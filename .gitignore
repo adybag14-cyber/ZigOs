@@ -1,0 +1,29 @@
+# Zig build output
+.zig-cache/
+zig-cache/
+zig-out/
+build/
+
+# Canonical Zig toolchain is downloaded locally, never committed
+.toolchains/
+
+# Local build / emulator logs
+build-output.log
+build-error.log
+build-exit.txt
+validation-output.log
+validation-error.log
+validation-exit.txt
+qemu-debug.log
+qemu-stdout.log
+qemu-stderr.log
+qemu-test-output.log
+qemu-test-error.log
+qemu-test-exit.txt
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
