@@ -38,6 +38,23 @@ pub fn main() noreturn {
         .size = kernel_stack_pages.len * @sizeOf(uefi.Page),
     };
 
+    const trampoline_limit: [*]align(4096) uefi.Page = @ptrFromInt(0x000F_F000);
+    const trampoline_pages = boot_services.allocatePages(
+        .{ .max_address = trampoline_limit },
+        .loader_data,
+        1,
+    ) catch fatal(console, "Unable to reserve an AP startup trampoline below 1 MiB.");
+    boot_info.ap_trampoline = .{
+        .base = @intFromPtr(trampoline_pages.ptr),
+        .size = trampoline_pages.len * @sizeOf(uefi.Page),
+    };
+    if (boot_info.ap_trampoline.base >= 0x0010_0000 or
+        (boot_info.ap_trampoline.base & 0xFFF) != 0 or
+        boot_info.ap_trampoline.size != 4096)
+    {
+        fatal(console, "UEFI returned an invalid AP trampoline region.");
+    }
+
     console.clearScreen() catch {};
     writeAscii(console, "ZigOs\r\n");
     writeAscii(console, "Experimental x86-64 operating system in Zig + Assembly\r\n\r\n");
@@ -60,6 +77,11 @@ pub fn main() noreturn {
     writeHex64(console, @intCast(boot_info.kernel_stack.base));
     writeAscii(console, " + ");
     writeUsizeDecimal(console, boot_info.kernel_stack.size);
+    writeAscii(console, " bytes\r\n");
+    writeAscii(console, "  AP trampoline reservation: 0x");
+    writeHex64(console, @intCast(boot_info.ap_trampoline.base));
+    writeAscii(console, " + ");
+    writeUsizeDecimal(console, boot_info.ap_trampoline.size);
     writeAscii(console, " bytes\r\n");
     if (boot_info.acpi_rsdp) |address| {
         writeAscii(console, "  ACPI RSDP: 0x");

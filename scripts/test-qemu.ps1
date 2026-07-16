@@ -127,6 +127,9 @@ if (-not $output.Contains('ZigOs now owns execution without UEFI boot services.'
 if (([regex]::Matches($output, 'Kernel stack: 0x')).Count -lt 2) {
     throw 'The ZigOs-owned stack was not observed on both sides of the handoff.'
 }
+if (-not $output.Contains('AP trampoline reservation: 0x')) {
+    throw 'The low-memory AP trampoline reservation marker was not observed.'
+}
 if (-not $output.Contains('Physical frame allocator verified:')) {
     throw 'The physical frame allocator verification marker was not observed.'
 }

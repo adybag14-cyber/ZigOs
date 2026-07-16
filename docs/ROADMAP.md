@@ -70,3 +70,10 @@
 - Network stack
 - Native Zig applications
 - Reproducible disk-image and release pipeline
+
+## 0.6 - Symmetric multiprocessing
+
+- [x] UEFI-reserved AP startup trampoline below 1 MiB
+- [ ] MADT processor-ID retention
+- [ ] INIT/SIPI application-processor startup
+- [ ] Per-CPU descriptor tables and scheduler state

@@ -21,14 +21,17 @@ pub const MemoryMapInfo = struct {
     highest_physical_address: u64,
 };
 
-pub const KernelStackInfo = struct {
+pub const MemoryRegion = struct {
     base: usize,
     size: usize,
 };
 
+pub const KernelStackInfo = MemoryRegion;
+
 pub const BootInfo = struct {
     memory_map: MemoryMapInfo,
     kernel_stack: KernelStackInfo,
+    ap_trampoline: MemoryRegion,
     acpi_rsdp: ?usize,
     framebuffer: ?FramebufferInfo,
 };
