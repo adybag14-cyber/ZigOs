@@ -44,6 +44,7 @@
 - [x] I/O APIC discovery and fully masked redirection table
 - [ ] External IRQ routing through MADT overrides
 - [x] PCIe ECAM enumeration from validated MCFG
+- [x] AHCI controller and port inspection through BAR5 MMIO
 - [x] HPET initialization and local-APIC timer calibration
 - [x] Maskable APIC timer interrupt with EOI and HLT wake-up
 - [ ] PS/2 and USB input experiments

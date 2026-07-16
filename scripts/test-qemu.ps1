@@ -187,6 +187,15 @@ if (-not $output.Contains('PCI inventory:')) {
 if (-not $output.Contains('PCI function ')) {
     throw 'No enumerated PCI function was printed.'
 }
+if (-not $output.Contains('AHCI controller active at')) {
+    throw 'The AHCI PCI/BAR discovery marker was not observed.'
+}
+if (-not $output.Contains('AHCI port inventory:')) {
+    throw 'The AHCI port inventory marker was not observed.'
+}
+if (-not $output.Contains('AHCI port 0: SATA active')) {
+    throw 'The expected active SATA port was not observed.'
+}
 if (-not $output.Contains('Kernel heap active:')) {
     throw 'The kernel heap initialization marker was not observed.'
 }

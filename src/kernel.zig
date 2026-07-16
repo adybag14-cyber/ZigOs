@@ -8,6 +8,7 @@ const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
 const ioapic = @import("ioapic.zig");
 const pci = @import("pci.zig");
+const ahci = @import("ahci.zig");
 const heap = @import("heap.zig");
 const serial = @import("serial.zig");
 const hpet = @import("hpet.zig");
@@ -47,7 +48,8 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     const local_apic_info = initializeApic(acpi_info);
     initializeIoApic(acpi_info, local_apic_info);
     testApicTimer(acpi_info);
-    enumeratePci(acpi_info);
+    const pci_inventory = enumeratePci(acpi_info);
+    inspectAhci(pci_inventory);
     initializeKernelHeap(&frame_allocator);
     initializeSerial();
 
@@ -403,7 +405,7 @@ fn ioApicFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn enumeratePci(discovery: acpi.Discovery) void {
+fn enumeratePci(discovery: acpi.Discovery) pci.Inventory {
     const mcfg_address = discovery.mcfg_address orelse pciFailure("ACPI did not expose an MCFG table");
     const inventory = pci.enumerate(mcfg_address) orelse
         pciFailure("MCFG validation or ECAM enumeration failed");
@@ -449,6 +451,7 @@ fn enumeratePci(discovery: acpi.Discovery) void {
         debugWriteHex8(function.header_type);
         debugWrite("\r\n");
     }
+    return inventory;
 }
 
 fn pciFailure(reason: []const u8) noreturn {
@@ -554,6 +557,82 @@ fn initializeSerial() void {
 
 fn serialFailure(reason: []const u8) noreturn {
     debugWrite("Serial initialization failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn inspectAhci(inventory: pci.Inventory) void {
+    var controller_function: ?pci.Function = null;
+    for (inventory.functions[0..inventory.retained_count]) |function| {
+        if (function.class_code == 0x01 and function.subclass == 0x06 and function.programming_interface == 0x01) {
+            controller_function = function;
+            break;
+        }
+    }
+
+    const function = controller_function orelse ahciFailure("no AHCI-class PCI function was enumerated");
+    const controller = ahci.inspect(function) orelse
+        ahciFailure("AHCI BAR5 or host-register validation failed");
+
+    debugWrite("AHCI controller active at ");
+    debugWriteHex16(function.segment);
+    debugWrite(":");
+    debugWriteHex8(function.bus);
+    debugWrite(":");
+    debugWriteHex8(function.device);
+    debugWrite(".");
+    debugWriteU64Decimal(function.function);
+    debugWrite(", ABAR 0x");
+    debugWriteHex64(@intCast(controller.abar));
+    debugWrite(", version 0x");
+    debugWriteHex64(controller.version);
+    debugWrite("\r\n");
+    debugWrite("AHCI capabilities: ");
+    debugWriteU64Decimal(controller.declared_port_count);
+    debugWrite(" declared ports, ");
+    debugWriteU64Decimal(controller.command_slot_count);
+    debugWrite(" command slots, PI 0x");
+    debugWriteHex64(controller.ports_implemented);
+    debugWrite(if (controller.supports_64_bit_dma) ", 64-bit DMA" else ", 32-bit DMA");
+    debugWrite(if (controller.supports_ncq) ", NCQ\r\n" else ", no NCQ\r\n");
+    debugWrite("AHCI port inventory: ");
+    debugWriteU64Decimal(controller.implemented_port_count);
+    debugWrite(" implemented, ");
+    debugWriteU64Decimal(controller.active_device_count);
+    debugWrite(" active device(s)\r\n");
+
+    for (controller.ports[0..controller.retained_port_count]) |port| {
+        debugWrite("AHCI port ");
+        debugWriteU64Decimal(port.index);
+        debugWrite(": ");
+        debugWrite(ahciDeviceTypeName(port.device_type));
+        debugWrite(if (port.active) " active" else " inactive");
+        debugWrite(", SSTS 0x");
+        debugWriteHex64(port.sata_status);
+        debugWrite(", SIG 0x");
+        debugWriteHex64(port.signature);
+        debugWrite(", TFD 0x");
+        debugWriteHex64(port.task_file_data);
+        debugWrite(", CMD 0x");
+        debugWriteHex64(port.command);
+        debugWrite("\r\n");
+    }
+}
+
+fn ahciDeviceTypeName(device_type: ahci.DeviceType) []const u8 {
+    return switch (device_type) {
+        .none => "no device",
+        .sata => "SATA",
+        .satapi => "SATAPI",
+        .enclosure_management => "SEMB",
+        .port_multiplier => "port multiplier",
+        .unknown => "unknown device",
+    };
+}
+
+fn ahciFailure(reason: []const u8) noreturn {
+    debugWrite("AHCI discovery failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();

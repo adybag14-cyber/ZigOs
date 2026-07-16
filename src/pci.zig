@@ -27,6 +27,7 @@ const McfgAllocation = extern struct {
 };
 
 pub const Function = struct {
+    configuration_address: usize,
     segment: u16,
     bus: u8,
     device: u8,
@@ -128,6 +129,7 @@ fn retainFunction(
 
     if (inventory.retained_count < inventory.functions.len) {
         inventory.functions[inventory.retained_count] = .{
+            .configuration_address = address,
             .segment = segment,
             .bus = bus,
             .device = device,
@@ -188,4 +190,18 @@ fn checksumValid(address: usize, length: usize) bool {
 comptime {
     if (@sizeOf(McfgHeader) != 44) @compileError("ACPI MCFG header must be 44 bytes");
     if (@sizeOf(McfgAllocation) != 16) @compileError("ACPI MCFG allocation must be 16 bytes");
+}
+
+pub fn readConfiguration8(function: Function, offset: usize) u8 {
+    return read8(function.configuration_address, offset);
+}
+
+pub fn readConfiguration16(function: Function, offset: usize) u16 {
+    return read16(function.configuration_address, offset);
+}
+
+pub fn readConfiguration32(function: Function, offset: usize) u32 {
+    const low = @as(u32, read16(function.configuration_address, offset));
+    const high = @as(u32, read16(function.configuration_address, offset + 2));
+    return low | (high << 16);
 }
