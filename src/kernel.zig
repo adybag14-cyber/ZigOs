@@ -6,6 +6,7 @@ const descriptor_tables = @import("descriptor_tables.zig");
 const exceptions = @import("exceptions.zig");
 const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
+const ioapic = @import("ioapic.zig");
 const hpet = @import("hpet.zig");
 
 const cc = std.os.uefi.cc;
@@ -37,7 +38,8 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     testExceptionRecovery();
 
     const acpi_info = discoverAcpi(info);
-    _ = initializeApic(acpi_info);
+    const local_apic_info = initializeApic(acpi_info);
+    initializeIoApic(acpi_info, local_apic_info);
     testApicTimer(acpi_info);
 
     if (info.framebuffer) |framebuffer| {
@@ -341,6 +343,52 @@ fn testExceptionRecovery() void {
 
 fn exceptionTestFailure(reason: []const u8) noreturn {
     debugWrite("Exception-path verification failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn initializeIoApic(discovery: acpi.Discovery, local_apic: apic.Information) void {
+    const madt = discovery.madt orelse ioApicFailure("validated ACPI did not contain a MADT");
+    const information = ioapic.initialize(madt, local_apic.apic_id) orelse
+        ioApicFailure("IOAPIC register discovery or redirection masking failed");
+
+    debugWrite("IOAPIC initialized: ID ");
+    debugWriteU64Decimal(information.io_apic_id);
+    debugWrite(", version 0x");
+    debugWriteHex16(information.version);
+    debugWrite(", base 0x");
+    debugWriteHex64(@intCast(information.base_address));
+    debugWrite(", GSI ");
+    debugWriteU64Decimal(information.global_system_interrupt_base);
+    debugWrite("-");
+    debugWriteU64Decimal(
+        information.global_system_interrupt_base + information.redirection_entries - 1,
+    );
+    debugWrite("\r\n");
+    debugWrite("IOAPIC redirection table fully masked: ");
+    debugWriteU64Decimal(information.redirection_entries);
+    debugWrite(" entries, first 0x");
+    debugWriteHex64(information.first_redirection_low);
+    debugWrite(", last 0x");
+    debugWriteHex64(information.last_redirection_low);
+    debugWrite("\r\n");
+
+    var index: usize = 0;
+    while (index < madt.stored_override_count) : (index += 1) {
+        const override = madt.overrides[index];
+        debugWrite("ISA override: IRQ ");
+        debugWriteU64Decimal(override.irq_source);
+        debugWrite(" -> GSI ");
+        debugWriteU64Decimal(override.global_system_interrupt);
+        debugWrite(", flags 0x");
+        debugWriteHex16(override.flags);
+        debugWrite("\r\n");
+    }
+}
+
+fn ioApicFailure(reason: []const u8) noreturn {
+    debugWrite("IOAPIC initialization failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();

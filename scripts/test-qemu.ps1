@@ -161,6 +161,12 @@ if (-not $output.Contains('Local APIC enabled:')) {
 if (-not $output.Contains('APIC SVR verified at 0x')) {
     throw 'The local APIC SVR verification marker was not observed.'
 }
+if (-not $output.Contains('IOAPIC initialized:')) {
+    throw 'The IOAPIC discovery marker was not observed.'
+}
+if (-not $output.Contains('IOAPIC redirection table fully masked:')) {
+    throw 'The IOAPIC redirection-mask verification marker was not observed.'
+}
 if (-not $output.Contains('HPET active:')) {
     throw 'The HPET initialization marker was not observed.'
 }

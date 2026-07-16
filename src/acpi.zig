@@ -42,13 +42,22 @@ pub const RootKind = enum {
     xsdt,
 };
 
+pub const InterruptOverride = struct {
+    bus_source: u8,
+    irq_source: u8,
+    global_system_interrupt: u32,
+    flags: u16,
+};
 pub const MadtInfo = struct {
     address: usize,
     local_apic_address: u64,
     processor_count: u32,
     io_apic_count: u32,
     first_io_apic_address: ?u32,
+    first_io_apic_gsi_base: ?u32,
     interrupt_override_count: u32,
+    stored_override_count: u8,
+    overrides: [16]InterruptOverride,
     legacy_pic_compatible: bool,
 };
 
@@ -156,7 +165,10 @@ fn parseMadt(address: usize) ?MadtInfo {
         .processor_count = 0,
         .io_apic_count = 0,
         .first_io_apic_address = null,
+        .first_io_apic_gsi_base = null,
         .interrupt_override_count = 0,
+        .stored_override_count = 0,
+        .overrides = undefined,
         .legacy_pic_compatible = (madt.flags & 1) != 0,
     };
 
@@ -176,10 +188,21 @@ fn parseMadt(address: usize) ?MadtInfo {
                 info.io_apic_count += 1;
                 if (info.first_io_apic_address == null) {
                     info.first_io_apic_address = @truncate(readU32(cursor + 4));
+                    info.first_io_apic_gsi_base = @truncate(readU32(cursor + 8));
                 }
             },
             2 => if (entry_length >= 10) {
                 info.interrupt_override_count += 1;
+                if (info.stored_override_count < info.overrides.len) {
+                    const override_index: usize = info.stored_override_count;
+                    info.overrides[override_index] = .{
+                        .bus_source = readU8(cursor + 2),
+                        .irq_source = readU8(cursor + 3),
+                        .global_system_interrupt = readU32(cursor + 4),
+                        .flags = readU16(cursor + 8),
+                    };
+                    info.stored_override_count += 1;
+                }
             },
             5 => if (entry_length >= 12) {
                 info.local_apic_address = readU64(cursor + 4);
@@ -225,6 +248,10 @@ fn readU8(address: usize) u8 {
     return byte.*;
 }
 
+fn readU16(address: usize) u16 {
+    const bytes: [*]const u8 = @ptrFromInt(address);
+    return @as(u16, bytes[0]) | (@as(u16, bytes[1]) << 8);
+}
 fn readU32(address: usize) u32 {
     const bytes: [*]const u8 = @ptrFromInt(address);
     return @as(u32, bytes[0]) |

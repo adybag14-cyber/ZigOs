@@ -40,7 +40,8 @@
 - [x] Validate and parse ACPI RSDP/XSDT
 - [x] MADT and APIC discovery
 - [x] Local APIC initialization and legacy PIC masking
-- [ ] I/O APIC initialization and interrupt routing
+- [x] I/O APIC discovery and fully masked redirection table
+- [ ] External IRQ routing through MADT overrides
 - [ ] PCI/PCIe enumeration
 - [x] HPET initialization and local-APIC timer calibration
 - [x] Maskable APIC timer interrupt with EOI and HLT wake-up
