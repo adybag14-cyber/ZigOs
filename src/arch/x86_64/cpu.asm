@@ -549,3 +549,155 @@ global zigos_high_half_probe
 zigos_high_half_probe:
     lea rax, [rel zigos_high_half_probe]
     ret
+
+
+extern zigos_user_syscall_handler
+
+global zigos_enter_user
+global zigos_isr_syscall
+global zigos_user_program_source
+global zigos_user_program_size
+
+section .data align=8
+zigos_user_kernel_rsp:
+    dq 0
+
+section .text
+
+; void zigos_enter_user(usize RIP, usize RSP, u16 CS, u16 SS)
+; Preserve the Microsoft x64 nonvolatile kernel state, build an outer-privilege
+; IRET frame, and transfer to CPL3. The exit syscall restores this exact state.
+zigos_enter_user:
+    mov r10, rcx
+    mov r11, rdx
+    movzx eax, r8w
+    movzx edx, r9w
+
+    sub rsp, 160
+    movdqu [rsp + 0], xmm6
+    movdqu [rsp + 16], xmm7
+    movdqu [rsp + 32], xmm8
+    movdqu [rsp + 48], xmm9
+    movdqu [rsp + 64], xmm10
+    movdqu [rsp + 80], xmm11
+    movdqu [rsp + 96], xmm12
+    movdqu [rsp + 112], xmm13
+    movdqu [rsp + 128], xmm14
+    movdqu [rsp + 144], xmm15
+    push rbx
+    push rbp
+    push rdi
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    mov [rel zigos_user_kernel_rsp], rsp
+
+    push rdx
+    push r11
+    push qword 0x202
+    push rax
+    push r10
+    iretq
+
+; DPL3 interrupt gate vector 0x80, delivered on IST1. The Zig handler returns
+; zero to resume userspace or nonzero to restore the saved kernel call frame.
+zigos_isr_syscall:
+    cld
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rsp
+    sub rsp, 512
+    mov r13, rsp
+    fxsave64 [r13]
+    sub rsp, 32
+    mov rcx, r12
+    mov rdx, r13
+    call zigos_user_syscall_handler
+    test rax, rax
+    jnz .return_to_kernel
+
+    add rsp, 32
+    fxrstor64 [rsp]
+    mov rsp, r12
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
+.return_to_kernel:
+    cli
+    mov rsp, [rel zigos_user_kernel_rsp]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rdi
+    pop rbp
+    pop rbx
+    movdqu xmm6, [rsp + 0]
+    movdqu xmm7, [rsp + 16]
+    movdqu xmm8, [rsp + 32]
+    movdqu xmm9, [rsp + 48]
+    movdqu xmm10, [rsp + 64]
+    movdqu xmm11, [rsp + 80]
+    movdqu xmm12, [rsp + 96]
+    movdqu xmm13, [rsp + 112]
+    movdqu xmm14, [rsp + 128]
+    movdqu xmm15, [rsp + 144]
+    add rsp, 160
+    ret
+
+; Position-independent userspace payload copied into a U/S executable page.
+zigos_user_program_start:
+    mov eax, 1
+    mov edi, 0xC0DEFACE
+    int 0x80
+    cmp eax, 0x051A11CE
+    jne .user_failure
+    mov eax, 2
+    mov edi, 0x42
+    int 0x80
+    ud2
+.user_failure:
+    mov eax, 2
+    mov edi, 0xEE
+    int 0x80
+    ud2
+zigos_user_program_end:
+
+zigos_user_program_source:
+    lea rax, [rel zigos_user_program_start]
+    ret
+
+zigos_user_program_size:
+    mov eax, zigos_user_program_end - zigos_user_program_start
+    ret

@@ -5,13 +5,19 @@ const cc = std.os.uefi.cc;
 
 pub const higher_half_base: u64 = 0xFFFF_8000_0000_0000;
 const higher_half_pml4_index: usize = 256;
+pub const user_virtual_base: u64 = 0x0000_0080_0000_0000;
+const user_pml4_index: usize = 1;
 
 extern fn zigos_load_cr3(address: usize) callconv(cc) void;
 extern fn zigos_read_cr3() callconv(cc) u64;
 
+var active_pml4_address: usize = 0;
+
 const entries_per_table: usize = 512;
 const large_page_size: u64 = 2 * 1024 * 1024;
 const present_writable: u64 = 0x003;
+const present_user: u64 = 0x005;
+const present_writable_user: u64 = 0x007;
 const present_writable_large: u64 = 0x083;
 
 pub const Installation = struct {
@@ -51,6 +57,7 @@ pub fn installFourGiBIdentityMap(allocator: *memory.FrameAllocator) ?Installatio
         }
     }
 
+    active_pml4_address = pml4_address;
     zigos_load_cr3(pml4_address);
 
     return .{
@@ -59,6 +66,57 @@ pub fn installFourGiBIdentityMap(allocator: *memory.FrameAllocator) ?Installatio
         .table_pages = 6,
         .mapped_bytes = memory.four_gib,
         .higher_half_base = higher_half_base,
+    };
+}
+
+pub const UserMapping = struct {
+    code_virtual: usize,
+    stack_virtual: usize,
+    stack_top: usize,
+    code_physical: usize,
+    stack_physical: usize,
+    table_pages: u64,
+};
+
+pub fn mapUserExperiment(
+    allocator: *memory.FrameAllocator,
+    code_physical: usize,
+    stack_physical: usize,
+) ?UserMapping {
+    if (active_pml4_address == 0) return null;
+    if (code_physical >= memory.four_gib or stack_physical >= memory.four_gib) return null;
+    if ((code_physical & 0xFFF) != 0 or (stack_physical & 0xFFF) != 0) return null;
+
+    const pml4 = tableAt(active_pml4_address);
+    if (pml4[user_pml4_index] != 0) return null;
+
+    const pdpt_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    const directory_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    const table_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    clearTable(pdpt_address);
+    clearTable(directory_address);
+    clearTable(table_address);
+
+    const pdpt = tableAt(pdpt_address);
+    const directory = tableAt(directory_address);
+    const table = tableAt(table_address);
+    pml4[user_pml4_index] = @as(u64, @intCast(pdpt_address)) | present_writable_user;
+    pdpt[0] = @as(u64, @intCast(directory_address)) | present_writable_user;
+    directory[0] = @as(u64, @intCast(table_address)) | present_writable_user;
+    table[0] = @as(u64, @intCast(code_physical)) | present_user;
+    table[1] = @as(u64, @intCast(stack_physical)) | present_writable_user;
+
+    zigos_load_cr3(active_pml4_address);
+
+    const code_virtual: usize = @intCast(user_virtual_base);
+    const stack_virtual = code_virtual + @as(usize, @intCast(memory.page_size));
+    return .{
+        .code_virtual = code_virtual,
+        .stack_virtual = stack_virtual,
+        .stack_top = stack_virtual + @as(usize, @intCast(memory.page_size)) - 16,
+        .code_physical = code_physical,
+        .stack_physical = stack_physical,
+        .table_pages = 3,
     };
 }
 

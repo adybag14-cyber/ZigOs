@@ -283,6 +283,15 @@ if (-not $output.Contains('Timer-frame GPR/FX state switching verified; no task 
 if (-not $output.Contains('Preemptive stack canaries intact; kernel interrupt frame restored.')) {
     throw 'The preemptive stack-integrity and kernel-frame restoration marker was not observed.'
 }
+if (-not $output.Contains('CPL3 userspace active:')) {
+    throw 'The isolated CPL3 page-mapping marker was not observed.'
+}
+if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B')) {
+    throw 'The RPL3 syscall-frame selector marker was not observed.'
+}
+if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
+    throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
+}
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
     throw 'The framebuffer was not retained and accessed after the handoff.'
 }

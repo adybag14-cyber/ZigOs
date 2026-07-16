@@ -5,9 +5,12 @@ const cc = std.os.uefi.cc;
 const code_selector: u16 = 0x08;
 const data_selector: u16 = 0x10;
 const tss_selector: u16 = 0x18;
+pub const user_data_selector: u16 = 0x2B;
+pub const user_code_selector: u16 = 0x33;
 const breakpoint_vector: usize = 3;
 const timer_vector: usize = 0x40;
 const scheduler_vector: usize = 0x41;
+const syscall_vector: usize = 0x80;
 const spurious_vector: usize = 0xFF;
 const interrupt_stack_pages: usize = 4;
 
@@ -69,10 +72,11 @@ extern fn zigos_read_tr() callconv(cc) u64;
 extern fn zigos_isr_breakpoint() callconv(cc) void;
 extern fn zigos_isr_apic_timer() callconv(cc) void;
 extern fn zigos_isr_scheduler() callconv(cc) void;
+extern fn zigos_isr_syscall() callconv(cc) void;
 extern fn zigos_isr_spurious() callconv(cc) void;
 extern fn zigos_trigger_breakpoint() callconv(cc) void;
 
-var gdt: [5]u64 align(16) = .{ 0, 0, 0, 0, 0 };
+var gdt: [7]u64 align(16) = .{ 0, 0, 0, 0, 0, 0, 0 };
 var tss: TaskStateSegment align(16) = undefined;
 var idt: [256]IdtEntry align(16) = undefined;
 
@@ -102,6 +106,8 @@ pub fn install(allocator: *memory.FrameAllocator, kernel_stack_top: usize) ?Inst
     gdt[1] = 0x00AF_9A00_0000_FFFF;
     gdt[2] = 0x00CF_9200_0000_FFFF;
     installTssDescriptor();
+    gdt[5] = 0x00CF_F200_0000_FFFF;
+    gdt[6] = 0x00AF_FA00_0000_FFFF;
 
     const gdt_pointer = DescriptorTablePointer{
         .limit = @intCast(@sizeOf(@TypeOf(gdt)) - 1),
@@ -122,6 +128,7 @@ pub fn install(allocator: *memory.FrameAllocator, kernel_stack_top: usize) ?Inst
     setInterruptGate(&idt[breakpoint_vector], @intFromPtr(&zigos_isr_breakpoint), code_selector, 1);
     setInterruptGate(&idt[timer_vector], @intFromPtr(&zigos_isr_apic_timer), code_selector, 1);
     setInterruptGate(&idt[scheduler_vector], @intFromPtr(&zigos_isr_scheduler), code_selector, 1);
+    setUserInterruptGate(&idt[syscall_vector], @intFromPtr(&zigos_isr_syscall), code_selector, 1);
     setInterruptGate(&idt[spurious_vector], @intFromPtr(&zigos_isr_spurious), code_selector, 0);
 
     const idt_pointer = DescriptorTablePointer{
@@ -178,6 +185,19 @@ fn setInterruptGate(entry: *IdtEntry, handler_address: usize, selector: u16, ist
         .selector = selector,
         .ist = ist_index,
         .type_attributes = 0x8E,
+        .offset_middle = @truncate(address >> 16),
+        .offset_high = @truncate(address >> 32),
+        .reserved = 0,
+    };
+}
+
+fn setUserInterruptGate(entry: *IdtEntry, handler_address: usize, selector: u16, ist_index: u3) void {
+    const address: u64 = @intCast(handler_address);
+    entry.* = .{
+        .offset_low = @truncate(address),
+        .selector = selector,
+        .ist = ist_index,
+        .type_attributes = 0xEE,
         .offset_middle = @truncate(address >> 16),
         .offset_high = @truncate(address >> 32),
         .reserved = 0,

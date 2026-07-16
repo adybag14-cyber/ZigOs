@@ -60,7 +60,7 @@
 - [x] Cooperative task abstraction with independent stacks and ABI-complete context switching
 - [x] APIC-timer pre-emptive scheduler with complete GPR/FX frame switching
 - [ ] Userspace privilege-transition experiment
-- [ ] Minimal syscall ABI
+- [x] Minimal DPL3 int 0x80 syscall ABI with return and process exit
 
 ## Long-term experiments
 

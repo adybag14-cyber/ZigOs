@@ -15,6 +15,7 @@ const pe = @import("pe.zig");
 const heap = @import("heap.zig");
 const scheduler = @import("scheduler.zig");
 const preemptive = @import("preemptive.zig");
+const user_mode = @import("user_mode.zig");
 const serial = @import("serial.zig");
 const hpet = @import("hpet.zig");
 
@@ -66,6 +67,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     initializeKernelHeap(&frame_allocator);
     testCooperativeScheduler(&frame_allocator);
     testPreemptiveScheduler(&frame_allocator, apic_timer_info.ticks_per_second);
+    testUserMode(&frame_allocator);
     initializeSerial();
 
     if (info.framebuffer) |framebuffer| {
@@ -1255,6 +1257,61 @@ fn volatileCounter(counter: *const u64) u64 {
 
 fn preemptiveFailure(reason: []const u8) noreturn {
     debugWrite("Preemptive scheduler failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn testUserMode(allocator: *memory.FrameAllocator) void {
+    const report = user_mode.run(allocator) orelse
+        userModeFailure("CPL3 entry, syscall return, or kernel restoration failed");
+    if (!report.returned_to_kernel or !report.stack_canary_intact) {
+        userModeFailure("userspace did not return with an intact isolated stack");
+    }
+    if (report.observed_cs != descriptor_tables.user_code_selector or
+        report.observed_ss != descriptor_tables.user_data_selector)
+    {
+        userModeFailure("syscall frame did not contain the expected RPL3 selectors");
+    }
+    if (report.syscall_count != 2 or report.exit_code != 0x42) {
+        userModeFailure("userspace syscall count or exit code was incorrect");
+    }
+
+    debugWrite("CPL3 userspace active: code physical 0x");
+    debugWriteHex64(@intCast(report.code_physical));
+    debugWrite(" -> virtual 0x");
+    debugWriteHex64(@intCast(report.code_virtual));
+    debugWrite(", stack physical 0x");
+    debugWriteHex64(@intCast(report.stack_physical));
+    debugWrite(" -> virtual 0x");
+    debugWriteHex64(@intCast(report.stack_virtual));
+    debugWrite("\r\n");
+    debugWrite("User page-table isolation: ");
+    debugWriteU64Decimal(report.page_table_pages);
+    debugWrite(" dedicated tables, payload ");
+    debugWriteUsizeDecimal(report.program_size);
+    debugWrite(" bytes\r\n");
+    debugWrite("int 0x80 syscall frame verified: CS=0x");
+    debugWriteHex16(@truncate(report.observed_cs));
+    debugWrite(", SS=0x");
+    debugWriteHex16(@truncate(report.observed_ss));
+    debugWrite(", RIP=0x");
+    debugWriteHex64(report.observed_rip);
+    debugWrite(", RSP=0x");
+    debugWriteHex64(report.observed_rsp);
+    debugWrite("\r\n");
+    debugWrite("Userspace report argument 0x");
+    debugWriteHex64(report.observed_argument);
+    debugWrite(", syscall count ");
+    debugWriteU64Decimal(report.syscall_count);
+    debugWrite(", exit code 0x");
+    debugWriteHex64(report.exit_code);
+    debugWrite("\r\n");
+    debugWrite("CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.\r\n");
+}
+
+fn userModeFailure(reason: []const u8) noreturn {
+    debugWrite("Userspace verification failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();
