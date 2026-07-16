@@ -73,3 +73,12 @@ zigos_enter_kernel:
     sub rsp, 32                 ; Microsoft x64 shadow space
     call r8
     ud2                         ; the kernel entry is contractually noreturn
+
+
+global zigos_load_cr3
+
+; void zigos_load_cr3(usize physical_address)
+; Loading CR3 installs ZigOs-owned page tables and flushes non-global TLB state.
+zigos_load_cr3:
+    mov cr3, rcx
+    ret

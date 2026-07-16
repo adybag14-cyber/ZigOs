@@ -26,7 +26,7 @@
 
 - [ ] Parse retained memory descriptors into usable and reserved regions
 - [x] Physical frame allocator
-- [ ] ZigOs-owned x86-64 page tables
+- [x] ZigOs-owned x86-64 page tables
 - [ ] Identity map required firmware/runtime regions
 - [ ] Higher-half kernel mapping experiment
 - [ ] GDT and TSS

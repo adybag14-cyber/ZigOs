@@ -128,6 +128,12 @@ if (([regex]::Matches($output, 'Kernel stack: 0x')).Count -lt 2) {
 if (-not $output.Contains('Physical frame allocator verified:')) {
     throw 'The physical frame allocator verification marker was not observed.'
 }
+if (-not $output.Contains('ZigOs page tables active:')) {
+    throw 'The ZigOs-owned CR3 marker was not observed.'
+}
+if (-not $output.Contains('Post-switch frame verified at 0x')) {
+    throw 'The post-page-table-switch memory probe was not observed.'
+}
 if (-not $output.Contains('ACPI RSDP retained at 0x')) {
     throw 'The ACPI root pointer was not retained across the handoff.'
 }

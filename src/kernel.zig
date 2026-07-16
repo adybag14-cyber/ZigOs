@@ -1,6 +1,7 @@
 const std = @import("std");
 const boot = @import("boot_info.zig");
 const memory = @import("memory.zig");
+const paging = @import("paging.zig");
 
 const cc = std.os.uefi.cc;
 
@@ -26,6 +27,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
 
     var frame_allocator = memory.FrameAllocator.init(info.memory_map);
     verifyFrameAllocator(&frame_allocator);
+    installPaging(info, &frame_allocator);
 
     if (info.acpi_rsdp) |address| {
         debugWrite("ACPI RSDP retained at 0x");
@@ -87,6 +89,63 @@ fn verifyFramePattern(address: usize, pattern: u64) void {
 
 fn allocatorFailure(reason: []const u8) noreturn {
     debugWrite("Physical frame allocator failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn installPaging(info: *const boot.BootInfo, allocator: *memory.FrameAllocator) void {
+    requireIdentityMapped("kernel entry", @intFromPtr(&enter), 1);
+    requireIdentityMapped("BootInfo", @intFromPtr(info), @sizeOf(boot.BootInfo));
+    requireIdentityMapped("kernel stack", info.kernel_stack.base, info.kernel_stack.size);
+    requireIdentityMapped(
+        "UEFI memory map",
+        info.memory_map.address,
+        info.memory_map.descriptor_count * info.memory_map.descriptor_size,
+    );
+    if (info.acpi_rsdp) |address| requireIdentityMapped("ACPI RSDP", address, 4096);
+    if (info.framebuffer) |framebuffer| {
+        requireIdentityMapped("framebuffer", framebuffer.base, framebuffer.size);
+    }
+
+    const installation = paging.installFourGiBIdentityMap(allocator) orelse
+        pagingFailure("unable to allocate six page-table frames below 4 GiB");
+    const active_cr3 = paging.currentCr3();
+    const active_base = active_cr3 & ~@as(u64, 0xFFF);
+    if (active_base != @as(u64, @intCast(installation.pml4_address))) {
+        pagingFailure("CR3 does not contain the ZigOs PML4 address");
+    }
+
+    const post_switch_probe = allocator.allocateBelow(memory.four_gib) orelse
+        pagingFailure("unable to allocate a post-switch probe frame");
+    verifyFramePattern(post_switch_probe, 0x5041_4745_5442_4C33);
+
+    debugWrite("ZigOs page tables active: CR3 0x");
+    debugWriteHex64(installation.previous_cr3);
+    debugWrite(" -> 0x");
+    debugWriteHex64(active_cr3);
+    debugWrite(", ");
+    debugWriteU64Decimal(installation.mapped_bytes);
+    debugWrite(" bytes identity-mapped with ");
+    debugWriteU64Decimal(installation.table_pages);
+    debugWrite(" table pages\r\n");
+    debugWrite("Post-switch frame verified at 0x");
+    debugWriteHex64(@intCast(post_switch_probe));
+    debugWrite("\r\n");
+}
+
+fn requireIdentityMapped(name: []const u8, start: usize, size: usize) void {
+    const limit: usize = @intCast(memory.four_gib);
+    if (start >= limit or size > limit - start) {
+        debugWrite("Cannot install 4 GiB identity map: ");
+        debugWrite(name);
+        debugWrite(" lies outside the safe bootstrap range.\r\n");
+        zigos_halt_forever();
+    }
+}
+
+fn pagingFailure(reason: []const u8) noreturn {
+    debugWrite("Paging installation failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();
