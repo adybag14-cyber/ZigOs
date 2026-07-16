@@ -45,6 +45,26 @@ pub const FrameAllocator = struct {
         }
     }
 
+    pub fn allocateContiguousBelow(self: *FrameAllocator, page_count: usize, limit_exclusive: u64) ?usize {
+        if (page_count == 0) return null;
+        const byte_count = @as(u64, @intCast(page_count)) *| page_size;
+        if (byte_count == 0 or byte_count > limit_exclusive) return null;
+
+        while (true) {
+            if (self.current_frame < self.current_region_end and
+                byte_count <= self.current_region_end - self.current_frame and
+                self.current_frame <= limit_exclusive - byte_count)
+            {
+                const base = self.current_frame;
+                self.current_frame += byte_count;
+                self.allocated_pages += @intCast(page_count);
+                return @intCast(base);
+            }
+
+            if (!self.loadNextRegion(limit_exclusive)) return null;
+        }
+    }
+
     fn loadNextRegion(self: *FrameAllocator, limit_exclusive: u64) bool {
         while (self.descriptor_index < self.memory_map.descriptor_count) {
             const entry = self.readDescriptor(self.descriptor_index);

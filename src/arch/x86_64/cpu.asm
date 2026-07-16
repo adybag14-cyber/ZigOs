@@ -82,3 +82,103 @@ global zigos_load_cr3
 zigos_load_cr3:
     mov cr3, rcx
     ret
+
+
+extern zigos_breakpoint_handler
+
+global zigos_load_gdt
+global zigos_load_idt
+global zigos_read_cs
+global zigos_read_tr
+global zigos_isr_breakpoint
+global zigos_trigger_breakpoint
+
+; void zigos_load_gdt(GDTR *pointer, u16 code, u16 data, u16 tss)
+; RCX = GDTR, DX = code selector, R8W = data selector, R9W = TSS selector.
+zigos_load_gdt:
+    lgdt [rcx]
+
+    mov ax, r8w
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+
+    movzx eax, dx
+    push rax
+    lea rax, [rel .reload_cs]
+    push rax
+    retfq
+.reload_cs:
+    mov ax, r9w
+    ltr ax
+    ret
+
+; void zigos_load_idt(IDTR *pointer)
+zigos_load_idt:
+    lidt [rcx]
+    ret
+
+; u64 zigos_read_cs(void)
+zigos_read_cs:
+    xor eax, eax
+    mov ax, cs
+    ret
+
+; u64 zigos_read_tr(void)
+zigos_read_tr:
+    xor eax, eax
+    str ax
+    ret
+
+; Normal callable helper used to trigger vector 3 after the IDT is installed.
+zigos_trigger_breakpoint:
+    int3
+    ret
+
+; Vector 3 interrupt entry. The IDT assigns IST1, so the CPU switches to the
+; ZigOs interrupt stack before entering this stub. Preserve all general-purpose
+; registers, establish the Microsoft x64 call frame, then return with IRETQ.
+zigos_isr_breakpoint:
+    cld
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rsp
+    and rsp, -16
+    sub rsp, 32
+    mov ecx, 3
+    mov rdx, r12
+    call zigos_breakpoint_handler
+    mov rsp, r12
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq

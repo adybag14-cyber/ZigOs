@@ -2,6 +2,7 @@ const std = @import("std");
 const boot = @import("boot_info.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
+const descriptor_tables = @import("descriptor_tables.zig");
 
 const cc = std.os.uefi.cc;
 
@@ -28,6 +29,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     var frame_allocator = memory.FrameAllocator.init(info.memory_map);
     verifyFrameAllocator(&frame_allocator);
     installPaging(info, &frame_allocator);
+    installDescriptorTables(info, &frame_allocator);
 
     if (info.acpi_rsdp) |address| {
         debugWrite("ACPI RSDP retained at 0x");
@@ -151,6 +153,39 @@ fn pagingFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
+fn installDescriptorTables(info: *const boot.BootInfo, allocator: *memory.FrameAllocator) void {
+    const kernel_stack_top = info.kernel_stack.base + info.kernel_stack.size;
+    const installation = descriptor_tables.install(allocator, kernel_stack_top) orelse
+        descriptorTableFailure("GDT/TSS/IDT installation or breakpoint verification failed");
+
+    debugWrite("Descriptor tables active: GDT 0x");
+    debugWriteHex64(@intCast(installation.gdt_address));
+    debugWrite(", TSS 0x");
+    debugWriteHex64(@intCast(installation.tss_address));
+    debugWrite(", IDT 0x");
+    debugWriteHex64(@intCast(installation.idt_address));
+    debugWrite("\r\n");
+    debugWrite("Segments verified: CS=0x");
+    debugWriteHex16(installation.code_segment);
+    debugWrite(", TR=0x");
+    debugWriteHex16(installation.task_register);
+    debugWrite("\r\n");
+    debugWrite("Breakpoint interrupt handled on IST1 at 0x");
+    debugWriteHex64(@intCast(installation.breakpoint_stack_pointer));
+    debugWrite(" within stack 0x");
+    debugWriteHex64(@intCast(installation.interrupt_stack_base));
+    debugWrite(" + ");
+    debugWriteUsizeDecimal(installation.interrupt_stack_size);
+    debugWrite(" bytes\r\n");
+}
+
+fn descriptorTableFailure(reason: []const u8) noreturn {
+    debugWrite("Descriptor-table failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
 fn paintFramebuffer(framebuffer: boot.FramebufferInfo) void {
     if (framebuffer.base == 0 or framebuffer.size < 4) return;
     if (framebuffer.pixel_format == 3) return;
@@ -199,6 +234,20 @@ fn channelToMask(value: u8, mask: u32) u32 {
 
 fn debugWrite(text: []const u8) void {
     for (text) |character| zigos_debug_putc(character);
+}
+
+fn debugWriteHex16(value: u16) void {
+    const digits = "0123456789ABCDEF";
+    var text: [4]u8 = undefined;
+    var shift: u4 = 12;
+
+    for (&text) |*character| {
+        const nibble: u4 = @truncate(value >> shift);
+        character.* = digits[nibble];
+        if (shift == 0) break;
+        shift -= 4;
+    }
+    debugWrite(&text);
 }
 
 fn debugWriteHex64(value: u64) void {

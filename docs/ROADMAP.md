@@ -29,8 +29,9 @@
 - [x] ZigOs-owned x86-64 page tables
 - [ ] Identity map required firmware/runtime regions
 - [ ] Higher-half kernel mapping experiment
-- [ ] GDT and TSS
-- [ ] IDT and assembly interrupt stubs
+- [x] GDT and TSS
+- [x] IDT and assembly interrupt stub proof (vector 3 on IST1)
+- [ ] Full CPU exception-vector coverage and fault diagnostics
 - [ ] Kernel panic path and serial diagnostics
 
 ## 0.4 - Hardware discovery

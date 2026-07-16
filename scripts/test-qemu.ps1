@@ -134,6 +134,15 @@ if (-not $output.Contains('ZigOs page tables active:')) {
 if (-not $output.Contains('Post-switch frame verified at 0x')) {
     throw 'The post-page-table-switch memory probe was not observed.'
 }
+if (-not $output.Contains('Descriptor tables active:')) {
+    throw 'The ZigOs GDT/TSS/IDT marker was not observed.'
+}
+if (-not $output.Contains('Segments verified: CS=0x0008, TR=0x0018')) {
+    throw 'The expected ZigOs code segment and task register were not observed.'
+}
+if (-not $output.Contains('Breakpoint interrupt handled on IST1')) {
+    throw 'The IST1 breakpoint round trip was not observed.'
+}
 if (-not $output.Contains('ACPI RSDP retained at 0x')) {
     throw 'The ACPI root pointer was not retained across the handoff.'
 }
