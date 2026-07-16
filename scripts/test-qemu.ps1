@@ -59,6 +59,7 @@ $arguments = @(
     '-machine', 'q35',
     '-m', '256M',
     '-cpu', 'max',
+    '-smp', '4',
     '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$codePath",
     '-drive', "if=pflash,format=raw,unit=1,file=$varsPath",
     '-drive', "format=raw,file=fat:rw:$fatPath",
@@ -168,6 +169,12 @@ if (-not $output.Contains('ACPI verified: revision')) {
 }
 if (-not $output.Contains('MADT topology:')) {
     throw 'The validated MADT topology marker was not observed.'
+}
+if (-not $output.Contains('MADT topology: 4 processors')) {
+    throw 'The four-CPU MADT topology marker was not observed.'
+}
+if (-not $output.Contains('MADT processor IDs: 0(xAPIC) 1(xAPIC) 2(xAPIC) 3(xAPIC)')) {
+    throw 'The expected retained MADT APIC-ID set was not observed.'
 }
 if (-not $output.Contains('Local APIC enabled:')) {
     throw 'The local APIC enablement marker was not observed.'

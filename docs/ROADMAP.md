@@ -74,6 +74,6 @@
 ## 0.6 - Symmetric multiprocessing
 
 - [x] UEFI-reserved AP startup trampoline below 1 MiB
-- [ ] MADT processor-ID retention
+- [x] MADT processor-ID retention and four-CPU QEMU topology
 - [ ] INIT/SIPI application-processor startup
 - [ ] Per-CPU descriptor tables and scheduler state

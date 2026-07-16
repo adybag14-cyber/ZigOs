@@ -42,6 +42,14 @@ pub const RootKind = enum {
     xsdt,
 };
 
+pub const maximum_processors: usize = 64;
+
+pub const ProcessorInfo = struct {
+    apic_id: u32,
+    acpi_uid: u32,
+    x2apic: bool,
+};
+
 pub const InterruptOverride = struct {
     bus_source: u8,
     irq_source: u8,
@@ -52,6 +60,8 @@ pub const MadtInfo = struct {
     address: usize,
     local_apic_address: u64,
     processor_count: u32,
+    stored_processor_count: u8,
+    processors: [maximum_processors]ProcessorInfo,
     io_apic_count: u32,
     first_io_apic_address: ?u32,
     first_io_apic_gsi_base: ?u32,
@@ -163,6 +173,8 @@ fn parseMadt(address: usize) ?MadtInfo {
         .address = address,
         .local_apic_address = madt.local_apic_address,
         .processor_count = 0,
+        .stored_processor_count = 0,
+        .processors = undefined,
         .io_apic_count = 0,
         .first_io_apic_address = null,
         .first_io_apic_gsi_base = null,
@@ -182,7 +194,14 @@ fn parseMadt(address: usize) ?MadtInfo {
         switch (entry_type) {
             0 => if (entry_length >= 8) {
                 const flags = readU32(cursor + 4);
-                if ((flags & 0x3) != 0) info.processor_count += 1;
+                if ((flags & 0x3) != 0) {
+                    info.processor_count += 1;
+                    retainProcessor(&info, .{
+                        .apic_id = readU8(cursor + 3),
+                        .acpi_uid = readU8(cursor + 2),
+                        .x2apic = false,
+                    });
+                }
             },
             1 => if (entry_length >= 12) {
                 info.io_apic_count += 1;
@@ -209,7 +228,14 @@ fn parseMadt(address: usize) ?MadtInfo {
             },
             9 => if (entry_length >= 16) {
                 const flags = readU32(cursor + 8);
-                if ((flags & 0x3) != 0) info.processor_count += 1;
+                if ((flags & 0x3) != 0) {
+                    info.processor_count += 1;
+                    retainProcessor(&info, .{
+                        .apic_id = readU32(cursor + 4),
+                        .acpi_uid = readU32(cursor + 12),
+                        .x2apic = true,
+                    });
+                }
             },
             else => {},
         }
@@ -219,6 +245,15 @@ fn parseMadt(address: usize) ?MadtInfo {
 
     if (cursor != end) return null;
     return info;
+}
+
+fn retainProcessor(info: *MadtInfo, processor: ProcessorInfo) void {
+    if (info.stored_processor_count >= info.processors.len) return;
+    for (info.processors[0..info.stored_processor_count]) |existing| {
+        if (existing.apic_id == processor.apic_id) return;
+    }
+    info.processors[info.stored_processor_count] = processor;
+    info.stored_processor_count += 1;
 }
 
 fn validHeader(address: usize) ?*const SdtHeader {

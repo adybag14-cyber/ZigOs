@@ -300,6 +300,13 @@ fn discoverAcpi(info: *const boot.BootInfo) acpi.Discovery {
             debugWriteHex64(address);
         }
         debugWrite(if (madt.legacy_pic_compatible) ", legacy PIC compatible\r\n" else ", no legacy PIC flag\r\n");
+        debugWrite("MADT processor IDs:");
+        for (madt.processors[0..madt.stored_processor_count]) |processor| {
+            debugWrite(" ");
+            debugWriteU64Decimal(processor.apic_id);
+            debugWrite(if (processor.x2apic) "(x2)" else "(xAPIC)");
+        }
+        debugWrite("\r\n");
     } else {
         debugWrite("MADT was not present in the validated ACPI tables.\r\n");
     }

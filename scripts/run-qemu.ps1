@@ -48,6 +48,7 @@ $varsPath = $varsImage.Replace('\', '/')
     -machine q35 `
     -m 256M `
     -cpu max `
+    -smp 4 `
     -drive "if=pflash,format=raw,unit=0,readonly=on,file=$codePath" `
     -drive "if=pflash,format=raw,unit=1,file=$varsPath" `
     -drive "format=raw,file=fat:rw:$fatPath" `
