@@ -143,8 +143,17 @@ if (-not $output.Contains('Segments verified: CS=0x0008, TR=0x0018')) {
 if (-not $output.Contains('Breakpoint interrupt handled on IST1')) {
     throw 'The IST1 breakpoint round trip was not observed.'
 }
-if (-not $output.Contains('ACPI RSDP retained at 0x')) {
-    throw 'The ACPI root pointer was not retained across the handoff.'
+if (-not $output.Contains('ACPI verified: revision')) {
+    throw 'The checksum-validated ACPI root walk was not observed.'
+}
+if (-not $output.Contains('MADT topology:')) {
+    throw 'The validated MADT topology marker was not observed.'
+}
+if (-not $output.Contains('Local APIC enabled:')) {
+    throw 'The local APIC enablement marker was not observed.'
+}
+if (-not $output.Contains('APIC SVR verified at 0x')) {
+    throw 'The local APIC SVR verification marker was not observed.'
 }
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
     throw 'The framebuffer was not retained and accessed after the handoff.'

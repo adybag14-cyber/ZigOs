@@ -3,6 +3,8 @@ const boot = @import("boot_info.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
 const descriptor_tables = @import("descriptor_tables.zig");
+const acpi = @import("acpi.zig");
+const apic = @import("apic.zig");
 
 const cc = std.os.uefi.cc;
 
@@ -31,13 +33,8 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     installPaging(info, &frame_allocator);
     installDescriptorTables(info, &frame_allocator);
 
-    if (info.acpi_rsdp) |address| {
-        debugWrite("ACPI RSDP retained at 0x");
-        debugWriteHex64(@intCast(address));
-        debugWrite("\r\n");
-    } else {
-        debugWrite("ACPI RSDP was not found.\r\n");
-    }
+    const acpi_info = discoverAcpi(info);
+    initializeApic(acpi_info);
 
     if (info.framebuffer) |framebuffer| {
         paintFramebuffer(framebuffer);
@@ -181,6 +178,106 @@ fn installDescriptorTables(info: *const boot.BootInfo, allocator: *memory.FrameA
 
 fn descriptorTableFailure(reason: []const u8) noreturn {
     debugWrite("Descriptor-table failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn discoverAcpi(info: *const boot.BootInfo) acpi.Discovery {
+    const rsdp_address = info.acpi_rsdp orelse acpiFailure("firmware did not provide an RSDP");
+    const discovery = acpi.discover(rsdp_address) orelse
+        acpiFailure("RSDP/root-table signature, bounds, or checksum validation failed");
+
+    debugWrite("ACPI verified: revision ");
+    debugWriteU64Decimal(discovery.revision);
+    debugWrite(", ");
+    debugWrite(switch (discovery.root_kind) {
+        .xsdt => "XSDT",
+        .rsdt => "RSDT",
+    });
+    debugWrite(" at 0x");
+    debugWriteHex64(@intCast(discovery.root_address));
+    debugWrite(", valid tables ");
+    debugWriteUsizeDecimal(discovery.valid_table_count);
+    debugWrite(", rejected tables ");
+    debugWriteUsizeDecimal(discovery.invalid_table_count);
+    debugWrite("\r\n");
+
+    if (discovery.madt) |madt| {
+        debugWrite("MADT topology: ");
+        debugWriteU64Decimal(madt.processor_count);
+        debugWrite(" processors, ");
+        debugWriteU64Decimal(madt.io_apic_count);
+        debugWrite(" IOAPICs, ");
+        debugWriteU64Decimal(madt.interrupt_override_count);
+        debugWrite(" overrides\r\n");
+        debugWrite("Local APIC at 0x");
+        debugWriteHex64(madt.local_apic_address);
+        if (madt.first_io_apic_address) |address| {
+            debugWrite(", first IOAPIC at 0x");
+            debugWriteHex64(address);
+        }
+        debugWrite(if (madt.legacy_pic_compatible) ", legacy PIC compatible\r\n" else ", no legacy PIC flag\r\n");
+    } else {
+        debugWrite("MADT was not present in the validated ACPI tables.\r\n");
+    }
+
+    printOptionalTable("MCFG", discovery.mcfg_address);
+    printOptionalTable("HPET", discovery.hpet_address);
+    printOptionalTable("FACP", discovery.facp_address);
+    return discovery;
+}
+
+fn printOptionalTable(name: []const u8, address: ?usize) void {
+    debugWrite(name);
+    if (address) |table_address| {
+        debugWrite(" at 0x");
+        debugWriteHex64(@intCast(table_address));
+    } else {
+        debugWrite(" not present");
+    }
+    debugWrite("\r\n");
+}
+
+fn acpiFailure(reason: []const u8) noreturn {
+    debugWrite("ACPI discovery failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn initializeApic(discovery: acpi.Discovery) void {
+    const madt = discovery.madt orelse apicFailure("validated ACPI did not contain a MADT");
+    const information = apic.initialize(madt) orelse
+        apicFailure("local APIC enablement or register verification failed");
+
+    debugWrite("Local APIC enabled: ");
+    debugWrite(if (information.x2apic) "x2APIC" else "xAPIC");
+    debugWrite(" ID ");
+    debugWriteU64Decimal(information.apic_id);
+    debugWrite(", version 0x");
+    debugWriteHex16(information.version);
+    debugWrite(", max LVT ");
+    debugWriteU64Decimal(information.maximum_lvt_entry);
+    debugWrite(", base 0x");
+    debugWriteHex64(information.base_address);
+    debugWrite("\r\n");
+    debugWrite("APIC SVR verified at 0x");
+    debugWriteHex64(information.spurious_vector_register);
+    debugWrite(if (information.legacy_pic_masked)
+        "; legacy PIC fully masked\r\n"
+    else if (madt.legacy_pic_compatible)
+        "; legacy PIC mask verification failed\r\n"
+    else
+        "; platform has no legacy PIC compatibility flag\r\n");
+
+    if (madt.legacy_pic_compatible and !information.legacy_pic_masked) {
+        apicFailure("8259 PIC mask registers did not retain 0xFF");
+    }
+}
+
+fn apicFailure(reason: []const u8) noreturn {
+    debugWrite("APIC initialization failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();

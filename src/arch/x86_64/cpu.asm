@@ -66,6 +66,7 @@ global zigos_enter_kernel
 ; noreturn zigos_enter_kernel(void *stack_top, BootInfo *info, KernelEntry entry)
 ; RCX = one-past-end stack address, RDX = BootInfo, R8 = kernel entry.
 zigos_enter_kernel:
+    cli
     mov rsp, rcx
     and rsp, -16
     xor rbp, rbp
@@ -182,3 +183,44 @@ zigos_isr_breakpoint:
     pop rcx
     pop rax
     iretq
+
+global zigos_isr_spurious
+global zigos_read_msr
+global zigos_write_msr
+global zigos_out8
+global zigos_in8
+
+; Local-APIC spurious vector. Intel specifies that a spurious interrupt does
+; not require an EOI; return directly to the interrupted context.
+zigos_isr_spurious:
+    iretq
+
+; u64 zigos_read_msr(u32 index)
+zigos_read_msr:
+    rdmsr
+    shl rdx, 32
+    or rax, rdx
+    ret
+
+; void zigos_write_msr(u32 index, u64 value)
+zigos_write_msr:
+    mov r8, rdx
+    mov eax, r8d
+    shr r8, 32
+    mov edx, r8d
+    wrmsr
+    ret
+
+; void zigos_out8(u16 port, u8 value)
+zigos_out8:
+    mov al, dl
+    mov dx, cx
+    out dx, al
+    ret
+
+; u8 zigos_in8(u16 port)
+zigos_in8:
+    mov dx, cx
+    in al, dx
+    movzx eax, al
+    ret

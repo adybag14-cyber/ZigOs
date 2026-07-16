@@ -27,7 +27,7 @@
 - [ ] Parse retained memory descriptors into usable and reserved regions
 - [x] Physical frame allocator
 - [x] ZigOs-owned x86-64 page tables
-- [ ] Identity map required firmware/runtime regions
+- [x] Identity map required bootstrap firmware, ACPI, stack, and framebuffer regions
 - [ ] Higher-half kernel mapping experiment
 - [x] GDT and TSS
 - [x] IDT and assembly interrupt stub proof (vector 3 on IST1)
@@ -36,9 +36,10 @@
 
 ## 0.4 - Hardware discovery
 
-- [ ] Validate and parse ACPI RSDP/XSDT
-- [ ] MADT and APIC discovery
-- [ ] Local APIC and I/O APIC initialization
+- [x] Validate and parse ACPI RSDP/XSDT
+- [x] MADT and APIC discovery
+- [x] Local APIC initialization and legacy PIC masking
+- [ ] I/O APIC initialization and interrupt routing
 - [ ] PCI/PCIe enumeration
 - [ ] HPET or invariant-TSC timing
 - [ ] PS/2 and USB input experiments
