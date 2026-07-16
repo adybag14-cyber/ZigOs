@@ -1,5 +1,6 @@
 const std = @import("std");
 const boot = @import("boot_info.zig");
+const memory = @import("memory.zig");
 
 const cc = std.os.uefi.cc;
 
@@ -23,6 +24,9 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWriteHex64(info.memory_map.highest_physical_address);
     debugWrite("\r\n");
 
+    var frame_allocator = memory.FrameAllocator.init(info.memory_map);
+    verifyFrameAllocator(&frame_allocator);
+
     if (info.acpi_rsdp) |address| {
         debugWrite("ACPI RSDP retained at 0x");
         debugWriteHex64(@intCast(address));
@@ -41,6 +45,50 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     }
 
     debugWrite("Milestone 0.2 reached: firmware handoff complete; kernel remains alive.\r\n");
+    zigos_halt_forever();
+}
+
+fn verifyFrameAllocator(allocator: *memory.FrameAllocator) void {
+    const first = allocator.allocateBelow(memory.four_gib) orelse allocatorFailure("no first frame below 4 GiB");
+    const second = allocator.allocateBelow(memory.four_gib) orelse allocatorFailure("no second frame below 4 GiB");
+    const third = allocator.allocateBelow(memory.four_gib) orelse allocatorFailure("no third frame below 4 GiB");
+
+    if ((first & 0xFFF) != 0 or (second & 0xFFF) != 0 or (third & 0xFFF) != 0) {
+        allocatorFailure("unaligned frame returned");
+    }
+    if (first == second or first == third or second == third) {
+        allocatorFailure("duplicate frame returned");
+    }
+
+    verifyFramePattern(first, 0x5A49_474F_5346_5241);
+    verifyFramePattern(second, 0x4D45_414C_4C4F_4332);
+    verifyFramePattern(third, 0x5048_5953_4652_4D33);
+
+    debugWrite("Physical frame allocator verified: ");
+    debugWriteU64Decimal(allocator.allocated_pages);
+    debugWrite(" frames at 0x");
+    debugWriteHex64(@intCast(first));
+    debugWrite(", 0x");
+    debugWriteHex64(@intCast(second));
+    debugWrite(", 0x");
+    debugWriteHex64(@intCast(third));
+    debugWrite("\r\n");
+}
+
+fn verifyFramePattern(address: usize, pattern: u64) void {
+    const words: [*]volatile u64 = @ptrFromInt(address);
+    words[0] = pattern;
+    words[511] = ~pattern;
+
+    if (words[0] != pattern or words[511] != ~pattern) {
+        allocatorFailure("frame write/read verification failed");
+    }
+}
+
+fn allocatorFailure(reason: []const u8) noreturn {
+    debugWrite("Physical frame allocator failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
     zigos_halt_forever();
 }
 

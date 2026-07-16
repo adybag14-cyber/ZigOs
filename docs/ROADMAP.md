@@ -25,7 +25,7 @@
 ## 0.3 - Kernel foundations
 
 - [ ] Parse retained memory descriptors into usable and reserved regions
-- [ ] Physical frame allocator
+- [x] Physical frame allocator
 - [ ] ZigOs-owned x86-64 page tables
 - [ ] Identity map required firmware/runtime regions
 - [ ] Higher-half kernel mapping experiment
