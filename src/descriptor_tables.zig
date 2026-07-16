@@ -55,6 +55,7 @@ pub const Installation = struct {
     breakpoint_stack_pointer: usize,
 };
 
+extern fn zigos_exception_stub_address(vector: u8) callconv(cc) usize;
 extern fn zigos_load_gdt(
     pointer: *const DescriptorTablePointer,
     new_code_selector: u16,
@@ -107,6 +108,15 @@ pub fn install(allocator: *memory.FrameAllocator, kernel_stack_top: usize) ?Inst
     zigos_load_gdt(&gdt_pointer, code_selector, data_selector, tss_selector);
 
     for (&idt) |*entry| entry.* = std.mem.zeroes(IdtEntry);
+    var exception_vector: usize = 0;
+    while (exception_vector < 32) : (exception_vector += 1) {
+        setInterruptGate(
+            &idt[exception_vector],
+            zigos_exception_stub_address(@intCast(exception_vector)),
+            code_selector,
+            1,
+        );
+    }
     setInterruptGate(&idt[breakpoint_vector], @intFromPtr(&zigos_isr_breakpoint), code_selector, 1);
     setInterruptGate(&idt[timer_vector], @intFromPtr(&zigos_isr_apic_timer), code_selector, 1);
     setInterruptGate(&idt[spurious_vector], @intFromPtr(&zigos_isr_spurious), code_selector, 0);

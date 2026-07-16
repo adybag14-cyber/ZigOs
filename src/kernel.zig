@@ -3,6 +3,7 @@ const boot = @import("boot_info.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
 const descriptor_tables = @import("descriptor_tables.zig");
+const exceptions = @import("exceptions.zig");
 const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
 const hpet = @import("hpet.zig");
@@ -33,6 +34,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     verifyFrameAllocator(&frame_allocator);
     installPaging(info, &frame_allocator);
     installDescriptorTables(info, &frame_allocator);
+    testExceptionRecovery();
 
     const acpi_info = discoverAcpi(info);
     _ = initializeApic(acpi_info);
@@ -313,6 +315,32 @@ fn testApicTimer(discovery: acpi.Discovery) void {
 
 fn timerFailure(reason: []const u8) noreturn {
     debugWrite("Timer initialization failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn testExceptionRecovery() void {
+    const result = exceptions.testInvalidOpcodeRecovery() orelse
+        exceptionTestFailure("UD2 did not return through the generic exception path");
+    if (result.resumed_rip != result.fault_rip + 2) {
+        exceptionTestFailure("invalid-opcode handler did not advance RIP by two bytes");
+    }
+
+    debugWrite("CPU exception coverage active: vectors 0-31 installed on IST1\r\n");
+    debugWrite("Invalid-opcode exception recovered: vector ");
+    debugWriteU64Decimal(result.vector);
+    debugWrite(", error 0x");
+    debugWriteHex64(result.error_code);
+    debugWrite(", RIP 0x");
+    debugWriteHex64(result.fault_rip);
+    debugWrite(" -> 0x");
+    debugWriteHex64(result.resumed_rip);
+    debugWrite("\r\n");
+}
+
+fn exceptionTestFailure(reason: []const u8) noreturn {
+    debugWrite("Exception-path verification failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();

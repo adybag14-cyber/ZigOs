@@ -31,8 +31,9 @@
 - [ ] Higher-half kernel mapping experiment
 - [x] GDT and TSS
 - [x] IDT and assembly interrupt stub proof (vector 3 on IST1)
-- [ ] Full CPU exception-vector coverage and fault diagnostics
-- [ ] Kernel panic path and serial diagnostics
+- [x] Full CPU exception-vector coverage and fault diagnostics
+- [x] Fatal exception panic path over early debug output
+- [ ] COM1 serial diagnostics and symbolized stack traces
 
 ## 0.4 - Hardware discovery
 

@@ -143,6 +143,12 @@ if (-not $output.Contains('Segments verified: CS=0x0008, TR=0x0018')) {
 if (-not $output.Contains('Breakpoint interrupt handled on IST1')) {
     throw 'The IST1 breakpoint round trip was not observed.'
 }
+if (-not $output.Contains('CPU exception coverage active: vectors 0-31')) {
+    throw 'The full architectural exception-vector installation marker was not observed.'
+}
+if (-not $output.Contains('Invalid-opcode exception recovered: vector 6')) {
+    throw 'The controlled UD2 exception recovery marker was not observed.'
+}
 if (-not $output.Contains('ACPI verified: revision')) {
     throw 'The checksum-validated ACPI root walk was not observed.'
 }

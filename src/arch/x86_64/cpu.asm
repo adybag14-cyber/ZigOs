@@ -278,3 +278,128 @@ zigos_wait_for_interrupt:
     hlt
     cli
     ret
+
+extern zigos_exception_handler
+
+global zigos_exception_stub_address
+global zigos_read_cr2
+global zigos_trigger_ud2
+
+%macro ZIGOS_EXCEPTION_NO_ERROR 1
+zigos_exception_%1:
+    push qword 0
+    push qword %1
+    jmp zigos_exception_common
+%endmacro
+
+%macro ZIGOS_EXCEPTION_WITH_ERROR 1
+zigos_exception_%1:
+    push qword %1
+    jmp zigos_exception_common
+%endmacro
+
+ZIGOS_EXCEPTION_NO_ERROR 0
+ZIGOS_EXCEPTION_NO_ERROR 1
+ZIGOS_EXCEPTION_NO_ERROR 2
+ZIGOS_EXCEPTION_NO_ERROR 3
+ZIGOS_EXCEPTION_NO_ERROR 4
+ZIGOS_EXCEPTION_NO_ERROR 5
+ZIGOS_EXCEPTION_NO_ERROR 6
+ZIGOS_EXCEPTION_NO_ERROR 7
+ZIGOS_EXCEPTION_WITH_ERROR 8
+ZIGOS_EXCEPTION_NO_ERROR 9
+ZIGOS_EXCEPTION_WITH_ERROR 10
+ZIGOS_EXCEPTION_WITH_ERROR 11
+ZIGOS_EXCEPTION_WITH_ERROR 12
+ZIGOS_EXCEPTION_WITH_ERROR 13
+ZIGOS_EXCEPTION_WITH_ERROR 14
+ZIGOS_EXCEPTION_NO_ERROR 15
+ZIGOS_EXCEPTION_NO_ERROR 16
+ZIGOS_EXCEPTION_WITH_ERROR 17
+ZIGOS_EXCEPTION_NO_ERROR 18
+ZIGOS_EXCEPTION_NO_ERROR 19
+ZIGOS_EXCEPTION_NO_ERROR 20
+ZIGOS_EXCEPTION_WITH_ERROR 21
+ZIGOS_EXCEPTION_NO_ERROR 22
+ZIGOS_EXCEPTION_NO_ERROR 23
+ZIGOS_EXCEPTION_NO_ERROR 24
+ZIGOS_EXCEPTION_NO_ERROR 25
+ZIGOS_EXCEPTION_NO_ERROR 26
+ZIGOS_EXCEPTION_NO_ERROR 27
+ZIGOS_EXCEPTION_NO_ERROR 28
+ZIGOS_EXCEPTION_WITH_ERROR 29
+ZIGOS_EXCEPTION_WITH_ERROR 30
+ZIGOS_EXCEPTION_NO_ERROR 31
+
+zigos_exception_common:
+    cld
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rsp
+    and rsp, -16
+    sub rsp, 32
+    mov rcx, r12
+    call zigos_exception_handler
+    mov rsp, r12
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    add rsp, 16
+    iretq
+
+; usize zigos_exception_stub_address(u8 vector)
+zigos_exception_stub_address:
+    movzx ecx, cl
+    lea rax, [rel zigos_exception_stub_table]
+    mov rax, [rax + rcx * 8]
+    ret
+
+; u64 zigos_read_cr2(void)
+zigos_read_cr2:
+    mov rax, cr2
+    ret
+
+; Controlled invalid-opcode test. The Zig handler advances RIP by two bytes.
+zigos_trigger_ud2:
+    ud2
+    ret
+
+section .rdata align=8
+zigos_exception_stub_table:
+    dq zigos_exception_0, zigos_exception_1, zigos_exception_2, zigos_exception_3
+    dq zigos_exception_4, zigos_exception_5, zigos_exception_6, zigos_exception_7
+    dq zigos_exception_8, zigos_exception_9, zigos_exception_10, zigos_exception_11
+    dq zigos_exception_12, zigos_exception_13, zigos_exception_14, zigos_exception_15
+    dq zigos_exception_16, zigos_exception_17, zigos_exception_18, zigos_exception_19
+    dq zigos_exception_20, zigos_exception_21, zigos_exception_22, zigos_exception_23
+    dq zigos_exception_24, zigos_exception_25, zigos_exception_26, zigos_exception_27
+    dq zigos_exception_28, zigos_exception_29, zigos_exception_30, zigos_exception_31
+
+section .text
