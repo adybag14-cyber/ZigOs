@@ -1,0 +1,6 @@
+# Canonical source line endings for reproducible formatting on Windows runners.
+*.zig text eol=lf
+*.asm text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
