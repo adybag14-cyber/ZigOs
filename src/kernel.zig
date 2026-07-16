@@ -9,6 +9,7 @@ const apic = @import("apic.zig");
 const ioapic = @import("ioapic.zig");
 const pci = @import("pci.zig");
 const heap = @import("heap.zig");
+const serial = @import("serial.zig");
 const hpet = @import("hpet.zig");
 
 const cc = std.os.uefi.cc;
@@ -48,6 +49,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     testApicTimer(acpi_info);
     enumeratePci(acpi_info);
     initializeKernelHeap(&frame_allocator);
+    initializeSerial();
 
     if (info.framebuffer) |framebuffer| {
         paintFramebuffer(framebuffer);
@@ -58,7 +60,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
         debugWrite("No writable framebuffer was retained.\r\n");
     }
 
-    debugWrite("Milestone 0.2 reached: firmware handoff complete; kernel remains alive.\r\n");
+    debugWrite("ZigOs boot sequence complete: kernel foundations and hardware probes passed.\r\n");
     zigos_halt_forever();
 }
 
@@ -539,6 +541,24 @@ fn heapFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
+fn initializeSerial() void {
+    if (!serial.initialize()) serialFailure("COM1 loopback self-test failed");
+    if (!serial.write("ZigOs COM1 serial diagnostics online\r\n")) {
+        serialFailure("COM1 transmitter did not become ready");
+    }
+
+    debugWrite("COM1 serial diagnostics active at I/O port 0x");
+    debugWriteHex16(serial.basePort());
+    debugWrite(" (115200 8N1, FIFO enabled)\r\n");
+}
+
+fn serialFailure(reason: []const u8) noreturn {
+    debugWrite("Serial initialization failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
 fn paintFramebuffer(framebuffer: boot.FramebufferInfo) void {
     if (framebuffer.base == 0 or framebuffer.size < 4) return;
     if (framebuffer.pixel_format == 3) return;
@@ -586,7 +606,10 @@ fn channelToMask(value: u8, mask: u32) u32 {
 }
 
 fn debugWrite(text: []const u8) void {
-    for (text) |character| zigos_debug_putc(character);
+    for (text) |character| {
+        zigos_debug_putc(character);
+        _ = serial.putByte(character);
+    }
 }
 
 fn debugWriteHex8(value: u8) void {

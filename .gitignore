@@ -15,6 +15,7 @@ validation-output.log
 validation-error.log
 validation-exit.txt
 qemu-debug.log
+qemu-serial.log
 qemu-stdout.log
 qemu-stderr.log
 qemu-test-output.log

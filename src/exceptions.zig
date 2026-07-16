@@ -1,4 +1,5 @@
 const std = @import("std");
+const serial = @import("serial.zig");
 
 const cc = std.os.uefi.cc;
 
@@ -134,7 +135,10 @@ fn exceptionName(vector: u64) []const u8 {
 }
 
 fn debugWrite(text: []const u8) void {
-    for (text) |character| zigos_debug_putc(character);
+    for (text) |character| {
+        zigos_debug_putc(character);
+        _ = serial.putByte(character);
+    }
 }
 
 fn debugWriteHex64(value: u64) void {

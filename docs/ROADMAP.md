@@ -33,7 +33,8 @@
 - [x] IDT and assembly interrupt stub proof (vector 3 on IST1)
 - [x] Full CPU exception-vector coverage and fault diagnostics
 - [x] Fatal exception panic path over early debug output
-- [ ] COM1 serial diagnostics and symbolized stack traces
+- [x] COM1 serial diagnostics with loopback self-test and mirrored panic output
+- [ ] Symbolized stack traces
 
 ## 0.4 - Hardware discovery
 

@@ -9,6 +9,7 @@ $efiRoot = Join-Path $repoRoot 'zig-out'
 $efiImage = Join-Path $efiRoot 'EFI\BOOT\BOOTX64.EFI'
 $buildDir = Join-Path $repoRoot 'build'
 $debugLog = Join-Path $repoRoot 'qemu-debug.log'
+$serialLog = Join-Path $repoRoot 'qemu-serial.log'
 $qemuStdout = Join-Path $repoRoot 'qemu-stdout.log'
 $qemuStderr = Join-Path $repoRoot 'qemu-stderr.log'
 
@@ -47,11 +48,12 @@ $varsImage = Join-Path $buildDir 'ovmf-vars.fd'
 Copy-Item $codeSource $codeImage -Force
 Copy-Item $varsSource $varsImage -Force
 
-Remove-Item $debugLog, $qemuStdout, $qemuStderr -Force -ErrorAction SilentlyContinue
+Remove-Item $debugLog, $serialLog, $qemuStdout, $qemuStderr -Force -ErrorAction SilentlyContinue
 $fatPath = $efiRoot.Replace('\', '/')
 $codePath = $codeImage.Replace('\', '/')
 $varsPath = $varsImage.Replace('\', '/')
 $debugPath = $debugLog.Replace('\', '/')
+$serialPath = $serialLog.Replace('\', '/')
 
 $arguments = @(
     '-machine', 'q35',
@@ -63,7 +65,7 @@ $arguments = @(
     '-debugcon', "file:$debugPath",
     '-global', 'isa-debugcon.iobase=0xe9',
     '-display', 'none',
-    '-serial', 'none',
+    '-serial', "file:$serialPath",
     '-monitor', 'none',
     '-net', 'none',
     '-no-reboot'
@@ -72,7 +74,7 @@ $arguments = @(
 Write-Host "Booting ZigOs in QEMU with $codeSource"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-$marker = 'Milestone 0.2 reached'
+$marker = 'ZigOs boot sequence complete'
 $captured = $false
 
 try {
@@ -190,6 +192,18 @@ if (-not $output.Contains('Kernel heap active:')) {
 }
 if (-not $output.Contains('Heap allocator verified: aligned alloc/free, split, coalesce')) {
     throw 'The kernel heap invariant test marker was not observed.'
+}
+if (-not (Test-Path $serialLog)) {
+    throw 'QEMU produced no COM1 serial log.'
+}
+$serialOutput = Get-Content $serialLog -Raw
+Write-Host '=== ZigOs COM1 serial output ==='
+Write-Host $serialOutput
+if (-not $serialOutput.Contains('ZigOs COM1 serial diagnostics online')) {
+    throw 'The COM1 loopback-tested online marker was not captured.'
+}
+if (-not $serialOutput.Contains('ZigOs boot sequence complete')) {
+    throw 'The final boot marker was not mirrored to COM1.'
 }
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
     throw 'The framebuffer was not retained and accessed after the handoff.'
