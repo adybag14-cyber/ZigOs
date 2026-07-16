@@ -7,6 +7,7 @@ const exceptions = @import("exceptions.zig");
 const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
 const ioapic = @import("ioapic.zig");
+const pci = @import("pci.zig");
 const hpet = @import("hpet.zig");
 
 const cc = std.os.uefi.cc;
@@ -41,6 +42,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     const local_apic_info = initializeApic(acpi_info);
     initializeIoApic(acpi_info, local_apic_info);
     testApicTimer(acpi_info);
+    enumeratePci(acpi_info);
 
     if (info.framebuffer) |framebuffer| {
         paintFramebuffer(framebuffer);
@@ -394,6 +396,61 @@ fn ioApicFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
+fn enumeratePci(discovery: acpi.Discovery) void {
+    const mcfg_address = discovery.mcfg_address orelse pciFailure("ACPI did not expose an MCFG table");
+    const inventory = pci.enumerate(mcfg_address) orelse
+        pciFailure("MCFG validation or ECAM enumeration failed");
+
+    debugWrite("PCIe ECAM active: MCFG 0x");
+    debugWriteHex64(@intCast(inventory.mcfg_address));
+    debugWrite(", allocations ");
+    debugWriteUsizeDecimal(inventory.allocation_count);
+    debugWrite(", buses scanned ");
+    debugWriteUsizeDecimal(inventory.scanned_bus_count);
+    debugWrite("\r\n");
+    debugWrite("PCI inventory: ");
+    debugWriteUsizeDecimal(inventory.function_count);
+    debugWrite(" functions, ");
+    debugWriteUsizeDecimal(inventory.bridge_count);
+    debugWrite(" PCI bridges, retained ");
+    debugWriteUsizeDecimal(inventory.retained_count);
+    debugWrite("\r\n");
+
+    const print_count = @min(inventory.retained_count, 16);
+    var index: usize = 0;
+    while (index < print_count) : (index += 1) {
+        const function = inventory.functions[index];
+        debugWrite("PCI function ");
+        debugWriteHex16(function.segment);
+        debugWrite(":");
+        debugWriteHex8(function.bus);
+        debugWrite(":");
+        debugWriteHex8(function.device);
+        debugWrite(".");
+        debugWriteU64Decimal(function.function);
+        debugWrite(" vendor 0x");
+        debugWriteHex16(function.vendor_id);
+        debugWrite(" device 0x");
+        debugWriteHex16(function.device_id);
+        debugWrite(" class ");
+        debugWriteHex8(function.class_code);
+        debugWrite(":");
+        debugWriteHex8(function.subclass);
+        debugWrite(":");
+        debugWriteHex8(function.programming_interface);
+        debugWrite(" header 0x");
+        debugWriteHex8(function.header_type);
+        debugWrite("\r\n");
+    }
+}
+
+fn pciFailure(reason: []const u8) noreturn {
+    debugWrite("PCIe discovery failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
 fn paintFramebuffer(framebuffer: boot.FramebufferInfo) void {
     if (framebuffer.base == 0 or framebuffer.size < 4) return;
     if (framebuffer.pixel_format == 3) return;
@@ -442,6 +499,15 @@ fn channelToMask(value: u8, mask: u32) u32 {
 
 fn debugWrite(text: []const u8) void {
     for (text) |character| zigos_debug_putc(character);
+}
+
+fn debugWriteHex8(value: u8) void {
+    const digits = "0123456789ABCDEF";
+    const text = [2]u8{
+        digits[@as(u4, @truncate(value >> 4))],
+        digits[@as(u4, @truncate(value))],
+    };
+    debugWrite(&text);
 }
 
 fn debugWriteHex16(value: u16) void {

@@ -176,6 +176,15 @@ if (-not $output.Contains('APIC timer calibrated:')) {
 if (-not $output.Contains('Maskable interrupt vector 0x0040 handled')) {
     throw 'The APIC timer interrupt round trip was not observed.'
 }
+if (-not $output.Contains('PCIe ECAM active:')) {
+    throw 'The PCIe MCFG/ECAM activation marker was not observed.'
+}
+if (-not $output.Contains('PCI inventory:')) {
+    throw 'The PCI function inventory marker was not observed.'
+}
+if (-not $output.Contains('PCI function ')) {
+    throw 'No enumerated PCI function was printed.'
+}
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
     throw 'The framebuffer was not retained and accessed after the handoff.'
 }

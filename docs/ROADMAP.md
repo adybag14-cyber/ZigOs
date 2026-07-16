@@ -42,7 +42,7 @@
 - [x] Local APIC initialization and legacy PIC masking
 - [x] I/O APIC discovery and fully masked redirection table
 - [ ] External IRQ routing through MADT overrides
-- [ ] PCI/PCIe enumeration
+- [x] PCIe ECAM enumeration from validated MCFG
 - [x] HPET initialization and local-APIC timer calibration
 - [x] Maskable APIC timer interrupt with EOI and HLT wake-up
 - [ ] PS/2 and USB input experiments
