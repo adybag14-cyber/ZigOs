@@ -31,3 +31,4 @@ m*-pid.txt
 *.swp
 .DS_Store
 Thumbs.db
+src/generated/

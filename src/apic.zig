@@ -16,6 +16,11 @@ const software_enable: u32 = 1 << 8;
 const timer_masked: u32 = 1 << 16;
 const timer_periodic: u32 = 1 << 17;
 const divide_by_16_encoding: u32 = 0x3;
+const ipi_delivery_status: u32 = 1 << 12;
+const init_delivery: u32 = 0b101 << 8;
+const startup_delivery: u32 = 0b110 << 8;
+const level_assert: u32 = 1 << 14;
+const trigger_level: u32 = 1 << 15;
 
 const xapic_id_offset: usize = 0x020;
 const xapic_version_offset: usize = 0x030;
@@ -26,6 +31,8 @@ const xapic_lvt_timer_offset: usize = 0x320;
 const xapic_initial_count_offset: usize = 0x380;
 const xapic_current_count_offset: usize = 0x390;
 const xapic_divide_configuration_offset: usize = 0x3E0;
+const xapic_icr_low_offset: usize = 0x300;
+const xapic_icr_high_offset: usize = 0x310;
 
 const x2apic_id_msr: u32 = 0x802;
 const x2apic_version_msr: u32 = 0x803;
@@ -36,6 +43,7 @@ const x2apic_lvt_timer_msr: u32 = 0x832;
 const x2apic_initial_count_msr: u32 = 0x838;
 const x2apic_current_count_msr: u32 = 0x839;
 const x2apic_divide_configuration_msr: u32 = 0x83E;
+const x2apic_icr_msr: u32 = 0x830;
 
 extern fn zigos_read_msr(index: u32) callconv(cc) u64;
 extern fn zigos_write_msr(index: u32, value: u64) callconv(cc) void;
@@ -134,6 +142,26 @@ pub fn initialize(madt: acpi.MadtInfo) ?Information {
     };
 }
 
+pub fn currentId() u32 {
+    return if (active_x2apic)
+        @truncate(zigos_read_msr(x2apic_id_msr))
+    else
+        readMmio(active_base, xapic_id_offset) >> 24;
+}
+
+pub fn sendInitSipi(destination_apic_id: u32, startup_vector: u8, reference: hpet.Device) bool {
+    if (startup_vector == 0) return false;
+    if (!active_x2apic and destination_apic_id > 0xFF) return false;
+
+    if (!sendIpi(destination_apic_id, init_delivery | level_assert | trigger_level)) return false;
+    if (!reference.waitNanoseconds(10_000_000)) return false;
+
+    if (!sendIpi(destination_apic_id, startup_delivery | level_assert | startup_vector)) return false;
+    if (!reference.waitNanoseconds(200_000)) return false;
+    if (!sendIpi(destination_apic_id, startup_delivery | level_assert | startup_vector)) return false;
+    return reference.waitNanoseconds(200_000);
+}
+
 pub fn calibrateAndTestTimer(reference: hpet.Device) ?TimerResult {
     const counter_before = reference.readCounter();
     if (!reference.waitNanoseconds(1_000_000)) return null;
@@ -205,6 +233,31 @@ pub fn startPeriodicTimer(ticks_per_second: u64, frequency_hz: u32) ?u32 {
 pub fn stopTimer() void {
     writeTimerInitial(0);
     writeTimerLvt(timer_vector | timer_masked);
+}
+
+fn sendIpi(destination_apic_id: u32, command: u32) bool {
+    if (!waitForIpiDelivery()) return false;
+
+    if (active_x2apic) {
+        const value = (@as(u64, destination_apic_id) << 32) | command;
+        zigos_write_msr(x2apic_icr_msr, value);
+    } else {
+        writeMmio(active_base, xapic_icr_high_offset, destination_apic_id << 24);
+        writeMmio(active_base, xapic_icr_low_offset, command);
+    }
+    return waitForIpiDelivery();
+}
+
+fn waitForIpiDelivery() bool {
+    var iteration: usize = 0;
+    while (iteration < 10_000_000) : (iteration += 1) {
+        const low: u32 = if (active_x2apic)
+            @truncate(zigos_read_msr(x2apic_icr_msr))
+        else
+            readMmio(active_base, xapic_icr_low_offset);
+        if ((low & ipi_delivery_status) == 0) return true;
+    }
+    return false;
 }
 
 fn maskLegacyPic() bool {

@@ -129,6 +129,10 @@ pub fn isHigherHalfAddress(address: usize) bool {
     return @as(u64, @intCast(address)) >= higher_half_base;
 }
 
+pub fn activePml4Address() ?usize {
+    return if (active_pml4_address == 0) null else active_pml4_address;
+}
+
 pub fn currentCr3() u64 {
     return zigos_read_cr3();
 }

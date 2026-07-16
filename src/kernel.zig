@@ -16,6 +16,7 @@ const heap = @import("heap.zig");
 const scheduler = @import("scheduler.zig");
 const preemptive = @import("preemptive.zig");
 const user_mode = @import("user_mode.zig");
+const smp = @import("smp.zig");
 const serial = @import("serial.zig");
 const hpet = @import("hpet.zig");
 
@@ -62,6 +63,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     const local_apic_info = initializeApic(acpi_info);
     initializeIoApic(acpi_info, local_apic_info);
     const apic_timer_info = testApicTimer(acpi_info);
+    startApplicationProcessors(info, &frame_allocator, acpi_info, local_apic_info);
     const pci_inventory = enumeratePci(acpi_info);
     inspectAhci(pci_inventory, &frame_allocator);
     initializeKernelHeap(&frame_allocator);
@@ -473,6 +475,62 @@ fn initializeIoApic(discovery: acpi.Discovery, local_apic: apic.Information) voi
 
 fn ioApicFailure(reason: []const u8) noreturn {
     debugWrite("IOAPIC initialization failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn startApplicationProcessors(
+    info: *const boot.BootInfo,
+    allocator: *memory.FrameAllocator,
+    discovery: acpi.Discovery,
+    local_apic: apic.Information,
+) void {
+    const madt = discovery.madt orelse smpFailure("validated ACPI did not contain a MADT");
+    const hpet_address = discovery.hpet_address orelse smpFailure("ACPI did not expose HPET for SIPI timing");
+    const reference = hpet.initialize(hpet_address) orelse
+        smpFailure("HPET could not be initialized for INIT/SIPI timing");
+    const report = smp.start(info, allocator, madt, local_apic, reference) orelse
+        smpFailure("trampoline patching, INIT/SIPI delivery, or AP acknowledgement failed");
+
+    debugWrite("SMP startup: BSP APIC ");
+    debugWriteU64Decimal(report.bsp_apic_id);
+    debugWrite(", MADT processors ");
+    debugWriteU64Decimal(report.madt_processor_count);
+    debugWrite(", AP targets ");
+    debugWriteUsizeDecimal(report.target_count);
+    debugWrite(", trampoline 0x");
+    debugWriteHex64(@intCast(report.trampoline_base));
+    debugWrite(", SIPI vector 0x");
+    debugWriteHex8(report.startup_vector);
+    debugWrite("\r\n");
+
+    for (report.processors[0..report.target_count]) |processor| {
+        debugWrite("AP online: expected APIC ");
+        debugWriteU64Decimal(processor.expected_apic_id);
+        debugWrite(", actual APIC ");
+        debugWriteU64Decimal(processor.actual_apic_id);
+        debugWrite(", state ");
+        debugWriteU64Decimal(processor.state);
+        debugWrite(", stack 0x");
+        debugWriteHex64(@intCast(processor.stack_base));
+        debugWrite(" + ");
+        debugWriteUsizeDecimal(processor.stack_size);
+        debugWrite(" bytes\r\n");
+    }
+
+    if (report.online_count != report.target_count) {
+        smpFailure("not every MADT application processor reached long mode");
+    }
+    debugWrite("SMP startup complete: ");
+    debugWriteUsizeDecimal(report.online_count);
+    debugWrite("/");
+    debugWriteUsizeDecimal(report.target_count);
+    debugWrite(" application processors online\r\n");
+}
+
+fn smpFailure(reason: []const u8) noreturn {
+    debugWrite("SMP startup failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();
