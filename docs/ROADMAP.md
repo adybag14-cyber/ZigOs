@@ -28,7 +28,7 @@
 - [x] Physical frame allocator
 - [x] ZigOs-owned x86-64 page tables
 - [x] Identity map required bootstrap firmware, ACPI, stack, and framebuffer regions
-- [ ] Higher-half kernel mapping experiment
+- [x] Higher-half data alias and RIP-relative code-execution proof experiment
 - [x] GDT and TSS
 - [x] IDT and assembly interrupt stub proof (vector 3 on IST1)
 - [x] Full CPU exception-vector coverage and fault diagnostics

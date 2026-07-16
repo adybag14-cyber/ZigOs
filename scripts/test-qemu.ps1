@@ -136,6 +136,15 @@ if (-not $output.Contains('ZigOs page tables active:')) {
 if (-not $output.Contains('Post-switch frame verified at 0x')) {
     throw 'The post-page-table-switch memory probe was not observed.'
 }
+if (-not $output.Contains('Higher-half data alias verified:')) {
+    throw 'The higher-half data-alias marker was not observed.'
+}
+if (-not $output.Contains('Higher-half code execution verified:')) {
+    throw 'The higher-half code-execution marker was not observed.'
+}
+if (-not $output.Contains('Higher-half mirror base 0xFFFF800000000000')) {
+    throw 'The canonical higher-half PML4 mirror marker was not observed.'
+}
 if (-not $output.Contains('Descriptor tables active:')) {
     throw 'The ZigOs GDT/TSS/IDT marker was not observed.'
 }

@@ -540,3 +540,12 @@ zigos_fxsave:
 zigos_cpu_relax:
     pause
     ret
+
+
+global zigos_high_half_probe
+
+; Return the address observed through RIP-relative execution. Calling this
+; through the high-half alias proves the CPU fetched and executed aliased code.
+zigos_high_half_probe:
+    lea rax, [rel zigos_high_half_probe]
+    ret

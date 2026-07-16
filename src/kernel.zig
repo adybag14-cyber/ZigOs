@@ -32,6 +32,7 @@ var preemptive_task_b_iterations: u64 = 0;
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_halt_forever() callconv(cc) noreturn;
+extern fn zigos_high_half_probe() callconv(cc) usize;
 
 pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWrite("\r\nExitBootServices succeeded.\r\n");
@@ -149,6 +150,7 @@ fn installPaging(info: *const boot.BootInfo, allocator: *memory.FrameAllocator) 
     const post_switch_probe = allocator.allocateBelow(memory.four_gib) orelse
         pagingFailure("unable to allocate a post-switch probe frame");
     verifyFramePattern(post_switch_probe, 0x5041_4745_5442_4C33);
+    verifyHigherHalfAlias(post_switch_probe);
 
     debugWrite("ZigOs page tables active: CR3 0x");
     debugWriteHex64(installation.previous_cr3);
@@ -159,8 +161,55 @@ fn installPaging(info: *const boot.BootInfo, allocator: *memory.FrameAllocator) 
     debugWrite(" bytes identity-mapped with ");
     debugWriteU64Decimal(installation.table_pages);
     debugWrite(" table pages\r\n");
+    debugWrite("Higher-half mirror base 0x");
+    debugWriteHex64(installation.higher_half_base);
+    debugWrite(" maps the same ");
+    debugWriteU64Decimal(installation.mapped_bytes);
+    debugWrite(" physical bytes\r\n");
     debugWrite("Post-switch frame verified at 0x");
     debugWriteHex64(@intCast(post_switch_probe));
+    debugWrite("\r\n");
+}
+
+fn verifyHigherHalfAlias(physical_frame: usize) void {
+    const high_frame_address = paging.higherHalfAlias(physical_frame) orelse
+        pagingFailure("physical probe frame was outside the higher-half mirror");
+    if (!paging.isHigherHalfAddress(high_frame_address)) {
+        pagingFailure("higher-half data alias was not canonical-high");
+    }
+
+    const low_words: [*]volatile u64 = @ptrFromInt(physical_frame);
+    const high_words: [*]volatile u64 = @ptrFromInt(high_frame_address);
+    if (high_words[0] != 0x5041_4745_5442_4C33 or high_words[511] != ~@as(u64, 0x5041_4745_5442_4C33)) {
+        pagingFailure("higher-half alias could not read the low-address frame pattern");
+    }
+
+    high_words[1] = 0x4849_4748_4441_5441;
+    if (low_words[1] != 0x4849_4748_4441_5441) {
+        pagingFailure("higher-half write was not visible through the identity mapping");
+    }
+
+    const low_code_address = @intFromPtr(&zigos_high_half_probe);
+    if (low_code_address >= memory.four_gib) {
+        pagingFailure("high-half probe code was linked outside the mirrored bootstrap range");
+    }
+    const high_code_address = paging.higherHalfAlias(low_code_address) orelse
+        pagingFailure("unable to create a higher-half code alias");
+    const high_probe: *const fn () callconv(cc) usize = @ptrFromInt(high_code_address);
+    const observed_address = high_probe();
+    if (observed_address != high_code_address) {
+        pagingFailure("RIP-relative execution did not observe the higher-half code address");
+    }
+
+    debugWrite("Higher-half data alias verified: physical 0x");
+    debugWriteHex64(@intCast(physical_frame));
+    debugWrite(" <-> virtual 0x");
+    debugWriteHex64(@intCast(high_frame_address));
+    debugWrite("\r\n");
+    debugWrite("Higher-half code execution verified: low 0x");
+    debugWriteHex64(@intCast(low_code_address));
+    debugWrite(" -> high RIP 0x");
+    debugWriteHex64(@intCast(observed_address));
     debugWrite("\r\n");
 }
 
