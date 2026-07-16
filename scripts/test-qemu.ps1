@@ -185,6 +185,12 @@ if (-not $output.Contains('PCI inventory:')) {
 if (-not $output.Contains('PCI function ')) {
     throw 'No enumerated PCI function was printed.'
 }
+if (-not $output.Contains('Kernel heap active:')) {
+    throw 'The kernel heap initialization marker was not observed.'
+}
+if (-not $output.Contains('Heap allocator verified: aligned alloc/free, split, coalesce')) {
+    throw 'The kernel heap invariant test marker was not observed.'
+}
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
     throw 'The framebuffer was not retained and accessed after the handoff.'
 }

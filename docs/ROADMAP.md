@@ -49,7 +49,7 @@
 
 ## 0.5 - Runtime
 
-- [ ] Kernel heap
+- [x] Kernel free-list heap with aligned allocation and coalescing
 - [ ] Cooperative task abstraction
 - [ ] Pre-emptive scheduler experiment
 - [ ] Userspace privilege-transition experiment

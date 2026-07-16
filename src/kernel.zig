@@ -8,9 +8,13 @@ const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
 const ioapic = @import("ioapic.zig");
 const pci = @import("pci.zig");
+const heap = @import("heap.zig");
 const hpet = @import("hpet.zig");
 
 const cc = std.os.uefi.cc;
+
+var kernel_heap: heap.Heap = undefined;
+var kernel_heap_ready: bool = false;
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_halt_forever() callconv(cc) noreturn;
@@ -43,6 +47,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     initializeIoApic(acpi_info, local_apic_info);
     testApicTimer(acpi_info);
     enumeratePci(acpi_info);
+    initializeKernelHeap(&frame_allocator);
 
     if (info.framebuffer) |framebuffer| {
         paintFramebuffer(framebuffer);
@@ -446,6 +451,89 @@ fn enumeratePci(discovery: acpi.Discovery) void {
 
 fn pciFailure(reason: []const u8) noreturn {
     debugWrite("PCIe discovery failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn initializeKernelHeap(allocator: *memory.FrameAllocator) void {
+    const heap_pages: usize = 256;
+    const region_base = allocator.allocateContiguousBelow(heap_pages, memory.four_gib) orelse
+        heapFailure("unable to allocate a contiguous 1 MiB heap region");
+    const region_size = heap_pages * @as(usize, @intCast(memory.page_size));
+    kernel_heap = heap.Heap.init(region_base, region_size) orelse
+        heapFailure("free-list heap rejected its physical region");
+    kernel_heap_ready = true;
+
+    const small = kernel_heap.allocate(24, 8) orelse heapFailure("24-byte allocation failed");
+    const page = kernel_heap.allocate(4096, 64) orelse heapFailure("4096-byte allocation failed");
+    const aligned = kernel_heap.allocate(73, 32) orelse heapFailure("73-byte allocation failed");
+
+    if ((@intFromPtr(small.ptr) & 7) != 0 or
+        (@intFromPtr(page.ptr) & 63) != 0 or
+        (@intFromPtr(aligned.ptr) & 31) != 0)
+    {
+        heapFailure("allocation alignment contract failed");
+    }
+    if (slicesOverlap(small, page) or slicesOverlap(small, aligned) or slicesOverlap(page, aligned)) {
+        heapFailure("heap returned overlapping allocations");
+    }
+
+    @memset(small, 0xA5);
+    @memset(page, 0x5A);
+    @memset(aligned, 0x3C);
+    if (small[0] != 0xA5 or small[small.len - 1] != 0xA5 or
+        page[0] != 0x5A or page[page.len - 1] != 0x5A or
+        aligned[0] != 0x3C or aligned[aligned.len - 1] != 0x3C)
+    {
+        heapFailure("heap payload write/read verification failed");
+    }
+    if (!kernel_heap.validate()) heapFailure("free-list invariants failed after allocation");
+
+    if (!kernel_heap.free(page)) heapFailure("freeing page allocation failed");
+    if (!kernel_heap.free(small)) heapFailure("freeing small allocation failed");
+    if (!kernel_heap.free(aligned)) heapFailure("freeing aligned allocation failed");
+    if (!kernel_heap.validate()) heapFailure("free-list coalescing validation failed");
+
+    const after_coalesce = kernel_heap.statistics();
+    if (after_coalesce.free_bytes != after_coalesce.region_size or
+        after_coalesce.allocated_bytes != 0 or
+        after_coalesce.active_allocations != 0)
+    {
+        heapFailure("heap did not coalesce back into one fully free region");
+    }
+
+    const large = kernel_heap.allocate(region_size / 2, 4096) orelse
+        heapFailure("coalesced half-region allocation failed");
+    @memset(large, 0xC3);
+    if (large[0] != 0xC3 or large[large.len - 1] != 0xC3) {
+        heapFailure("large allocation verification failed");
+    }
+    if (!kernel_heap.free(large) or !kernel_heap.validate()) {
+        heapFailure("large allocation release failed");
+    }
+
+    const statistics = kernel_heap.statistics();
+    debugWrite("Kernel heap active: base 0x");
+    debugWriteHex64(@intCast(statistics.region_base));
+    debugWrite(", size ");
+    debugWriteUsizeDecimal(statistics.region_size);
+    debugWrite(" bytes\r\n");
+    debugWrite("Heap allocator verified: aligned alloc/free, split, coalesce; ");
+    debugWriteUsizeDecimal(statistics.total_allocations);
+    debugWrite(" allocations and ");
+    debugWriteUsizeDecimal(statistics.total_frees);
+    debugWrite(" frees\r\n");
+}
+
+fn slicesOverlap(first: []const u8, second: []const u8) bool {
+    const first_start = @intFromPtr(first.ptr);
+    const second_start = @intFromPtr(second.ptr);
+    return first_start < second_start + second.len and second_start < first_start + first.len;
+}
+
+fn heapFailure(reason: []const u8) noreturn {
+    debugWrite("Kernel heap failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();
