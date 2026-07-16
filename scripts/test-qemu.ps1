@@ -196,6 +196,18 @@ if (-not $output.Contains('AHCI port inventory:')) {
 if (-not $output.Contains('AHCI port 0: SATA active')) {
     throw 'The expected active SATA port was not observed.'
 }
+if (-not $output.Contains('ATA IDENTIFY completed on port 0:')) {
+    throw 'The ATA IDENTIFY DEVICE completion marker was not observed.'
+}
+if (-not $output.Contains('SATA capacity:')) {
+    throw 'The decoded SATA capacity marker was not observed.'
+}
+if (-not $output.Contains('AHCI DMA structures:')) {
+    throw 'The AHCI DMA structure and transfer marker was not observed.'
+}
+if (-not $output.Contains('transferred 512 bytes')) {
+    throw 'ATA IDENTIFY did not report a complete 512-byte DMA transfer.'
+}
 if (-not $output.Contains('Kernel heap active:')) {
     throw 'The kernel heap initialization marker was not observed.'
 }

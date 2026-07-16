@@ -403,3 +403,11 @@ zigos_exception_stub_table:
     dq zigos_exception_28, zigos_exception_29, zigos_exception_30, zigos_exception_31
 
 section .text
+
+
+global zigos_memory_fence
+
+; Serialize normal-memory DMA descriptors before and after MMIO doorbells.
+zigos_memory_fence:
+    mfence
+    ret

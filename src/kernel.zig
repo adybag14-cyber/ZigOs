@@ -49,7 +49,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     initializeIoApic(acpi_info, local_apic_info);
     testApicTimer(acpi_info);
     const pci_inventory = enumeratePci(acpi_info);
-    inspectAhci(pci_inventory);
+    inspectAhci(pci_inventory, &frame_allocator);
     initializeKernelHeap(&frame_allocator);
     initializeSerial();
 
@@ -562,7 +562,7 @@ fn serialFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn inspectAhci(inventory: pci.Inventory) void {
+fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void {
     var controller_function: ?pci.Function = null;
     for (inventory.functions[0..inventory.retained_count]) |function| {
         if (function.class_code == 0x01 and function.subclass == 0x06 and function.programming_interface == 0x01) {
@@ -618,6 +618,40 @@ fn inspectAhci(inventory: pci.Inventory) void {
         debugWriteHex64(port.command);
         debugWrite("\r\n");
     }
+    const identity = ahci.identifyFirstSata(controller, allocator) orelse
+        ahciFailure("ATA IDENTIFY DEVICE DMA command did not complete successfully");
+    debugWrite("ATA IDENTIFY completed on port ");
+    debugWriteU64Decimal(identity.port_index);
+    debugWrite(": model \"");
+    debugWrite(ahci.terminatedSlice(&identity.model));
+    debugWrite("\", serial \"");
+    debugWrite(ahci.terminatedSlice(&identity.serial_number));
+    debugWrite("\", firmware \"");
+    debugWrite(ahci.terminatedSlice(&identity.firmware_revision));
+    debugWrite("\"\r\n");
+    debugWrite("SATA capacity: ");
+    debugWriteU64Decimal(identity.sector_count);
+    debugWrite(" sectors x ");
+    debugWriteU64Decimal(identity.logical_sector_size);
+    debugWrite(" bytes = ");
+    debugWriteU64Decimal(identity.capacity_bytes);
+    debugWrite(" bytes");
+    debugWrite(if (identity.lba48_supported) ", LBA48" else ", LBA28");
+    debugWrite(if (identity.ncq_supported) ", NCQ" else ", no NCQ");
+    debugWrite(", queue depth ");
+    debugWriteU64Decimal(identity.queue_depth);
+    debugWrite("\r\n");
+    debugWrite("AHCI DMA structures: CLB 0x");
+    debugWriteHex64(@intCast(identity.command_list_address));
+    debugWrite(", FB 0x");
+    debugWriteHex64(@intCast(identity.received_fis_address));
+    debugWrite(", CTBA 0x");
+    debugWriteHex64(@intCast(identity.command_table_address));
+    debugWrite(", data 0x");
+    debugWriteHex64(@intCast(identity.identify_buffer_address));
+    debugWrite(", transferred ");
+    debugWriteU64Decimal(identity.transferred_bytes);
+    debugWrite(" bytes\r\n");
 }
 
 fn ahciDeviceTypeName(device_type: ahci.DeviceType) []const u8 {
