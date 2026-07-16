@@ -13,6 +13,7 @@ const partition = @import("partition.zig");
 const fat = @import("fat.zig");
 const pe = @import("pe.zig");
 const heap = @import("heap.zig");
+const scheduler = @import("scheduler.zig");
 const serial = @import("serial.zig");
 const hpet = @import("hpet.zig");
 
@@ -20,6 +21,11 @@ const cc = std.os.uefi.cc;
 
 var kernel_heap: heap.Heap = undefined;
 var kernel_heap_ready: bool = false;
+
+var cooperative_trace: [12]u8 = @splat(0);
+var cooperative_trace_length: usize = 0;
+var cooperative_task_a_count: u64 = 0;
+var cooperative_task_b_count: u64 = 0;
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_halt_forever() callconv(cc) noreturn;
@@ -54,6 +60,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     const pci_inventory = enumeratePci(acpi_info);
     inspectAhci(pci_inventory, &frame_allocator);
     initializeKernelHeap(&frame_allocator);
+    testCooperativeScheduler(&frame_allocator);
     initializeSerial();
 
     if (info.framebuffer) |framebuffer| {
@@ -1031,6 +1038,90 @@ fn ahciDeviceTypeName(device_type: ahci.DeviceType) []const u8 {
 
 fn ahciFailure(reason: []const u8) noreturn {
     debugWrite("AHCI discovery failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn testCooperativeScheduler(allocator: *memory.FrameAllocator) void {
+    cooperative_trace = @splat(0);
+    cooperative_trace_length = 0;
+    cooperative_task_a_count = 0;
+    cooperative_task_b_count = 0;
+
+    const report = scheduler.runTwo(allocator, &cooperativeTaskA, &cooperativeTaskB) orelse
+        schedulerFailure("task creation or context return failed");
+    if (report.task_count != 2 or !report.first.finished or !report.second.finished) {
+        schedulerFailure("both cooperative tasks did not reach the finished state");
+    }
+    if (!report.first.canary_intact or !report.second.canary_intact) {
+        schedulerFailure("a task stack canary was overwritten");
+    }
+    if (cooperative_task_a_count != 5 or cooperative_task_b_count != 7) {
+        schedulerFailure("task counters did not reach their deterministic totals");
+    }
+    if (report.first.yields != 5 or report.second.yields != 7) {
+        schedulerFailure("per-task yield counters were incorrect");
+    }
+    const expected_trace = "ABABABABABBB";
+    if (cooperative_trace_length != expected_trace.len or
+        !std.mem.eql(u8, cooperative_trace[0..cooperative_trace_length], expected_trace))
+    {
+        schedulerFailure("cooperative task interleave was not deterministic");
+    }
+    if (report.context_switches != 13) {
+        schedulerFailure("unexpected cooperative context-switch count");
+    }
+
+    debugWrite("Cooperative scheduler active: 2 tasks, ");
+    debugWriteU64Decimal(report.context_switches);
+    debugWrite(" context switches, trace ");
+    debugWrite(cooperative_trace[0..cooperative_trace_length]);
+    debugWrite("\r\n");
+    debugWrite("Task A: stack 0x");
+    debugWriteHex64(@intCast(report.first.stack_base));
+    debugWrite(" + ");
+    debugWriteUsizeDecimal(report.first.stack_size);
+    debugWrite(" bytes, yields ");
+    debugWriteU64Decimal(report.first.yields);
+    debugWrite("; Task B: stack 0x");
+    debugWriteHex64(@intCast(report.second.stack_base));
+    debugWrite(" + ");
+    debugWriteUsizeDecimal(report.second.stack_size);
+    debugWrite(" bytes, yields ");
+    debugWriteU64Decimal(report.second.yields);
+    debugWrite("\r\n");
+    debugWrite("Scheduler stack canaries intact; execution returned to the kernel context.\r\n");
+}
+
+fn cooperativeTaskA() callconv(cc) void {
+    var iteration: u8 = 0;
+    while (iteration < 5) : (iteration += 1) {
+        cooperative_task_a_count += 1;
+        appendCooperativeTrace('A');
+        scheduler.yield();
+    }
+}
+
+fn cooperativeTaskB() callconv(cc) void {
+    var iteration: u8 = 0;
+    while (iteration < 7) : (iteration += 1) {
+        cooperative_task_b_count += 1;
+        appendCooperativeTrace('B');
+        scheduler.yield();
+    }
+}
+
+fn appendCooperativeTrace(marker: u8) void {
+    if (cooperative_trace_length >= cooperative_trace.len) {
+        schedulerFailure("cooperative trace overflow");
+    }
+    cooperative_trace[cooperative_trace_length] = marker;
+    cooperative_trace_length += 1;
+}
+
+fn schedulerFailure(reason: []const u8) noreturn {
+    debugWrite("Scheduler verification failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();

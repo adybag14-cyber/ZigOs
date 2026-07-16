@@ -259,6 +259,12 @@ if (-not $serialOutput.Contains('ZigOs COM1 serial diagnostics online')) {
 if (-not $serialOutput.Contains('ZigOs boot sequence complete')) {
     throw 'The final boot marker was not mirrored to COM1.'
 }
+if (-not $output.Contains('Cooperative scheduler active: 2 tasks, 13 context switches, trace ABABABABABBB')) {
+    throw 'The deterministic cooperative scheduler marker was not observed.'
+}
+if (-not $output.Contains('Scheduler stack canaries intact; execution returned to the kernel context.')) {
+    throw 'The scheduler stack-integrity and kernel-return marker was not observed.'
+}
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
     throw 'The framebuffer was not retained and accessed after the handoff.'
 }

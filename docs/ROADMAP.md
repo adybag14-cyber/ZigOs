@@ -57,7 +57,7 @@
 ## 0.5 - Runtime
 
 - [x] Kernel free-list heap with aligned allocation and coalescing
-- [ ] Cooperative task abstraction
+- [x] Cooperative task abstraction with independent stacks and ABI-complete context switching
 - [ ] Pre-emptive scheduler experiment
 - [ ] Userspace privilege-transition experiment
 - [ ] Minimal syscall ABI
