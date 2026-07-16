@@ -250,9 +250,15 @@ zigos_isr_apic_timer:
     push r15
 
     mov r12, rsp
-    and rsp, -16
+    sub rsp, 512
+    mov r13, rsp
+    fxsave64 [r13]
     sub rsp, 32
+    mov rcx, r12
+    mov rdx, r13
     call zigos_apic_timer_handler
+    add rsp, 32
+    fxrstor64 [rsp]
     mov rsp, r12
 
     pop r15
@@ -463,4 +469,74 @@ zigos_context_switch:
     movdqu xmm14, [rsp + 128]
     movdqu xmm15, [rsp + 144]
     add rsp, 160
+    ret
+
+
+extern zigos_scheduler_interrupt_handler
+
+global zigos_isr_scheduler
+global zigos_trigger_scheduler_interrupt
+global zigos_fxsave
+global zigos_cpu_relax
+
+; Software scheduling vector 0x41. It uses the same complete CPU/FX frame as
+; the APIC timer, but requires no local-APIC EOI.
+zigos_isr_scheduler:
+    cld
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rsp
+    sub rsp, 512
+    mov r13, rsp
+    fxsave64 [r13]
+    sub rsp, 32
+    mov rcx, r12
+    mov rdx, r13
+    call zigos_scheduler_interrupt_handler
+    add rsp, 32
+    fxrstor64 [rsp]
+    mov rsp, r12
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
+zigos_trigger_scheduler_interrupt:
+    int 0x41
+    ret
+
+; Capture a baseline x87/SSE state for a newly constructed task.
+zigos_fxsave:
+    fxsave64 [rcx]
+    ret
+
+zigos_cpu_relax:
+    pause
     ret

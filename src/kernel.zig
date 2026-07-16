@@ -14,6 +14,7 @@ const fat = @import("fat.zig");
 const pe = @import("pe.zig");
 const heap = @import("heap.zig");
 const scheduler = @import("scheduler.zig");
+const preemptive = @import("preemptive.zig");
 const serial = @import("serial.zig");
 const hpet = @import("hpet.zig");
 
@@ -26,6 +27,8 @@ var cooperative_trace: [12]u8 = @splat(0);
 var cooperative_trace_length: usize = 0;
 var cooperative_task_a_count: u64 = 0;
 var cooperative_task_b_count: u64 = 0;
+var preemptive_task_a_iterations: u64 = 0;
+var preemptive_task_b_iterations: u64 = 0;
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_halt_forever() callconv(cc) noreturn;
@@ -56,11 +59,12 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     const acpi_info = discoverAcpi(info);
     const local_apic_info = initializeApic(acpi_info);
     initializeIoApic(acpi_info, local_apic_info);
-    testApicTimer(acpi_info);
+    const apic_timer_info = testApicTimer(acpi_info);
     const pci_inventory = enumeratePci(acpi_info);
     inspectAhci(pci_inventory, &frame_allocator);
     initializeKernelHeap(&frame_allocator);
     testCooperativeScheduler(&frame_allocator);
+    testPreemptiveScheduler(&frame_allocator, apic_timer_info.ticks_per_second);
     initializeSerial();
 
     if (info.framebuffer) |framebuffer| {
@@ -311,7 +315,7 @@ fn apicFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn testApicTimer(discovery: acpi.Discovery) void {
+fn testApicTimer(discovery: acpi.Discovery) apic.TimerResult {
     const table_address = discovery.hpet_address orelse timerFailure("ACPI did not expose an HPET table");
     const device = hpet.initialize(table_address) orelse
         timerFailure("HPET table or MMIO capability validation failed");
@@ -334,6 +338,7 @@ fn testApicTimer(discovery: acpi.Discovery) void {
     debugWrite("Maskable interrupt vector 0x0040 handled ");
     debugWriteU64Decimal(result.interrupt_count);
     debugWrite(" time(s), EOI acknowledged\r\n");
+    return result;
 }
 
 fn timerFailure(reason: []const u8) noreturn {
@@ -1122,6 +1127,85 @@ fn appendCooperativeTrace(marker: u8) void {
 
 fn schedulerFailure(reason: []const u8) noreturn {
     debugWrite("Scheduler verification failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn testPreemptiveScheduler(allocator: *memory.FrameAllocator, ticks_per_second: u64) void {
+    preemptive_task_a_iterations = 0;
+    preemptive_task_b_iterations = 0;
+
+    const report = preemptive.runTwo(
+        allocator,
+        &preemptiveTaskA,
+        &preemptiveTaskB,
+        ticks_per_second,
+        200,
+    ) orelse preemptiveFailure("task launch, timer setup, or kernel-context return failed");
+
+    if (!report.first.finished or !report.second.finished) {
+        preemptiveFailure("both timer-preempted tasks did not finish");
+    }
+    if (!report.first.canary_intact or !report.second.canary_intact) {
+        preemptiveFailure("a preemptive task stack canary was overwritten");
+    }
+    if (report.timer_ticks < 8 or report.timer_preemptions < 8) {
+        preemptiveFailure("the APIC timer did not perform enough task preemptions");
+    }
+    if (report.first.preemptions == 0 or report.second.preemptions == 0) {
+        preemptiveFailure("both CPU-bound tasks were not independently preempted");
+    }
+    if (volatileCounter(&preemptive_task_a_iterations) == 0 or
+        volatileCounter(&preemptive_task_b_iterations) == 0)
+    {
+        preemptiveFailure("a CPU-bound task never executed its work loop");
+    }
+
+    debugWrite("Preemptive scheduler active: APIC periodic count ");
+    debugWriteU64Decimal(report.periodic_initial_count);
+    debugWrite(", timer ticks ");
+    debugWriteU64Decimal(report.timer_ticks);
+    debugWrite(", preemptions ");
+    debugWriteU64Decimal(report.timer_preemptions);
+    debugWrite(", total context switches ");
+    debugWriteU64Decimal(report.context_switches);
+    debugWrite("\r\n");
+    debugWrite("CPU-bound task A iterations ");
+    debugWriteU64Decimal(volatileCounter(&preemptive_task_a_iterations));
+    debugWrite(", task B iterations ");
+    debugWriteU64Decimal(volatileCounter(&preemptive_task_b_iterations));
+    debugWrite("\r\n");
+    debugWrite("Timer-frame GPR/FX state switching verified; no task called yield.\r\n");
+    debugWrite("Preemptive stack canaries intact; kernel interrupt frame restored.\r\n");
+}
+
+fn preemptiveTaskA() callconv(cc) void {
+    while (preemptive.tickCount() < 8) {
+        incrementVolatileCounter(&preemptive_task_a_iterations);
+        preemptive.relax();
+    }
+}
+
+fn preemptiveTaskB() callconv(cc) void {
+    while (preemptive.tickCount() < 8) {
+        incrementVolatileCounter(&preemptive_task_b_iterations);
+        preemptive.relax();
+    }
+}
+
+fn incrementVolatileCounter(counter: *u64) void {
+    const pointer: *volatile u64 = @ptrCast(counter);
+    pointer.* +%= 1;
+}
+
+fn volatileCounter(counter: *const u64) u64 {
+    const pointer: *const volatile u64 = @ptrCast(counter);
+    return pointer.*;
+}
+
+fn preemptiveFailure(reason: []const u8) noreturn {
+    debugWrite("Preemptive scheduler failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();

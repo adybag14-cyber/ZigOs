@@ -7,6 +7,7 @@ const data_selector: u16 = 0x10;
 const tss_selector: u16 = 0x18;
 const breakpoint_vector: usize = 3;
 const timer_vector: usize = 0x40;
+const scheduler_vector: usize = 0x41;
 const spurious_vector: usize = 0xFF;
 const interrupt_stack_pages: usize = 4;
 
@@ -67,6 +68,7 @@ extern fn zigos_read_cs() callconv(cc) u64;
 extern fn zigos_read_tr() callconv(cc) u64;
 extern fn zigos_isr_breakpoint() callconv(cc) void;
 extern fn zigos_isr_apic_timer() callconv(cc) void;
+extern fn zigos_isr_scheduler() callconv(cc) void;
 extern fn zigos_isr_spurious() callconv(cc) void;
 extern fn zigos_trigger_breakpoint() callconv(cc) void;
 
@@ -119,6 +121,7 @@ pub fn install(allocator: *memory.FrameAllocator, kernel_stack_top: usize) ?Inst
     }
     setInterruptGate(&idt[breakpoint_vector], @intFromPtr(&zigos_isr_breakpoint), code_selector, 1);
     setInterruptGate(&idt[timer_vector], @intFromPtr(&zigos_isr_apic_timer), code_selector, 1);
+    setInterruptGate(&idt[scheduler_vector], @intFromPtr(&zigos_isr_scheduler), code_selector, 1);
     setInterruptGate(&idt[spurious_vector], @intFromPtr(&zigos_isr_spurious), code_selector, 0);
 
     const idt_pointer = DescriptorTablePointer{

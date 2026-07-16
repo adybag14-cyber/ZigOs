@@ -265,6 +265,15 @@ if (-not $output.Contains('Cooperative scheduler active: 2 tasks, 13 context swi
 if (-not $output.Contains('Scheduler stack canaries intact; execution returned to the kernel context.')) {
     throw 'The scheduler stack-integrity and kernel-return marker was not observed.'
 }
+if (-not $output.Contains('Preemptive scheduler active: APIC periodic count')) {
+    throw 'The timer-driven preemptive scheduler marker was not observed.'
+}
+if (-not $output.Contains('Timer-frame GPR/FX state switching verified; no task called yield.')) {
+    throw 'The full interrupt-frame preemption proof marker was not observed.'
+}
+if (-not $output.Contains('Preemptive stack canaries intact; kernel interrupt frame restored.')) {
+    throw 'The preemptive stack-integrity and kernel-frame restoration marker was not observed.'
+}
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
     throw 'The framebuffer was not retained and accessed after the handoff.'
 }

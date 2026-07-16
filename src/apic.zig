@@ -2,6 +2,7 @@ const std = @import("std");
 const acpi = @import("acpi.zig");
 const hpet = @import("hpet.zig");
 const memory = @import("memory.zig");
+const interrupt_context = @import("interrupt_context.zig");
 
 const cc = std.os.uefi.cc;
 
@@ -13,6 +14,7 @@ const spurious_vector: u32 = 0xFF;
 const timer_vector: u32 = 0x40;
 const software_enable: u32 = 1 << 8;
 const timer_masked: u32 = 1 << 16;
+const timer_periodic: u32 = 1 << 17;
 const divide_by_16_encoding: u32 = 0x3;
 
 const xapic_id_offset: usize = 0x020;
@@ -51,6 +53,11 @@ pub const Information = struct {
     legacy_pic_masked: bool,
 };
 
+pub const TimerHook = *const fn (
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) callconv(cc) void;
+
 pub const TimerResult = struct {
     ticks_per_second: u64,
     initial_count: u32,
@@ -62,6 +69,7 @@ pub const TimerResult = struct {
 var active_x2apic: bool = false;
 var active_base: usize = 0;
 var timer_interrupt_count: u64 = 0;
+var timer_hook: ?TimerHook = null;
 
 pub fn initialize(madt: acpi.MadtInfo) ?Information {
     var base_msr = zigos_read_msr(ia32_apic_base_msr);
@@ -169,9 +177,34 @@ pub fn calibrateAndTestTimer(reference: hpet.Device) ?TimerResult {
     };
 }
 
-export fn zigos_apic_timer_handler() callconv(cc) void {
+export fn zigos_apic_timer_handler(
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) callconv(cc) void {
     timer_interrupt_count +%= 1;
+    if (timer_hook) |hook| hook(frame, fx_state);
     sendEoi();
+}
+
+pub fn setTimerHook(hook: ?TimerHook) void {
+    timer_hook = hook;
+}
+
+pub fn startPeriodicTimer(ticks_per_second: u64, frequency_hz: u32) ?u32 {
+    if (ticks_per_second == 0 or frequency_hz == 0) return null;
+    const count_u64 = @max(@as(u64, 1), ticks_per_second / frequency_hz);
+    if (count_u64 > std.math.maxInt(u32)) return null;
+    const count: u32 = @intCast(count_u64);
+
+    writeTimerDivide(divide_by_16_encoding);
+    writeTimerLvt(timer_vector | timer_periodic);
+    writeTimerInitial(count);
+    return count;
+}
+
+pub fn stopTimer() void {
+    writeTimerInitial(0);
+    writeTimerLvt(timer_vector | timer_masked);
 }
 
 fn maskLegacyPic() bool {

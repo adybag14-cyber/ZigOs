@@ -58,7 +58,7 @@
 
 - [x] Kernel free-list heap with aligned allocation and coalescing
 - [x] Cooperative task abstraction with independent stacks and ABI-complete context switching
-- [ ] Pre-emptive scheduler experiment
+- [x] APIC-timer pre-emptive scheduler with complete GPR/FX frame switching
 - [ ] Userspace privilege-transition experiment
 - [ ] Minimal syscall ABI
 
