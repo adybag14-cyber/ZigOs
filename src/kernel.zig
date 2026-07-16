@@ -9,6 +9,8 @@ const apic = @import("apic.zig");
 const ioapic = @import("ioapic.zig");
 const pci = @import("pci.zig");
 const ahci = @import("ahci.zig");
+const partition = @import("partition.zig");
+const fat = @import("fat.zig");
 const heap = @import("heap.zig");
 const serial = @import("serial.zig");
 const hpet = @import("hpet.zig");
@@ -667,11 +669,91 @@ fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
         debugWriteHex8(byte);
     }
     debugWrite("\r\n");
+    inspectPartitionAndFat(controller, identity, sector_zero);
     debugWrite("LBA 0 FNV-1a64: 0x");
     debugWriteHex64(sector_zero.fnv1a64);
     debugWrite(", trailing signature 0x");
     debugWriteHex16(sector_zero.trailing_signature);
     debugWrite("\r\n");
+}
+
+fn inspectPartitionAndFat(
+    controller: ahci.Controller,
+    identity: ahci.IdentifyResult,
+    sector_zero: ahci.ReadResult,
+) void {
+    const mbr = partition.parseMbr(ahci.readBuffer(sector_zero)) orelse
+        filesystemFailure("LBA 0 did not contain a valid MBR");
+    debugWrite("MBR parsed: disk signature 0x");
+    debugWriteHex64(mbr.disk_signature);
+    debugWrite(", populated partitions ");
+    debugWriteU64Decimal(mbr.populated_count);
+    debugWrite("\r\n");
+
+    for (mbr.partitions) |entry| {
+        if (entry.partition_type == 0 or entry.sector_count == 0) continue;
+        debugWrite("MBR partition ");
+        debugWriteU64Decimal(entry.index);
+        debugWrite(if (entry.bootable) " bootable" else " non-bootable");
+        debugWrite(", type 0x");
+        debugWriteHex8(entry.partition_type);
+        debugWrite(", LBA ");
+        debugWriteU64Decimal(entry.first_lba);
+        debugWrite(" + ");
+        debugWriteU64Decimal(entry.sector_count);
+        debugWrite(" sectors\r\n");
+    }
+
+    const selected = partition.firstUsablePartition(mbr) orelse
+        filesystemFailure("MBR contained no usable partition");
+    const partition_end = @as(u64, selected.first_lba) + selected.sector_count;
+    if (partition_end > identity.sector_count) {
+        filesystemFailure("partition extends beyond IDENTIFY-reported device capacity");
+    }
+
+    const boot_sector = ahci.readOneSector(controller, identity, selected.first_lba) orelse
+        filesystemFailure("partition volume boot sector read failed");
+    const volume = fat.parseBootSector(ahci.readBuffer(boot_sector), selected.first_lba) orelse
+        filesystemFailure("volume boot sector was not a valid FAT BPB");
+
+    debugWrite("FAT volume detected: ");
+    debugWrite(switch (volume.kind) {
+        .fat12 => "FAT12",
+        .fat16 => "FAT16",
+        .fat32 => "FAT32",
+    });
+    debugWrite(", label \"");
+    debugWrite(fat.terminatedSlice(&volume.volume_label));
+    debugWrite("\", fs label \"");
+    debugWrite(fat.terminatedSlice(&volume.filesystem_label));
+    debugWrite("\", volume ID 0x");
+    debugWriteHex64(volume.volume_id);
+    debugWrite("\r\n");
+    debugWrite("FAT geometry: ");
+    debugWriteU64Decimal(volume.bytes_per_sector);
+    debugWrite(" bytes/sector, ");
+    debugWriteU64Decimal(volume.sectors_per_cluster);
+    debugWrite(" sectors/cluster, ");
+    debugWriteU64Decimal(volume.fat_count);
+    debugWrite(" FAT(s) x ");
+    debugWriteU64Decimal(volume.sectors_per_fat);
+    debugWrite(" sectors\r\n");
+    debugWrite("FAT layout: first FAT LBA ");
+    debugWriteU64Decimal(volume.first_fat_lba);
+    debugWrite(", first data LBA ");
+    debugWriteU64Decimal(volume.first_data_lba);
+    debugWrite(", root directory LBA ");
+    debugWriteU64Decimal(volume.root_directory_lba);
+    debugWrite(", clusters ");
+    debugWriteU64Decimal(volume.cluster_count);
+    debugWrite("\r\n");
+}
+
+fn filesystemFailure(reason: []const u8) noreturn {
+    debugWrite("Filesystem discovery failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
 }
 
 fn ahciDeviceTypeName(device_type: ahci.DeviceType) []const u8 {

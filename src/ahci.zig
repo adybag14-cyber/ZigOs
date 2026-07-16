@@ -559,3 +559,7 @@ fn fnv1a(bytes: []const u8) u64 {
     }
     return hash;
 }
+
+pub fn readBuffer(result: ReadResult) []const u8 {
+    return @as([*]const u8, @ptrFromInt(result.buffer_address))[0..result.byte_count];
+}

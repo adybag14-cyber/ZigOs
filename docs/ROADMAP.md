@@ -47,7 +47,8 @@
 - [x] AHCI controller and port inspection through BAR5 MMIO
 - [x] AHCI command-engine ownership and ATA IDENTIFY DEVICE DMA
 - [x] Read-only ATA sector DMA with LBA fingerprinting
-- [ ] Partition-table and FAT filesystem discovery
+- [x] MBR partition-table and FAT12/16/32 BPB discovery
+- [ ] FAT directory and cluster-chain traversal
 - [x] HPET initialization and local-APIC timer calibration
 - [x] Maskable APIC timer interrupt with EOI and HLT wake-up
 - [ ] PS/2 and USB input experiments

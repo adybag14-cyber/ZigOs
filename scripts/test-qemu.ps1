@@ -217,6 +217,15 @@ if (-not $output.Contains('LBA 0 FNV-1a64:')) {
 if (-not $output.Contains('trailing signature 0xAA55')) {
     throw 'The expected LBA 0 MBR signature was not observed.'
 }
+if (-not $output.Contains('MBR parsed:')) {
+    throw 'The MBR partition-table parser marker was not observed.'
+}
+if (-not $output.Contains('FAT volume detected: FAT16')) {
+    throw 'The FAT volume classification marker was not observed.'
+}
+if (-not $output.Contains('FAT layout:')) {
+    throw 'The FAT geometry/layout marker was not observed.'
+}
 if (-not $output.Contains('Kernel heap active:')) {
     throw 'The kernel heap initialization marker was not observed.'
 }
