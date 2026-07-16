@@ -1,5 +1,6 @@
 const std = @import("std");
 const acpi = @import("acpi.zig");
+const hpet = @import("hpet.zig");
 const memory = @import("memory.zig");
 
 const cc = std.os.uefi.cc;
@@ -9,22 +10,36 @@ const apic_global_enable: u64 = 1 << 11;
 const x2apic_enable: u64 = 1 << 10;
 const apic_base_mask: u64 = 0x000F_FFFF_FFFF_F000;
 const spurious_vector: u32 = 0xFF;
+const timer_vector: u32 = 0x40;
 const software_enable: u32 = 1 << 8;
+const timer_masked: u32 = 1 << 16;
+const divide_by_16_encoding: u32 = 0x3;
 
 const xapic_id_offset: usize = 0x020;
 const xapic_version_offset: usize = 0x030;
 const xapic_task_priority_offset: usize = 0x080;
+const xapic_eoi_offset: usize = 0x0B0;
 const xapic_spurious_offset: usize = 0x0F0;
+const xapic_lvt_timer_offset: usize = 0x320;
+const xapic_initial_count_offset: usize = 0x380;
+const xapic_current_count_offset: usize = 0x390;
+const xapic_divide_configuration_offset: usize = 0x3E0;
 
 const x2apic_id_msr: u32 = 0x802;
 const x2apic_version_msr: u32 = 0x803;
 const x2apic_task_priority_msr: u32 = 0x808;
+const x2apic_eoi_msr: u32 = 0x80B;
 const x2apic_spurious_msr: u32 = 0x80F;
+const x2apic_lvt_timer_msr: u32 = 0x832;
+const x2apic_initial_count_msr: u32 = 0x838;
+const x2apic_current_count_msr: u32 = 0x839;
+const x2apic_divide_configuration_msr: u32 = 0x83E;
 
 extern fn zigos_read_msr(index: u32) callconv(cc) u64;
 extern fn zigos_write_msr(index: u32, value: u64) callconv(cc) void;
 extern fn zigos_out8(port: u16, value: u8) callconv(cc) void;
 extern fn zigos_in8(port: u16) callconv(cc) u8;
+extern fn zigos_wait_for_interrupt() callconv(cc) void;
 
 pub const Information = struct {
     base_address: u64,
@@ -35,6 +50,18 @@ pub const Information = struct {
     x2apic: bool,
     legacy_pic_masked: bool,
 };
+
+pub const TimerResult = struct {
+    ticks_per_second: u64,
+    initial_count: u32,
+    interrupt_count: u64,
+    hpet_period_femtoseconds: u32,
+    hpet_counter_64_bit: bool,
+};
+
+var active_x2apic: bool = false;
+var active_base: usize = 0;
+var timer_interrupt_count: u64 = 0;
 
 pub fn initialize(madt: acpi.MadtInfo) ?Information {
     var base_msr = zigos_read_msr(ia32_apic_base_msr);
@@ -56,6 +83,8 @@ pub fn initialize(madt: acpi.MadtInfo) ?Information {
         const verified_spurious: u32 = @truncate(zigos_read_msr(x2apic_spurious_msr));
         if ((verified_spurious & (software_enable | 0xFF)) != (software_enable | spurious_vector)) return null;
 
+        active_x2apic = true;
+        active_base = 0;
         return .{
             .base_address = base_msr & apic_base_mask,
             .apic_id = @truncate(zigos_read_msr(x2apic_id_msr)),
@@ -84,6 +113,8 @@ pub fn initialize(madt: acpi.MadtInfo) ?Information {
     const verified_spurious = readMmio(base, xapic_spurious_offset);
     if ((verified_spurious & (software_enable | 0xFF)) != (software_enable | spurious_vector)) return null;
 
+    active_x2apic = false;
+    active_base = base;
     return .{
         .base_address = base_address,
         .apic_id = raw_id >> 24,
@@ -95,10 +126,97 @@ pub fn initialize(madt: acpi.MadtInfo) ?Information {
     };
 }
 
+pub fn calibrateAndTestTimer(reference: hpet.Device) ?TimerResult {
+    const counter_before = reference.readCounter();
+    if (!reference.waitNanoseconds(1_000_000)) return null;
+    const counter_after = reference.readCounter();
+    if (counter_after == counter_before) return null;
+
+    writeTimerDivide(divide_by_16_encoding);
+    writeTimerLvt(timer_vector | timer_masked);
+    writeTimerInitial(std.math.maxInt(u32));
+    if (!reference.waitNanoseconds(10_000_000)) return null;
+    const current_count = readTimerCurrent();
+    writeTimerInitial(0);
+
+    const elapsed: u32 = std.math.maxInt(u32) - current_count;
+    if (elapsed < 100) return null;
+    const ticks_per_second = @as(u64, elapsed) * 100;
+    const desired_count_u64 = @max(@as(u64, 1), ticks_per_second / 100);
+    if (desired_count_u64 > std.math.maxInt(u32)) return null;
+    const desired_count: u32 = @intCast(desired_count_u64);
+
+    timer_interrupt_count = 0;
+    writeTimerDivide(divide_by_16_encoding);
+    writeTimerLvt(timer_vector);
+    writeTimerInitial(desired_count);
+
+    var wake_attempts: u8 = 0;
+    while (timer_interrupt_count == 0 and wake_attempts < 8) : (wake_attempts += 1) {
+        zigos_wait_for_interrupt();
+    }
+
+    writeTimerInitial(0);
+    writeTimerLvt(timer_vector | timer_masked);
+    if (timer_interrupt_count == 0) return null;
+
+    return .{
+        .ticks_per_second = ticks_per_second,
+        .initial_count = desired_count,
+        .interrupt_count = timer_interrupt_count,
+        .hpet_period_femtoseconds = reference.period_femtoseconds,
+        .hpet_counter_64_bit = reference.counter_64_bit,
+    };
+}
+
+export fn zigos_apic_timer_handler() callconv(cc) void {
+    timer_interrupt_count +%= 1;
+    sendEoi();
+}
+
 fn maskLegacyPic() bool {
     zigos_out8(0x21, 0xFF);
     zigos_out8(0xA1, 0xFF);
     return zigos_in8(0x21) == 0xFF and zigos_in8(0xA1) == 0xFF;
+}
+
+fn writeTimerDivide(value: u32) void {
+    if (active_x2apic) {
+        zigos_write_msr(x2apic_divide_configuration_msr, value);
+    } else {
+        writeMmio(active_base, xapic_divide_configuration_offset, value);
+    }
+}
+
+fn writeTimerLvt(value: u32) void {
+    if (active_x2apic) {
+        zigos_write_msr(x2apic_lvt_timer_msr, value);
+    } else {
+        writeMmio(active_base, xapic_lvt_timer_offset, value);
+    }
+}
+
+fn writeTimerInitial(value: u32) void {
+    if (active_x2apic) {
+        zigos_write_msr(x2apic_initial_count_msr, value);
+    } else {
+        writeMmio(active_base, xapic_initial_count_offset, value);
+    }
+}
+
+fn readTimerCurrent() u32 {
+    return if (active_x2apic)
+        @truncate(zigos_read_msr(x2apic_current_count_msr))
+    else
+        readMmio(active_base, xapic_current_count_offset);
+}
+
+fn sendEoi() void {
+    if (active_x2apic) {
+        zigos_write_msr(x2apic_eoi_msr, 0);
+    } else {
+        writeMmio(active_base, xapic_eoi_offset, 0);
+    }
 }
 
 fn readMmio(base: usize, offset: usize) u32 {

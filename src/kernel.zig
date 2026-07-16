@@ -5,6 +5,7 @@ const paging = @import("paging.zig");
 const descriptor_tables = @import("descriptor_tables.zig");
 const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
+const hpet = @import("hpet.zig");
 
 const cc = std.os.uefi.cc;
 
@@ -34,7 +35,8 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     installDescriptorTables(info, &frame_allocator);
 
     const acpi_info = discoverAcpi(info);
-    initializeApic(acpi_info);
+    _ = initializeApic(acpi_info);
+    testApicTimer(acpi_info);
 
     if (info.framebuffer) |framebuffer| {
         paintFramebuffer(framebuffer);
@@ -246,7 +248,7 @@ fn acpiFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn initializeApic(discovery: acpi.Discovery) void {
+fn initializeApic(discovery: acpi.Discovery) apic.Information {
     const madt = discovery.madt orelse apicFailure("validated ACPI did not contain a MADT");
     const information = apic.initialize(madt) orelse
         apicFailure("local APIC enablement or register verification failed");
@@ -274,10 +276,43 @@ fn initializeApic(discovery: acpi.Discovery) void {
     if (madt.legacy_pic_compatible and !information.legacy_pic_masked) {
         apicFailure("8259 PIC mask registers did not retain 0xFF");
     }
+    return information;
 }
 
 fn apicFailure(reason: []const u8) noreturn {
     debugWrite("APIC initialization failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn testApicTimer(discovery: acpi.Discovery) void {
+    const table_address = discovery.hpet_address orelse timerFailure("ACPI did not expose an HPET table");
+    const device = hpet.initialize(table_address) orelse
+        timerFailure("HPET table or MMIO capability validation failed");
+
+    debugWrite("HPET active: base 0x");
+    debugWriteHex64(@intCast(device.base_address));
+    debugWrite(", period ");
+    debugWriteU64Decimal(device.period_femtoseconds);
+    debugWrite(" fs, timers ");
+    debugWriteU64Decimal(device.timer_count);
+    debugWrite(if (device.counter_64_bit) ", 64-bit counter\r\n" else ", 32-bit counter\r\n");
+
+    const result = apic.calibrateAndTestTimer(device) orelse
+        timerFailure("APIC timer calibration or interrupt wake-up failed");
+    debugWrite("APIC timer calibrated: ");
+    debugWriteU64Decimal(result.ticks_per_second);
+    debugWrite(" ticks/s, one-shot count ");
+    debugWriteU64Decimal(result.initial_count);
+    debugWrite("\r\n");
+    debugWrite("Maskable interrupt vector 0x0040 handled ");
+    debugWriteU64Decimal(result.interrupt_count);
+    debugWrite(" time(s), EOI acknowledged\r\n");
+}
+
+fn timerFailure(reason: []const u8) noreturn {
+    debugWrite("Timer initialization failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();

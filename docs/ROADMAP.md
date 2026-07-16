@@ -41,7 +41,8 @@
 - [x] Local APIC initialization and legacy PIC masking
 - [ ] I/O APIC initialization and interrupt routing
 - [ ] PCI/PCIe enumeration
-- [ ] HPET or invariant-TSC timing
+- [x] HPET initialization and local-APIC timer calibration
+- [x] Maskable APIC timer interrupt with EOI and HLT wake-up
 - [ ] PS/2 and USB input experiments
 
 ## 0.5 - Runtime

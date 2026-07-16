@@ -155,6 +155,15 @@ if (-not $output.Contains('Local APIC enabled:')) {
 if (-not $output.Contains('APIC SVR verified at 0x')) {
     throw 'The local APIC SVR verification marker was not observed.'
 }
+if (-not $output.Contains('HPET active:')) {
+    throw 'The HPET initialization marker was not observed.'
+}
+if (-not $output.Contains('APIC timer calibrated:')) {
+    throw 'The APIC timer calibration marker was not observed.'
+}
+if (-not $output.Contains('Maskable interrupt vector 0x0040 handled')) {
+    throw 'The APIC timer interrupt round trip was not observed.'
+}
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
     throw 'The framebuffer was not retained and accessed after the handoff.'
 }

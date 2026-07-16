@@ -224,3 +224,57 @@ zigos_in8:
     in al, dx
     movzx eax, al
     ret
+
+global zigos_isr_apic_timer
+global zigos_wait_for_interrupt
+extern zigos_apic_timer_handler
+
+; APIC timer vector 0x40, delivered on IST1. Preserve all general-purpose
+; registers and call the Zig handler, which acknowledges the local APIC.
+zigos_isr_apic_timer:
+    cld
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rsp
+    and rsp, -16
+    sub rsp, 32
+    call zigos_apic_timer_handler
+    mov rsp, r12
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
+; Wait for one maskable interrupt, then return with interrupts disabled.
+zigos_wait_for_interrupt:
+    sti
+    hlt
+    cli
+    ret
