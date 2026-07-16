@@ -49,7 +49,7 @@
 - [x] Read-only ATA sector DMA with LBA fingerprinting
 - [x] MBR partition-table and FAT12/16/32 BPB discovery
 - [x] FAT directory and cluster-chain traversal to EFI/BOOT/BOOTX64.EFI
-- [ ] Stream and validate complete FAT files
+- [x] Stream complete FAT files and validate on-disk AMD64 PE32+ EFI headers
 - [x] HPET initialization and local-APIC timer calibration
 - [x] Maskable APIC timer interrupt with EOI and HLT wake-up
 - [ ] PS/2 and USB input experiments

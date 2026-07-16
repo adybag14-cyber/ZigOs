@@ -235,6 +235,12 @@ if (-not $output.Contains('FAT path resolved: EFI cluster')) {
 if (-not $output.Contains('FAT boot file found: EFI/BOOT/BOOTX64.EFI')) {
     throw 'The FAT boot-file lookup marker was not observed.'
 }
+if (-not $output.Contains('FAT file streamed:')) {
+    throw 'The complete FAT file-stream marker was not observed.'
+}
+if (-not $output.Contains('On-disk PE verified: AMD64 PE32+, EFI subsystem 10')) {
+    throw 'The on-disk AMD64 PE32+ EFI validation marker was not observed.'
+}
 if (-not $output.Contains('Kernel heap active:')) {
     throw 'The kernel heap initialization marker was not observed.'
 }

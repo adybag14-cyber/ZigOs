@@ -11,6 +11,7 @@ const pci = @import("pci.zig");
 const ahci = @import("ahci.zig");
 const partition = @import("partition.zig");
 const fat = @import("fat.zig");
+const pe = @import("pe.zig");
 const heap = @import("heap.zig");
 const serial = @import("serial.zig");
 const hpet = @import("hpet.zig");
@@ -789,6 +790,143 @@ fn walkFatBootPath(controller: ahci.Controller, identity: ahci.IdentifyResult, v
     debugWrite("FAT boot file found: EFI/BOOT/BOOTX64.EFI, size ");
     debugWriteU64Decimal(loader_entry.file_size);
     debugWrite(" bytes\r\n");
+    validateStreamedBootFile(controller, identity, volume, loader_entry);
+}
+
+const FatFileStream = struct {
+    byte_count: u64,
+    cluster_count: u32,
+    last_cluster: u32,
+    fnv1a64: u64,
+    first_sector: [512]u8,
+};
+
+fn validateStreamedBootFile(
+    controller: ahci.Controller,
+    identity: ahci.IdentifyResult,
+    volume: fat.Volume,
+    entry: fat.DirectoryEntry,
+) void {
+    const stream = streamFatFile(controller, identity, volume, entry);
+    const image = pe.parse(&stream.first_sector) orelse
+        filesystemFailure("streamed BOOTX64.EFI did not contain valid DOS/PE headers");
+    if (!image.amd64 or !image.pe32_plus or !image.efi_application) {
+        filesystemFailure("streamed BOOTX64.EFI was not an AMD64 PE32+ EFI application");
+    }
+    if (image.size_of_headers > stream.byte_count or image.size_of_image == 0) {
+        filesystemFailure("streamed PE image reported invalid image/header sizes");
+    }
+
+    debugWrite("FAT file streamed: ");
+    debugWriteU64Decimal(stream.byte_count);
+    debugWrite(" bytes across ");
+    debugWriteU64Decimal(stream.cluster_count);
+    debugWrite(" cluster(s), last cluster ");
+    debugWriteU64Decimal(stream.last_cluster);
+    debugWrite(", FNV-1a64 0x");
+    debugWriteHex64(stream.fnv1a64);
+    debugWrite("\r\n");
+    debugWrite("On-disk PE verified: AMD64 PE32+, EFI subsystem ");
+    debugWriteU64Decimal(image.subsystem);
+    debugWrite(", sections ");
+    debugWriteU64Decimal(image.section_count);
+    debugWrite(", entry RVA 0x");
+    debugWriteHex64(image.entry_point_rva);
+    debugWrite(", image base 0x");
+    debugWriteHex64(image.image_base);
+    debugWrite(", image size ");
+    debugWriteU64Decimal(image.size_of_image);
+    debugWrite("\r\n");
+}
+
+fn streamFatFile(
+    controller: ahci.Controller,
+    identity: ahci.IdentifyResult,
+    volume: fat.Volume,
+    entry: fat.DirectoryEntry,
+) FatFileStream {
+    if (entry.isDirectory() or entry.first_cluster < 2 or entry.file_size == 0) {
+        filesystemFailure("FAT file stream received an invalid file entry");
+    }
+
+    var result = FatFileStream{
+        .byte_count = 0,
+        .cluster_count = 0,
+        .last_cluster = 0,
+        .fnv1a64 = 0xCBF2_9CE4_8422_2325,
+        .first_sector = undefined,
+    };
+    var remaining: u64 = entry.file_size;
+    var cluster = entry.first_cluster;
+    var first_sector_copied = false;
+
+    while (remaining != 0 and result.cluster_count < 1_000_000) {
+        const first_lba = fat.clusterFirstLba(volume, cluster) orelse
+            filesystemFailure("file cluster was outside FAT data range");
+        result.cluster_count += 1;
+        result.last_cluster = cluster;
+
+        var sector_index: u8 = 0;
+        while (sector_index < volume.sectors_per_cluster and remaining != 0) : (sector_index += 1) {
+            const sector = ahci.readOneSector(controller, identity, first_lba + sector_index) orelse
+                filesystemFailure("FAT file sector read failed");
+            const sector_bytes = ahci.readBuffer(sector);
+            const take: usize = @intCast(@min(remaining, sector_bytes.len));
+            if (!first_sector_copied) {
+                if (sector_bytes.len < result.first_sector.len) {
+                    filesystemFailure("first FAT file sector was smaller than 512 bytes");
+                }
+                @memcpy(&result.first_sector, sector_bytes[0..result.first_sector.len]);
+                first_sector_copied = true;
+            }
+            result.fnv1a64 = fnv1aUpdate(result.fnv1a64, sector_bytes[0..take]);
+            result.byte_count += take;
+            remaining -= take;
+        }
+
+        const link = readFatClusterLink(controller, identity, volume, cluster);
+        if (remaining == 0) {
+            switch (link) {
+                .end => {},
+                else => filesystemFailure("file data ended before the FAT cluster chain"),
+            }
+            break;
+        }
+        switch (link) {
+            .next => |next_cluster| cluster = next_cluster,
+            .end => filesystemFailure("FAT cluster chain ended before the declared file size"),
+            .free => filesystemFailure("FAT file cluster chain reached a free entry"),
+            .bad => filesystemFailure("FAT file cluster chain reached a bad cluster"),
+        }
+    }
+
+    if (remaining != 0 or result.byte_count != entry.file_size or !first_sector_copied) {
+        filesystemFailure("FAT file stream did not consume the declared file size");
+    }
+    return result;
+}
+
+fn readFatClusterLink(
+    controller: ahci.Controller,
+    identity: ahci.IdentifyResult,
+    volume: fat.Volume,
+    cluster: u32,
+) fat.ClusterLink {
+    const location = fat.fatEntryLocation(volume, cluster) orelse
+        filesystemFailure("FAT cluster entry location was invalid");
+    const fat_sector = ahci.readOneSector(controller, identity, location.lba) orelse
+        filesystemFailure("FAT cluster-link sector read failed");
+    return fat.decodeClusterLink(volume, cluster, ahci.readBuffer(fat_sector)) orelse
+        filesystemFailure("FAT cluster-link value was invalid");
+}
+
+fn fnv1aUpdate(initial_hash: u64, bytes: []const u8) u64 {
+    var hash = initial_hash;
+    for (bytes) |byte| {
+        hash ^= byte;
+        hash *%= 0x0000_0100_0000_01B3;
+    }
+    return hash;
 }
 
 fn findRootDirectoryEntry(
