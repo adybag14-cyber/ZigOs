@@ -5,14 +5,15 @@ const boot = @import("boot_info.zig");
 const hpet = @import("hpet.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
+const percpu = @import("percpu.zig");
 
 const cc = std.os.uefi.cc;
 const trampoline_image = @embedFile("generated/ap_trampoline.bin");
 
 const boot_data_offset: usize = 0x10;
-const gdt_descriptor_base_offset: usize = 0x42;
-const protected_mode_pointer_offset: usize = 0x46;
-const long_mode_pointer_offset: usize = 0x4C;
+const gdt_descriptor_base_offset: usize = 0x4A;
+const protected_mode_pointer_offset: usize = 0x4E;
+const long_mode_pointer_offset: usize = 0x54;
 const gdt_offset: usize = 0x300;
 const code32_descriptor_offset: usize = gdt_offset + 8;
 const stack_pages: usize = 4;
@@ -30,6 +31,7 @@ const ApBootData = extern struct {
     actual_apic_id: u32,
     online: u32,
     state: u32,
+    per_cpu_state: u64,
 };
 
 pub const ApReport = struct {
@@ -37,8 +39,21 @@ pub const ApReport = struct {
     actual_apic_id: u32,
     stack_base: usize,
     stack_size: usize,
+    ist_stack_base: usize,
+    ist_stack_size: usize,
+    gdt_address: usize,
+    tss_address: usize,
+    idt_address: usize,
+    active_cs: u16,
+    active_tr: u16,
+    work_checksum: u64,
+    mailbox_epoch: u32,
+    completion_epoch: u32,
+    work_input: u64,
+    work_result: u64,
     online: bool,
     state: u32,
+    per_cpu_state: u64,
 };
 
 pub const Report = struct {
@@ -53,6 +68,7 @@ pub const Report = struct {
 };
 
 extern fn zigos_memory_fence() callconv(cc) void;
+extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_halt_forever() callconv(cc) noreturn;
 
 pub fn start(
@@ -97,6 +113,19 @@ pub fn start(
         const stack = @as([*]u8, @ptrFromInt(stack_base))[0..stack_size];
         @memset(stack, 0);
 
+        const ist_stack_base = allocator.allocateContiguousBelow(stack_pages, memory.four_gib) orelse return null;
+        const ist_stack_size = stack_pages * @as(usize, @intCast(memory.page_size));
+        const ist_stack = @as([*]u8, @ptrFromInt(ist_stack_base))[0..ist_stack_size];
+        @memset(ist_stack, 0);
+        const per_cpu_state = percpu.prepare(
+            report.target_count,
+            processor.apic_id,
+            stack_base,
+            stack_size,
+            ist_stack_base,
+            ist_stack_size,
+        ) orelse return null;
+
         const data = bootDataAt(boot_info.ap_trampoline.base);
         data.* = .{
             .signature = boot_signature,
@@ -107,6 +136,7 @@ pub fn start(
             .actual_apic_id = initial_actual_apic_id,
             .online = 0,
             .state = 1,
+            .per_cpu_state = @intFromPtr(per_cpu_state),
         };
         zigos_memory_fence();
 
@@ -138,31 +168,103 @@ pub fn start(
             debugWrite("\r\n");
             return null;
         }
+        const per_cpu_report = percpu.report(per_cpu_state);
+        if (!per_cpu_report.descriptor_ready or
+            per_cpu_report.active_cs != 0x08 or
+            per_cpu_report.active_tr != 0x18 or
+            per_cpu_report.work_checksum == 0)
+        {
+            debugWrite("SMP per-CPU descriptor verification failed\r\n");
+            return null;
+        }
 
         report.processors[report.target_count] = .{
             .expected_apic_id = processor.apic_id,
             .actual_apic_id = actual_apic_id,
             .stack_base = stack_base,
             .stack_size = stack_size,
+            .ist_stack_base = ist_stack_base,
+            .ist_stack_size = ist_stack_size,
+            .gdt_address = per_cpu_report.gdt_address,
+            .tss_address = per_cpu_report.tss_address,
+            .idt_address = per_cpu_report.idt_address,
+            .active_cs = per_cpu_report.active_cs,
+            .active_tr = per_cpu_report.active_tr,
+            .work_checksum = per_cpu_report.work_checksum,
+            .mailbox_epoch = 0,
+            .completion_epoch = 0,
+            .work_input = 0,
+            .work_result = 0,
             .online = online,
             .state = state,
+            .per_cpu_state = @intFromPtr(per_cpu_state),
         };
         report.target_count += 1;
         report.online_count += 1;
     }
 
     if (report.target_count + 1 != madt.processor_count) return null;
+    if (!runMailboxRound(&report, reference)) return null;
     return report;
 }
 
-export fn zigos_ap_entry(data: *volatile ApBootData) callconv(cc) noreturn {
+export fn zigos_ap_entry(data: *volatile ApBootData, per_cpu_state: *percpu.State) callconv(cc) noreturn {
     const actual_apic_id = apic.currentId();
     data.actual_apic_id = actual_apic_id;
-    data.state = if (data.signature == boot_signature and actual_apic_id == data.expected_apic_id) 2 else 0xDEAD;
+    const valid_boot = data.signature == boot_signature and
+        data.per_cpu_state == @intFromPtr(per_cpu_state) and
+        actual_apic_id == data.expected_apic_id;
+    const descriptors_ready = valid_boot and percpu.initialize(per_cpu_state, actual_apic_id);
+    data.state = if (descriptors_ready) 2 else 0xDEAD;
     zigos_memory_fence();
     data.online = 1;
     zigos_memory_fence();
-    zigos_halt_forever();
+    percpu.runMailbox(per_cpu_state);
+}
+
+fn runMailboxRound(report: *Report, reference: hpet.Device) bool {
+    const epoch: u32 = 1;
+    const base_input: u64 = 0xC001_D00D_5A49_474F;
+
+    for (report.processors[0..report.target_count], 0..) |*processor, index| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        const input = base_input ^
+            (@as(u64, processor.actual_apic_id) << 32) ^
+            @as(u64, @intCast(index));
+        if (!percpu.dispatchWork(state, epoch, input)) return false;
+        processor.mailbox_epoch = epoch;
+        processor.work_input = input;
+    }
+
+    var iteration: usize = 0;
+    while (iteration < startup_timeout_iterations) : (iteration += 1) {
+        var completed: usize = 0;
+        for (report.processors[0..report.target_count]) |processor| {
+            const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+            if (percpu.workCompleted(state, epoch)) completed += 1;
+        }
+        if (completed == report.target_count) break;
+        if (!reference.waitNanoseconds(startup_poll_nanoseconds)) return false;
+    }
+
+    var distinct_result: u64 = 0;
+    for (report.processors[0..report.target_count], 0..) |*processor, index| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        const state_report = percpu.report(state);
+        const expected = percpu.expectedWorkResult(processor.actual_apic_id, processor.work_input);
+        if (state_report.mailbox_epoch != epoch or
+            state_report.completion_epoch != epoch or
+            state_report.work_input != processor.work_input or
+            state_report.work_result != expected)
+        {
+            return false;
+        }
+        if (index != 0 and state_report.work_result == distinct_result) return false;
+        distinct_result = state_report.work_result;
+        processor.completion_epoch = state_report.completion_epoch;
+        processor.work_result = state_report.work_result;
+    }
+    return true;
 }
 
 fn debugWrite(text: []const u8) void {
@@ -265,6 +367,6 @@ fn writeU32(bytes: []u8, offset: usize, value: u32) void {
 }
 
 comptime {
-    if (@sizeOf(ApBootData) != 48) @compileError("AP boot-data header must remain 48 bytes");
+    if (@sizeOf(ApBootData) != 56) @compileError("AP boot-data header must remain 56 bytes");
     if (trampoline_image.len != 4096) @compileError("embedded AP trampoline must be one page");
 }

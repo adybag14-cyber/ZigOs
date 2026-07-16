@@ -517,6 +517,28 @@ fn startApplicationProcessors(
         debugWrite(" + ");
         debugWriteUsizeDecimal(processor.stack_size);
         debugWrite(" bytes\r\n");
+        debugWrite("AP private descriptors: GDT 0x");
+        debugWriteHex64(@intCast(processor.gdt_address));
+        debugWrite(", TSS 0x");
+        debugWriteHex64(@intCast(processor.tss_address));
+        debugWrite(", IDT 0x");
+        debugWriteHex64(@intCast(processor.idt_address));
+        debugWrite(", CS 0x");
+        debugWriteHex16(processor.active_cs);
+        debugWrite(", TR 0x");
+        debugWriteHex16(processor.active_tr);
+        debugWrite(", checksum 0x");
+        debugWriteHex64(processor.work_checksum);
+        debugWrite("\r\n");
+        debugWrite("AP mailbox complete: APIC ");
+        debugWriteU64Decimal(processor.actual_apic_id);
+        debugWrite(", epoch ");
+        debugWriteU64Decimal(processor.completion_epoch);
+        debugWrite(", input 0x");
+        debugWriteHex64(processor.work_input);
+        debugWrite(", result 0x");
+        debugWriteHex64(processor.work_result);
+        debugWrite("\r\n");
     }
 
     if (report.online_count != report.target_count) {

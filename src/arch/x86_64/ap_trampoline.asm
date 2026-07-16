@@ -17,6 +17,7 @@ boot_expected_apic_id: dd 0
 boot_actual_apic_id:   dd 0xFFFFFFFF
 boot_online:           dd 0
 boot_state:            dd 0
+boot_per_cpu_state:    dq 0
 
 gdt_descriptor:
     dw gdt_end - gdt - 1
@@ -32,8 +33,6 @@ times 0x60 - ($ - $$) db 0
 
 real_mode_start:
     cli
-    mov al, 'R'
-    out 0xE9, al
     cld
     mov ax, cs
     mov ds, ax
@@ -41,8 +40,6 @@ real_mode_start:
     mov ss, ax
     mov sp, 0x0FF0
     lgdt [gdt_descriptor]
-    mov al, 'G'
-    out 0xE9, al
     mov eax, cr0
     or eax, 1
     mov cr0, eax
@@ -50,8 +47,6 @@ real_mode_start:
 
 bits 32
 protected_mode_start:
-    mov al, 'P'
-    out 0xE9, al
     mov ax, 0x10
     mov ds, ax
     mov es, ax
@@ -80,8 +75,6 @@ protected_mode_start:
 
 bits 64
 long_mode_start:
-    mov al, 'L'
-    out 0xE9, al
     mov ax, 0x20
     mov ds, ax
     mov es, ax
@@ -93,6 +86,8 @@ long_mode_start:
     and rsp, -16
     sub rsp, 32
     lea rcx, [rel boot_signature]
+    mov rdx, [rel boot_per_cpu_state]
+    fninit
     mov rax, [rel boot_entry_point]
     call rax
 .ap_halt:

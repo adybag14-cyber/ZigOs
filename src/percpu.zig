@@ -1,0 +1,316 @@
+const std = @import("std");
+const interrupt_context = @import("interrupt_context.zig");
+
+const cc = std.os.uefi.cc;
+const code_selector: u16 = 0x08;
+const data_selector: u16 = 0x10;
+const tss_selector: u16 = 0x18;
+const exception_vector_count: usize = 32;
+const spurious_vector: usize = 0xFF;
+const state_magic: u64 = 0x5A49_474F_5350_4355;
+
+const DescriptorTablePointer = extern struct {
+    limit: u16,
+    base: u64 align(1),
+};
+
+const TaskStateSegment = extern struct {
+    reserved0: u32,
+    rsp0: u64 align(1),
+    rsp1: u64 align(1),
+    rsp2: u64 align(1),
+    reserved1: u64 align(1),
+    ist1: u64 align(1),
+    ist2: u64 align(1),
+    ist3: u64 align(1),
+    ist4: u64 align(1),
+    ist5: u64 align(1),
+    ist6: u64 align(1),
+    ist7: u64 align(1),
+    reserved2: u64 align(1),
+    reserved3: u16 align(1),
+    io_map_base: u16 align(1),
+};
+
+const IdtEntry = extern struct {
+    offset_low: u16,
+    selector: u16,
+    ist: u8,
+    type_attributes: u8,
+    offset_middle: u16,
+    offset_high: u32,
+    reserved: u32,
+};
+
+pub const State = struct {
+    magic: u64,
+    index: u32,
+    expected_apic_id: u32,
+    kernel_stack_base: usize,
+    kernel_stack_size: usize,
+    ist_stack_base: usize,
+    ist_stack_size: usize,
+    gdt: [5]u64 align(16),
+    tss: TaskStateSegment align(16),
+    idt: [256]IdtEntry align(16),
+    active_cs: u16,
+    active_tr: u16,
+    descriptor_ready: u32,
+    work_checksum: u64,
+    mailbox_command: u32,
+    mailbox_epoch: u32,
+    completion_epoch: u32,
+    mailbox_reserved: u32,
+    work_input: u64,
+    work_result: u64,
+};
+
+pub const Report = struct {
+    gdt_address: usize,
+    tss_address: usize,
+    idt_address: usize,
+    active_cs: u16,
+    active_tr: u16,
+    work_checksum: u64,
+    descriptor_ready: bool,
+    mailbox_epoch: u32,
+    completion_epoch: u32,
+    work_input: u64,
+    work_result: u64,
+};
+
+extern fn zigos_load_gdt(
+    pointer: *const DescriptorTablePointer,
+    new_code_selector: u16,
+    new_data_selector: u16,
+    new_tss_selector: u16,
+) callconv(cc) void;
+extern fn zigos_load_idt(pointer: *const DescriptorTablePointer) callconv(cc) void;
+extern fn zigos_read_cs() callconv(cc) u64;
+extern fn zigos_read_tr() callconv(cc) u64;
+extern fn zigos_exception_stub_address(vector: u8) callconv(cc) usize;
+extern fn zigos_isr_spurious() callconv(cc) void;
+extern fn zigos_memory_fence() callconv(cc) void;
+extern fn zigos_cpu_relax() callconv(cc) void;
+
+var states: [64]State align(4096) = undefined;
+
+pub fn prepare(
+    index: usize,
+    expected_apic_id: u32,
+    kernel_stack_base: usize,
+    kernel_stack_size: usize,
+    ist_stack_base: usize,
+    ist_stack_size: usize,
+) ?*State {
+    if (index >= states.len) return null;
+    if (kernel_stack_size == 0 or ist_stack_size == 0) return null;
+    const state = &states[index];
+    state.* = undefined;
+    state.magic = state_magic;
+    state.index = @intCast(index);
+    state.expected_apic_id = expected_apic_id;
+    state.kernel_stack_base = kernel_stack_base;
+    state.kernel_stack_size = kernel_stack_size;
+    state.ist_stack_base = ist_stack_base;
+    state.ist_stack_size = ist_stack_size;
+    state.active_cs = 0;
+    state.active_tr = 0;
+    state.descriptor_ready = 0;
+    state.work_checksum = 0;
+    state.mailbox_command = 0;
+    state.mailbox_epoch = 0;
+    state.completion_epoch = 0;
+    state.mailbox_reserved = 0;
+    state.work_input = 0;
+    state.work_result = 0;
+    zigos_memory_fence();
+    return state;
+}
+
+pub fn initialize(state: *State, actual_apic_id: u32) bool {
+    if (state.magic != state_magic or state.expected_apic_id != actual_apic_id) return false;
+    if (state.kernel_stack_base > std.math.maxInt(usize) - state.kernel_stack_size) return false;
+    if (state.ist_stack_base > std.math.maxInt(usize) - state.ist_stack_size) return false;
+
+    const kernel_stack_top = state.kernel_stack_base + state.kernel_stack_size;
+    const ist_stack_top = state.ist_stack_base + state.ist_stack_size;
+
+    state.tss = std.mem.zeroes(TaskStateSegment);
+    state.tss.rsp0 = @intCast(kernel_stack_top);
+    state.tss.ist1 = @intCast(ist_stack_top);
+    state.tss.io_map_base = @intCast(@sizeOf(TaskStateSegment));
+
+    state.gdt[0] = 0;
+    state.gdt[1] = 0x00AF_9A00_0000_FFFF;
+    state.gdt[2] = 0x00CF_9200_0000_FFFF;
+    installTssDescriptor(state);
+
+    const gdt_pointer = DescriptorTablePointer{
+        .limit = @intCast(@sizeOf(@TypeOf(state.gdt)) - 1),
+        .base = @intCast(@intFromPtr(&state.gdt)),
+    };
+    zigos_load_gdt(&gdt_pointer, code_selector, data_selector, tss_selector);
+
+    for (&state.idt) |*entry| entry.* = std.mem.zeroes(IdtEntry);
+    var vector: usize = 0;
+    while (vector < exception_vector_count) : (vector += 1) {
+        setInterruptGate(
+            &state.idt[vector],
+            zigos_exception_stub_address(@intCast(vector)),
+            code_selector,
+            1,
+        );
+    }
+    setInterruptGate(
+        &state.idt[spurious_vector],
+        @intFromPtr(&zigos_isr_spurious),
+        code_selector,
+        0,
+    );
+
+    const idt_pointer = DescriptorTablePointer{
+        .limit = @intCast(@sizeOf(@TypeOf(state.idt)) - 1),
+        .base = @intCast(@intFromPtr(&state.idt)),
+    };
+    zigos_load_idt(&idt_pointer);
+
+    state.active_cs = @truncate(zigos_read_cs());
+    state.active_tr = @truncate(zigos_read_tr());
+    if (state.active_cs != code_selector or state.active_tr != tss_selector) return false;
+
+    state.work_checksum = calculateWorkChecksum(actual_apic_id, state.index);
+    state.descriptor_ready = 1;
+    zigos_memory_fence();
+    return true;
+}
+
+pub fn report(state: *const State) Report {
+    zigos_memory_fence();
+    return .{
+        .gdt_address = @intFromPtr(&state.gdt),
+        .tss_address = @intFromPtr(&state.tss),
+        .idt_address = @intFromPtr(&state.idt),
+        .active_cs = state.active_cs,
+        .active_tr = state.active_tr,
+        .work_checksum = state.work_checksum,
+        .descriptor_ready = state.descriptor_ready == 1,
+        .mailbox_epoch = readVolatileU32(&state.mailbox_epoch),
+        .completion_epoch = readVolatileU32(&state.completion_epoch),
+        .work_input = readVolatileU64(&state.work_input),
+        .work_result = readVolatileU64(&state.work_result),
+    };
+}
+
+pub fn dispatchWork(state: *State, epoch: u32, input: u64) bool {
+    if (epoch == 0 or state.descriptor_ready != 1) return false;
+    writeVolatileU64(&state.work_input, input);
+    writeVolatileU32(&state.mailbox_command, 1);
+    zigos_memory_fence();
+    writeVolatileU32(&state.mailbox_epoch, epoch);
+    zigos_memory_fence();
+    return true;
+}
+
+pub fn workCompleted(state: *State, epoch: u32) bool {
+    zigos_memory_fence();
+    return readVolatileU32(&state.completion_epoch) == epoch;
+}
+
+pub fn expectedWorkResult(apic_id: u32, input: u64) u64 {
+    return calculateMailboxWork(apic_id, input);
+}
+
+pub fn runMailbox(state: *State) noreturn {
+    var observed_epoch: u32 = 0;
+    while (true) {
+        const epoch = readVolatileU32(&state.mailbox_epoch);
+        if (epoch == 0 or epoch == observed_epoch) {
+            zigos_cpu_relax();
+            continue;
+        }
+        observed_epoch = epoch;
+        const command = readVolatileU32(&state.mailbox_command);
+        if (command == 1) {
+            const input = readVolatileU64(&state.work_input);
+            const result = calculateMailboxWork(state.expected_apic_id, input);
+            writeVolatileU64(&state.work_result, result);
+            zigos_memory_fence();
+            writeVolatileU32(&state.completion_epoch, epoch);
+            zigos_memory_fence();
+        }
+    }
+}
+
+fn calculateMailboxWork(apic_id: u32, input: u64) u64 {
+    var value = input ^ (@as(u64, apic_id) *% 0x9E37_79B9_7F4A_7C15);
+    var iteration: u64 = 0;
+    while (iteration < 1_000_000) : (iteration += 1) {
+        value = std.math.rotl(u64, value +% iteration +% 0xA076_1D64_78BD_642F, 17);
+        value ^= value >> 23;
+        value *%= 0xE703_7ED1_A0B4_28DB;
+    }
+    return value;
+}
+
+fn readVolatileU32(value: *const u32) u32 {
+    const pointer: *volatile const u32 = @ptrCast(value);
+    return pointer.*;
+}
+
+fn writeVolatileU32(value: *u32, data: u32) void {
+    const pointer: *volatile u32 = @ptrCast(value);
+    pointer.* = data;
+}
+
+fn readVolatileU64(value: *const u64) u64 {
+    const pointer: *volatile const u64 = @ptrCast(value);
+    return pointer.*;
+}
+
+fn writeVolatileU64(value: *u64, data: u64) void {
+    const pointer: *volatile u64 = @ptrCast(value);
+    pointer.* = data;
+}
+
+fn installTssDescriptor(state: *State) void {
+    const base: u64 = @intCast(@intFromPtr(&state.tss));
+    const limit: u64 = @sizeOf(TaskStateSegment) - 1;
+    state.gdt[3] = (limit & 0xFFFF) |
+        ((base & 0xFF_FFFF) << 16) |
+        (@as(u64, 0x89) << 40) |
+        (((limit >> 16) & 0xF) << 48) |
+        (((base >> 24) & 0xFF) << 56);
+    state.gdt[4] = base >> 32;
+}
+
+fn setInterruptGate(entry: *IdtEntry, handler_address: usize, selector: u16, ist_index: u3) void {
+    const address: u64 = @intCast(handler_address);
+    entry.* = .{
+        .offset_low = @truncate(address),
+        .selector = selector,
+        .ist = ist_index,
+        .type_attributes = 0x8E,
+        .offset_middle = @truncate(address >> 16),
+        .offset_high = @truncate(address >> 32),
+        .reserved = 0,
+    };
+}
+
+fn calculateWorkChecksum(apic_id: u32, index: u32) u64 {
+    var value = 0x9E37_79B9_7F4A_7C15 ^ @as(u64, apic_id) ^ (@as(u64, index) << 32);
+    var iteration: u64 = 0;
+    while (iteration < 100_000) : (iteration += 1) {
+        value = std.math.rotl(u64, value ^ iteration, 13);
+        value *%= 0xD6E8_FEB8_6659_FD93;
+        value +%= 0xA5A5_A5A5_A5A5_A5A5;
+    }
+    return value;
+}
+
+comptime {
+    if (@sizeOf(DescriptorTablePointer) != 10) @compileError("descriptor-table pointer must be 10 bytes");
+    if (@sizeOf(TaskStateSegment) != 104) @compileError("x86-64 TSS must be 104 bytes");
+    if (@sizeOf(IdtEntry) != 16) @compileError("x86-64 IDT entry must be 16 bytes");
+    _ = interrupt_context;
+}

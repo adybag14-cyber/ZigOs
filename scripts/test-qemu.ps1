@@ -197,6 +197,14 @@ if (-not $output.Contains('APIC timer calibrated:')) {
 if (-not $output.Contains('Maskable interrupt vector 0x0040 handled')) {
     throw 'The APIC timer interrupt round trip was not observed.'
 }
+$descriptorMatches = [regex]::Matches($output, 'AP private descriptors: GDT 0x[0-9A-F]+, TSS 0x[0-9A-F]+, IDT 0x[0-9A-F]+, CS 0x0008, TR 0x0018, checksum 0x(?!0000000000000000)[0-9A-F]{16}')
+if ($descriptorMatches.Count -ne 3) {
+    throw 'All three AP-private GDT/TSS/IDT verification records were not observed.'
+}
+$mailboxMatches = [regex]::Matches($output, 'AP mailbox complete: APIC [123], epoch 1, input 0x[0-9A-F]{16}, result 0x(?!0000000000000000)[0-9A-F]{16}')
+if ($mailboxMatches.Count -ne 3) {
+    throw 'All three AP mailbox completion records were not observed.'
+}
 if (-not $output.Contains('PCIe ECAM active:')) {
     throw 'The PCIe MCFG/ECAM activation marker was not observed.'
 }

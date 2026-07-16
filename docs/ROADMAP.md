@@ -75,5 +75,7 @@
 
 - [x] UEFI-reserved AP startup trampoline below 1 MiB
 - [x] MADT processor-ID retention and four-CPU QEMU topology
-- [ ] INIT/SIPI application-processor startup
-- [ ] Per-CPU descriptor tables and scheduler state
+- [x] INIT/SIPI application-processor startup
+- [x] Per-CPU GDT, TSS, IST and IDT installation
+- [x] Lock-free BSP-to-AP work mailbox and parallel completion proof
+- [ ] Per-CPU scheduler/run-queue state
