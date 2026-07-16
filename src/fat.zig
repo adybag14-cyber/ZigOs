@@ -142,3 +142,171 @@ fn read16(bytes: []const u8, offset: usize) u16 {
 fn read32(bytes: []const u8, offset: usize) u32 {
     return @as(u32, read16(bytes, offset)) | (@as(u32, read16(bytes, offset + 2)) << 16);
 }
+
+pub const DirectoryEntry = struct {
+    name: [13]u8,
+    attributes: u8,
+    first_cluster: u32,
+    file_size: u32,
+
+    pub fn nameSlice(self: *const DirectoryEntry) []const u8 {
+        return terminatedSlice(&self.name);
+    }
+
+    pub fn isDirectory(self: DirectoryEntry) bool {
+        return (self.attributes & 0x10) != 0;
+    }
+};
+
+pub const maximum_directory_entries_per_sector: usize = 128;
+
+pub const DirectorySector = struct {
+    entries: [maximum_directory_entries_per_sector]DirectoryEntry,
+    count: usize,
+    end_of_directory: bool,
+};
+
+pub const FatEntryLocation = struct {
+    lba: u64,
+    byte_offset: usize,
+    byte_count: u8,
+};
+
+pub const ClusterLink = union(enum) {
+    next: u32,
+    end,
+    free,
+    bad,
+};
+
+pub fn parseDirectorySector(sector: []const u8) ?DirectorySector {
+    if (sector.len < 32 or sector.len % 32 != 0) return null;
+    const raw_entry_count = sector.len / 32;
+    if (raw_entry_count > maximum_directory_entries_per_sector) return null;
+
+    var result = DirectorySector{
+        .entries = undefined,
+        .count = 0,
+        .end_of_directory = false,
+    };
+
+    var index: usize = 0;
+    while (index < raw_entry_count) : (index += 1) {
+        const offset = index * 32;
+        const first_byte = sector[offset];
+        if (first_byte == 0x00) {
+            result.end_of_directory = true;
+            break;
+        }
+        if (first_byte == 0xE5) continue;
+
+        const attributes = sector[offset + 11];
+        if (attributes == 0x0F) continue;
+        if ((attributes & 0x08) != 0) continue;
+
+        if (result.count >= result.entries.len) return null;
+        var entry = DirectoryEntry{
+            .name = @splat(0),
+            .attributes = attributes,
+            .first_cluster = (@as(u32, read16(sector, offset + 20)) << 16) |
+                read16(sector, offset + 26),
+            .file_size = read32(sector, offset + 28),
+        };
+        decodeShortName(sector[offset .. offset + 11], &entry.name);
+        result.entries[result.count] = entry;
+        result.count += 1;
+    }
+
+    return result;
+}
+
+pub fn fatEntryLocation(volume: Volume, cluster: u32) ?FatEntryLocation {
+    if (cluster < 2 or cluster >= volume.cluster_count + 2) return null;
+    const fat_offset: u64 = switch (volume.kind) {
+        .fat12 => @as(u64, cluster) + cluster / 2,
+        .fat16 => @as(u64, cluster) * 2,
+        .fat32 => @as(u64, cluster) * 4,
+    };
+    const byte_offset: usize = @intCast(fat_offset % volume.bytes_per_sector);
+    const byte_count: u8 = switch (volume.kind) {
+        .fat12, .fat16 => 2,
+        .fat32 => 4,
+    };
+    if (byte_offset + byte_count > volume.bytes_per_sector) return null;
+    return .{
+        .lba = volume.first_fat_lba + fat_offset / volume.bytes_per_sector,
+        .byte_offset = byte_offset,
+        .byte_count = byte_count,
+    };
+}
+
+pub fn decodeClusterLink(volume: Volume, cluster: u32, fat_sector: []const u8) ?ClusterLink {
+    const location = fatEntryLocation(volume, cluster) orelse return null;
+    if (location.byte_offset + location.byte_count > fat_sector.len) return null;
+
+    const value: u32 = switch (volume.kind) {
+        .fat12 => blk: {
+            const packed_value = read16(fat_sector, location.byte_offset);
+            break :blk if ((cluster & 1) == 0) packed_value & 0x0FFF else packed_value >> 4;
+        },
+        .fat16 => read16(fat_sector, location.byte_offset),
+        .fat32 => read32(fat_sector, location.byte_offset) & 0x0FFF_FFFF,
+    };
+
+    const bad_marker: u32 = switch (volume.kind) {
+        .fat12 => 0x0FF7,
+        .fat16 => 0xFFF7,
+        .fat32 => 0x0FFF_FFF7,
+    };
+    const end_marker: u32 = switch (volume.kind) {
+        .fat12 => 0x0FF8,
+        .fat16 => 0xFFF8,
+        .fat32 => 0x0FFF_FFF8,
+    };
+
+    if (value == 0) return .free;
+    if (value == bad_marker) return .bad;
+    if (value >= end_marker) return .end;
+    if (value < 2 or value >= volume.cluster_count + 2) return null;
+    return .{ .next = value };
+}
+
+pub fn clusterFirstLba(volume: Volume, cluster: u32) ?u64 {
+    if (cluster < 2 or cluster >= volume.cluster_count + 2) return null;
+    return volume.first_data_lba + (@as(u64, cluster) - 2) * volume.sectors_per_cluster;
+}
+
+pub fn namesEqual(entry_name: []const u8, expected_name: []const u8) bool {
+    if (entry_name.len != expected_name.len) return false;
+    for (entry_name, expected_name) |left, right| {
+        if (toUpperAscii(left) != toUpperAscii(right)) return false;
+    }
+    return true;
+}
+
+fn decodeShortName(raw: []const u8, output: []u8) void {
+    @memset(output, 0);
+    var name_end: usize = 8;
+    while (name_end > 0 and raw[name_end - 1] == ' ') name_end -= 1;
+    var extension_end: usize = 11;
+    while (extension_end > 8 and raw[extension_end - 1] == ' ') extension_end -= 1;
+
+    var output_index: usize = 0;
+    for (raw[0..name_end]) |character| {
+        output[output_index] = if (output_index == 0 and character == 0x05) 0xE5 else character;
+        output_index += 1;
+    }
+    if (extension_end > 8) {
+        output[output_index] = '.';
+        output_index += 1;
+        for (raw[8..extension_end]) |character| {
+            output[output_index] = character;
+            output_index += 1;
+        }
+    }
+    output[output_index] = 0;
+}
+
+fn toUpperAscii(character: u8) u8 {
+    return if (character >= 'a' and character <= 'z') character - ('a' - 'A') else character;
+}

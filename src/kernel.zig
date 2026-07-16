@@ -747,6 +747,130 @@ fn inspectPartitionAndFat(
     debugWrite(", clusters ");
     debugWriteU64Decimal(volume.cluster_count);
     debugWrite("\r\n");
+    walkFatBootPath(controller, identity, volume);
+}
+
+fn walkFatBootPath(controller: ahci.Controller, identity: ahci.IdentifyResult, volume: fat.Volume) void {
+    const efi_entry = findRootDirectoryEntry(controller, identity, volume, "EFI") orelse
+        filesystemFailure("FAT root directory did not contain EFI");
+    if (!efi_entry.isDirectory() or efi_entry.first_cluster < 2) {
+        filesystemFailure("EFI root entry was not a valid directory");
+    }
+
+    const boot_entry = findClusterDirectoryEntry(
+        controller,
+        identity,
+        volume,
+        efi_entry.first_cluster,
+        "BOOT",
+    ) orelse filesystemFailure("EFI directory did not contain BOOT");
+    if (!boot_entry.isDirectory() or boot_entry.first_cluster < 2) {
+        filesystemFailure("EFI/BOOT entry was not a valid directory");
+    }
+
+    const loader_entry = findClusterDirectoryEntry(
+        controller,
+        identity,
+        volume,
+        boot_entry.first_cluster,
+        "BOOTX64.EFI",
+    ) orelse filesystemFailure("EFI/BOOT did not contain BOOTX64.EFI");
+    if (loader_entry.isDirectory() or loader_entry.first_cluster < 2 or loader_entry.file_size == 0) {
+        filesystemFailure("BOOTX64.EFI entry did not describe a non-empty file");
+    }
+
+    debugWrite("FAT path resolved: EFI cluster ");
+    debugWriteU64Decimal(efi_entry.first_cluster);
+    debugWrite(" -> BOOT cluster ");
+    debugWriteU64Decimal(boot_entry.first_cluster);
+    debugWrite(" -> BOOTX64.EFI cluster ");
+    debugWriteU64Decimal(loader_entry.first_cluster);
+    debugWrite("\r\n");
+    debugWrite("FAT boot file found: EFI/BOOT/BOOTX64.EFI, size ");
+    debugWriteU64Decimal(loader_entry.file_size);
+    debugWrite(" bytes\r\n");
+}
+
+fn findRootDirectoryEntry(
+    controller: ahci.Controller,
+    identity: ahci.IdentifyResult,
+    volume: fat.Volume,
+    expected_name: []const u8,
+) ?fat.DirectoryEntry {
+    if (volume.kind == .fat32) {
+        return findClusterDirectoryEntry(controller, identity, volume, volume.root_cluster, expected_name);
+    }
+
+    var sector_index: u32 = 0;
+    while (sector_index < volume.root_directory_sectors) : (sector_index += 1) {
+        const sector = ahci.readOneSector(controller, identity, volume.root_directory_lba + sector_index) orelse
+            filesystemFailure("FAT root-directory sector read failed");
+        const directory = fat.parseDirectorySector(ahci.readBuffer(sector)) orelse
+            filesystemFailure("FAT root-directory entry decoding failed");
+        printDirectoryEntries("FAT root", directory);
+        if (findNamedEntry(directory, expected_name)) |entry| return entry;
+        if (directory.end_of_directory) return null;
+    }
+    return null;
+}
+
+fn findClusterDirectoryEntry(
+    controller: ahci.Controller,
+    identity: ahci.IdentifyResult,
+    volume: fat.Volume,
+    initial_cluster: u32,
+    expected_name: []const u8,
+) ?fat.DirectoryEntry {
+    var cluster = initial_cluster;
+    var traversed_clusters: usize = 0;
+    while (traversed_clusters < 4096) : (traversed_clusters += 1) {
+        const first_lba = fat.clusterFirstLba(volume, cluster) orelse
+            filesystemFailure("directory cluster was outside FAT data range");
+
+        var sector_index: u8 = 0;
+        while (sector_index < volume.sectors_per_cluster) : (sector_index += 1) {
+            const sector = ahci.readOneSector(controller, identity, first_lba + sector_index) orelse
+                filesystemFailure("FAT directory-cluster sector read failed");
+            const directory = fat.parseDirectorySector(ahci.readBuffer(sector)) orelse
+                filesystemFailure("FAT directory-cluster entry decoding failed");
+            if (findNamedEntry(directory, expected_name)) |entry| return entry;
+            if (directory.end_of_directory) return null;
+        }
+
+        const location = fat.fatEntryLocation(volume, cluster) orelse
+            filesystemFailure("FAT cluster entry location was invalid");
+        const fat_sector = ahci.readOneSector(controller, identity, location.lba) orelse
+            filesystemFailure("FAT cluster-link sector read failed");
+        const link = fat.decodeClusterLink(volume, cluster, ahci.readBuffer(fat_sector)) orelse
+            filesystemFailure("FAT cluster-link value was invalid");
+        switch (link) {
+            .next => |next_cluster| cluster = next_cluster,
+            .end => return null,
+            .free => filesystemFailure("directory cluster chain reached a free entry"),
+            .bad => filesystemFailure("directory cluster chain reached a bad cluster"),
+        }
+    }
+    filesystemFailure("directory cluster chain exceeded traversal limit");
+}
+
+fn findNamedEntry(directory: fat.DirectorySector, expected_name: []const u8) ?fat.DirectoryEntry {
+    for (directory.entries[0..directory.count]) |entry| {
+        if (fat.namesEqual(entry.nameSlice(), expected_name)) return entry;
+    }
+    return null;
+}
+
+fn printDirectoryEntries(prefix: []const u8, directory: fat.DirectorySector) void {
+    for (directory.entries[0..directory.count]) |entry| {
+        debugWrite(prefix);
+        debugWrite(" entry: ");
+        debugWrite(entry.nameSlice());
+        debugWrite(if (entry.isDirectory()) " <DIR> cluster " else " file cluster ");
+        debugWriteU64Decimal(entry.first_cluster);
+        debugWrite(", size ");
+        debugWriteU64Decimal(entry.file_size);
+        debugWrite("\r\n");
+    }
 }
 
 fn filesystemFailure(reason: []const u8) noreturn {

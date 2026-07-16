@@ -226,6 +226,15 @@ if (-not $output.Contains('FAT volume detected: FAT16')) {
 if (-not $output.Contains('FAT layout:')) {
     throw 'The FAT geometry/layout marker was not observed.'
 }
+if (-not $output.Contains('FAT root entry: EFI <DIR>')) {
+    throw 'The FAT root-directory decoding marker was not observed.'
+}
+if (-not $output.Contains('FAT path resolved: EFI cluster')) {
+    throw 'The FAT cluster-chain path-resolution marker was not observed.'
+}
+if (-not $output.Contains('FAT boot file found: EFI/BOOT/BOOTX64.EFI')) {
+    throw 'The FAT boot-file lookup marker was not observed.'
+}
 if (-not $output.Contains('Kernel heap active:')) {
     throw 'The kernel heap initialization marker was not observed.'
 }
