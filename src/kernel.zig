@@ -652,6 +652,26 @@ fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWrite(", transferred ");
     debugWriteU64Decimal(identity.transferred_bytes);
     debugWrite(" bytes\r\n");
+    const sector_zero = ahci.readOneSector(controller, identity, 0) orelse
+        ahciFailure("READ DMA EXT for LBA 0 did not complete successfully");
+    debugWrite("READ DMA EXT completed: LBA ");
+    debugWriteU64Decimal(sector_zero.lba);
+    debugWrite(", ");
+    debugWriteU64Decimal(sector_zero.byte_count);
+    debugWrite(" bytes at 0x");
+    debugWriteHex64(@intCast(sector_zero.buffer_address));
+    debugWrite("\r\n");
+    debugWrite("LBA 0 first 16 bytes:");
+    for (sector_zero.first_bytes) |byte| {
+        debugWrite(" ");
+        debugWriteHex8(byte);
+    }
+    debugWrite("\r\n");
+    debugWrite("LBA 0 FNV-1a64: 0x");
+    debugWriteHex64(sector_zero.fnv1a64);
+    debugWrite(", trailing signature 0x");
+    debugWriteHex16(sector_zero.trailing_signature);
+    debugWrite("\r\n");
 }
 
 fn ahciDeviceTypeName(device_type: ahci.DeviceType) []const u8 {

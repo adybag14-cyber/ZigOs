@@ -208,6 +208,15 @@ if (-not $output.Contains('AHCI DMA structures:')) {
 if (-not $output.Contains('transferred 512 bytes')) {
     throw 'ATA IDENTIFY did not report a complete 512-byte DMA transfer.'
 }
+if (-not $output.Contains('READ DMA EXT completed: LBA 0')) {
+    throw 'The read-only ATA sector DMA marker was not observed.'
+}
+if (-not $output.Contains('LBA 0 FNV-1a64:')) {
+    throw 'The LBA 0 sector fingerprint marker was not observed.'
+}
+if (-not $output.Contains('trailing signature 0xAA55')) {
+    throw 'The expected LBA 0 MBR signature was not observed.'
+}
 if (-not $output.Contains('Kernel heap active:')) {
     throw 'The kernel heap initialization marker was not observed.'
 }

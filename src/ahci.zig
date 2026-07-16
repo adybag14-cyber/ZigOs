@@ -456,3 +456,106 @@ comptime {
     if (@sizeOf(CommandHeader) != 32) @compileError("AHCI command header must be 32 bytes");
     if (@sizeOf(PhysicalRegionDescriptor) != 16) @compileError("AHCI PRDT entry must be 16 bytes");
 }
+
+const read_dma_extended_command: u8 = 0x25;
+
+pub const ReadResult = struct {
+    lba: u64,
+    byte_count: u32,
+    buffer_address: usize,
+    fnv1a64: u64,
+    trailing_signature: u16,
+    first_bytes: [16]u8,
+};
+
+pub fn readOneSector(controller: Controller, identity: IdentifyResult, lba: u64) ?ReadResult {
+    if (!identity.lba48_supported) return null;
+    if (lba >= identity.sector_count or lba >= (@as(u64, 1) << 48)) return null;
+    if (identity.logical_sector_size == 0 or identity.logical_sector_size > memory.page_size) return null;
+
+    const port_base = controller.abar + port_base_offset + @as(usize, identity.port_index) * port_stride;
+    if ((read32(port_base, port_command_issue_offset) & 1) != 0) return null;
+    if (!waitForTaskFileReady(port_base)) return null;
+
+    zeroPage(identity.command_table_address);
+    zeroPage(identity.identify_buffer_address);
+
+    const header: *volatile CommandHeader = @ptrFromInt(identity.command_list_address);
+    header.* = .{
+        .flags = command_fis_length_dwords,
+        .prdt_length = 1,
+        .prd_byte_count = 0,
+        .command_table_base = @truncate(identity.command_table_address),
+        .command_table_base_upper = @truncate(identity.command_table_address >> 32),
+        .reserved = .{ 0, 0, 0, 0 },
+    };
+
+    const command_table = @as([*]volatile u8, @ptrFromInt(identity.command_table_address));
+    command_table[0] = register_host_to_device_fis;
+    command_table[1] = 1 << 7;
+    command_table[2] = read_dma_extended_command;
+    command_table[4] = @truncate(lba);
+    command_table[5] = @truncate(lba >> 8);
+    command_table[6] = @truncate(lba >> 16);
+    command_table[7] = 1 << 6;
+    command_table[8] = @truncate(lba >> 24);
+    command_table[9] = @truncate(lba >> 32);
+    command_table[10] = @truncate(lba >> 40);
+    command_table[12] = 1;
+    command_table[13] = 0;
+
+    const prdt: *volatile PhysicalRegionDescriptor = @ptrFromInt(identity.command_table_address + 0x80);
+    prdt.* = .{
+        .data_base = @truncate(identity.identify_buffer_address),
+        .data_base_upper = @truncate(identity.identify_buffer_address >> 32),
+        .reserved = 0,
+        .byte_count_and_interrupt = identity.logical_sector_size - 1 | (@as(u32, 1) << 31),
+    };
+
+    write32(port_base, port_interrupt_status_offset, 0xFFFF_FFFF);
+    write32(port_base, port_sata_error_offset, 0xFFFF_FFFF);
+    zigos_memory_fence();
+    write32(port_base, port_command_issue_offset, 1);
+
+    if (!waitForSlotCompletion(port_base)) return null;
+    zigos_memory_fence();
+
+    const transferred_bytes = header.prd_byte_count;
+    if (transferred_bytes != identity.logical_sector_size) return null;
+    const bytes = @as([*]const u8, @ptrFromInt(identity.identify_buffer_address))[0..transferred_bytes];
+
+    var first_bytes: [16]u8 = undefined;
+    @memcpy(&first_bytes, bytes[0..first_bytes.len]);
+    const trailing_signature = if (bytes.len >= 2)
+        @as(u16, bytes[bytes.len - 2]) | (@as(u16, bytes[bytes.len - 1]) << 8)
+    else
+        0;
+
+    return .{
+        .lba = lba,
+        .byte_count = transferred_bytes,
+        .buffer_address = identity.identify_buffer_address,
+        .fnv1a64 = fnv1a(bytes),
+        .trailing_signature = trailing_signature,
+        .first_bytes = first_bytes,
+    };
+}
+
+fn waitForSlotCompletion(port_base: usize) bool {
+    var iteration: usize = 0;
+    while (iteration < maximum_poll_iterations) : (iteration += 1) {
+        const interrupt_status = read32(port_base, port_interrupt_status_offset);
+        if ((interrupt_status & task_file_error_status) != 0) return false;
+        if ((read32(port_base, port_command_issue_offset) & 1) == 0) return true;
+    }
+    return false;
+}
+
+fn fnv1a(bytes: []const u8) u64 {
+    var hash: u64 = 0xCBF2_9CE4_8422_2325;
+    for (bytes) |byte| {
+        hash ^= byte;
+        hash *%= 0x0000_0100_0000_01B3;
+    }
+    return hash;
+}
