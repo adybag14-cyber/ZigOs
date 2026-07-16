@@ -72,7 +72,7 @@ $arguments = @(
 Write-Host "Booting ZigOs in QEMU with $codeSource"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-$marker = 'Milestone 0.1 reached'
+$marker = 'Milestone 0.2 reached'
 $captured = $false
 
 try {
@@ -115,6 +115,21 @@ if (-not $output.Contains('CPU vendor:')) {
 }
 if (-not $output.Contains('CR0 = 0x')) {
     throw 'The assembly control-register result was not observed.'
+}
+if (-not $output.Contains('ExitBootServices succeeded.')) {
+    throw 'The firmware handoff did not complete.'
+}
+if (-not $output.Contains('ZigOs now owns execution without UEFI boot services.')) {
+    throw 'No post-UEFI kernel execution marker was observed.'
+}
+if (([regex]::Matches($output, 'Kernel stack: 0x')).Count -lt 2) {
+    throw 'The ZigOs-owned stack was not observed on both sides of the handoff.'
+}
+if (-not $output.Contains('ACPI RSDP retained at 0x')) {
+    throw 'The ACPI root pointer was not retained across the handoff.'
+}
+if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
+    throw 'The framebuffer was not retained and accessed after the handoff.'
 }
 
 Write-Host 'QEMU boot test passed.'

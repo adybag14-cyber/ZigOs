@@ -20,6 +20,9 @@ qemu-stderr.log
 qemu-test-output.log
 qemu-test-error.log
 qemu-test-exit.txt
+m*-output.log
+m*-error.log
+m*-pid.txt
 
 # Editors / OS
 .vscode/

@@ -49,3 +49,27 @@ zigos_debug_putc:
     mov al, cl
     out dx, al
     ret
+
+global zigos_halt_forever
+
+; noreturn zigos_halt_forever(void)
+; Once boot services are gone, ZigOs disables interrupts until it installs its
+; own IDT and interrupt controllers in a later milestone.
+zigos_halt_forever:
+    cli
+.hang:
+    hlt
+    jmp .hang
+
+global zigos_enter_kernel
+
+; noreturn zigos_enter_kernel(void *stack_top, BootInfo *info, KernelEntry entry)
+; RCX = one-past-end stack address, RDX = BootInfo, R8 = kernel entry.
+zigos_enter_kernel:
+    mov rsp, rcx
+    and rsp, -16
+    xor rbp, rbp
+    mov rcx, rdx
+    sub rsp, 32                 ; Microsoft x64 shadow space
+    call r8
+    ud2                         ; the kernel entry is contractually noreturn

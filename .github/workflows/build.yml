@@ -22,6 +22,14 @@ jobs:
         shell: pwsh
         run: .\scripts\build.ps1 -Clean
 
+      - name: Check canonical Zig formatting
+        shell: pwsh
+        run: |
+          $version = (Get-Content .toolchain-version -Raw).Trim()
+          $zig = ".toolchains\zig-canonical\zig-x86_64-windows-$version\zig.exe"
+          & $zig fmt --check src
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Upload UEFI image
         uses: actions/upload-artifact@v4
         with:
