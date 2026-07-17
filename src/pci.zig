@@ -379,7 +379,6 @@ pub fn writeConfiguration16(function: Function, offset: usize, value: u16) void 
     }
 }
 
-
 pub fn inspectCapabilities(function: Function) ?CapabilityList {
     const status = readConfiguration16(function, 0x06);
     if ((status & (1 << 4)) == 0) {

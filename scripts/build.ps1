@@ -36,11 +36,15 @@ if ($actualVersion -ne $version) {
 
 New-Item -ItemType Directory -Force -Path $buildDir, $outputDir, $generatedDir | Out-Null
 
-Write-Host "[1/4] Assembling x86-64 hardware layer with NASM"
+Write-Host '[1/5] Checking canonical Zig formatting'
+& $zigExe fmt --check (Join-Path $repoRoot 'src')
+if ($LASTEXITCODE -ne 0) { throw "Canonical Zig formatting check failed with exit code $LASTEXITCODE" }
+
+Write-Host "[2/5] Assembling x86-64 hardware layer with NASM"
 & nasm -f win64 (Join-Path $repoRoot 'src\arch\x86_64\cpu.asm') -o $asmObject
 if ($LASTEXITCODE -ne 0) { throw "NASM hardware layer failed with exit code $LASTEXITCODE" }
 
-Write-Host '[2/4] Assembling 16-to-64-bit AP startup trampoline'
+Write-Host '[3/5] Assembling 16-to-64-bit AP startup trampoline'
 & nasm -f bin (Join-Path $repoRoot 'src\arch\x86_64\ap_trampoline.asm') -o $apTrampoline
 if ($LASTEXITCODE -ne 0) { throw "NASM AP trampoline failed with exit code $LASTEXITCODE" }
 $trampolineSize = (Get-Item $apTrampoline).Length
@@ -48,7 +52,7 @@ if ($trampolineSize -ne 4096) {
     throw "AP trampoline must be exactly one 4096-byte page; got $trampolineSize bytes."
 }
 
-Write-Host "[3/4] Compiling UEFI image with canonical Zig $actualVersion"
+Write-Host "[4/5] Compiling UEFI image with canonical Zig $actualVersion"
 $zigArgs = @(
     'build-exe',
     (Join-Path $repoRoot 'src\main.zig'),
@@ -64,7 +68,7 @@ $zigArgs = @(
 & $zigExe @zigArgs
 if ($LASTEXITCODE -ne 0) { throw "Canonical Zig failed with exit code $LASTEXITCODE" }
 
-Write-Host '[4/4] Verifying PE/COFF UEFI image'
+Write-Host '[5/5] Verifying PE/COFF UEFI image'
 & (Join-Path $PSScriptRoot 'verify-efi.ps1') -Path $efiImage
 
 Write-Host "USB layout ready at: $(Join-Path $repoRoot 'zig-out')"

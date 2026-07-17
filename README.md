@@ -172,10 +172,11 @@ The build script:
 
 1. Bootstraps the pinned canonical Zig release when it is missing.
 2. Refuses to continue when the compiler version differs from `.toolchain-version`.
-3. Assembles the x86-64 hardware layer as Win64 COFF.
-4. Assembles the one-page AP startup trampoline as a flat binary.
-5. Compiles and links the UEFI image.
-6. Verifies AMD64 PE32+, EFI application subsystem 10, and output structure.
+3. Runs canonical `zig fmt --check` across the entire `src` tree.
+4. Assembles the x86-64 hardware layer as Win64 COFF.
+5. Assembles the one-page AP startup trampoline as a flat binary.
+6. Compiles and links the UEFI image.
+7. Verifies AMD64 PE32+, EFI application subsystem 10, and output structure.
 
 Output:
 
