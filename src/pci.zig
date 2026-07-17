@@ -205,3 +205,10 @@ pub fn readConfiguration32(function: Function, offset: usize) u32 {
     const high = @as(u32, read16(function.configuration_address, offset + 2));
     return low | (high << 16);
 }
+
+pub fn writeConfiguration16(function: Function, offset: usize, value: u16) void {
+    const low: *volatile u8 = @ptrFromInt(function.configuration_address + offset);
+    const high: *volatile u8 = @ptrFromInt(function.configuration_address + offset + 1);
+    low.* = @truncate(value);
+    high.* = @truncate(value >> 8);
+}

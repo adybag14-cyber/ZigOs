@@ -21,6 +21,7 @@ const present_writable_user: u64 = 0x007;
 const present_writable_large: u64 = 0x083;
 const page_table_address_mask: u64 = 0x000F_FFFF_FFFF_F000;
 const large_page_flag: u64 = 1 << 7;
+const hardware_accessed_dirty_flags: u64 = (1 << 5) | (1 << 6);
 
 pub const Installation = struct {
     previous_cr3: u64,
@@ -119,7 +120,7 @@ pub fn mapIdentityMmio(
         const current = directory[directory_index];
         if (current == 0) {
             directory[directory_index] = expected;
-        } else if (current != expected) {
+        } else if ((current & ~hardware_accessed_dirty_flags) != expected) {
             return null;
         }
     }
@@ -132,6 +133,33 @@ pub fn mapIdentityMmio(
         .mapped_bytes = mapped_end - mapped_base,
         .table_pages = table_pages,
     };
+}
+
+pub fn isIdentityRangeMapped(requested_base: u64, requested_size: u64) bool {
+    if (active_pml4_address == 0 or requested_size == 0) return false;
+    if (requested_base > std.math.maxInt(u64) - requested_size) return false;
+    const requested_end = requested_base + requested_size;
+    const mapped_base = alignBackward(requested_base, large_page_size);
+    const mapped_end = alignForward(requested_end, large_page_size) orelse return false;
+    if (mapped_end <= mapped_base) return false;
+
+    const pml4 = tableAt(active_pml4_address);
+    var physical = mapped_base;
+    while (physical < mapped_end) : (physical += large_page_size) {
+        const pml4_index: usize = @intCast((physical >> 39) & 0x1FF);
+        const pdpt_index: usize = @intCast((physical >> 30) & 0x1FF);
+        const directory_index: usize = @intCast((physical >> 21) & 0x1FF);
+
+        const pml4_entry = pml4[pml4_index];
+        if ((pml4_entry & 1) == 0 or (pml4_entry & large_page_flag) != 0) return false;
+        const pdpt = tableAt(@intCast(pml4_entry & page_table_address_mask));
+        const pdpt_entry = pdpt[pdpt_index];
+        if ((pdpt_entry & 1) == 0 or (pdpt_entry & large_page_flag) != 0) return false;
+        const directory = tableAt(@intCast(pdpt_entry & page_table_address_mask));
+        const expected = physical | present_writable_large;
+        if ((directory[directory_index] & ~hardware_accessed_dirty_flags) != expected) return false;
+    }
+    return true;
 }
 
 pub const UserMapping = struct {

@@ -12,6 +12,7 @@ $debugLog = Join-Path $repoRoot 'qemu-debug.log'
 $serialLog = Join-Path $repoRoot 'qemu-serial.log'
 $qemuStdout = Join-Path $repoRoot 'qemu-stdout.log'
 $qemuStderr = Join-Path $repoRoot 'qemu-stderr.log'
+$nvmeImage = Join-Path $buildDir 'nvme-test.img'
 
 if (-not (Test-Path $efiImage)) {
     & (Join-Path $PSScriptRoot 'build.ps1')
@@ -50,6 +51,22 @@ Copy-Item $varsSource $varsImage -Force
 
 Remove-Item $debugLog, $serialLog, $qemuStdout, $qemuStderr -Force -ErrorAction SilentlyContinue
 $fatPath = $efiRoot.Replace('\', '/')
+$nvmeSector = [byte[]]::new(512)
+$nvmeMarker = [System.Text.Encoding]::ASCII.GetBytes('ZIGOS-NVME-LBA0!')
+[Array]::Copy($nvmeMarker, 0, $nvmeSector, 0, $nvmeMarker.Length)
+$nvmeSector[510] = 0x55
+$nvmeSector[511] = 0xAA
+$nvmeStream = [System.IO.File]::Open($nvmeImage, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+try {
+    $nvmeStream.SetLength(16MB)
+    $nvmeStream.Position = 0
+    $nvmeStream.Write($nvmeSector, 0, $nvmeSector.Length)
+    $nvmeStream.Flush()
+}
+finally {
+    $nvmeStream.Dispose()
+}
+$nvmePath = $nvmeImage.Replace('\', '/')
 $codePath = $codeImage.Replace('\', '/')
 $varsPath = $varsImage.Replace('\', '/')
 $debugPath = $debugLog.Replace('\', '/')
@@ -68,6 +85,8 @@ $arguments = @(
     '-smp', '4',
     '-device', 'qemu-xhci,id=xhci',
     '-device', 'usb-kbd,bus=xhci.0,port=1',
+    '-drive', "file=$nvmePath,if=none,id=nvme0,format=raw,cache=unsafe",
+    '-device', 'nvme,drive=nvme0,serial=ZIGOSNVME',
     '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$codePath",
     '-drive', "if=pflash,format=raw,unit=1,file=$varsPath",
     '-drive', "format=raw,file=fat:rw:$fatPath",
@@ -329,7 +348,7 @@ if (-not $output.Contains('PCI inventory:')) {
 if (-not $output.Contains('PCI function ')) {
     throw 'No enumerated PCI function was printed.'
 }
-if (-not [regex]::IsMatch($output, 'xHCI controller discovered at [0-9A-F]{4}:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], vendor 0x[0-9A-F]{4}, device 0x[0-9A-F]{4}, MMIO 0x000000C000000000, sparse identity map 0x000000C000000000 \+ 2097152 bytes using [12] new table page\(s\)')) {
+if (-not [regex]::IsMatch($output, 'xHCI controller discovered at [0-9A-F]{4}:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], vendor 0x[0-9A-F]{4}, device 0x[0-9A-F]{4}, MMIO 0x[0-9A-F]{16}, sparse identity map 0x[0-9A-F]{16} \+ 2097152 bytes using [12] new table page\(s\)')) {
     throw 'The PCI xHCI controller and BAR discovery marker was not observed.'
 }
 if (-not [regex]::IsMatch($output, 'xHCI capabilities: version [0-9]+\.[0-9A-F]{2}, [1-9][0-9]* slots, [1-9][0-9]* interrupters, [1-9][0-9]* ports, (32|64)-bit addressing, (32|64)-byte contexts, doorbells \+0x[0-9A-F]{16}, runtime \+0x[0-9A-F]{16}')) {
@@ -446,6 +465,34 @@ if (-not [regex]::IsMatch($output, 'Framebuffer history shell: cursor row 8, col
 if (-not [regex]::IsMatch($output, 'ZigOs shell session complete: valid, clear, unknown, empty, recovery, history; commands 10, reports [1-9][0-9]*, rejected 0')) {
     throw 'The persistent native shell history-recovery marker was not observed.'
 }
+if (-not [regex]::IsMatch($output, 'NVMe controller active at [0-9A-F]{4}:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], vendor 0x[0-9A-F]{4}, device 0x[0-9A-F]{4}, BAR 0x[0-9A-F]{16}')) {
+    throw 'The NVMe PCI function and BAR marker was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'NVMe capabilities: version [0-9]+\.[0-9]+\.[0-9]+, CAP 0x[0-9A-F]{16}, max queue entries [2-9][0-9]*, doorbell stride [1-9][0-9]*, timeout units [0-9]+')) {
+    throw 'The NVMe controller capability-register marker was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'NVMe MMIO mapping: 0x000000C000000000 \+ 2097152 bytes using 0 new table page\(s\)')) {
+    throw 'The NVMe sparse MMIO mapping marker was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'NVMe identity: model "[^"]+", serial "ZIGOSNVME", firmware "[^"]+", namespaces [1-9][0-9]*')) {
+    throw 'The NVMe Identify Controller result was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'NVMe namespace [1-9][0-9]*: [1-9][0-9]* LBA\(s\), capacity [1-9][0-9]* LBA\(s\) x 512 bytes = [1-9][0-9]* bytes, metadata 0')) {
+    throw 'The NVMe Identify Namespace geometry was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'NVMe queues active: admin SQ 0x[0-9A-F]{16}, admin CQ 0x[0-9A-F]{16}, I/O SQ 0x[0-9A-F]{16}, I/O CQ 0x[0-9A-F]{16}, depth 16')) {
+    throw 'The ZigOs-owned NVMe admin and I/O queues were not observed.'
+}
+if (-not [regex]::IsMatch($output, 'NVMe READ completed: namespace [1-9][0-9]*, LBA 0, 512 bytes at 0x[0-9A-F]{16}')) {
+    throw 'The read-only NVMe LBA 0 command was not observed.'
+}
+if (-not $output.Contains('NVMe LBA 0 first 16 bytes: 5A 49 47 4F 53 2D 4E 56 4D 45 2D 4C 42 41 30 21')) {
+    throw 'The deterministic NVMe LBA 0 payload was not read correctly.'
+}
+if (-not [regex]::IsMatch($output, 'NVMe LBA 0 FNV-1a64: 0x2E2FDEB78EF436CC, trailing signature 0xAA55')) {
+    throw 'The NVMe LBA 0 fingerprint and trailing signature were not observed.'
+}
+
 if (-not $output.Contains('AHCI controller active at')) {
     throw 'The AHCI PCI/BAR discovery marker was not observed.'
 }

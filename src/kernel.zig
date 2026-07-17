@@ -13,6 +13,7 @@ const pit = @import("pit.zig");
 const ps2 = @import("ps2.zig");
 const pci = @import("pci.zig");
 const ahci = @import("ahci.zig");
+const nvme = @import("nvme.zig");
 const partition = @import("partition.zig");
 const fat = @import("fat.zig");
 const pe = @import("pe.zig");
@@ -123,6 +124,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
 
     const pci_inventory = enumeratePci(acpi_info);
     inspectXhci(pci_inventory, &frame_allocator, &graphical_console);
+    inspectNvme(pci_inventory, &frame_allocator);
     inspectAhci(pci_inventory, &frame_allocator);
     initializeKernelHeap(&frame_allocator);
     testCooperativeScheduler(&frame_allocator);
@@ -1792,6 +1794,166 @@ fn runUsbShell(
 
 fn xhciFailure(reason: []const u8) noreturn {
     debugWrite("xHCI discovery failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void {
+    var controller_function: ?pci.Function = null;
+    for (inventory.functions[0..inventory.retained_count]) |function| {
+        if (function.class_code == 0x01 and function.subclass == 0x08 and function.programming_interface == 0x02) {
+            controller_function = function;
+            break;
+        }
+    }
+
+    const function = controller_function orelse {
+        debugWrite("NVMe controller not present; continuing without NVMe storage\r\n");
+        return;
+    };
+    var controller = nvme.initialize(function, allocator) orelse {
+        debugWrite("NVMe initialization diagnostics: BAR 0x");
+        debugWriteHex64(nvme.last_bar);
+        debugWrite(", mapping present ");
+        debugWrite(if (nvme.last_mapping_present) "yes" else "no");
+        debugWrite(", stage ");
+        debugWrite(nvmeFailureStageName(nvme.last_failure_stage));
+        debugWrite(", opcode 0x");
+        debugWriteHex8(nvme.last_command_opcode);
+        debugWrite(", completion status 0x");
+        debugWriteHex16(nvme.last_completion_status);
+        debugWrite(", CID ");
+        debugWriteU64Decimal(nvme.last_completion_command_id);
+        debugWrite(", SQID ");
+        debugWriteU64Decimal(nvme.last_completion_queue_id);
+        debugWrite(", CSTS 0x");
+        debugWriteHex64(nvme.last_controller_status);
+        debugWrite(", CC 0x");
+        debugWriteHex64(nvme.last_controller_configuration);
+        debugWrite("\r\n");
+        nvmeFailure("controller reset, admin queue, or Identify command failed");
+    };
+
+    debugWrite("NVMe controller active at ");
+    debugWriteHex16(function.segment);
+    debugWrite(":");
+    debugWriteHex8(function.bus);
+    debugWrite(":");
+    debugWriteHex8(function.device);
+    debugWrite(".");
+    debugWriteU64Decimal(function.function);
+    debugWrite(", vendor 0x");
+    debugWriteHex16(function.vendor_id);
+    debugWrite(", device 0x");
+    debugWriteHex16(function.device_id);
+    debugWrite(", BAR 0x");
+    debugWriteHex64(@intCast(controller.bar));
+    debugWrite("\r\n");
+
+    debugWrite("NVMe capabilities: version ");
+    debugWriteU64Decimal(controller.version >> 16);
+    debugWrite(".");
+    debugWriteU64Decimal((controller.version >> 8) & 0xFF);
+    debugWrite(".");
+    debugWriteU64Decimal(controller.version & 0xFF);
+    debugWrite(", CAP 0x");
+    debugWriteHex64(controller.capabilities);
+    debugWrite(", max queue entries ");
+    debugWriteU64Decimal(controller.maximum_queue_entries);
+    debugWrite(", doorbell stride ");
+    debugWriteU64Decimal(controller.doorbell_stride);
+    debugWrite(", timeout units ");
+    debugWriteU64Decimal(controller.timeout_units);
+    debugWrite("\r\n");
+
+    debugWrite("NVMe MMIO mapping: 0x");
+    debugWriteHex64(controller.mapped_base);
+    debugWrite(" + ");
+    debugWriteU64Decimal(controller.mapped_bytes);
+    debugWrite(" bytes using ");
+    debugWriteU64Decimal(controller.mapping_table_pages);
+    debugWrite(" new table page(s)\r\n");
+
+    debugWrite("NVMe identity: model \"");
+    debugWrite(nvme.terminatedSlice(&controller.model_number));
+    debugWrite("\", serial \"");
+    debugWrite(nvme.terminatedSlice(&controller.serial_number));
+    debugWrite("\", firmware \"");
+    debugWrite(nvme.terminatedSlice(&controller.firmware_revision));
+    debugWrite("\", namespaces ");
+    debugWriteU64Decimal(controller.namespace_count);
+    debugWrite("\r\n");
+
+    debugWrite("NVMe namespace ");
+    debugWriteU64Decimal(controller.namespace_id);
+    debugWrite(": ");
+    debugWriteU64Decimal(controller.namespace_size_lbas);
+    debugWrite(" LBA(s), capacity ");
+    debugWriteU64Decimal(controller.namespace_capacity_lbas);
+    debugWrite(" LBA(s) x ");
+    debugWriteU64Decimal(controller.logical_block_size);
+    debugWrite(" bytes = ");
+    debugWriteU64Decimal(controller.capacity_bytes);
+    debugWrite(" bytes, metadata ");
+    debugWriteU64Decimal(controller.metadata_size);
+    debugWrite("\r\n");
+
+    debugWrite("NVMe queues active: admin SQ 0x");
+    debugWriteHex64(@intCast(controller.admin_queue.submission_address));
+    debugWrite(", admin CQ 0x");
+    debugWriteHex64(@intCast(controller.admin_queue.completion_address));
+    debugWrite(", I/O SQ 0x");
+    debugWriteHex64(@intCast(controller.io_queue.submission_address));
+    debugWrite(", I/O CQ 0x");
+    debugWriteHex64(@intCast(controller.io_queue.completion_address));
+    debugWrite(", depth ");
+    debugWriteU64Decimal(controller.io_queue.depth);
+    debugWrite("\r\n");
+
+    const block_zero = nvme.readOneBlock(&controller, allocator, 0) orelse
+        nvmeFailure("read-only NVM Read command for LBA 0 failed");
+    debugWrite("NVMe READ completed: namespace ");
+    debugWriteU64Decimal(block_zero.namespace_id);
+    debugWrite(", LBA ");
+    debugWriteU64Decimal(block_zero.lba);
+    debugWrite(", ");
+    debugWriteU64Decimal(block_zero.byte_count);
+    debugWrite(" bytes at 0x");
+    debugWriteHex64(@intCast(block_zero.buffer_address));
+    debugWrite("\r\n");
+    debugWrite("NVMe LBA 0 first 16 bytes:");
+    for (block_zero.first_bytes) |byte| {
+        debugWrite(" ");
+        debugWriteHex8(byte);
+    }
+    debugWrite("\r\nNVMe LBA 0 FNV-1a64: 0x");
+    debugWriteHex64(block_zero.fnv1a64);
+    debugWrite(", trailing signature 0x");
+    debugWriteHex16(block_zero.trailing_signature);
+    debugWrite("\r\n");
+}
+
+fn nvmeFailureStageName(stage: nvme.FailureStage) []const u8 {
+    return switch (stage) {
+        .none => "none",
+        .pci_command => "pci-command",
+        .bar => "bar",
+        .mapping => "mapping",
+        .capabilities => "capabilities",
+        .disable => "disable",
+        .allocation => "allocation",
+        .enable => "enable",
+        .identify_controller => "identify-controller",
+        .namespace_list => "namespace-list",
+        .identify_namespace => "identify-namespace",
+        .create_io_queues => "create-io-queues",
+        .io_read => "io-read",
+    };
+}
+
+fn nvmeFailure(reason: []const u8) noreturn {
+    debugWrite("NVMe failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();

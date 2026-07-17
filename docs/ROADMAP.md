@@ -131,3 +131,14 @@
 - [x] Separate content and displayed-pixel checksums preserving transcript regressions
 - [x] Single-entry command history retained across valid, invalid, and empty commands
 - [x] USB HID Up-arrow recall redrawn and executed through the normal shell path
+
+
+## 1.0 - NVMe storage
+
+- [x] PCI class 01:08:02 discovery and 32/64-bit BAR decoding
+- [x] Sparse high-MMIO mapping and PCI memory/bus-master enablement
+- [x] Controller reset and ZigOs-owned admin submission/completion queues
+- [x] Identify Controller and active-namespace discovery
+- [x] Identify Namespace geometry and logical-block-size validation
+- [x] ZigOs-owned I/O submission/completion queues
+- [x] Read-only NVM Read command for LBA 0 with deterministic QEMU payload verification
