@@ -102,3 +102,10 @@
 - [x] Device-independent ordered keyboard event queue
 - [x] PS/2 Set-1 make/break translation through the common queue
 - [x] HID usage-to-ASCII translation proof
+
+## 0.8 - Native shell
+
+- [x] Line-buffered command parser driven by keyboard events
+- [x] Repeated xHCI report rearming during interactive input
+- [x] Native `help`, `cpu` and `mem` command dispatch
+- [x] QEMU-injected end-to-end `help` command proof

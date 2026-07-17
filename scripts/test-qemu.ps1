@@ -87,6 +87,8 @@ $marker = 'ZigOs boot sequence complete'
 $captured = $false
 $keyInjected = $false
 $inputMarker = 'HID input transfer armed:'
+$shellInjected = $false
+$shellMarker = 'ZigOs shell input armed:'
 
 try {
     while ((Get-Date) -lt $deadline) {
@@ -104,6 +106,26 @@ try {
                     Start-Sleep -Milliseconds 50
                     $writer.WriteLine('sendkey a 500')
                     $keyInjected = $true
+                    $writer.Dispose()
+                }
+                finally {
+                    $client.Dispose()
+                }
+            }
+            if ($text -and $keyInjected -and -not $shellInjected -and $text.Contains($shellMarker)) {
+                $client = [System.Net.Sockets.TcpClient]::new()
+                try {
+                    $client.Connect('127.0.0.1', $monitorPort)
+                    $stream = $client.GetStream()
+                    $writer = [System.IO.StreamWriter]::new($stream, [System.Text.Encoding]::ASCII)
+                    $writer.NewLine = "`n"
+                    $writer.AutoFlush = $true
+                    Start-Sleep -Milliseconds 50
+                    foreach ($key in @('h', 'e', 'l', 'p', 'ret')) {
+                        $writer.WriteLine("sendkey $key 120")
+                        Start-Sleep -Milliseconds 180
+                    }
+                    $shellInjected = $true
                     $writer.Dispose()
                 }
                 finally {
@@ -376,6 +398,21 @@ if (-not [regex]::IsMatch($output, 'USB keyboard input verified: HID usage 0x04 
 }
 if (-not $output.Contains("Keyboard event queue verified: #1 USB usage 0x04 pressed -> 'a'; #2 USB usage 0x04 released -> 'a'; dropped 0")) {
     throw 'The ordered device-independent keyboard event queue marker was not observed.'
+}
+if (-not $shellInjected) {
+    throw 'The QEMU HMP harness never typed the help command after the shell arm marker.'
+}
+if (-not $output.Contains('ZigOs shell input armed: commands help cpu mem; waiting for QEMU command')) {
+    throw 'The native ZigOs shell input marker was not observed.'
+}
+if (-not $output.Contains('zigos> help')) {
+    throw 'The native shell did not echo the injected help command.'
+}
+if (-not $output.Contains('commands: help cpu mem')) {
+    throw 'The native shell help response was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'ZigOs shell command complete: help -> commands: help cpu mem; reports [1-9][0-9]*, rejected 0')) {
+    throw 'The native shell command-dispatch verification marker was not observed.'
 }
 if (-not $output.Contains('AHCI controller active at')) {
     throw 'The AHCI PCI/BAR discovery marker was not observed.'

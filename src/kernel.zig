@@ -23,6 +23,7 @@ const user_mode = @import("user_mode.zig");
 const xhci = @import("xhci.zig");
 const smp = @import("smp.zig");
 const serial = @import("serial.zig");
+const shell = @import("shell.zig");
 const hpet = @import("hpet.zig");
 
 const cc = std.os.uefi.cc;
@@ -1537,6 +1538,64 @@ fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWriteHex64(release_report.event_trb_pointer);
     debugWrite("\r\n");
     debugWrite("Keyboard event queue verified: #1 USB usage 0x04 pressed -> 'a'; #2 USB usage 0x04 released -> 'a'; dropped 0\r\n");
+    runUsbShell(controller, &ownership, &mutable_hid_endpoint, allocator);
+}
+
+fn runUsbShell(
+    controller: xhci.Controller,
+    ownership: *xhci.Ownership,
+    endpoint: *xhci.HidEndpoint,
+    allocator: *memory.FrameAllocator,
+) void {
+    var command_shell = shell.Shell.init();
+    var previous_keys = std.mem.zeroes([6]u8);
+    var previous_modifiers: u8 = 0;
+    var report_count: u32 = 0;
+    var marker_printed = false;
+
+    while (report_count < 64) : (report_count += 1) {
+        const arm = xhci.armNextHidKeyboardInput(
+            controller,
+            endpoint,
+            allocator,
+        ) orelse xhciFailure("shell HID input transfer could not be armed");
+        if (!marker_printed) {
+            debugWrite("ZigOs shell input armed: commands help cpu mem; waiting for QEMU command\r\n");
+            marker_printed = true;
+        }
+        const report = xhci.waitHidKeyboardInput(controller, ownership, arm) orelse
+            xhciFailure("shell HID input transfer did not complete");
+        var event_queue = keyboard_input.Queue.init();
+        _ = event_queue.applyHidReport(
+            &previous_keys,
+            &previous_modifiers,
+            report.modifier,
+            report.keys,
+        );
+        while (event_queue.pop()) |event| {
+            if (command_shell.feed(event)) |response| {
+                if (response == .empty) continue;
+                const command = command_shell.executedCommand();
+                const response_text = shell.Shell.responseText(response);
+                debugWrite("zigos> ");
+                debugWrite(command);
+                debugWrite("\r\n");
+                debugWrite(response_text);
+                debugWrite("\r\n");
+                if (response != .help or !std.mem.eql(u8, command, "help") or
+                    !std.mem.eql(u8, response_text, "commands: help cpu mem") or
+                    command_shell.command_count != 1 or command_shell.rejected_characters != 0)
+                {
+                    xhciFailure("native shell command parsing or dispatch validation failed");
+                }
+                debugWrite("ZigOs shell command complete: help -> commands: help cpu mem; reports ");
+                debugWriteU64Decimal(report_count + 1);
+                debugWrite(", rejected 0\r\n");
+                return;
+            }
+        }
+    }
+    xhciFailure("native shell did not receive a complete command within 64 reports");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {
