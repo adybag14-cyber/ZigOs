@@ -227,8 +227,11 @@ if (-not $output.Contains('IOAPIC redirection table fully masked:')) {
 if (-not [regex]::IsMatch($output, 'External IRQ routed: ISA IRQ 0 -> GSI 2 -> vector 0x44, BSP APIC 0, PIT divisor [1-9][0-9]*, count 1, active-high, edge, remasked after EOI')) {
     throw 'The MADT/IOAPIC/PIT external IRQ0 round trip was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'PS/2 keyboard IRQ verified: ISA IRQ 1 -> GSI 1 -> vector 0x45, injected scan code 0x1E, captured 0x1E, count 1, command byte 0x[0-9A-F]{2}, remasked and restored after EOI')) {
+if (-not [regex]::IsMatch($output, 'PS/2 keyboard IRQ verified: ISA IRQ 1 -> GSI 1 -> vector 0x45, make 0x1E, break 0x9E, count 2, command byte 0x[0-9A-F]{2}, remasked and restored after EOI')) {
     throw 'The i8042/IOAPIC PS/2 keyboard IRQ and scan-code capture were not observed.'
+}
+if (-not $output.Contains("PS/2 event queue verified: #1 usage 0x04 pressed -> 'a'; #2 usage 0x04 released -> 'a'; dropped 0")) {
+    throw 'The PS/2 make/break translation through the common keyboard queue was not observed.'
 }
 if (-not $output.Contains('HPET active:')) {
     throw 'The HPET initialization marker was not observed.'

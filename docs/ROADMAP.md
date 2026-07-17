@@ -100,4 +100,5 @@
 - [x] Reusable xHCI interrupt-IN report rearming
 - [x] HID key press and release transition detection
 - [x] Device-independent ordered keyboard event queue
+- [x] PS/2 Set-1 make/break translation through the common queue
 - [x] HID usage-to-ASCII translation proof

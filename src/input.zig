@@ -70,6 +70,19 @@ pub const Queue = struct {
         return event;
     }
 
+    pub fn applyPs2Set1(self: *Queue, scan_code: u8) bool {
+        if (scan_code == 0xE0 or scan_code == 0xE1) return false;
+        const released = (scan_code & 0x80) != 0;
+        const make_code = scan_code & 0x7F;
+        const usage = ps2Set1ToHidUsage(make_code) orelse return false;
+        return self.push(
+            .ps2,
+            if (released) .released else .pressed,
+            usage,
+            0,
+        );
+    }
+
     pub fn applyHidReport(
         self: *Queue,
         previous_keys: *[6]u8,
@@ -123,6 +136,55 @@ pub fn usageToAscii(usage: u8, modifiers: u8) u8 {
         0x37 => if (shifted) '>' else '.',
         0x38 => if (shifted) '?' else '/',
         else => 0,
+    };
+}
+
+fn ps2Set1ToHidUsage(make_code: u8) ?u8 {
+    return switch (make_code) {
+        0x1E => 0x04,
+        0x30 => 0x05,
+        0x2E => 0x06,
+        0x20 => 0x07,
+        0x12 => 0x08,
+        0x21 => 0x09,
+        0x22 => 0x0A,
+        0x23 => 0x0B,
+        0x17 => 0x0C,
+        0x24 => 0x0D,
+        0x25 => 0x0E,
+        0x26 => 0x0F,
+        0x32 => 0x10,
+        0x31 => 0x11,
+        0x18 => 0x12,
+        0x19 => 0x13,
+        0x10 => 0x14,
+        0x13 => 0x15,
+        0x1F => 0x16,
+        0x14 => 0x17,
+        0x16 => 0x18,
+        0x2F => 0x19,
+        0x11 => 0x1A,
+        0x2D => 0x1B,
+        0x15 => 0x1C,
+        0x2C => 0x1D,
+        0x02...0x0A => 0x1E + (make_code - 0x02),
+        0x0B => 0x27,
+        0x1C => 0x28,
+        0x0E => 0x2A,
+        0x0F => 0x2B,
+        0x39 => 0x2C,
+        0x0C => 0x2D,
+        0x0D => 0x2E,
+        0x1A => 0x2F,
+        0x1B => 0x30,
+        0x2B => 0x31,
+        0x27 => 0x33,
+        0x28 => 0x34,
+        0x29 => 0x35,
+        0x33 => 0x36,
+        0x34 => 0x37,
+        0x35 => 0x38,
+        else => null,
     };
 }
 

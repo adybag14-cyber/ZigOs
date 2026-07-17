@@ -672,12 +672,22 @@ fn testPs2KeyboardIrq(
         flags,
     ) orelse ioApicFailure("IOAPIC keyboard IRQ route programming or readback failed");
     if (!ps2.injectKeyboardScanCode(injected_scan_code)) {
-        ioApicFailure("i8042 keyboard output-buffer injection failed");
+        ioApicFailure("i8042 keyboard make-code injection failed");
     }
     ps2.waitForInterrupt();
     if (ps2.count() != 1 or ps2.scanCode() != injected_scan_code) {
-        ioApicFailure("PS/2 keyboard interrupt did not return the injected scan code");
+        ioApicFailure("PS/2 keyboard make interrupt did not return scan code 0x1E");
     }
+    const captured_make = ps2.scanCode();
+    const injected_break_code: u8 = injected_scan_code | 0x80;
+    if (!ps2.injectKeyboardScanCode(injected_break_code)) {
+        ioApicFailure("i8042 keyboard break-code injection failed");
+    }
+    ps2.waitForInterrupt();
+    if (ps2.count() != 2 or ps2.scanCode() != injected_break_code) {
+        ioApicFailure("PS/2 keyboard break interrupt did not return scan code 0x9E");
+    }
+    const captured_break = ps2.scanCode();
     if (!ioapic.mask(information, global_system_interrupt)) {
         ioApicFailure("IOAPIC keyboard route could not be remasked after EOI");
     }
@@ -685,19 +695,40 @@ fn testPs2KeyboardIrq(
         ioApicFailure("i8042 configuration byte could not be restored");
     }
 
+    var event_queue = keyboard_input.Queue.init();
+    if (!event_queue.applyPs2Set1(captured_make) or
+        !event_queue.applyPs2Set1(captured_break) or
+        event_queue.count() != 2 or event_queue.dropped != 0)
+    {
+        ioApicFailure("PS/2 make/break codes did not enter the common keyboard queue");
+    }
+    const press_event = event_queue.pop() orelse
+        ioApicFailure("PS/2 press event was missing from the common queue");
+    const release_event = event_queue.pop() orelse
+        ioApicFailure("PS/2 release event was missing from the common queue");
+    if (press_event.sequence != 1 or press_event.source != .ps2 or
+        press_event.action != .pressed or press_event.usage != 0x04 or press_event.ascii != 'a' or
+        release_event.sequence != 2 or release_event.source != .ps2 or
+        release_event.action != .released or release_event.usage != 0x04 or release_event.ascii != 'a' or
+        event_queue.pop() != null)
+    {
+        ioApicFailure("PS/2 keyboard event translation or ordering failed");
+    }
+
     debugWrite("PS/2 keyboard IRQ verified: ISA IRQ 1 -> GSI ");
     debugWriteU64Decimal(route.global_system_interrupt);
     debugWrite(" -> vector 0x");
     debugWriteHex8(route.vector);
-    debugWrite(", injected scan code 0x");
-    debugWriteHex8(injected_scan_code);
-    debugWrite(", captured 0x");
-    debugWriteHex8(ps2.scanCode());
+    debugWrite(", make 0x");
+    debugWriteHex8(captured_make);
+    debugWrite(", break 0x");
+    debugWriteHex8(captured_break);
     debugWrite(", count ");
     debugWriteU64Decimal(ps2.count());
     debugWrite(", command byte 0x");
     debugWriteHex8(configuration.active);
     debugWrite(", remasked and restored after EOI\r\n");
+    debugWrite("PS/2 event queue verified: #1 usage 0x04 pressed -> 'a'; #2 usage 0x04 released -> 'a'; dropped 0\r\n");
 }
 
 fn ioApicFailure(reason: []const u8) noreturn {
