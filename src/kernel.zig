@@ -1157,7 +1157,7 @@ fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWriteU64Decimal(controller.connected_port_count);
     debugWrite(" connected xHCI port(s); read-only discovery complete\r\n");
 
-    const ownership = xhci.takeOwnership(controller, allocator) orelse
+    var ownership = xhci.takeOwnership(controller, allocator) orelse
         xhciFailure("controller reset, ring installation, or Enable Slot completion failed");
     debugWrite("xHCI ownership active: DCBAA 0x");
     debugWriteHex64(@intCast(ownership.dcbaa_address));
@@ -1184,6 +1184,61 @@ fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWriteU64Decimal(ownership.event_cycle);
     debugWrite(if (ownership.controller_running) ", controller running" else ", controller halted");
     debugWrite(if (ownership.legacy_handoff_performed) ", legacy handoff claimed\r\n" else ", no legacy handoff required\r\n");
+    const addressed = xhci.addressConnectedDevice(controller, &ownership, allocator) orelse {
+        const diagnostic = xhci.address_diagnostics;
+        debugWrite("xHCI Address Device failure: stage ");
+        debugWrite(xhci.addressStageName(diagnostic.stage));
+        debugWrite(", port ");
+        debugWriteU64Decimal(diagnostic.port_number);
+        debugWrite(", PORTSC 0x");
+        debugWriteHex64(diagnostic.port_status);
+        debugWrite(", event type ");
+        debugWriteU64Decimal(diagnostic.event_type);
+        debugWrite(", completion ");
+        debugWriteU64Decimal(diagnostic.completion_code);
+        debugWrite(", event slot ");
+        debugWriteU64Decimal(diagnostic.event_slot_id);
+        debugWrite(", command pointer 0x");
+        debugWriteHex64(diagnostic.command_pointer);
+        debugWrite(", USB address ");
+        debugWriteU64Decimal(diagnostic.device_address);
+        debugWrite(", slot state ");
+        debugWriteU64Decimal(diagnostic.slot_state);
+        debugWrite(", EP0 state ");
+        debugWriteU64Decimal(diagnostic.endpoint0_state);
+        debugWrite("\r\n");
+        xhciFailure("port reset, device-context construction, or Address Device completion failed");
+    };
+    debugWrite("xHCI port reset complete: port ");
+    debugWriteU64Decimal(addressed.port_number);
+    debugWrite(", speed ID ");
+    debugWriteU64Decimal(addressed.port_speed_id);
+    debugWrite(", PORTSC 0x");
+    debugWriteHex64(addressed.reset_port_status);
+    debugWrite(", EP0 max packet ");
+    debugWriteU64Decimal(addressed.endpoint0_max_packet_size);
+    debugWrite(", skipped ");
+    debugWriteU64Decimal(addressed.skipped_port_status_events);
+    debugWrite(" port-status event(s)\r\n");
+    debugWrite("xHCI Address Device completed: slot ");
+    debugWriteU64Decimal(addressed.slot_id);
+    debugWrite(", USB address ");
+    debugWriteU64Decimal(addressed.device_address);
+    debugWrite(", slot state ");
+    debugWriteU64Decimal(addressed.slot_state);
+    debugWrite(", EP0 state ");
+    debugWriteU64Decimal(addressed.endpoint0_state);
+    debugWrite(", completion ");
+    debugWriteU64Decimal(addressed.completion_code);
+    debugWrite(", context size ");
+    debugWriteU64Decimal(addressed.context_size);
+    debugWrite(", device context 0x");
+    debugWriteHex64(@intCast(addressed.device_context_address));
+    debugWrite(", input context 0x");
+    debugWriteHex64(@intCast(addressed.input_context_address));
+    debugWrite(", EP0 ring 0x");
+    debugWriteHex64(@intCast(addressed.transfer_ring_address));
+    debugWrite("\r\n");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {

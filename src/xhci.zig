@@ -23,7 +23,9 @@ const trb_toggle_cycle: u32 = 1 << 1;
 const trb_type_shift: u5 = 10;
 const trb_type_link: u32 = 6;
 const trb_type_enable_slot: u32 = 9;
+const trb_type_address_device: u32 = 11;
 const trb_type_command_completion: u32 = 33;
+const trb_type_port_status_change: u32 = 34;
 const completion_success: u8 = 1;
 const event_handler_busy: u64 = 1 << 3;
 const legacy_capability_id: u8 = 1;
@@ -35,6 +37,19 @@ const operational_pagesize: usize = 0x08;
 const operational_crcr: usize = 0x18;
 const operational_dcbaap: usize = 0x30;
 const operational_config: usize = 0x38;
+const port_register_base: usize = 0x400;
+const port_register_stride: usize = 0x10;
+const portsc_current_connect_status: u32 = 1 << 0;
+const portsc_port_enabled: u32 = 1 << 1;
+const portsc_port_reset: u32 = 1 << 4;
+const portsc_port_power: u32 = 1 << 9;
+const portsc_speed_shift: u5 = 10;
+const portsc_indicator_mask: u32 = 0x3 << 14;
+const portsc_change_mask: u32 = 0x7F << 17;
+const portsc_wake_mask: u32 = 0x7 << 25;
+const endpoint_type_control: u32 = 4;
+const endpoint_error_count: u32 = 3;
+const address_device_command_type: u32 = 11;
 const interrupter0_offset: usize = 0x20;
 const interrupter_iman: usize = 0x00;
 const interrupter_imod: usize = 0x04;
@@ -72,6 +87,76 @@ pub const Ownership = struct {
     event_cycle: u1,
     controller_running: bool,
     legacy_handoff_performed: bool,
+    command_producer_index: u16,
+    event_consumer_index: u16,
+};
+
+pub const AddressStage = enum(u8) {
+    none,
+    port_selected,
+    port_reset,
+    contexts_ready,
+    command_submitted,
+    event_received,
+    output_context_read,
+    complete,
+};
+
+pub const AddressDiagnostics = struct {
+    stage: AddressStage,
+    port_number: u8,
+    port_status: u32,
+    event_type: u8,
+    completion_code: u8,
+    event_slot_id: u8,
+    command_pointer: u64,
+    device_address: u8,
+    slot_state: u5,
+    endpoint0_state: u3,
+};
+
+pub var address_diagnostics = AddressDiagnostics{
+    .stage = .none,
+    .port_number = 0,
+    .port_status = 0,
+    .event_type = 0,
+    .completion_code = 0,
+    .event_slot_id = 0,
+    .command_pointer = 0,
+    .device_address = 0,
+    .slot_state = 0,
+    .endpoint0_state = 0,
+};
+
+pub fn addressStageName(stage: AddressStage) []const u8 {
+    return switch (stage) {
+        .none => "none",
+        .port_selected => "port-selected",
+        .port_reset => "port-reset",
+        .contexts_ready => "contexts-ready",
+        .command_submitted => "command-submitted",
+        .event_received => "event-received",
+        .output_context_read => "output-context-read",
+        .complete => "complete",
+    };
+}
+
+pub const AddressedDevice = struct {
+    port_number: u8,
+    port_speed_id: u4,
+    slot_id: u8,
+    device_address: u8,
+    slot_state: u5,
+    endpoint0_state: u3,
+    endpoint0_max_packet_size: u16,
+    context_size: u8,
+    device_context_address: usize,
+    input_context_address: usize,
+    transfer_ring_address: usize,
+    completion_code: u8,
+    command_pointer: u64,
+    reset_port_status: u32,
+    skipped_port_status_events: u8,
 };
 
 pub const Port = struct {
@@ -310,7 +395,190 @@ pub fn takeOwnership(
         .event_cycle = @truncate(event.control),
         .controller_running = running,
         .legacy_handoff_performed = legacy_handoff_performed,
+        .command_producer_index = 1,
+        .event_consumer_index = 1,
     };
+}
+
+pub fn addressConnectedDevice(
+    controller: Controller,
+    ownership: *Ownership,
+    allocator: *memory.FrameAllocator,
+) ?AddressedDevice {
+    address_diagnostics = .{
+        .stage = .none,
+        .port_number = 0,
+        .port_status = 0,
+        .event_type = 0,
+        .completion_code = 0,
+        .event_slot_id = 0,
+        .command_pointer = 0,
+        .device_address = 0,
+        .slot_state = 0,
+        .endpoint0_state = 0,
+    };
+    const port = firstConnectedPort(controller) orelse return null;
+    address_diagnostics.stage = .port_selected;
+    address_diagnostics.port_number = port.number;
+    const operational_base = controller.base_address + controller.capability_length;
+    const doorbell_base = controller.base_address + controller.doorbell_offset;
+    const reset_port_status = resetPort(operational_base, port.number) orelse return null;
+    address_diagnostics.stage = .port_reset;
+    address_diagnostics.port_status = reset_port_status;
+    const speed_id: u4 = @truncate(reset_port_status >> portsc_speed_shift);
+    const max_packet_size = endpoint0MaxPacketSize(speed_id) orelse return null;
+    const context_size: usize = if (controller.context_size_64_bytes) 64 else 32;
+
+    const device_context_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    const input_context_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    const transfer_ring_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    clearPage(device_context_address);
+    clearPage(input_context_address);
+    clearPage(transfer_ring_address);
+
+    const transfer_ring = trbPage(transfer_ring_address);
+    const transfer_link = &transfer_ring[trbs_per_page - 1];
+    transfer_link.parameter = transfer_ring_address;
+    transfer_link.status = 0;
+    transfer_link.control = (trb_type_link << trb_type_shift) | trb_toggle_cycle | trb_cycle;
+
+    const dcbaa = @as([*]volatile u64, @ptrFromInt(ownership.dcbaa_address));
+    dcbaa[ownership.slot_id] = device_context_address;
+
+    const input_control = contextDwords(input_context_address);
+    input_control[0] = 0;
+    input_control[1] = 0x3;
+
+    const slot = contextDwords(input_context_address + context_size);
+    slot[0] = (@as(u32, speed_id) << 20) | (@as(u32, 1) << 27);
+    slot[1] = @as(u32, port.number) << 16;
+    slot[2] = 0;
+    slot[3] = 0;
+
+    const endpoint0 = contextDwords(input_context_address + 2 * context_size);
+    endpoint0[0] = 0;
+    endpoint0[1] = (@as(u32, endpoint_error_count) << 1) |
+        (@as(u32, endpoint_type_control) << 3) |
+        (@as(u32, max_packet_size) << 16);
+    endpoint0[2] = @truncate(@as(u64, @intCast(transfer_ring_address)) | 1);
+    endpoint0[3] = @truncate(@as(u64, @intCast(transfer_ring_address)) >> 32);
+    endpoint0[4] = 8;
+    zigos_memory_fence();
+    address_diagnostics.stage = .contexts_ready;
+
+    if (ownership.command_producer_index >= trbs_per_page - 1 or
+        ownership.event_consumer_index >= trbs_per_page)
+    {
+        return null;
+    }
+    const command_address = ownership.command_ring_address +
+        @as(usize, ownership.command_producer_index) * @sizeOf(Trb);
+    const command: *volatile Trb = @ptrFromInt(command_address);
+    command.parameter = input_context_address;
+    command.status = 0;
+    command.control = (address_device_command_type << trb_type_shift) |
+        (@as(u32, ownership.slot_id) << 24) |
+        ownership.event_cycle;
+    zigos_memory_fence();
+    write32(doorbell_base, 0, 0);
+    address_diagnostics.stage = .command_submitted;
+
+    const completion = waitForCommandCompletion(
+        controller,
+        ownership,
+        command_address,
+        ownership.slot_id,
+    ) orelse return null;
+    const event = completion.event;
+    const event_type = (event.control >> trb_type_shift) & 0x3F;
+    const completion_code: u8 = @truncate(event.status >> 24);
+    const event_slot_id: u8 = @truncate(event.control >> 24);
+    const command_pointer = event.parameter & ~@as(u64, 0xF);
+    address_diagnostics.stage = .event_received;
+    address_diagnostics.event_type = @truncate(event_type);
+    address_diagnostics.completion_code = completion_code;
+    address_diagnostics.event_slot_id = event_slot_id;
+    address_diagnostics.command_pointer = command_pointer;
+    ownership.command_producer_index += 1;
+    zigos_memory_fence();
+
+    const device_slot = contextDwords(device_context_address);
+    const device_endpoint0 = contextDwords(device_context_address + context_size);
+    const device_address: u8 = @truncate(device_slot[3]);
+    const slot_state: u5 = @truncate(device_slot[3] >> 27);
+    const endpoint0_state: u3 = @truncate(device_endpoint0[0]);
+    address_diagnostics.stage = .output_context_read;
+    address_diagnostics.device_address = device_address;
+    address_diagnostics.slot_state = slot_state;
+    address_diagnostics.endpoint0_state = endpoint0_state;
+    if (device_address == 0 or slot_state < 2 or endpoint0_state == 0) return null;
+
+    address_diagnostics.stage = .complete;
+    return .{
+        .port_number = port.number,
+        .port_speed_id = speed_id,
+        .slot_id = ownership.slot_id,
+        .device_address = device_address,
+        .slot_state = slot_state,
+        .endpoint0_state = endpoint0_state,
+        .endpoint0_max_packet_size = max_packet_size,
+        .context_size = @intCast(context_size),
+        .device_context_address = device_context_address,
+        .input_context_address = input_context_address,
+        .transfer_ring_address = transfer_ring_address,
+        .completion_code = completion_code,
+        .command_pointer = command_pointer,
+        .reset_port_status = reset_port_status,
+        .skipped_port_status_events = completion.skipped_port_status_events,
+    };
+}
+
+fn firstConnectedPort(controller: Controller) ?Port {
+    for (controller.ports[0..controller.retained_port_count]) |port| {
+        if (port.connected) return port;
+    }
+    return null;
+}
+
+fn resetPort(operational_base: usize, port_number: u8) ?u32 {
+    if (port_number == 0) return null;
+    const offset = port_register_base +
+        (@as(usize, port_number) - 1) * port_register_stride;
+    const current = read32(operational_base, offset);
+    if ((current & portsc_current_connect_status) == 0) return null;
+    var reset_value = current & (portsc_port_power | portsc_indicator_mask | portsc_wake_mask);
+    reset_value |= portsc_port_reset;
+    write32(operational_base, offset, reset_value);
+
+    var polls: usize = 0;
+    while (polls < maximum_poll_count) : (polls += 1) {
+        const value = read32(operational_base, offset);
+        if ((value & portsc_current_connect_status) == 0) return null;
+        if ((value & portsc_port_reset) == 0 and (value & portsc_port_enabled) != 0) {
+            const clear_changes = value & portsc_change_mask;
+            if (clear_changes != 0) {
+                const preserved = value & (portsc_port_power | portsc_indicator_mask | portsc_wake_mask);
+                write32(operational_base, offset, preserved | clear_changes);
+            }
+            return value;
+        }
+        zigos_cpu_relax();
+    }
+    return null;
+}
+
+fn endpoint0MaxPacketSize(speed_id: u4) ?u16 {
+    return switch (speed_id) {
+        1 => 64,
+        2 => 8,
+        3 => 64,
+        4 => 512,
+        else => null,
+    };
+}
+
+fn contextDwords(address: usize) [*]volatile u32 {
+    return @ptrFromInt(address);
 }
 
 fn claimLegacyOwnership(controller: Controller) ?bool {
@@ -365,6 +633,68 @@ fn resetController(operational_base: usize) bool {
         usbsts_controller_not_ready,
         false,
     );
+}
+
+const CommandCompletion = struct {
+    event: Trb,
+    skipped_port_status_events: u8,
+};
+
+fn waitForCommandCompletion(
+    controller: Controller,
+    ownership: *Ownership,
+    command_address: usize,
+    expected_slot_id: u8,
+) ?CommandCompletion {
+    var skipped_port_status_events: u8 = 0;
+    var events_seen: usize = 0;
+    while (events_seen < 32) : (events_seen += 1) {
+        const event = consumeEvent(controller, ownership) orelse return null;
+        const event_type = (event.control >> trb_type_shift) & 0x3F;
+        if (event_type == trb_type_port_status_change) {
+            skipped_port_status_events +|= 1;
+            continue;
+        }
+        if (event_type != trb_type_command_completion) return null;
+        const completion_code: u8 = @truncate(event.status >> 24);
+        const slot_id: u8 = @truncate(event.control >> 24);
+        const command_pointer = event.parameter & ~@as(u64, 0xF);
+        if (completion_code != completion_success or
+            slot_id != expected_slot_id or
+            command_pointer != command_address)
+        {
+            return null;
+        }
+        return .{
+            .event = event,
+            .skipped_port_status_events = skipped_port_status_events,
+        };
+    }
+    return null;
+}
+
+fn consumeEvent(controller: Controller, ownership: *Ownership) ?Trb {
+    if (ownership.event_consumer_index >= trbs_per_page) return null;
+    const event_address = ownership.event_ring_address +
+        @as(usize, ownership.event_consumer_index) * @sizeOf(Trb);
+    const event = waitForEvent(event_address, ownership.event_cycle) orelse return null;
+
+    ownership.event_consumer_index += 1;
+    if (ownership.event_consumer_index == trbs_per_page) {
+        ownership.event_consumer_index = 0;
+        ownership.event_cycle ^= 1;
+    }
+    const interrupter_base = controller.base_address +
+        controller.runtime_offset + interrupter0_offset;
+    const next_event_address = ownership.event_ring_address +
+        @as(usize, ownership.event_consumer_index) * @sizeOf(Trb);
+    write64(
+        interrupter_base,
+        interrupter_erdp,
+        @as(u64, @intCast(next_event_address)) | event_handler_busy,
+    );
+    zigos_memory_fence();
+    return event;
 }
 
 fn waitForEvent(event_ring_address: usize, expected_cycle: u1) ?Trb {

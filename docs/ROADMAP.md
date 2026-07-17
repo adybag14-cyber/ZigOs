@@ -56,7 +56,8 @@
 - [x] PS/2 keyboard IRQ and scan-code injection experiment
 - [x] xHCI capability and connected USB keyboard port discovery
 - [x] xHCI controller ownership, command/event rings and Enable Slot completion
-- [ ] xHCI port reset, Address Device and USB HID input transfers
+- [x] xHCI port reset, slot/EP0 context construction and Address Device completion
+- [ ] USB descriptor requests, HID endpoint configuration and input transfers
 
 ## 0.5 - Runtime
 
