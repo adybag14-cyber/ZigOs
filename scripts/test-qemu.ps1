@@ -7,7 +7,8 @@ param(
     [switch]$NoUsbKeyboard,
     [switch]$UsbMouseOnly,
     [switch]$NoGraphics,
-    [switch]$LegacyPci
+    [switch]$LegacyPci,
+    [switch]$Nvme4k
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +21,7 @@ $serialLog = Join-Path $repoRoot 'qemu-serial.log'
 $qemuStdout = Join-Path $repoRoot 'qemu-stdout.log'
 $qemuStderr = Join-Path $repoRoot 'qemu-stderr.log'
 $nvmeImage = Join-Path $buildDir 'nvme-test.img'
+$nvmeMetadataPath = Join-Path $buildDir 'nvme-test.json'
 
 if (-not (Test-Path $efiImage)) {
     & (Join-Path $PSScriptRoot 'build.ps1')
@@ -58,197 +60,13 @@ Copy-Item $varsSource $varsImage -Force
 
 Remove-Item $debugLog, $serialLog, $qemuStdout, $qemuStderr -Force -ErrorAction SilentlyContinue
 $fatPath = $efiRoot.Replace('\', '/')
-Add-Type -TypeDefinition @'
-namespace ZigOs {
-    public static class Crc32 {
-        public static uint Compute(byte[] data, int offset, int count) {
-            uint crc = 0xFFFFFFFFu;
-            for (int index = 0; index < count; index++) {
-                crc ^= data[offset + index];
-                for (int bit = 0; bit < 8; bit++) {
-                    uint mask = (uint)-(int)(crc & 1u);
-                    crc = (crc >> 1) ^ (0xEDB88320u & mask);
-                }
-            }
-            return ~crc;
-        }
-    }
+$nvmeBlockSize = if ($Nvme4k) { 4096 } else { 512 }
+$nvmeBuilder = Join-Path $PSScriptRoot 'create-nvme-test-image.py'
+& python $nvmeBuilder --output $nvmeImage --efi $efiImage --block-size $nvmeBlockSize --metadata $nvmeMetadataPath | Out-Null
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $nvmeMetadataPath)) {
+    throw "The deterministic NVMe test image builder failed for block size $nvmeBlockSize."
 }
-'@
-
-function Set-Le16([byte[]]$Buffer, [int]$Offset, [UInt16]$Value) {
-    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Buffer, $Offset, 2)
-}
-function Set-Le32([byte[]]$Buffer, [int]$Offset, [UInt32]$Value) {
-    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Buffer, $Offset, 4)
-}
-function Set-Le64([byte[]]$Buffer, [int]$Offset, [UInt64]$Value) {
-    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Buffer, $Offset, 8)
-}
-function Set-Fat16Entry([byte[]]$Fat, [UInt16]$Cluster, [UInt16]$Value) {
-    Set-Le16 $Fat ([int]$Cluster * 2) $Value
-}
-function Set-FatDirectoryEntry(
-    [byte[]]$Buffer,
-    [int]$Offset,
-    [string]$ShortName,
-    [byte]$Attributes,
-    [UInt16]$FirstCluster,
-    [UInt32]$FileSize
-) {
-    if ($ShortName.Length -ne 11) { throw "FAT short names must contain exactly 11 characters." }
-    [Array]::Copy([Text.Encoding]::ASCII.GetBytes($ShortName), 0, $Buffer, $Offset, 11)
-    $Buffer[$Offset + 11] = $Attributes
-    Set-Le16 $Buffer ($Offset + 20) 0
-    Set-Le16 $Buffer ($Offset + 26) $FirstCluster
-    Set-Le32 $Buffer ($Offset + 28) $FileSize
-}
-function New-GptHeader(
-    [UInt64]$CurrentLba,
-    [UInt64]$BackupLba,
-    [UInt64]$EntryLba,
-    [UInt32]$EntryArrayCrc,
-    [byte[]]$DiskGuid
-) {
-    [byte[]]$header = [byte[]]::new(512)
-    [Array]::Copy([Text.Encoding]::ASCII.GetBytes('EFI PART'), 0, $header, 0, 8)
-    Set-Le32 $header 8 0x00010000
-    Set-Le32 $header 12 92
-    Set-Le64 $header 24 $CurrentLba
-    Set-Le64 $header 32 $BackupLba
-    Set-Le64 $header 40 34
-    Set-Le64 $header 48 32734
-    [Array]::Copy($DiskGuid, 0, $header, 56, 16)
-    Set-Le64 $header 72 $EntryLba
-    Set-Le32 $header 80 128
-    Set-Le32 $header 84 128
-    Set-Le32 $header 88 $EntryArrayCrc
-    Set-Le32 $header 16 ([ZigOs.Crc32]::Compute($header, 0, 92))
-    return $header
-}
-
-[UInt64]$nvmeTotalSectors = 32768
-[UInt64]$nvmeLastLba = $nvmeTotalSectors - 1
-[UInt64]$primaryEntriesLba = 2
-[UInt64]$backupEntriesLba = 32735
-[UInt64]$partitionFirstLba = 2048
-[UInt64]$partitionLastLba = 32734
-[UInt32]$partitionSectors = [UInt32]($partitionLastLba - $partitionFirstLba + 1)
-
-[byte[]]$protectiveMbr = [byte[]]::new(512)
-[byte[]]$nvmeMarker = [Text.Encoding]::ASCII.GetBytes('ZIGOS-NVME-LBA0!')
-[Array]::Copy($nvmeMarker, 0, $protectiveMbr, 0, $nvmeMarker.Length)
-$protectiveMbr[446] = 0x00
-$protectiveMbr[447] = 0x00
-$protectiveMbr[448] = 0x02
-$protectiveMbr[449] = 0x00
-$protectiveMbr[450] = 0xEE
-$protectiveMbr[451] = 0xFF
-$protectiveMbr[452] = 0xFF
-$protectiveMbr[453] = 0xFF
-Set-Le32 $protectiveMbr 454 1
-Set-Le32 $protectiveMbr 458 ([UInt32]($nvmeTotalSectors - 1))
-$protectiveMbr[510] = 0x55
-$protectiveMbr[511] = 0xAA
-
-[byte[]]$partitionEntries = [byte[]]::new(128 * 128)
-[byte[]]$efiSystemGuid = 0x28,0x73,0x2A,0xC1,0x1F,0xF8,0xD2,0x11,0xBA,0x4B,0x00,0xA0,0xC9,0x3E,0xC9,0x3B
-[byte[]]$partitionGuid = 0x44,0x33,0x22,0x11,0x66,0x55,0x88,0x77,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xF0,0x01
-[Array]::Copy($efiSystemGuid, 0, $partitionEntries, 0, 16)
-[Array]::Copy($partitionGuid, 0, $partitionEntries, 16, 16)
-Set-Le64 $partitionEntries 32 $partitionFirstLba
-Set-Le64 $partitionEntries 40 $partitionLastLba
-[byte[]]$partitionName = [Text.Encoding]::Unicode.GetBytes('ZigOs NVMe FAT')
-[Array]::Copy($partitionName, 0, $partitionEntries, 56, $partitionName.Length)
-[UInt32]$partitionArrayCrc = [ZigOs.Crc32]::Compute($partitionEntries, 0, $partitionEntries.Length)
-
-[byte[]]$diskGuid = 0x78,0x56,0x34,0x12,0xBC,0x9A,0xF0,0xDE,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88
-[byte[]]$primaryHeader = New-GptHeader 1 $nvmeLastLba $primaryEntriesLba $partitionArrayCrc $diskGuid
-[byte[]]$backupHeader = New-GptHeader $nvmeLastLba 1 $backupEntriesLba $partitionArrayCrc $diskGuid
-
-[byte[]]$fatBootSector = [byte[]]::new(512)
-$fatBootSector[0] = 0xEB
-$fatBootSector[1] = 0x3C
-$fatBootSector[2] = 0x90
-[Array]::Copy([Text.Encoding]::ASCII.GetBytes('ZIGOS   '), 0, $fatBootSector, 3, 8)
-Set-Le16 $fatBootSector 11 512
-$fatBootSector[13] = 1
-Set-Le16 $fatBootSector 14 1
-$fatBootSector[16] = 2
-Set-Le16 $fatBootSector 17 512
-Set-Le16 $fatBootSector 19 ([UInt16]$partitionSectors)
-$fatBootSector[21] = 0xF8
-Set-Le16 $fatBootSector 22 120
-Set-Le16 $fatBootSector 24 63
-Set-Le16 $fatBootSector 26 255
-Set-Le32 $fatBootSector 28 ([UInt32]$partitionFirstLba)
-$fatBootSector[36] = 0x80
-$fatBootSector[38] = 0x29
-Set-Le32 $fatBootSector 39 0x5A49474F
-[Array]::Copy([Text.Encoding]::ASCII.GetBytes('ZIGOSNVME  '), 0, $fatBootSector, 43, 11)
-[Array]::Copy([Text.Encoding]::ASCII.GetBytes('FAT16   '), 0, $fatBootSector, 54, 8)
-$fatBootSector[510] = 0x55
-$fatBootSector[511] = 0xAA
-
-[byte[]]$nvmeEfiBytes = [IO.File]::ReadAllBytes($efiImage)
-[UInt32]$nvmeFileClusterCount = [UInt32][Math]::Ceiling($nvmeEfiBytes.Length / 512.0)
-if ($nvmeFileClusterCount -eq 0 -or $nvmeFileClusterCount -gt 30000) {
-    throw 'The current BOOTX64.EFI did not fit the deterministic NVMe FAT16 volume.'
-}
-[UInt16]$nvmeFileFirstCluster = 4
-[UInt16]$nvmeFileLastCluster = [UInt16]($nvmeFileFirstCluster + $nvmeFileClusterCount - 1)
-[byte[]]$nvmeFat = [byte[]]::new(120 * 512)
-Set-Fat16Entry $nvmeFat 0 0xFFF8
-Set-Fat16Entry $nvmeFat 1 0xFFFF
-Set-Fat16Entry $nvmeFat 2 0xFFFF
-Set-Fat16Entry $nvmeFat 3 0xFFFF
-for ([UInt32]$cluster = $nvmeFileFirstCluster; $cluster -lt $nvmeFileLastCluster; $cluster++) {
-    Set-Fat16Entry $nvmeFat ([UInt16]$cluster) ([UInt16]($cluster + 1))
-}
-Set-Fat16Entry $nvmeFat $nvmeFileLastCluster 0xFFFF
-
-[byte[]]$nvmeRootDirectory = [byte[]]::new(32 * 512)
-Set-FatDirectoryEntry $nvmeRootDirectory 0 'EFI        ' 0x10 2 0
-$nvmeRootDirectory[32] = 0
-[byte[]]$nvmeEfiDirectory = [byte[]]::new(512)
-Set-FatDirectoryEntry $nvmeEfiDirectory 0 'BOOT       ' 0x10 3 0
-$nvmeEfiDirectory[32] = 0
-[byte[]]$nvmeBootDirectory = [byte[]]::new(512)
-Set-FatDirectoryEntry $nvmeBootDirectory 0 'BOOTX64 EFI' 0x20 $nvmeFileFirstCluster ([UInt32]$nvmeEfiBytes.Length)
-$nvmeBootDirectory[32] = 0
-
-$nvmeStream = [IO.File]::Open($nvmeImage, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
-try {
-    $nvmeStream.SetLength(16MB)
-    $nvmeStream.Position = 0
-    $nvmeStream.Write($protectiveMbr, 0, $protectiveMbr.Length)
-    $nvmeStream.Position = 512
-    $nvmeStream.Write($primaryHeader, 0, $primaryHeader.Length)
-    $nvmeStream.Position = $primaryEntriesLba * 512
-    $nvmeStream.Write($partitionEntries, 0, $partitionEntries.Length)
-    $nvmeStream.Position = $backupEntriesLba * 512
-    $nvmeStream.Write($partitionEntries, 0, $partitionEntries.Length)
-    $nvmeStream.Position = $nvmeLastLba * 512
-    $nvmeStream.Write($backupHeader, 0, $backupHeader.Length)
-    $nvmeStream.Position = $partitionFirstLba * 512
-    $nvmeStream.Write($fatBootSector, 0, $fatBootSector.Length)
-    $nvmeStream.Position = ($partitionFirstLba + 1) * 512
-    $nvmeStream.Write($nvmeFat, 0, $nvmeFat.Length)
-    $nvmeStream.Position = ($partitionFirstLba + 121) * 512
-    $nvmeStream.Write($nvmeFat, 0, $nvmeFat.Length)
-    $nvmeStream.Position = ($partitionFirstLba + 241) * 512
-    $nvmeStream.Write($nvmeRootDirectory, 0, $nvmeRootDirectory.Length)
-    $nvmeStream.Position = ($partitionFirstLba + 273) * 512
-    $nvmeStream.Write($nvmeEfiDirectory, 0, $nvmeEfiDirectory.Length)
-    $nvmeStream.Position = ($partitionFirstLba + 274) * 512
-    $nvmeStream.Write($nvmeBootDirectory, 0, $nvmeBootDirectory.Length)
-    $nvmeStream.Position = ($partitionFirstLba + 275) * 512
-    $nvmeStream.Write($nvmeEfiBytes, 0, $nvmeEfiBytes.Length)
-    $nvmeStream.Flush()
-}
-finally {
-    $nvmeStream.Dispose()
-}
+$nvmeMetadata = Get-Content $nvmeMetadataPath -Raw | ConvertFrom-Json
 $nvmePath = $nvmeImage.Replace('\', '/')
 $codePath = $codeImage.Replace('\', '/')
 $varsPath = $varsImage.Replace('\', '/')
@@ -269,7 +87,7 @@ $arguments = @(
     '-smp', $CpuCount,
     '-device', 'qemu-xhci,id=xhci',
     '-drive', "file=$nvmePath,if=none,id=nvme0,format=raw,cache=unsafe",
-    '-device', 'nvme,drive=nvme0,serial=ZIGOSNVME',
+    '-device', "nvme,drive=nvme0,serial=ZIGOSNVME,logical_block_size=$nvmeBlockSize,physical_block_size=$nvmeBlockSize",
     '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$codePath",
     '-drive', "if=pflash,format=raw,unit=1,file=$varsPath",
     '-debugcon', "file:$debugPath",
@@ -292,7 +110,7 @@ if ($NoGraphics) {
     $arguments += @('-vga', 'none')
 }
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPUs: $CpuCount, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPUs: $CpuCount, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, NVMe block size: $nvmeBlockSize)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -796,37 +614,37 @@ if ($LegacyPci) {
 if (-not [regex]::IsMatch($output, 'NVMe identity: model "[^"]+", serial "ZIGOSNVME", firmware "[^"]+", namespaces [1-9][0-9]*')) {
     throw 'The NVMe Identify Controller result was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'NVMe namespace [1-9][0-9]*: [1-9][0-9]* LBA\(s\), capacity [1-9][0-9]* LBA\(s\) x 512 bytes = [1-9][0-9]* bytes, metadata 0')) {
+if (-not [regex]::IsMatch($output, "NVMe namespace [1-9][0-9]*: $($nvmeMetadata.total_lbas) LBA\(s\), capacity $($nvmeMetadata.total_lbas) LBA\(s\) x $nvmeBlockSize bytes = $($nvmeMetadata.total_bytes) bytes, metadata 0")) {
     throw 'The NVMe Identify Namespace geometry was not observed.'
 }
 if (-not [regex]::IsMatch($output, 'NVMe queues active: admin SQ 0x[0-9A-F]{16}, admin CQ 0x[0-9A-F]{16}, I/O SQ 0x[0-9A-F]{16}, I/O CQ 0x[0-9A-F]{16}, depth 16')) {
     throw 'The ZigOs-owned NVMe admin and I/O queues were not observed.'
 }
-if (-not [regex]::IsMatch($output, 'NVMe READ completed: namespace [1-9][0-9]*, LBA 0, 512 bytes at 0x[0-9A-F]{16}')) {
+if (-not [regex]::IsMatch($output, "NVMe READ completed: namespace [1-9][0-9]*, LBA 0, $nvmeBlockSize bytes at 0x[0-9A-F]{16}")) {
     throw 'The read-only NVMe LBA 0 command was not observed.'
 }
 if (-not $output.Contains('NVMe LBA 0 first 16 bytes: 5A 49 47 4F 53 2D 4E 56 4D 45 2D 4C 42 41 30 21')) {
     throw 'The deterministic NVMe LBA 0 payload was not read correctly.'
 }
-if (-not [regex]::IsMatch($output, 'NVMe LBA 0 FNV-1a64: 0xA3BA5289D74BDD3C, trailing signature 0xAA55')) {
-    throw 'The NVMe LBA 0 fingerprint and trailing signature were not observed.'
+if (-not $output.Contains("NVMe LBA 0 FNV-1a64: 0x$($nvmeMetadata.lba0_fnv1a64), MBR signature 0xAA55")) {
+    throw 'The NVMe LBA 0 fingerprint and protective-MBR signature were not observed.'
 }
-if (-not $output.Contains('NVMe protective MBR verified: type 0xEE, first LBA 1, sectors 32767')) {
+if (-not $output.Contains("NVMe protective MBR verified: type 0xEE, first LBA 1, sectors $($nvmeMetadata.last_lba)")) {
     throw 'The NVMe protective MBR verification marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'NVMe GPT header verified: revision 1\.0, current LBA 1, backup LBA 32767, usable 34-32734, header CRC 0x[0-9A-F]{16}')) {
+if (-not [regex]::IsMatch($output, "NVMe GPT header verified: revision 1\.0, current LBA 1, backup LBA $($nvmeMetadata.last_lba), usable $($nvmeMetadata.first_usable_lba)-$($nvmeMetadata.last_usable_lba), header CRC 0x00000000$($nvmeMetadata.primary_header_crc)")) {
     throw 'The checksum-valid primary GPT header marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'NVMe GPT partition array verified: 128 entries x 128 bytes at LBA 2, sectors 32, populated 1, CRC 0x[0-9A-F]{16}')) {
+if (-not $output.Contains("NVMe GPT partition array verified: 128 entries x 128 bytes at LBA 2, sectors $($nvmeMetadata.entry_array_sectors), populated 1, CRC 0x00000000$($nvmeMetadata.partition_array_crc)")) {
     throw 'The checksum-valid GPT partition-entry-array marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'NVMe backup GPT verified: current LBA 32767, primary LBA 1, entries LBA 32735, header CRC 0x[0-9A-F]{16}, array CRC 0x[0-9A-F]{16}')) {
+if (-not $output.Contains("NVMe backup GPT verified: current LBA $($nvmeMetadata.last_lba), primary LBA 1, entries LBA $($nvmeMetadata.backup_entry_lba), header CRC 0x00000000$($nvmeMetadata.backup_header_crc), array CRC 0x00000000$($nvmeMetadata.partition_array_crc)")) {
     throw 'The cross-validated backup GPT header and partition array were not observed.'
 }
-if (-not $output.Contains('NVMe EFI System Partition: index 0, LBA 2048 + 30687 sectors, name "ZigOs NVMe FAT"')) {
+if (-not $output.Contains("NVMe EFI System Partition: index 0, LBA $($nvmeMetadata.partition_first_lba) + $($nvmeMetadata.partition_sectors) sectors, name `"ZigOs NVMe FAT`"")) {
     throw 'The NVMe EFI System Partition discovery marker was not observed.'
 }
-if (-not $output.Contains('NVMe FAT volume verified: FAT16, label "ZIGOSNVME", filesystem "FAT16", 30687 sectors, first FAT LBA 2049, root LBA 2289')) {
+if (-not $output.Contains("NVMe FAT volume verified: FAT16, label `"ZIGOSNVME`", filesystem `"FAT16`", $($nvmeMetadata.partition_sectors) sectors, first FAT LBA $($nvmeMetadata.first_fat_lba), root LBA $($nvmeMetadata.root_directory_lba)")) {
     throw 'The FAT16 volume inside the NVMe GPT partition was not observed.'
 }
 if (-not [regex]::IsMatch($output, 'NVMe FAT path resolved: EFI cluster 2 -> BOOT cluster 3 -> BOOTX64.EFI cluster 4')) {
@@ -835,7 +653,8 @@ if (-not [regex]::IsMatch($output, 'NVMe FAT path resolved: EFI cluster 2 -> BOO
 if (-not [regex]::IsMatch($output, 'NVMe FAT boot file found: EFI/BOOT/BOOTX64.EFI, size [1-9][0-9]* bytes')) {
     throw 'The NVMe FAT BOOTX64.EFI directory entry was not observed.'
 }
-$nvmeFileMatch = [regex]::Match($output, 'NVMe FAT file streamed: ([1-9][0-9]*) bytes across ([1-9][0-9]*) cluster\(s\), last cluster ([1-9][0-9]*), FNV-1a64 0x([0-9A-F]{16})')
+$nvmeFilePattern = "NVMe FAT file streamed: ($($nvmeMetadata.efi_size)) bytes across ($($nvmeMetadata.file_cluster_count)) cluster\(s\), last cluster ($($nvmeMetadata.file_last_cluster)), FNV-1a64 0x($($nvmeMetadata.efi_fnv1a64))"
+$nvmeFileMatch = [regex]::Match($output, $nvmeFilePattern)
 if (-not $nvmeFileMatch.Success) {
     throw 'The complete NVMe FAT file stream was not observed.'
 }

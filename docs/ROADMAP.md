@@ -238,3 +238,13 @@
 - [x] Work stealing enabled only with three selected APs
 - [x] Ticket-lock/barrier participant count sized to BSP plus active APs
 - [x] One-, two-, three-, and four-CPU QEMU topology regressions
+
+
+## 2.1 - 4 KiB NVMe logical blocks
+
+- [x] NVMe NVM Read with one page-aligned 4 KiB PRP buffer
+- [x] Protective-MBR signature read from bytes 510-511 independent of logical-block size
+- [x] Block-size-aware deterministic GPT/FAT16 namespace builder
+- [x] Primary and backup GPT validation on a 4 KiB namespace
+- [x] FAT16 directory and complete EFI file streaming with 4 KiB clusters
+- [x] OVMF direct boot from the 4 KiB NVMe GPT/FAT namespace

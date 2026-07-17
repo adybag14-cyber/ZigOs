@@ -145,7 +145,7 @@ pub const ReadResult = struct {
     byte_count: u32,
     buffer_address: usize,
     first_bytes: [16]u8,
-    trailing_signature: u16,
+    mbr_signature: u16,
     fnv1a64: u64,
 };
 
@@ -330,7 +330,7 @@ pub fn readOneBlock(controller: *Controller, allocator: *memory.FrameAllocator, 
         .byte_count = byte_count,
         .buffer_address = buffer_address,
         .first_bytes = undefined,
-        .trailing_signature = 0,
+        .mbr_signature = 0,
         .fnv1a64 = 0xCBF2_9CE4_8422_2325,
     };
     for (0..result.first_bytes.len) |index| result.first_bytes[index] = bytes[index];
@@ -339,9 +339,8 @@ pub fn readOneBlock(controller: *Controller, allocator: *memory.FrameAllocator, 
         result.fnv1a64 ^= bytes[index];
         result.fnv1a64 *%= 0x0000_0100_0000_01B3;
     }
-    const trailing_offset: usize = byte_count - 2;
-    result.trailing_signature = @as(u16, bytes[trailing_offset]) |
-        (@as(u16, bytes[trailing_offset + 1]) << 8);
+    result.mbr_signature = @as(u16, bytes[510]) |
+        (@as(u16, bytes[511]) << 8);
     last_failure_stage = .none;
     return result;
 }

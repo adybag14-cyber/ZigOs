@@ -2019,8 +2019,8 @@ fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool
     }
     debugWrite("\r\nNVMe LBA 0 FNV-1a64: 0x");
     debugWriteHex64(block_zero.fnv1a64);
-    debugWrite(", trailing signature 0x");
-    debugWriteHex16(block_zero.trailing_signature);
+    debugWrite(", MBR signature 0x");
+    debugWriteHex16(block_zero.mbr_signature);
     debugWrite("\r\n");
 
     const protective_mbr = partition.parseMbr(nvme.readBuffer(block_zero)) orelse
