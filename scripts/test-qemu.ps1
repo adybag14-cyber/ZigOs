@@ -121,7 +121,7 @@ try {
                     $writer.NewLine = "`n"
                     $writer.AutoFlush = $true
                     Start-Sleep -Milliseconds 50
-                    foreach ($key in @('h', 'e', 'l', 'x', 'backspace', 'p', 'ret', 'c', 'p', 'u', 'ret', 'm', 'e', 'm', 'ret')) {
+                    foreach ($key in @('h', 'e', 'l', 'x', 'backspace', 'p', 'ret', 'c', 'p', 'u', 'ret', 'm', 'e', 'm', 'ret', 's', 'c', 'r', 'o', 'l', 'l', 'ret')) {
                         $writer.WriteLine("sendkey $key 120")
                         Start-Sleep -Milliseconds 180
                     }
@@ -404,7 +404,7 @@ if (-not $output.Contains("Keyboard event queue verified: #1 USB usage 0x04 pres
 if (-not $shellInjected) {
     throw 'The QEMU HMP harness never typed the persistent shell session after the shell arm marker.'
 }
-if (-not $output.Contains('ZigOs shell input armed: commands help cpu mem; waiting for QEMU session')) {
+if (-not $output.Contains('ZigOs shell input armed: commands help cpu mem scroll; waiting for QEMU session')) {
     throw 'The persistent native ZigOs shell input marker was not observed.'
 }
 if (-not $output.Contains('zigos> help') -or -not $output.Contains('commands: help cpu mem')) {
@@ -416,13 +416,19 @@ if (-not $output.Contains('zigos> cpu') -or -not $output.Contains('cpu: x86-64 S
 if (-not $output.Contains('zigos> mem') -or -not $output.Contains('memory: normalized UEFI layout active')) {
     throw 'The native shell mem command or response was not observed.'
 }
+if (-not $output.Contains('zigos> scroll') -or -not $output.Contains('scroll: 32 lines')) {
+    throw 'The native shell scroll command or response was not observed.'
+}
+if (-not $output.Contains('Framebuffer scrolling verified: 32 lines, 37 rows, 6 scrolls')) {
+    throw 'The framebuffer scrolling memory-move proof was not observed.'
+}
 if (-not $output.Contains('Framebuffer line editing verified: helx<BS>p -> help')) {
     throw 'The USB Backspace command-line editing proof was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer persistent shell: cursor row 8, column 37, lines 9, writes 137, newlines 8, backspaces 1, scrolls 0, checksum 0xD805250E224832A5')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer persistent shell: cursor row 36, column 11, lines 43, writes 518, newlines 42, backspaces 1, scrolls 6, checksum 0x9F06BA73625AD44D')) {
     throw 'The three-command live framebuffer shell state proof was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'ZigOs shell session complete: help, cpu, mem; commands 3, reports [1-9][0-9]*, rejected 0')) {
+if (-not [regex]::IsMatch($output, 'ZigOs shell session complete: help, cpu, mem, scroll; commands 4, reports [1-9][0-9]*, rejected 0')) {
     throw 'The persistent native shell session completion marker was not observed.'
 }
 if (-not $output.Contains('AHCI controller active at')) {
@@ -521,10 +527,10 @@ if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B
 if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
     throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 9, glyphs 137, lit pixels 7312, checksum 0xD805250E224832A5')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 43, glyphs 518, lit pixels 23640, checksum 0x9F06BA73625AD44D')) {
     throw 'The deterministic GOP bitmap-console report was not observed.'
 }
-if (-not $output.Contains('Framebuffer transcript: ZigOs | zigos> help | commands: help cpu mem | zigos> cpu | cpu: x86-64 SMP online | zigos> mem | memory: normalized UEFI layout active')) {
+if (-not $output.Contains('Framebuffer transcript: persistent shell help, cpu, mem and scroll; 32 scroll lines rendered')) {
     throw 'The rendered graphical-console transcript marker was not observed.'
 }
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {

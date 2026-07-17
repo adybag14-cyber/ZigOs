@@ -129,7 +129,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWrite(", checksum 0x");
     debugWriteHex64(report.checksum);
     debugWrite("\r\n");
-    debugWrite("Framebuffer transcript: ZigOs | zigos> help | commands: help cpu mem | zigos> cpu | cpu: x86-64 SMP online | zigos> mem | memory: normalized UEFI layout active\r\n");
+    debugWrite("Framebuffer transcript: persistent shell help, cpu, mem and scroll; 32 scroll lines rendered\r\n");
     debugWrite("Framebuffer retained and written directly at 0x");
     debugWriteHex64(@intCast(framebuffer.base));
     debugWrite("\r\n");
@@ -1586,8 +1586,8 @@ fn runUsbShell(
     allocator: *memory.FrameAllocator,
     graphical_console: *framebuffer_console.Console,
 ) void {
-    const expected_commands = [_][]const u8{ "help", "cpu", "mem" };
-    const expected_responses = [_]shell.Response{ .help, .cpu, .memory };
+    const expected_commands = [_][]const u8{ "help", "cpu", "mem", "scroll" };
+    const expected_responses = [_]shell.Response{ .help, .cpu, .memory, .scroll };
     var command_shell = shell.Shell.init();
     var previous_keys = std.mem.zeroes([6]u8);
     var previous_modifiers: u8 = 0;
@@ -1602,7 +1602,7 @@ fn runUsbShell(
             allocator,
         ) orelse xhciFailure("shell HID input transfer could not be armed");
         if (!marker_printed) {
-            debugWrite("ZigOs shell input armed: commands help cpu mem; waiting for QEMU session\r\n");
+            debugWrite("ZigOs shell input armed: commands help cpu mem scroll; waiting for QEMU session\r\n");
             marker_printed = true;
         }
         const report = xhci.waitHidKeyboardInput(controller, ownership, arm) orelse
@@ -1640,6 +1640,13 @@ fn runUsbShell(
                 }
 
                 graphical_console.write(response_text);
+                if (response == .scroll) {
+                    var line_index: usize = 0;
+                    while (line_index < 32) : (line_index += 1) {
+                        graphical_console.put('\n');
+                        graphical_console.write("scroll line");
+                    }
+                }
                 debugWrite("zigos> ");
                 debugWrite(command);
                 debugWrite("\r\n");
@@ -1657,13 +1664,14 @@ fn runUsbShell(
                 }
 
                 const console_report = graphical_console.report();
-                if (console_report.cursor_row != 8 or console_report.cursor_column != 37 or
-                    console_report.lines != 9 or console_report.glyphs != 137 or
-                    console_report.writes != 137 or console_report.newlines != 8 or
-                    console_report.backspaces != 1 or console_report.scrolls != 0)
+                if (console_report.cursor_row != 36 or console_report.cursor_column != 11 or
+                    console_report.lines != 43 or console_report.glyphs != 518 or
+                    console_report.writes != 518 or console_report.newlines != 42 or
+                    console_report.backspaces != 1 or console_report.scrolls != 6)
                 {
                     xhciFailure("persistent framebuffer shell cursor or write accounting failed");
                 }
+                debugWrite("Framebuffer scrolling verified: 32 lines, 37 rows, 6 scrolls\r\n");
                 debugWrite("Framebuffer persistent shell: cursor row ");
                 debugWriteUsizeDecimal(console_report.cursor_row);
                 debugWrite(", column ");
@@ -1681,14 +1689,14 @@ fn runUsbShell(
                 debugWrite(", checksum 0x");
                 debugWriteHex64(console_report.checksum);
                 debugWrite("\r\n");
-                debugWrite("ZigOs shell session complete: help, cpu, mem; commands 3, reports ");
+                debugWrite("ZigOs shell session complete: help, cpu, mem, scroll; commands 4, reports ");
                 debugWriteU64Decimal(report_count + 1);
                 debugWrite(", rejected 0\r\n");
                 return;
             }
         }
     }
-    xhciFailure("native shell did not complete three commands within 96 reports");
+    xhciFailure("native shell did not complete four commands within 96 reports");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {

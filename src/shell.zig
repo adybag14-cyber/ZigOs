@@ -7,6 +7,7 @@ pub const Response = enum {
     help,
     cpu,
     memory,
+    scroll,
     empty,
     unknown,
 };
@@ -61,6 +62,7 @@ pub const Shell = struct {
             .help => "commands: help cpu mem",
             .cpu => "cpu: x86-64 SMP online",
             .memory => "memory: normalized UEFI layout active",
+            .scroll => "scroll: 32 lines",
             .empty => "",
             .unknown => "error: unknown command",
         };
@@ -77,6 +79,7 @@ pub const Shell = struct {
         if (std.mem.eql(u8, command, "help")) return .help;
         if (std.mem.eql(u8, command, "cpu")) return .cpu;
         if (std.mem.eql(u8, command, "mem")) return .memory;
+        if (std.mem.eql(u8, command, "scroll")) return .scroll;
         return .unknown;
     }
 };

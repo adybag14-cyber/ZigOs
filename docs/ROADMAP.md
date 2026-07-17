@@ -121,3 +121,5 @@
 - [x] USB HID Backspace editing with framebuffer cell erasure
 - [x] Persistent multi-command `help`, `cpu` and `mem` shell session
 - [x] Prompt continuation and distinct command-response rendering
+- [x] Native `scroll` shell command with six real framebuffer scroll operations
+- [x] Overlapping pixel-row copy and bottom-line clearing verification
