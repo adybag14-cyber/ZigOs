@@ -6,6 +6,7 @@ const hpet = @import("hpet.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
 const percpu = @import("percpu.zig");
+const synchronization = @import("synchronization.zig");
 
 const cc = std.os.uefi.cc;
 const trampoline_image = @embedFile("generated/ap_trampoline.bin");
@@ -78,6 +79,10 @@ pub const ApReport = struct {
     local_task_trace: [12]u8,
     local_task_trace_length: u32,
     local_task_canaries_intact: bool,
+    sync_worker_id: u32,
+    sync_iterations: u32,
+    sync_acquisitions: u32,
+    sync_barrier_generation: u32,
     online: bool,
     state: u32,
     per_cpu_state: u64,
@@ -110,6 +115,13 @@ pub const Report = struct {
     ap_task_targets: u32,
     ap_task_completed: u32,
     ap_task_context_switches: u64,
+    sync_participants: u32,
+    sync_iterations_per_participant: u32,
+    sync_total_increments: u64,
+    sync_lock_next: u32,
+    sync_lock_serving: u32,
+    sync_barrier_generation: u32,
+    sync_checksum: u64,
     processors: [acpi.maximum_processors]ApReport,
 };
 
@@ -166,6 +178,13 @@ pub fn start(
         .ap_task_targets = 0,
         .ap_task_completed = 0,
         .ap_task_context_switches = 0,
+        .sync_participants = 0,
+        .sync_iterations_per_participant = 0,
+        .sync_total_increments = 0,
+        .sync_lock_next = 0,
+        .sync_lock_serving = 0,
+        .sync_barrier_generation = 0,
+        .sync_checksum = 0,
         .processors = undefined,
     };
 
@@ -287,6 +306,10 @@ pub fn start(
             .local_task_trace = std.mem.zeroes([12]u8),
             .local_task_trace_length = 0,
             .local_task_canaries_intact = false,
+            .sync_worker_id = 0,
+            .sync_iterations = 0,
+            .sync_acquisitions = 0,
+            .sync_barrier_generation = 0,
             .online = online,
             .state = state,
             .per_cpu_state = @intFromPtr(per_cpu_state),
@@ -322,6 +345,10 @@ pub fn start(
     }
     if (!runLocalTaskRound(&report, allocator, reference)) {
         debugWrite("SMP stage failure: local task contexts\r\n");
+        return null;
+    }
+    if (!runSynchronizationRound(&report, reference)) {
+        debugWrite("SMP stage failure: synchronization\r\n");
         return null;
     }
     return report;
@@ -768,6 +795,79 @@ fn runLocalTaskRound(
     report.ap_task_completed = completed;
     report.ap_task_context_switches = total_switches;
     return completed == report.target_count;
+}
+
+fn runSynchronizationRound(report: *Report, reference: hpet.Device) bool {
+    const epoch: u32 = 1;
+    const participants: u32 = 4;
+    const iterations: u32 = 4096;
+    var experiment = synchronization.Experiment.init(participants) orelse return false;
+
+    for (report.processors[0..report.target_count], 0..) |processor, index| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        if (!percpu.configureSynchronizationWorker(
+            state,
+            epoch,
+            &experiment,
+            @intCast(index + 1),
+            iterations,
+        )) return false;
+    }
+    for (report.processors[0..report.target_count]) |processor| {
+        if (!apic.sendFixedIpi(processor.actual_apic_id, percpu.ap_work_vector)) return false;
+    }
+
+    const bsp_result = synchronization.runWorker(&experiment, 0, iterations) orelse return false;
+    if (bsp_result.acquisitions != iterations or bsp_result.final_barrier_generation != 1) return false;
+
+    var iteration: usize = 0;
+    while (iteration < startup_timeout_iterations) : (iteration += 1) {
+        var completed: usize = 0;
+        for (report.processors[0..report.target_count]) |processor| {
+            const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+            if (percpu.synchronizationWorkerComplete(state, epoch)) completed += 1;
+        }
+        if (completed == report.target_count) break;
+        if (!reference.waitNanoseconds(startup_poll_nanoseconds)) return false;
+    }
+
+    const total: u64 = @as(u64, participants) * iterations;
+    const expected_checksum = synchronization.expectedChecksum(participants, iterations);
+    if (experiment.counter != total or
+        experiment.checksum != expected_checksum or
+        experiment.lock.next() != total or
+        experiment.lock.serving() != total or
+        experiment.barrier.currentGeneration() != 1)
+    {
+        return false;
+    }
+
+    for (report.processors[0..report.target_count]) |*processor| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        const state_report = percpu.report(state);
+        if (state_report.sync_request_epoch != epoch or
+            state_report.sync_completion_epoch != epoch or
+            state_report.sync_error != 0 or
+            state_report.sync_iterations != iterations or
+            state_report.sync_acquisitions != iterations or
+            state_report.sync_barrier_generation != 1)
+        {
+            return false;
+        }
+        processor.sync_worker_id = state_report.sync_worker_id;
+        processor.sync_iterations = state_report.sync_iterations;
+        processor.sync_acquisitions = state_report.sync_acquisitions;
+        processor.sync_barrier_generation = state_report.sync_barrier_generation;
+    }
+
+    report.sync_participants = participants;
+    report.sync_iterations_per_participant = iterations;
+    report.sync_total_increments = total;
+    report.sync_lock_next = experiment.lock.next();
+    report.sync_lock_serving = experiment.lock.serving();
+    report.sync_barrier_generation = experiment.barrier.currentGeneration();
+    report.sync_checksum = experiment.checksum;
+    return true;
 }
 
 fn debugWrite(text: []const u8) void {

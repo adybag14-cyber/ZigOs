@@ -244,6 +244,13 @@ if ($apTaskMatches.Count -ne 3) {
 if (-not $output.Contains('Per-AP task contexts complete: 3/3 APs, total context switches 39, trace ABABABABABBB on every core')) {
     throw 'The aggregate per-AP task-context verification marker was not observed.'
 }
+$syncWorkerMatches = [regex]::Matches($output, 'AP synchronization worker: APIC [123], worker [123], acquisitions 4096, barrier generation 1')
+if ($syncWorkerMatches.Count -ne 3) {
+    throw 'All three AP ticket-lock/barrier workers did not complete.'
+}
+if (-not [regex]::IsMatch($output, 'SMP synchronization complete: 4 participants, 16384 locked increments, tickets 16384/16384, barrier generation 1, checksum 0x(?!0000000000000000)[0-9A-F]{16}')) {
+    throw 'The four-core ticket-lock and barrier verification marker was not observed.'
+}
 if (-not $output.Contains('PCIe ECAM active:')) {
     throw 'The PCIe MCFG/ECAM activation marker was not observed.'
 }

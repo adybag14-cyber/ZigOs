@@ -85,3 +85,4 @@
 - [x] Per-AP local-APIC one-shot timers with autonomous HLT wakeups
 - [x] Tick-gated per-AP run-queue dispatch with one job per quantum
 - [x] Independent cooperative task stacks and ABI-complete context switching on every AP
+- [x] Fair ticket spinlock and reusable four-core barrier synchronization

@@ -564,6 +564,15 @@ fn startApplicationProcessors(
         debugWrite(", checksum 0x");
         debugWriteHex64(processor.run_queue_checksum);
         debugWrite("\r\n");
+        debugWrite("AP synchronization worker: APIC ");
+        debugWriteU64Decimal(processor.actual_apic_id);
+        debugWrite(", worker ");
+        debugWriteU64Decimal(processor.sync_worker_id);
+        debugWrite(", acquisitions ");
+        debugWriteU64Decimal(processor.sync_acquisitions);
+        debugWrite(", barrier generation ");
+        debugWriteU64Decimal(processor.sync_barrier_generation);
+        debugWrite("\r\n");
         debugWrite("AP local tasks: APIC ");
         debugWriteU64Decimal(processor.actual_apic_id);
         debugWrite(", stacks 0x");
@@ -640,6 +649,19 @@ fn startApplicationProcessors(
     if (report.online_count != report.target_count) {
         smpFailure("not every MADT application processor reached long mode");
     }
+    debugWrite("SMP synchronization complete: ");
+    debugWriteU64Decimal(report.sync_participants);
+    debugWrite(" participants, ");
+    debugWriteU64Decimal(report.sync_total_increments);
+    debugWrite(" locked increments, tickets ");
+    debugWriteU64Decimal(report.sync_lock_serving);
+    debugWrite("/");
+    debugWriteU64Decimal(report.sync_lock_next);
+    debugWrite(", barrier generation ");
+    debugWriteU64Decimal(report.sync_barrier_generation);
+    debugWrite(", checksum 0x");
+    debugWriteHex64(report.sync_checksum);
+    debugWrite("\r\n");
     debugWrite("Per-AP task contexts complete: ");
     debugWriteU64Decimal(report.ap_task_completed);
     debugWrite("/");

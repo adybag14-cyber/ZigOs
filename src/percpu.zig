@@ -1,6 +1,7 @@
 const std = @import("std");
 const apic = @import("apic.zig");
 const interrupt_context = @import("interrupt_context.zig");
+const synchronization = @import("synchronization.zig");
 
 const cc = std.os.uefi.cc;
 const code_selector: u16 = 0x08;
@@ -138,6 +139,14 @@ pub const State = struct {
     task_trace: [local_task_trace_length]u8,
     task_trace_length: u32,
     task_error: u32,
+    sync_request_epoch: u32,
+    sync_completion_epoch: u32,
+    sync_experiment_address: usize,
+    sync_worker_id: u32,
+    sync_iterations: u32,
+    sync_acquisitions: u32,
+    sync_barrier_generation: u32,
+    sync_error: u32,
 };
 
 pub const Report = struct {
@@ -191,6 +200,13 @@ pub const Report = struct {
     task_trace: [local_task_trace_length]u8,
     task_trace_length: u32,
     task_error: u32,
+    sync_request_epoch: u32,
+    sync_completion_epoch: u32,
+    sync_worker_id: u32,
+    sync_iterations: u32,
+    sync_acquisitions: u32,
+    sync_barrier_generation: u32,
+    sync_error: u32,
 };
 
 extern fn zigos_load_gdt(
@@ -293,6 +309,14 @@ pub fn prepare(
     @memset(&state.task_trace, 0);
     state.task_trace_length = 0;
     state.task_error = 0;
+    state.sync_request_epoch = 0;
+    state.sync_completion_epoch = 0;
+    state.sync_experiment_address = 0;
+    state.sync_worker_id = 0;
+    state.sync_iterations = 0;
+    state.sync_acquisitions = 0;
+    state.sync_barrier_generation = 0;
+    state.sync_error = 0;
     zigos_memory_fence();
     return state;
 }
@@ -420,6 +444,13 @@ pub fn report(state: *const State) Report {
         .task_trace = state.task_trace,
         .task_trace_length = state.task_trace_length,
         .task_error = state.task_error,
+        .sync_request_epoch = atomicLoadU32(&state.sync_request_epoch),
+        .sync_completion_epoch = atomicLoadU32(&state.sync_completion_epoch),
+        .sync_worker_id = state.sync_worker_id,
+        .sync_iterations = state.sync_iterations,
+        .sync_acquisitions = state.sync_acquisitions,
+        .sync_barrier_generation = state.sync_barrier_generation,
+        .sync_error = state.sync_error,
     };
 }
 
@@ -440,6 +471,54 @@ pub fn workCompleted(state: *State, epoch: u32) bool {
 
 pub fn expectedWorkResult(apic_id: u32, input: u64) u64 {
     return calculateMailboxWork(apic_id, input);
+}
+
+pub fn configureSynchronizationWorker(
+    state: *State,
+    epoch: u32,
+    experiment: *synchronization.Experiment,
+    worker_id: u32,
+    iterations: u32,
+) bool {
+    if (epoch == 0 or iterations == 0 or state.descriptor_ready != 1) return false;
+    state.sync_experiment_address = @intFromPtr(experiment);
+    state.sync_worker_id = worker_id;
+    state.sync_iterations = iterations;
+    state.sync_acquisitions = 0;
+    state.sync_barrier_generation = 0;
+    state.sync_error = 0;
+    atomicStoreU32(&state.sync_completion_epoch, 0);
+    atomicStoreU32(&state.sync_request_epoch, epoch);
+    return true;
+}
+
+pub fn synchronizationWorkerComplete(state: *const State, epoch: u32) bool {
+    return epoch != 0 and
+        atomicLoadU32(&state.sync_completion_epoch) == epoch and
+        state.sync_error == 0;
+}
+
+fn serviceSynchronizationRequest(state: *State) bool {
+    const epoch = atomicLoadU32(&state.sync_request_epoch);
+    if (epoch == 0 or atomicLoadU32(&state.sync_completion_epoch) == epoch) return false;
+    if (state.sync_experiment_address == 0 or state.sync_iterations == 0) {
+        state.sync_error = 1;
+    } else {
+        const experiment: *synchronization.Experiment = @ptrFromInt(state.sync_experiment_address);
+        if (synchronization.runWorker(
+            experiment,
+            state.sync_worker_id,
+            state.sync_iterations,
+        )) |result| {
+            state.sync_acquisitions = result.acquisitions;
+            state.sync_barrier_generation = result.final_barrier_generation;
+        } else {
+            state.sync_error = 2;
+        }
+    }
+    zigos_memory_fence();
+    atomicStoreU32(&state.sync_completion_epoch, epoch);
+    return true;
 }
 
 pub fn prepareLocalTaskExperiment(
@@ -912,6 +991,7 @@ pub fn verifyRunQueue(state: *State, apic_id: u32, expected_jobs: u32) ?u64 {
 pub fn runMailbox(state: *State) noreturn {
     var observed_epoch: u32 = 0;
     while (true) {
+        if (serviceSynchronizationRequest(state)) continue;
         if (serviceLocalTaskRequest(state)) continue;
         if (serviceTimerRequest(state)) continue;
         if (atomicLoadU32(&run_queue_gate) != 0) {
