@@ -323,6 +323,7 @@ if (-not $output.Contains($expectedProcessorIds)) {
     throw "The expected retained MADT processor records were not observed: $($expectedProcessorRecords -join ',')."
 }
 $expectedActiveAps = [Math]::Min(3, [Math]::Max(0, $CpuCount - 1))
+$expectedLegacyIrqTarget = if ($expectedActiveAps -gt 0) { 1 } else { 0 }
 $expectedParkedAps = [Math]::Max(0, $expectedMadtProcessorCount - 1 - $expectedActiveAps)
 if (-not [regex]::IsMatch($output, "SMP startup: BSP APIC 0, MADT processors $expectedMadtProcessorCount, AP targets $expectedActiveAps, discovered APs $($expectedMadtProcessorCount - 1), parked APs $expectedParkedAps, trampoline 0x[0-9A-F]{16}, SIPI vector 0x[0-9A-F]{2}")) {
     throw 'The selected-versus-parked SMP topology marker was not observed.'
@@ -377,7 +378,11 @@ if (-not $output.Contains('IOAPIC initialized:')) {
 if (-not $output.Contains('IOAPIC redirection table fully masked:')) {
     throw 'The IOAPIC redirection-mask verification marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'External IRQ routed: ISA IRQ 0 -> GSI 2 -> vector 0x44, BSP APIC 0, PIT divisor [1-9][0-9]*, count 1, active-high, edge, remasked after EOI')) {
+$expectedLegacyTargetKind = if ($expectedActiveAps -gt 0) { 'application processor' } else { 'bootstrap processor' }
+if (-not $output.Contains("Legacy IRQ target selected: APIC $expectedLegacyIrqTarget ($expectedLegacyTargetKind)")) {
+    throw 'The expected routable legacy-IRQ destination was not selected.'
+}
+if (-not [regex]::IsMatch($output, "External IRQ routed: ISA IRQ 0 -> GSI 2 -> vector 0x44, target APIC $expectedLegacyIrqTarget, PIT divisor [1-9][0-9]*, count 1, active-high, edge, remasked after EOI")) {
     throw 'The MADT/IOAPIC/PIT external IRQ0 round trip was not observed.'
 }
 if ($NoPs2) {
@@ -391,7 +396,7 @@ if ($NoPs2) {
         throw 'The PS/2 validation path unexpectedly ran with i8042 disabled.'
     }
 } else {
-    if (-not [regex]::IsMatch($output, 'PS/2 keyboard IRQ verified: ISA IRQ 1 -> GSI 1 -> vector 0x45, make 0x1E, break 0x9E, count 2, command byte 0x[0-9A-F]{2}, remasked and restored after EOI')) {
+    if (-not [regex]::IsMatch($output, "PS/2 keyboard IRQ verified: ISA IRQ 1 -> GSI 1 -> vector 0x45, make 0x1E, break 0x9E, count 2, command byte 0x[0-9A-F]{2}, target APIC $expectedLegacyIrqTarget, remasked and restored after EOI")) {
         throw 'The i8042/IOAPIC PS/2 keyboard IRQ and scan-code capture were not observed.'
     }
     if (-not $output.Contains("PS/2 event queue verified: #1 usage 0x04 pressed -> 'a'; #2 usage 0x04 released -> 'a'; dropped 0")) {

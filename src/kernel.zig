@@ -81,14 +81,8 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
 
     const acpi_info = discoverAcpi(info);
     const local_apic_info = initializeApic(acpi_info);
-    const io_apic_info = initializeIoApic(acpi_info, local_apic_info);
-    testExternalIrq(acpi_info, local_apic_info, io_apic_info);
-    const ps2_keyboard_ready = testPs2KeyboardIrq(acpi_info, local_apic_info, io_apic_info);
-    debugWrite("Legacy input ready: PS/2 keyboard ");
-    debugWrite(if (ps2_keyboard_ready) "yes" else "no");
-    debugWrite("\r\n");
     const timer_setup = testApicTimer(acpi_info);
-    startApplicationProcessors(
+    const legacy_irq_target = startApplicationProcessors(
         info,
         &frame_allocator,
         acpi_info,
@@ -96,6 +90,28 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
         timer_setup.reference,
         timer_setup.result.ticks_per_second,
     );
+    const io_apic_info = initializeIoApic(acpi_info);
+    var ps2_keyboard_ready = false;
+    if (legacy_irq_target) |destination_apic_id| {
+        debugWrite("Legacy IRQ target selected: APIC ");
+        debugWriteU64Decimal(destination_apic_id);
+        debugWrite(if (destination_apic_id == local_apic_info.apic_id)
+            " (bootstrap processor)\r\n"
+        else
+            " (application processor)\r\n");
+        testExternalIrq(acpi_info, destination_apic_id, io_apic_info, timer_setup.reference);
+        ps2_keyboard_ready = testPs2KeyboardIrq(
+            acpi_info,
+            destination_apic_id,
+            io_apic_info,
+            timer_setup.reference,
+        );
+    } else {
+        debugWrite("Legacy IRQ routing unavailable: no online APIC ID fits the IOAPIC destination field\r\n");
+    }
+    debugWrite("Legacy input ready: PS/2 keyboard ");
+    debugWrite(if (ps2_keyboard_ready) "yes" else "no");
+    debugWrite("\r\n");
     var graphical_console_storage: ?framebuffer_console.Console = null;
     if (info.framebuffer) |framebuffer| {
         graphical_console_storage = framebuffer_console.Console.init(framebuffer);
@@ -670,9 +686,9 @@ fn exceptionTestFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn initializeIoApic(discovery: acpi.Discovery, local_apic: apic.Information) ioapic.Information {
+fn initializeIoApic(discovery: acpi.Discovery) ioapic.Information {
     const madt = discovery.madt orelse ioApicFailure("validated ACPI did not contain a MADT");
-    const information = ioapic.initialize(madt, local_apic.apic_id) orelse
+    const information = ioapic.initialize(madt) orelse
         ioApicFailure("IOAPIC register discovery or redirection masking failed");
 
     debugWrite("IOAPIC initialized: ID ");
@@ -712,8 +728,9 @@ fn initializeIoApic(discovery: acpi.Discovery, local_apic: apic.Information) ioa
 
 fn testExternalIrq(
     discovery: acpi.Discovery,
-    local_apic: apic.Information,
+    destination_apic_id: u8,
     information: ioapic.Information,
+    reference: time_reference.Reference,
 ) void {
     const vector: u8 = 0x44;
     const milliseconds: u32 = 10;
@@ -732,12 +749,16 @@ fn testExternalIrq(
         information,
         override.global_system_interrupt,
         vector,
-        local_apic.apic_id,
+        destination_apic_id,
         override.flags,
     ) orelse ioApicFailure("IOAPIC IRQ0 route programming or readback failed");
     const divisor = pit.armOneShotMilliseconds(milliseconds) orelse
         ioApicFailure("PIT one-shot divisor was invalid");
-    pit.waitForInterrupt();
+    if (destination_apic_id == apic.currentId()) {
+        pit.waitForInterrupt();
+    } else if (!waitForPitInterruptCount(reference, 1)) {
+        ioApicFailure("PIT IRQ0 did not arrive exactly once at the selected CPU");
+    }
     if (pit.count() != 1) ioApicFailure("PIT IRQ0 did not arrive exactly once");
     if (!ioapic.mask(information, override.global_system_interrupt)) {
         ioApicFailure("IOAPIC IRQ0 route could not be remasked after EOI");
@@ -746,7 +767,7 @@ fn testExternalIrq(
     debugWriteU64Decimal(route.global_system_interrupt);
     debugWrite(" -> vector 0x");
     debugWriteHex8(route.vector);
-    debugWrite(", BSP APIC ");
+    debugWrite(", target APIC ");
     debugWriteU64Decimal(route.destination_apic_id);
     debugWrite(", PIT divisor ");
     debugWriteU64Decimal(divisor);
@@ -761,8 +782,9 @@ fn testExternalIrq(
 
 fn testPs2KeyboardIrq(
     discovery: acpi.Discovery,
-    local_apic: apic.Information,
+    destination_apic_id: u8,
     information: ioapic.Information,
+    reference: time_reference.Reference,
 ) bool {
     const vector: u8 = 0x45;
     const isa_irq: u8 = 1;
@@ -786,13 +808,17 @@ fn testPs2KeyboardIrq(
         information,
         global_system_interrupt,
         vector,
-        local_apic.apic_id,
+        destination_apic_id,
         flags,
     ) orelse ioApicFailure("IOAPIC keyboard IRQ route programming or readback failed");
     if (!ps2.injectKeyboardScanCode(injected_scan_code)) {
         ioApicFailure("i8042 keyboard make-code injection failed");
     }
-    ps2.waitForInterrupt();
+    if (destination_apic_id == apic.currentId()) {
+        ps2.waitForInterrupt();
+    } else if (!waitForPs2InterruptCount(reference, 1)) {
+        ioApicFailure("PS/2 keyboard make interrupt did not reach the selected CPU");
+    }
     if (ps2.count() != 1 or ps2.scanCode() != injected_scan_code) {
         ioApicFailure("PS/2 keyboard make interrupt did not return scan code 0x1E");
     }
@@ -801,7 +827,11 @@ fn testPs2KeyboardIrq(
     if (!ps2.injectKeyboardScanCode(injected_break_code)) {
         ioApicFailure("i8042 keyboard break-code injection failed");
     }
-    ps2.waitForInterrupt();
+    if (destination_apic_id == apic.currentId()) {
+        ps2.waitForInterrupt();
+    } else if (!waitForPs2InterruptCount(reference, 2)) {
+        ioApicFailure("PS/2 keyboard break interrupt did not reach the selected CPU");
+    }
     if (ps2.count() != 2 or ps2.scanCode() != injected_break_code) {
         ioApicFailure("PS/2 keyboard break interrupt did not return scan code 0x9E");
     }
@@ -845,9 +875,27 @@ fn testPs2KeyboardIrq(
     debugWriteU64Decimal(ps2.count());
     debugWrite(", command byte 0x");
     debugWriteHex8(configuration.active);
+    debugWrite(", target APIC ");
+    debugWriteU64Decimal(route.destination_apic_id);
     debugWrite(", remasked and restored after EOI\r\n");
     debugWrite("PS/2 event queue verified: #1 usage 0x04 pressed -> 'a'; #2 usage 0x04 released -> 'a'; dropped 0\r\n");
     return true;
+}
+
+fn waitForPitInterruptCount(reference: time_reference.Reference, expected: u32) bool {
+    var attempts: usize = 0;
+    while (pit.count() < expected and attempts < 1_000) : (attempts += 1) {
+        if (!reference.waitNanoseconds(100_000)) return false;
+    }
+    return pit.count() == expected;
+}
+
+fn waitForPs2InterruptCount(reference: time_reference.Reference, expected: u32) bool {
+    var attempts: usize = 0;
+    while (ps2.count() < expected and attempts < 1_000) : (attempts += 1) {
+        if (!reference.waitNanoseconds(100_000)) return false;
+    }
+    return ps2.count() == expected;
 }
 
 fn ioApicFailure(reason: []const u8) noreturn {
@@ -864,7 +912,7 @@ fn startApplicationProcessors(
     local_apic: apic.Information,
     reference: time_reference.Reference,
     timer_ticks_per_second: u64,
-) void {
+) ?u8 {
     const madt = discovery.madt orelse smpFailure("validated ACPI did not contain a MADT");
     const report = smp.start(
         info,
@@ -1026,6 +1074,7 @@ fn startApplicationProcessors(
     if (report.online_count != report.target_count) {
         smpFailure("not every selected application processor reached long mode");
     }
+    const legacy_irq_target = selectLegacyIrqTarget(&report);
     if (report.target_count == 0) {
         debugWrite("SMP validation skipped: uniprocessor topology; BSP APIC ");
         debugWriteU64Decimal(report.bsp_apic_id);
@@ -1033,7 +1082,7 @@ fn startApplicationProcessors(
         debugWrite("SMP startup complete: 0/0 selected application processors online; ");
         debugWriteUsizeDecimal(report.parked_application_processors);
         debugWrite(" additional application processors left parked\r\n");
-        return;
+        return legacy_irq_target;
     }
 
     debugWrite("SMP synchronization complete: ");
@@ -1088,6 +1137,17 @@ fn startApplicationProcessors(
     debugWrite(" selected application processors online; ");
     debugWriteUsizeDecimal(report.parked_application_processors);
     debugWrite(" additional application processors left parked\r\n");
+    return legacy_irq_target;
+}
+
+fn selectLegacyIrqTarget(report: *const smp.Report) ?u8 {
+    for (report.processors[0..report.target_count]) |processor| {
+        if (processor.online and processor.actual_apic_id <= 0xFF) {
+            return @intCast(processor.actual_apic_id);
+        }
+    }
+    if (report.bsp_apic_id <= 0xFF) return @intCast(report.bsp_apic_id);
+    return null;
 }
 
 fn smpFailure(reason: []const u8) noreturn {

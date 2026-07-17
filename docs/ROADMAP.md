@@ -277,3 +277,11 @@
 - Work-stealing participant masks use stable per-CPU state slots rather than hardware APIC IDs, so sparse or greater-than-63 identifiers cannot overflow a 64-bit mask.
 - `scripts/test-qemu.ps1 -SparseApicIds` uses a six-slot topology with four online processors. QEMU retains MADT IDs `0,1,2,4`; ZigOs starts IDs `1,2,4` and completes the full multicore validation suite without assuming contiguous hardware identifiers.
 - `scripts/test-qemu.ps1 -HighApicId` explicitly installs APIC IDs `1`, `2`, and `256`, requiring a mixed MADT with an x2APIC record for ID 256 and proving full-width INIT/SIPI, fixed-IPI, local-timer, and work-stealing paths.
+
+## 2.5 - Routable legacy interrupt destination
+
+- Ordinary IOAPIC physical-destination entries are limited to an 8-bit APIC ID even when the CPUs use x2APIC.
+- ZigOs now completes SMP startup before programming legacy IRQ routes, selects an online application processor with APIC ID below 256, and falls back to the BSP only on uniprocessor systems.
+- IOAPIC initialization leaves all redirection entries masked with a neutral destination until a routable processor is online.
+- IRQ0 and IRQ1 handlers may execute on the selected AP while the BSP verifies their atomic completion counters using the active HPET/PIT reference clock.
+- The normal multicore regression deliberately routes PIT and PS/2 interrupts to APIC 1, proving the same fallback required by a real system whose BSP APIC ID exceeds the IOAPIC destination width.

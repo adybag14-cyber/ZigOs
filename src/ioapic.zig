@@ -33,10 +33,9 @@ pub const Route = struct {
     high_value: u32,
 };
 
-pub fn initialize(madt: acpi.MadtInfo, destination_apic_id: u32) ?Information {
+pub fn initialize(madt: acpi.MadtInfo) ?Information {
     const address = madt.first_io_apic_address orelse return null;
     const gsi_base = madt.first_io_apic_gsi_base orelse return null;
-    if (destination_apic_id > 0xFF) return null;
     if (address >= memory.four_gib or (address & 0xFFF) != 0) return null;
 
     const base: usize = address;
@@ -52,7 +51,7 @@ pub fn initialize(madt: acpi.MadtInfo, destination_apic_id: u32) ?Information {
         const low_register = redirection_table_base + @as(u32, index) * 2;
         const high_register = low_register + 1;
         const vector: u32 = 0x20 + (@as(u32, index) % 0xD0);
-        writeRegister(base, high_register, destination_apic_id << 24);
+        writeRegister(base, high_register, 0);
         writeRegister(base, low_register, vector | redirection_mask);
     }
 
