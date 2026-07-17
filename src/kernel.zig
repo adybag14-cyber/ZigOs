@@ -8,6 +8,7 @@ const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
 const ioapic = @import("ioapic.zig");
 const pit = @import("pit.zig");
+const ps2 = @import("ps2.zig");
 const pci = @import("pci.zig");
 const ahci = @import("ahci.zig");
 const partition = @import("partition.zig");
@@ -64,6 +65,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     const local_apic_info = initializeApic(acpi_info);
     const io_apic_info = initializeIoApic(acpi_info, local_apic_info);
     testExternalIrq(acpi_info, local_apic_info, io_apic_info);
+    testPs2KeyboardIrq(acpi_info, local_apic_info, io_apic_info);
     const apic_timer_info = testApicTimer(acpi_info);
     startApplicationProcessors(
         info,
@@ -529,6 +531,63 @@ fn testExternalIrq(
     debugWrite(", ");
     debugWrite(if (route.level_triggered) "level" else "edge");
     debugWrite(", remasked after EOI\r\n");
+}
+
+fn testPs2KeyboardIrq(
+    discovery: acpi.Discovery,
+    local_apic: apic.Information,
+    information: ioapic.Information,
+) void {
+    const vector: u8 = 0x45;
+    const isa_irq: u8 = 1;
+    const injected_scan_code: u8 = 0x1E;
+    const madt = discovery.madt orelse ioApicFailure("validated ACPI did not contain a MADT");
+    var global_system_interrupt: u32 = isa_irq;
+    var flags: u16 = 0;
+    for (madt.overrides[0..madt.stored_override_count]) |override| {
+        if (override.bus_source == 0 and override.irq_source == isa_irq) {
+            global_system_interrupt = override.global_system_interrupt;
+            flags = override.flags;
+            break;
+        }
+    }
+
+    const configuration = ps2.prepareKeyboardIrq() orelse
+        ioApicFailure("i8042 keyboard IRQ configuration failed");
+    const route = ioapic.route(
+        information,
+        global_system_interrupt,
+        vector,
+        local_apic.apic_id,
+        flags,
+    ) orelse ioApicFailure("IOAPIC keyboard IRQ route programming or readback failed");
+    if (!ps2.injectKeyboardScanCode(injected_scan_code)) {
+        ioApicFailure("i8042 keyboard output-buffer injection failed");
+    }
+    ps2.waitForInterrupt();
+    if (ps2.count() != 1 or ps2.scanCode() != injected_scan_code) {
+        ioApicFailure("PS/2 keyboard interrupt did not return the injected scan code");
+    }
+    if (!ioapic.mask(information, global_system_interrupt)) {
+        ioApicFailure("IOAPIC keyboard route could not be remasked after EOI");
+    }
+    if (!ps2.restoreConfiguration(configuration)) {
+        ioApicFailure("i8042 configuration byte could not be restored");
+    }
+
+    debugWrite("PS/2 keyboard IRQ verified: ISA IRQ 1 -> GSI ");
+    debugWriteU64Decimal(route.global_system_interrupt);
+    debugWrite(" -> vector 0x");
+    debugWriteHex8(route.vector);
+    debugWrite(", injected scan code 0x");
+    debugWriteHex8(injected_scan_code);
+    debugWrite(", captured 0x");
+    debugWriteHex8(ps2.scanCode());
+    debugWrite(", count ");
+    debugWriteU64Decimal(ps2.count());
+    debugWrite(", command byte 0x");
+    debugWriteHex8(configuration.active);
+    debugWrite(", remasked and restored after EOI\r\n");
 }
 
 fn ioApicFailure(reason: []const u8) noreturn {

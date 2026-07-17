@@ -52,7 +52,8 @@
 - [x] Stream complete FAT files and validate on-disk AMD64 PE32+ EFI headers
 - [x] HPET initialization and local-APIC timer calibration
 - [x] Maskable APIC timer interrupt with EOI and HLT wake-up
-- [ ] PS/2 and USB input experiments
+- [x] PS/2 keyboard IRQ and scan-code injection experiment
+- [ ] USB input experiments
 
 ## 0.5 - Runtime
 
