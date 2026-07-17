@@ -209,6 +209,13 @@ $runQueueMatches = [regex]::Matches($output, 'AP run queue complete: APIC [123],
 if ($runQueueMatches.Count -ne 3) {
     throw 'All three per-CPU FIFO run-queue completion records were not observed.'
 }
+$stealMatches = [regex]::Matches($output, 'AP work stealing: APIC [23] executed 2 stolen jobs')
+if ($stealMatches.Count -ne 2) {
+    throw 'Both idle application processors did not execute their deterministic steal quotas.'
+}
+if (-not [regex]::IsMatch($output, 'Work stealing complete: source APIC 1, jobs 8, owner 4, stolen 4, checksum 0x(?!0000000000000000)[0-9A-F]{16}')) {
+    throw 'The deterministic multicore work-stealing verification marker was not observed.'
+}
 if (-not $output.Contains('PCIe ECAM active:')) {
     throw 'The PCIe MCFG/ECAM activation marker was not observed.'
 }

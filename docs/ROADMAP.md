@@ -80,3 +80,4 @@
 - [x] Lock-free BSP-to-AP work mailbox and parallel completion proof
 - [x] Per-CPU scheduler/run-queue state
 - [x] FIFO sequence and completion verification across all APs
+- [x] Deterministic multicore work stealing with atomic queue claims

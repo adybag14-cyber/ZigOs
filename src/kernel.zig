@@ -550,7 +550,26 @@ fn startApplicationProcessors(
         debugWrite(", checksum 0x");
         debugWriteHex64(processor.run_queue_checksum);
         debugWrite("\r\n");
+        if (processor.stolen_jobs_executed != 0) {
+            debugWrite("AP work stealing: APIC ");
+            debugWriteU64Decimal(processor.actual_apic_id);
+            debugWrite(" executed ");
+            debugWriteU64Decimal(processor.stolen_jobs_executed);
+            debugWrite(" stolen jobs\r\n");
+        }
     }
+
+    debugWrite("Work stealing complete: source APIC ");
+    debugWriteU64Decimal(report.work_stealing_source_apic);
+    debugWrite(", jobs ");
+    debugWriteU64Decimal(report.work_stealing_jobs);
+    debugWrite(", owner ");
+    debugWriteU64Decimal(report.work_stealing_owner_jobs);
+    debugWrite(", stolen ");
+    debugWriteU64Decimal(report.work_stealing_stolen_jobs);
+    debugWrite(", checksum 0x");
+    debugWriteHex64(report.work_stealing_checksum);
+    debugWrite("\r\n");
 
     if (report.online_count != report.target_count) {
         smpFailure("not every MADT application processor reached long mode");

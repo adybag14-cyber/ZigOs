@@ -55,6 +55,7 @@ pub const ApReport = struct {
     run_queue_completed: u32,
     run_queue_last_sequence: u32,
     run_queue_checksum: u64,
+    stolen_jobs_executed: u32,
     online: bool,
     state: u32,
     per_cpu_state: u64,
@@ -68,6 +69,11 @@ pub const Report = struct {
     startup_vector: u8,
     trampoline_base: usize,
     trampoline_size: usize,
+    work_stealing_source_apic: u32,
+    work_stealing_jobs: u32,
+    work_stealing_owner_jobs: u32,
+    work_stealing_stolen_jobs: u32,
+    work_stealing_checksum: u64,
     processors: [acpi.maximum_processors]ApReport,
 };
 
@@ -104,6 +110,11 @@ pub fn start(
         .startup_vector = startup_vector,
         .trampoline_base = boot_info.ap_trampoline.base,
         .trampoline_size = boot_info.ap_trampoline.size,
+        .work_stealing_source_apic = 0,
+        .work_stealing_jobs = 0,
+        .work_stealing_owner_jobs = 0,
+        .work_stealing_stolen_jobs = 0,
+        .work_stealing_checksum = 0,
         .processors = undefined,
     };
 
@@ -203,6 +214,7 @@ pub fn start(
             .run_queue_completed = 0,
             .run_queue_last_sequence = 0,
             .run_queue_checksum = 0,
+            .stolen_jobs_executed = 0,
             .online = online,
             .state = state,
             .per_cpu_state = @intFromPtr(per_cpu_state),
@@ -214,6 +226,7 @@ pub fn start(
     if (report.target_count + 1 != madt.processor_count) return null;
     if (!runMailboxRound(&report, reference)) return null;
     if (!runQueueRound(&report, reference)) return null;
+    if (!runWorkStealingRound(&report, reference)) return null;
     return report;
 }
 
@@ -318,6 +331,73 @@ fn runQueueRound(report: *Report, reference: hpet.Device) bool {
         processor.run_queue_last_sequence = state_report.run_queue_last_sequence;
         processor.run_queue_checksum = checksum;
     }
+    return true;
+}
+
+fn runWorkStealingRound(report: *Report, reference: hpet.Device) bool {
+    const source_index: usize = 0;
+    const jobs: u32 = 8;
+    const thief_quota: u32 = 2;
+    const expected_stolen: u32 = 4;
+    const expected_owner: u32 = jobs - expected_stolen;
+    const base_input: u64 = 0x5354_4541_4C5F_4A4F;
+    if (report.target_count != 3) return false;
+
+    percpu.pauseRunQueues();
+    for (report.processors[0..report.target_count]) |processor| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        if (!percpu.resetRunQueue(state)) return false;
+    }
+
+    const source_processor = &report.processors[source_index];
+    const source_state: *percpu.State = @ptrFromInt(source_processor.per_cpu_state);
+    var sequence: u32 = 1;
+    while (sequence <= jobs) : (sequence += 1) {
+        const input = base_input ^ (@as(u64, sequence) *% 0x0101_0101_0101_0101);
+        if (!percpu.enqueueRunQueue(source_state, sequence, input)) return false;
+    }
+    if (!percpu.configureWorkStealing(
+        report.target_count,
+        source_index,
+        thief_quota,
+        expected_stolen,
+    )) return false;
+    percpu.resumeRunQueues();
+
+    var iteration: usize = 0;
+    while (iteration < startup_timeout_iterations) : (iteration += 1) {
+        if (percpu.runQueueCompleted(source_state, jobs) and percpu.workStealingComplete()) break;
+        if (!reference.waitNanoseconds(startup_poll_nanoseconds)) return false;
+    }
+
+    percpu.pauseRunQueues();
+    const verification = percpu.verifyWorkStealing(
+        source_state,
+        jobs,
+        expected_owner,
+        expected_stolen,
+    ) orelse return false;
+    if (percpu.stolenJobCount() != expected_stolen) return false;
+
+    var expected_mask: u64 = 0;
+    for (report.processors[0..report.target_count], 0..) |*processor, index| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        const state_report = percpu.report(state);
+        const expected = if (index == source_index) 0 else thief_quota;
+        if (state_report.steal_completed != expected) return false;
+        processor.stolen_jobs_executed = state_report.steal_completed;
+        if (processor.actual_apic_id >= 64) return false;
+        expected_mask |= @as(u64, 1) << @intCast(processor.actual_apic_id);
+    }
+    if (verification.executor_mask != expected_mask) return false;
+
+    report.work_stealing_source_apic = source_processor.actual_apic_id;
+    report.work_stealing_jobs = jobs;
+    report.work_stealing_owner_jobs = verification.owner_jobs;
+    report.work_stealing_stolen_jobs = verification.stolen_jobs;
+    report.work_stealing_checksum = verification.checksum;
+    percpu.disableWorkStealing();
+    percpu.resumeRunQueues();
     return true;
 }
 

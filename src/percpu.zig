@@ -11,6 +11,7 @@ const state_magic: u64 = 0x5A49_474F_5350_4355;
 pub const run_queue_capacity: usize = 8;
 const run_queue_command: u32 = 2;
 const run_queue_checksum_seed: u64 = 0xCBF2_9CE4_8422_2325;
+const work_stealing_checksum_seed: u64 = 0x5753_5445_414C_494E;
 
 const DescriptorTablePointer = extern struct {
     limit: u16,
@@ -51,6 +52,8 @@ const RunQueueEntry = struct {
     input: u64,
     result: u64,
     completed: u32,
+    executor_apic_id: u32,
+    stolen: u32,
     reserved: u32,
 };
 
@@ -81,6 +84,11 @@ pub const State = struct {
     run_queue_completed: u32,
     run_queue_last_sequence: u32,
     run_queue_checksum: u64,
+    run_queue_stolen: u32,
+    steal_quota: u32,
+    steal_completed: u32,
+    steal_reserved: u32,
+    steal_checksum: u64,
 };
 
 pub const Report = struct {
@@ -100,6 +108,9 @@ pub const Report = struct {
     run_queue_completed: u32,
     run_queue_last_sequence: u32,
     run_queue_checksum: u64,
+    run_queue_stolen: u32,
+    steal_completed: u32,
+    steal_checksum: u64,
 };
 
 extern fn zigos_load_gdt(
@@ -117,6 +128,12 @@ extern fn zigos_memory_fence() callconv(cc) void;
 extern fn zigos_cpu_relax() callconv(cc) void;
 
 var states: [64]State align(4096) = undefined;
+var run_queue_gate: u32 = 1;
+var stealing_enabled: u32 = 0;
+var active_state_count: u32 = 0;
+var steal_source_index: u32 = 0;
+var steal_required_total: u32 = 0;
+var stolen_total: u32 = 0;
 
 pub fn prepare(
     index: usize,
@@ -153,6 +170,11 @@ pub fn prepare(
     state.run_queue_completed = 0;
     state.run_queue_last_sequence = 0;
     state.run_queue_checksum = run_queue_checksum_seed;
+    state.run_queue_stolen = 0;
+    state.steal_quota = 0;
+    state.steal_completed = 0;
+    state.steal_reserved = 0;
+    state.steal_checksum = work_stealing_checksum_seed;
     zigos_memory_fence();
     return state;
 }
@@ -233,6 +255,9 @@ pub fn report(state: *const State) Report {
         .run_queue_completed = readVolatileU32(&state.run_queue_completed),
         .run_queue_last_sequence = readVolatileU32(&state.run_queue_last_sequence),
         .run_queue_checksum = readVolatileU64(&state.run_queue_checksum),
+        .run_queue_stolen = atomicLoadU32(&state.run_queue_stolen),
+        .steal_completed = atomicLoadU32(&state.steal_completed),
+        .steal_checksum = atomicLoadU64(&state.steal_checksum),
     };
 }
 
@@ -255,6 +280,79 @@ pub fn expectedWorkResult(apic_id: u32, input: u64) u64 {
     return calculateMailboxWork(apic_id, input);
 }
 
+pub const WorkStealingReport = struct {
+    owner_jobs: u32,
+    stolen_jobs: u32,
+    executor_mask: u64,
+    checksum: u64,
+};
+
+pub fn pauseRunQueues() void {
+    atomicStoreU32(&run_queue_gate, 0);
+}
+
+pub fn resumeRunQueues() void {
+    atomicStoreU32(&run_queue_gate, 1);
+}
+
+pub fn resetRunQueue(state: *State) bool {
+    if (atomicLoadU32(&run_queue_gate) != 0) return false;
+    if (atomicLoadU32(&state.run_queue_head) != atomicLoadU32(&state.run_queue_tail)) return false;
+    if (atomicLoadU32(&state.run_queue_completed) != atomicLoadU32(&state.run_queue_head)) return false;
+    for (&state.run_queue) |*entry| entry.* = std.mem.zeroes(RunQueueEntry);
+    atomicStoreU32(&state.run_queue_head, 0);
+    atomicStoreU32(&state.run_queue_tail, 0);
+    atomicStoreU32(&state.run_queue_completed, 0);
+    atomicStoreU32(&state.run_queue_last_sequence, 0);
+    atomicStoreU64(&state.run_queue_checksum, run_queue_checksum_seed);
+    atomicStoreU32(&state.run_queue_stolen, 0);
+    atomicStoreU32(&state.steal_completed, 0);
+    atomicStoreU64(&state.steal_checksum, work_stealing_checksum_seed);
+    return true;
+}
+
+pub fn configureWorkStealing(
+    state_count: usize,
+    source_index: usize,
+    thief_quota: u32,
+    required_stolen: u32,
+) bool {
+    if (atomicLoadU32(&run_queue_gate) != 0) return false;
+    if (state_count < 3 or state_count > states.len or source_index >= state_count) return false;
+    if (thief_quota == 0 or required_stolen == 0) return false;
+    if (required_stolen != thief_quota * @as(u32, @intCast(state_count - 1))) return false;
+
+    var index: usize = 0;
+    while (index < state_count) : (index += 1) {
+        atomicStoreU32(&states[index].steal_completed, 0);
+        atomicStoreU32(
+            &states[index].steal_quota,
+            if (index == source_index) 0 else thief_quota,
+        );
+    }
+    atomicStoreU32(&active_state_count, @intCast(state_count));
+    atomicStoreU32(&steal_source_index, @intCast(source_index));
+    atomicStoreU32(&steal_required_total, required_stolen);
+    atomicStoreU32(&stolen_total, 0);
+    atomicStoreU32(&stealing_enabled, 1);
+    return true;
+}
+
+pub fn disableWorkStealing() void {
+    atomicStoreU32(&stealing_enabled, 0);
+    atomicStoreU32(&active_state_count, 0);
+    atomicStoreU32(&steal_required_total, 0);
+}
+
+pub fn workStealingComplete() bool {
+    const required = atomicLoadU32(&steal_required_total);
+    return required != 0 and atomicLoadU32(&stolen_total) == required;
+}
+
+pub fn stolenJobCount() u32 {
+    return atomicLoadU32(&stolen_total);
+}
+
 pub fn enqueueRunQueue(state: *State, sequence: u32, input: u64) bool {
     if (sequence == 0 or state.descriptor_ready != 1) return false;
     const head = readVolatileU32(&state.run_queue_head);
@@ -262,8 +360,10 @@ pub fn enqueueRunQueue(state: *State, sequence: u32, input: u64) bool {
     if (head -% tail >= @as(u32, @intCast(run_queue_capacity))) return false;
 
     const entry = &state.run_queue[queueIndex(head)];
-    writeVolatileU32(&entry.completed, 0);
+    atomicStoreU32(&entry.completed, 0);
     writeVolatileU64(&entry.result, 0);
+    entry.executor_apic_id = 0;
+    entry.stolen = 0;
     entry.sequence = sequence;
     entry.command = run_queue_command;
     entry.input = input;
@@ -317,7 +417,13 @@ pub fn verifyRunQueue(state: *State, apic_id: u32, expected_jobs: u32) ?u64 {
 pub fn runMailbox(state: *State) noreturn {
     var observed_epoch: u32 = 0;
     while (true) {
-        if (runQueueStep(state)) continue;
+        if (atomicLoadU32(&run_queue_gate) != 0) {
+            if (atomicLoadU32(&stealing_enabled) != 0) {
+                if (workStealingStep(state)) continue;
+            } else if (runQueueStep(state, state, false)) {
+                continue;
+            }
+        }
         const epoch = readVolatileU32(&state.mailbox_epoch);
         if (epoch == 0 or epoch == observed_epoch) {
             zigos_cpu_relax();
@@ -336,32 +442,124 @@ pub fn runMailbox(state: *State) noreturn {
     }
 }
 
-fn runQueueStep(state: *State) bool {
-    const tail = readVolatileU32(&state.run_queue_tail);
-    const head = readVolatileU32(&state.run_queue_head);
-    if (tail == head) return false;
+fn workStealingStep(executor: *State) bool {
+    const count = atomicLoadU32(&active_state_count);
+    const source_index = atomicLoadU32(&steal_source_index);
+    if (count == 0 or source_index >= count) return false;
+    const source = &states[source_index];
 
-    const entry = &state.run_queue[queueIndex(tail)];
+    if (executor.index == source_index) {
+        if (atomicLoadU32(&stolen_total) < atomicLoadU32(&steal_required_total)) return false;
+        return runQueueStep(source, executor, false);
+    }
+
+    const quota = atomicLoadU32(&executor.steal_quota);
+    if (quota == 0 or atomicLoadU32(&executor.steal_completed) >= quota) return false;
+    return runQueueStep(source, executor, true);
+}
+
+fn runQueueStep(victim: *State, executor: *State, stealing: bool) bool {
+    const tail = atomicLoadU32(&victim.run_queue_tail);
+    const head = atomicLoadU32(&victim.run_queue_head);
+    if (tail == head) return false;
+    if (!atomicClaimU32(&victim.run_queue_tail, tail, tail +% 1)) return false;
+
+    const entry = &victim.run_queue[queueIndex(tail)];
     const sequence = entry.sequence;
     if (sequence == 0 or entry.command != run_queue_command) return false;
-    const result = calculateRunQueueWork(state.expected_apic_id, sequence, entry.input);
+    const executor_apic_id = executor.expected_apic_id;
+    const was_stolen = stealing and executor != victim;
+    const result = calculateRunQueueWork(executor_apic_id, sequence, entry.input);
+    entry.executor_apic_id = executor_apic_id;
+    entry.stolen = @intFromBool(was_stolen);
     writeVolatileU64(&entry.result, result);
-    const checksum = accumulateRunQueueChecksum(
-        readVolatileU64(&state.run_queue_checksum),
-        sequence,
-        result,
-    );
-    writeVolatileU64(&state.run_queue_checksum, checksum);
-    writeVolatileU32(&state.run_queue_last_sequence, sequence);
-    writeVolatileU32(&entry.completed, 1);
-    writeVolatileU32(
-        &state.run_queue_completed,
-        readVolatileU32(&state.run_queue_completed) +% 1,
-    );
-    zigos_memory_fence();
-    writeVolatileU32(&state.run_queue_tail, tail +% 1);
-    zigos_memory_fence();
+
+    if (atomicLoadU32(&stealing_enabled) == 0) {
+        const checksum = accumulateRunQueueChecksum(
+            readVolatileU64(&victim.run_queue_checksum),
+            sequence,
+            result,
+        );
+        writeVolatileU64(&victim.run_queue_checksum, checksum);
+        writeVolatileU32(&victim.run_queue_last_sequence, sequence);
+    } else {
+        _ = atomicFetchXorU64(
+            &victim.steal_checksum,
+            workStealingToken(sequence, executor_apic_id, result),
+        );
+        if (was_stolen) {
+            _ = atomicFetchAddU32(&victim.run_queue_stolen, 1);
+            _ = atomicFetchAddU32(&executor.steal_completed, 1);
+            _ = atomicFetchAddU32(&stolen_total, 1);
+        }
+    }
+
+    atomicStoreU32(&entry.completed, 1);
+    _ = atomicFetchAddU32(&victim.run_queue_completed, 1);
     return true;
+}
+
+pub fn verifyWorkStealing(
+    source: *State,
+    expected_jobs: u32,
+    expected_owner_jobs: u32,
+    expected_stolen_jobs: u32,
+) ?WorkStealingReport {
+    if (expected_jobs == 0 or expected_jobs > run_queue_capacity) return null;
+    if (expected_owner_jobs + expected_stolen_jobs != expected_jobs) return null;
+    if (atomicLoadU32(&source.run_queue_head) != expected_jobs or
+        atomicLoadU32(&source.run_queue_tail) != expected_jobs or
+        atomicLoadU32(&source.run_queue_completed) != expected_jobs or
+        atomicLoadU32(&source.run_queue_stolen) != expected_stolen_jobs)
+    {
+        return null;
+    }
+
+    var owner_jobs: u32 = 0;
+    var stolen_jobs: u32 = 0;
+    var executor_mask: u64 = 0;
+    var checksum = work_stealing_checksum_seed;
+    var index: u32 = 0;
+    while (index < expected_jobs) : (index += 1) {
+        const entry = &source.run_queue[queueIndex(index)];
+        const sequence = index + 1;
+        if (atomicLoadU32(&entry.completed) != 1 or
+            entry.sequence != sequence or
+            entry.command != run_queue_command or
+            entry.executor_apic_id >= 64)
+        {
+            return null;
+        }
+        const was_stolen = entry.executor_apic_id != source.expected_apic_id;
+        if (entry.stolen != @intFromBool(was_stolen)) return null;
+        if (was_stolen) {
+            stolen_jobs += 1;
+        } else {
+            owner_jobs += 1;
+        }
+        const result = readVolatileU64(&entry.result);
+        const expected = calculateRunQueueWork(entry.executor_apic_id, sequence, entry.input);
+        if (result != expected) return null;
+        executor_mask |= @as(u64, 1) << @intCast(entry.executor_apic_id);
+        checksum ^= workStealingToken(sequence, entry.executor_apic_id, result);
+    }
+    if (owner_jobs != expected_owner_jobs or stolen_jobs != expected_stolen_jobs) return null;
+    if (atomicLoadU64(&source.steal_checksum) != checksum) return null;
+    return .{
+        .owner_jobs = owner_jobs,
+        .stolen_jobs = stolen_jobs,
+        .executor_mask = executor_mask,
+        .checksum = checksum,
+    };
+}
+
+fn workStealingToken(sequence: u32, executor_apic_id: u32, result: u64) u64 {
+    var value = result ^
+        (@as(u64, sequence) *% 0x9E37_79B9_7F4A_7C15) ^
+        (@as(u64, executor_apic_id) *% 0xD6E8_FEB8_6659_FD93);
+    value = std.math.rotl(u64, value, 23);
+    value *%= 0xA076_1D64_78BD_642F;
+    return value;
 }
 
 fn calculateRunQueueWork(apic_id: u32, sequence: u32, input: u64) u64 {
@@ -398,6 +596,34 @@ fn calculateMailboxWork(apic_id: u32, input: u64) u64 {
         value *%= 0xE703_7ED1_A0B4_28DB;
     }
     return value;
+}
+
+fn atomicLoadU32(value: *const u32) u32 {
+    return @atomicLoad(u32, value, .acquire);
+}
+
+fn atomicStoreU32(value: *u32, data: u32) void {
+    @atomicStore(u32, value, data, .release);
+}
+
+fn atomicLoadU64(value: *const u64) u64 {
+    return @atomicLoad(u64, value, .acquire);
+}
+
+fn atomicStoreU64(value: *u64, data: u64) void {
+    @atomicStore(u64, value, data, .release);
+}
+
+fn atomicFetchAddU32(value: *u32, amount: u32) u32 {
+    return @atomicRmw(u32, value, .Add, amount, .acq_rel);
+}
+
+fn atomicFetchXorU64(value: *u64, operand: u64) u64 {
+    return @atomicRmw(u64, value, .Xor, operand, .acq_rel);
+}
+
+fn atomicClaimU32(value: *u32, expected: u32, desired: u32) bool {
+    return @cmpxchgStrong(u32, value, expected, desired, .acq_rel, .acquire) == null;
 }
 
 fn readVolatileU32(value: *const u32) u32 {
