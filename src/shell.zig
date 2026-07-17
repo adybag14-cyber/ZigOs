@@ -18,6 +18,9 @@ pub const Shell = struct {
     line_length: usize,
     executed_line: [maximum_line_length]u8,
     executed_length: usize,
+    history_line: [maximum_line_length]u8,
+    history_length: usize,
+    history_recalls: u32,
     command_count: u32,
     rejected_characters: u32,
 
@@ -27,6 +30,9 @@ pub const Shell = struct {
             .line_length = 0,
             .executed_line = undefined,
             .executed_length = 0,
+            .history_line = undefined,
+            .history_length = 0,
+            .history_recalls = 0,
             .command_count = 0,
             .rejected_characters = 0,
         };
@@ -58,6 +64,14 @@ pub const Shell = struct {
         return self.executed_line[0..self.executed_length];
     }
 
+    pub fn recallPrevious(self: *Shell) []const u8 {
+        if (self.line_length != 0 or self.history_length == 0) return "";
+        @memcpy(self.line[0..self.history_length], self.history_line[0..self.history_length]);
+        self.line_length = self.history_length;
+        self.history_recalls +%= 1;
+        return self.line[0..self.line_length];
+    }
+
     pub fn responseText(response: Response) []const u8 {
         return switch (response) {
             .help => "commands: help cpu mem scroll clear",
@@ -73,7 +87,11 @@ pub const Shell = struct {
     fn execute(self: *Shell) Response {
         const command = std.mem.trim(u8, self.line[0..self.line_length], " \t");
         self.executed_length = command.len;
-        if (command.len != 0) @memcpy(self.executed_line[0..command.len], command);
+        if (command.len != 0) {
+            @memcpy(self.executed_line[0..command.len], command);
+            @memcpy(self.history_line[0..command.len], command);
+            self.history_length = command.len;
+        }
         self.line_length = 0;
         self.command_count +%= 1;
 

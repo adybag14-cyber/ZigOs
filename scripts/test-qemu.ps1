@@ -121,7 +121,7 @@ try {
                     $writer.NewLine = "`n"
                     $writer.AutoFlush = $true
                     Start-Sleep -Milliseconds 50
-                    foreach ($key in @('h', 'e', 'l', 'x', 'backspace', 'p', 'ret', 'c', 'p', 'u', 'ret', 'm', 'e', 'm', 'ret', 's', 'c', 'r', 'o', 'l', 'l', 'ret', 'c', 'l', 'e', 'a', 'r', 'ret', 'h', 'e', 'l', 'p', 'ret', 'n', 'o', 'p', 'e', 'ret', 'ret', 'h', 'e', 'l', 'p', 'ret')) {
+                    foreach ($key in @('h', 'e', 'l', 'x', 'backspace', 'p', 'ret', 'c', 'p', 'u', 'ret', 'm', 'e', 'm', 'ret', 's', 'c', 'r', 'o', 'l', 'l', 'ret', 'c', 'l', 'e', 'a', 'r', 'ret', 'h', 'e', 'l', 'p', 'ret', 'n', 'o', 'p', 'e', 'ret', 'ret', 'h', 'e', 'l', 'p', 'ret', 'up', 'ret')) {
                         $writer.WriteLine("sendkey $key 120")
                         Start-Sleep -Milliseconds 180
                     }
@@ -437,11 +437,14 @@ if (-not $output.Contains('Framebuffer unknown command verified: nope -> error: 
 if (-not $output.Contains('Framebuffer empty command verified: prompt continued without an error response')) {
     throw 'The empty-command prompt-continuation proof was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer error recovery shell: cursor row 6, column 35, lines 7, writes 132, newlines 6, resets 1, checksum 0xFE1CD6284B13B031, cursor visible, draws 26, erases 25, display checksum 0xC4E5ABA32112C6BD')) {
-    throw 'The post-error-recovery framebuffer state was not observed.'
+if (-not $output.Contains('Framebuffer history recall verified: Up -> help')) {
+    throw 'The USB Up-arrow command-history recall marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'ZigOs shell session complete: valid, clear, unknown, empty, recovery; commands 9, reports [1-9][0-9]*, rejected 0')) {
-    throw 'The persistent native shell error-recovery marker was not observed.'
+if (-not [regex]::IsMatch($output, 'Framebuffer history shell: cursor row 8, column 35, lines 9, writes 178, newlines 8, resets 1, recalls 1, checksum 0x4721B2F0411D5331, cursor visible, draws 31, erases 30, display checksum 0x030FBD6154A5D1BD')) {
+    throw 'The history-recalled framebuffer state was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'ZigOs shell session complete: valid, clear, unknown, empty, recovery, history; commands 10, reports [1-9][0-9]*, rejected 0')) {
+    throw 'The persistent native shell history-recovery marker was not observed.'
 }
 if (-not $output.Contains('AHCI controller active at')) {
     throw 'The AHCI PCI/BAR discovery marker was not observed.'
@@ -539,10 +542,10 @@ if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B
 if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
     throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 7, glyphs 132, resets 1, lit pixels 7076, checksum 0xFE1CD6284B13B031, cursor visible, draws 26, erases 25, display lit pixels 7096, display checksum 0xC4E5ABA32112C6BD')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 9, glyphs 178, resets 1, lit pixels 9492, checksum 0x4721B2F0411D5331, cursor visible, draws 31, erases 30, display lit pixels 9512, display checksum 0x030FBD6154A5D1BD')) {
     throw 'The deterministic GOP bitmap-console report was not observed.'
 }
-if (-not $output.Contains('Framebuffer transcript: clear, unknown, empty, and recovered help commands')) {
+if (-not $output.Contains('Framebuffer transcript: clear, error recovery, and Up-arrow history recall')) {
     throw 'The rendered graphical-console transcript marker was not observed.'
 }
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {

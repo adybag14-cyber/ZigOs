@@ -158,7 +158,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWrite(", display checksum 0x");
     debugWriteHex64(report.display_checksum);
     debugWrite("\r\n");
-    debugWrite("Framebuffer transcript: clear, unknown, empty, and recovered help commands\r\n");
+    debugWrite("Framebuffer transcript: clear, error recovery, and Up-arrow history recall\r\n");
     debugWrite("Framebuffer retained and written directly at 0x");
     debugWriteHex64(@intCast(framebuffer.base));
     debugWrite("\r\n");
@@ -1615,8 +1615,8 @@ fn runUsbShell(
     allocator: *memory.FrameAllocator,
     graphical_console: *framebuffer_console.Console,
 ) void {
-    const expected_commands = [_][]const u8{ "help", "cpu", "mem", "scroll", "clear", "help", "nope", "", "help" };
-    const expected_responses = [_]shell.Response{ .help, .cpu, .memory, .scroll, .clear_screen, .help, .unknown, .empty, .help };
+    const expected_commands = [_][]const u8{ "help", "cpu", "mem", "scroll", "clear", "help", "nope", "", "help", "help" };
+    const expected_responses = [_]shell.Response{ .help, .cpu, .memory, .scroll, .clear_screen, .help, .unknown, .empty, .help, .help };
     var command_shell = shell.Shell.init();
     var previous_keys = std.mem.zeroes([6]u8);
     var previous_modifiers: u8 = 0;
@@ -1624,7 +1624,7 @@ fn runUsbShell(
     var completed_commands: usize = 0;
     var marker_printed = false;
 
-    while (report_count < 160) : (report_count += 1) {
+    while (report_count < 176) : (report_count += 1) {
         const arm = xhci.armNextHidKeyboardInput(
             controller,
             endpoint,
@@ -1644,6 +1644,15 @@ fn runUsbShell(
             report.keys,
         );
         while (event_queue.pop()) |event| {
+            if (event.action == .pressed and event.usage == 0x52) {
+                const recalled = command_shell.recallPrevious();
+                if (!std.mem.eql(u8, recalled, "help")) {
+                    xhciFailure("Up-arrow history recall did not restore the previous help command");
+                }
+                graphical_console.write(recalled);
+                debugWrite("Framebuffer history recall verified: Up -> help\r\n");
+                continue;
+            }
             if (event.action == .pressed and event.ascii != 0 and event.ascii != '\n') {
                 graphical_console.put(event.ascii);
             }
@@ -1734,21 +1743,21 @@ fn runUsbShell(
                 }
 
                 const console_report = graphical_console.report();
-                if (console_report.cursor_row != 6 or console_report.cursor_column != 35 or
-                    console_report.lines != 7 or console_report.glyphs != 132 or
-                    console_report.writes != 132 or console_report.newlines != 6 or
+                if (console_report.cursor_row != 8 or console_report.cursor_column != 35 or
+                    console_report.lines != 9 or console_report.glyphs != 178 or
+                    console_report.writes != 178 or console_report.newlines != 8 or
                     console_report.backspaces != 0 or console_report.scrolls != 0 or
-                    console_report.resets != 1 or
-                    !console_report.cursor_visible or console_report.cursor_draws != 26 or
-                    console_report.cursor_erases != 25 or
-                    console_report.display_lit_pixels != 7096 or
-                    console_report.display_checksum != 0xC4E5_ABA3_2112_C6BD or
-                    console_report.lit_pixels != 7076 or
-                    console_report.checksum != 0xFE1C_D628_4B13_B031)
+                    console_report.resets != 1 or command_shell.history_recalls != 1 or
+                    !console_report.cursor_visible or console_report.cursor_draws != 31 or
+                    console_report.cursor_erases != 30 or
+                    console_report.display_lit_pixels != 9512 or
+                    console_report.display_checksum != 0x030F_BD61_54A5_D1BD or
+                    console_report.lit_pixels != 9492 or
+                    console_report.checksum != 0x4721_B2F0_411D_5331)
                 {
-                    xhciFailure("post-error-recovery framebuffer shell state was not deterministic");
+                    xhciFailure("history-recalled framebuffer shell state was not deterministic");
                 }
-                debugWrite("Framebuffer error recovery shell: cursor row ");
+                debugWrite("Framebuffer history shell: cursor row ");
                 debugWriteUsizeDecimal(console_report.cursor_row);
                 debugWrite(", column ");
                 debugWriteUsizeDecimal(console_report.cursor_column);
@@ -1760,6 +1769,8 @@ fn runUsbShell(
                 debugWriteUsizeDecimal(console_report.newlines);
                 debugWrite(", resets ");
                 debugWriteUsizeDecimal(console_report.resets);
+                debugWrite(", recalls ");
+                debugWriteUsizeDecimal(command_shell.history_recalls);
                 debugWrite(", checksum 0x");
                 debugWriteHex64(console_report.checksum);
                 debugWrite(", cursor visible, draws ");
@@ -1769,14 +1780,14 @@ fn runUsbShell(
                 debugWrite(", display checksum 0x");
                 debugWriteHex64(console_report.display_checksum);
                 debugWrite("\r\n");
-                debugWrite("ZigOs shell session complete: valid, clear, unknown, empty, recovery; commands 9, reports ");
+                debugWrite("ZigOs shell session complete: valid, clear, unknown, empty, recovery, history; commands 10, reports ");
                 debugWriteU64Decimal(report_count + 1);
                 debugWrite(", rejected 0\r\n");
                 return;
             }
         }
     }
-    xhciFailure("native shell did not complete nine commands within 160 reports");
+    xhciFailure("native shell did not complete ten commands within 176 reports");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {

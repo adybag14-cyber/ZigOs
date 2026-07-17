@@ -129,3 +129,5 @@
 - [x] Empty-command handling and valid-command recovery in the same USB session
 - [x] Live underline cursor overlay with automatic erase/redraw around terminal mutations
 - [x] Separate content and displayed-pixel checksums preserving transcript regressions
+- [x] Single-entry command history retained across valid, invalid, and empty commands
+- [x] USB HID Up-arrow recall redrawn and executed through the normal shell path
