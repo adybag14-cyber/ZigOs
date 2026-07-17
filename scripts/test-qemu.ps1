@@ -3,7 +3,8 @@ param(
     [int]$TimeoutSeconds = 30,
     [switch]$NvmeOnly,
     [switch]$NoUsbKeyboard,
-    [switch]$UsbMouseOnly
+    [switch]$UsbMouseOnly,
+    [switch]$NoGraphics
 )
 
 $ErrorActionPreference = 'Stop'
@@ -283,8 +284,11 @@ if ($UsbMouseOnly) {
 } elseif (-not $NoUsbKeyboard) {
     $arguments += @('-device', 'usb-kbd,bus=xhci.0,port=1')
 }
+if ($NoGraphics) {
+    $arguments += @('-vga', 'none')
+}
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -299,7 +303,7 @@ try {
         Start-Sleep -Milliseconds 25
         if (Test-Path $debugLog) {
             $text = Get-Content $debugLog -Raw -ErrorAction SilentlyContinue
-            if (-not $NoUsbKeyboard -and -not $UsbMouseOnly -and $text -and -not $keyInjected -and $text.Contains($inputMarker)) {
+            if (-not $NoUsbKeyboard -and -not $UsbMouseOnly -and -not $NoGraphics -and $text -and -not $keyInjected -and $text.Contains($inputMarker)) {
                 $client = [System.Net.Sockets.TcpClient]::new()
                 try {
                     $client.Connect('127.0.0.1', $monitorPort)
@@ -316,7 +320,7 @@ try {
                     $client.Dispose()
                 }
             }
-            if (-not $NoUsbKeyboard -and -not $UsbMouseOnly -and $text -and $keyInjected -and -not $shellInjected -and $text.Contains($shellMarker)) {
+            if (-not $NoUsbKeyboard -and -not $UsbMouseOnly -and -not $NoGraphics -and $text -and $keyInjected -and -not $shellInjected -and $text.Contains($shellMarker)) {
                 $client = [System.Net.Sockets.TcpClient]::new()
                 try {
                     $client.Connect('127.0.0.1', $monitorPort)
@@ -522,9 +526,22 @@ if ($syncWorkerMatches.Count -ne 3) {
 if (-not [regex]::IsMatch($output, 'SMP synchronization complete: 4 participants, 16384 locked increments, tickets 16384/16384, barrier generation 1, checksum 0x(?!0000000000000000)[0-9A-F]{16}')) {
     throw 'The four-core ticket-lock and barrier verification marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer terminal initialized: 1280x800, cells 102x37, cursor row 3, column 7, writes 31, cursor visible, draws 6, erases 5, display checksum 0x7CF72F9AF061C761')) {
-    throw 'The persistent graphical terminal was not initialized before PCI/xHCI discovery.'
-}if (-not $output.Contains('PCIe ECAM active:')) {
+if ($NoGraphics) {
+    if (-not $output.Contains('GOP framebuffer: unavailable or BLT-only')) {
+        throw 'UEFI did not report the expected missing GOP framebuffer.'
+    }
+    if (-not $output.Contains('GOP framebuffer unavailable; continuing with serial diagnostics only')) {
+        throw 'The kernel serial-only GOP fallback marker was not observed.'
+    }
+    if ($output.Contains('Framebuffer terminal initialized:')) {
+        throw 'A graphical terminal was unexpectedly initialized in no-graphics mode.'
+    }
+} else {
+    if (-not [regex]::IsMatch($output, 'Framebuffer terminal initialized: 1280x800, cells 102x37, cursor row 3, column 7, writes 31, cursor visible, draws 6, erases 5, display checksum 0x7CF72F9AF061C761')) {
+        throw 'The persistent graphical terminal was not initialized before PCI/xHCI discovery.'
+    }
+}
+if (-not $output.Contains('PCIe ECAM active:')) {
     throw 'The PCIe MCFG/ECAM activation marker was not observed.'
 }
 if (-not $output.Contains('PCI inventory:')) {
@@ -539,7 +556,20 @@ if (-not [regex]::IsMatch($output, 'xHCI controller discovered at [0-9A-F]{4}:[0
 if (-not [regex]::IsMatch($output, 'xHCI capabilities: version [0-9]+\.[0-9A-F]{2}, [1-9][0-9]* slots, [1-9][0-9]* interrupters, [1-9][0-9]* ports, (32|64)-bit addressing, (32|64)-byte contexts, doorbells \+0x[0-9A-F]{16}, runtime \+0x[0-9A-F]{16}')) {
     throw 'The xHCI capability-register report was not observed.'
 }
-if ($NoUsbKeyboard) {
+if ($NoGraphics) {
+    if (-not $output.Contains('USB keyboard attachment visible: 1 connected xHCI port(s); read-only discovery complete')) {
+        throw 'The connected keyboard was not visible during serial-only xHCI discovery.'
+    }
+    if (-not $output.Contains('Framebuffer console unavailable; continuing without interactive USB shell')) {
+        throw 'The xHCI serial-only interactive-shell fallback marker was not observed.'
+    }
+    if (-not $output.Contains('Interactive input ready: USB keyboard no')) {
+        throw 'The serial-only USB-input readiness marker was not observed.'
+    }
+    if ($output.Contains('xHCI ownership active:') -or $output.Contains('ZigOs shell input armed:')) {
+        throw 'xHCI ownership or the shell unexpectedly started without a framebuffer console.'
+    }
+} elseif ($NoUsbKeyboard) {
     if (-not $output.Contains('USB keyboard attachment visible: 0 connected xHCI port(s); read-only discovery complete')) {
         throw 'The zero-device xHCI port inventory was not observed.'
     }
@@ -845,7 +875,7 @@ if (-not (Test-Path $serialLog)) {
 $serialOutput = Get-Content $serialLog -Raw
 Write-Host '=== ZigOs COM1 serial output ==='
 Write-Host $serialOutput
-if (($NoUsbKeyboard -or $UsbMouseOnly) -and -not $serialOutput.Contains('resets 0, lit pixels 1744')) {
+if (-not $NoGraphics -and ($NoUsbKeyboard -or $UsbMouseOnly) -and -not $serialOutput.Contains('resets 0, lit pixels 1744')) {
     throw 'COM1 decimal formatting dropped the zero-valued framebuffer reset counter.'
 }
 if (-not $serialOutput.Contains('BdsDxe: starting Boot0001 "UEFI QEMU NVMe Ctrl ZIGOSNVME 1"')) {
@@ -881,12 +911,24 @@ if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B
 if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
     throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
 }
-if ($NoUsbKeyboard -or $UsbMouseOnly) {
+if ($NoGraphics) {
+    if (-not $output.Contains('Framebuffer console unavailable; serial-only diagnostics active')) {
+        throw 'The final serial-only framebuffer marker was not observed.'
+    }
+    if ($output.Contains('Framebuffer console active:') -or
+        $output.Contains('Framebuffer transcript:') -or
+        $output.Contains('Framebuffer retained and written directly at 0x')) {
+        throw 'Framebuffer output was unexpectedly used in no-graphics mode.'
+    }
+} elseif ($NoUsbKeyboard -or $UsbMouseOnly) {
     if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 4, glyphs 31, resets 0, lit pixels 1744, checksum 0x866AA691AB18DEB5, cursor visible, draws 6, erases 5, display lit pixels 1764, display checksum 0x7CF72F9AF061C761')) {
         throw 'The unchanged startup-prompt framebuffer state was not observed without a USB keyboard.'
     }
     if (-not $output.Contains('Framebuffer transcript: startup prompt; USB keyboard unavailable')) {
         throw 'The keyboard-less framebuffer transcript marker was not observed.'
+    }
+    if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
+        throw 'The framebuffer was not retained and accessed after the handoff.'
     }
 } else {
     if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 9, glyphs 178, resets 1, lit pixels 9492, checksum 0x4721B2F0411D5331, cursor visible, draws 31, erases 30, display lit pixels 9512, display checksum 0x030FBD6154A5D1BD')) {
@@ -895,9 +937,9 @@ if ($NoUsbKeyboard -or $UsbMouseOnly) {
     if (-not $output.Contains('Framebuffer transcript: clear, error recovery, and Up-arrow history recall')) {
         throw 'The rendered graphical-console transcript marker was not observed.'
     }
-}
-if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
-    throw 'The framebuffer was not retained and accessed after the handoff.'
+    if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
+        throw 'The framebuffer was not retained and accessed after the handoff.'
+    }
 }
 
 Write-Host 'QEMU boot test passed.'

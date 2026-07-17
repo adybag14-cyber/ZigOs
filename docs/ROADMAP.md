@@ -199,3 +199,13 @@
 
 - [x] Zero-valued decimal counters mirrored through the shared debug/COM1 path
 - [x] Headless framebuffer reset counter verified as `0` in COM1 output
+
+
+## 1.7 - Serial-only boot
+
+- [x] COM1 initialized immediately after paging, descriptor tables, and exception handling
+- [x] GOP framebuffer treated as an optional boot capability
+- [x] Kernel continuation when GOP is missing or unsupported
+- [x] USB interactive ownership suppressed when no framebuffer console exists
+- [x] Final boot diagnostics emitted entirely through debugcon and COM1
+- [x] NVMe-only, keyboard-connected, no-VGA full-system QEMU regression

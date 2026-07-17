@@ -72,6 +72,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     installPaging(info, &frame_allocator);
     installDescriptorTables(info, &frame_allocator);
     testExceptionRecovery(info);
+    initializeSerial();
 
     const acpi_info = discoverAcpi(info);
     const local_apic_info = initializeApic(acpi_info);
@@ -86,45 +87,55 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
         local_apic_info,
         apic_timer_info.ticks_per_second,
     );
-    const framebuffer = info.framebuffer orelse
-        framebufferConsoleFailure("no writable GOP framebuffer was retained");
-    var graphical_console = framebuffer_console.Console.init(framebuffer) orelse
-        framebufferConsoleFailure("GOP geometry, pixel format, or terminal initialization failed");
-    const initial_console_report = graphical_console.report();
-    if (!initial_console_report.cursor_visible or
-        initial_console_report.cursor_draws != 6 or
-        initial_console_report.cursor_erases != 5 or
-        initial_console_report.display_lit_pixels != initial_console_report.lit_pixels + cursor_pixel_count or
-        initial_console_report.display_checksum != 0x7CF7_2F9A_F061_C761)
-    {
-        framebufferConsoleFailure("initial framebuffer cursor overlay was not deterministic");
+    var graphical_console_storage: ?framebuffer_console.Console = null;
+    if (info.framebuffer) |framebuffer| {
+        graphical_console_storage = framebuffer_console.Console.init(framebuffer);
+        if (graphical_console_storage) |*graphical_console| {
+            const initial_console_report = graphical_console.report();
+            if (!initial_console_report.cursor_visible or
+                initial_console_report.cursor_draws != 6 or
+                initial_console_report.cursor_erases != 5 or
+                initial_console_report.display_lit_pixels != initial_console_report.lit_pixels + cursor_pixel_count or
+                initial_console_report.display_checksum != 0x7CF7_2F9A_F061_C761)
+            {
+                framebufferConsoleFailure("initial framebuffer cursor overlay was not deterministic");
+            }
+            debugWrite("Framebuffer terminal initialized: ");
+            debugWriteUsizeDecimal(initial_console_report.width);
+            debugWrite("x");
+            debugWriteUsizeDecimal(initial_console_report.height);
+            debugWrite(", cells ");
+            debugWriteUsizeDecimal(initial_console_report.columns);
+            debugWrite("x");
+            debugWriteUsizeDecimal(initial_console_report.rows);
+            debugWrite(", cursor row ");
+            debugWriteUsizeDecimal(initial_console_report.cursor_row);
+            debugWrite(", column ");
+            debugWriteUsizeDecimal(initial_console_report.cursor_column);
+            debugWrite(", writes ");
+            debugWriteUsizeDecimal(initial_console_report.writes);
+            debugWrite(", cursor ");
+            debugWrite(if (initial_console_report.cursor_visible) "visible" else "hidden");
+            debugWrite(", draws ");
+            debugWriteUsizeDecimal(initial_console_report.cursor_draws);
+            debugWrite(", erases ");
+            debugWriteUsizeDecimal(initial_console_report.cursor_erases);
+            debugWrite(", display checksum 0x");
+            debugWriteHex64(initial_console_report.display_checksum);
+            debugWrite("\r\n");
+        } else {
+            debugWrite("GOP framebuffer geometry or pixel format unsupported; continuing with serial diagnostics only\r\n");
+        }
+    } else {
+        debugWrite("GOP framebuffer unavailable; continuing with serial diagnostics only\r\n");
     }
-    debugWrite("Framebuffer terminal initialized: ");
-    debugWriteUsizeDecimal(initial_console_report.width);
-    debugWrite("x");
-    debugWriteUsizeDecimal(initial_console_report.height);
-    debugWrite(", cells ");
-    debugWriteUsizeDecimal(initial_console_report.columns);
-    debugWrite("x");
-    debugWriteUsizeDecimal(initial_console_report.rows);
-    debugWrite(", cursor row ");
-    debugWriteUsizeDecimal(initial_console_report.cursor_row);
-    debugWrite(", column ");
-    debugWriteUsizeDecimal(initial_console_report.cursor_column);
-    debugWrite(", writes ");
-    debugWriteUsizeDecimal(initial_console_report.writes);
-    debugWrite(", cursor ");
-    debugWrite(if (initial_console_report.cursor_visible) "visible" else "hidden");
-    debugWrite(", draws ");
-    debugWriteUsizeDecimal(initial_console_report.cursor_draws);
-    debugWrite(", erases ");
-    debugWriteUsizeDecimal(initial_console_report.cursor_erases);
-    debugWrite(", display checksum 0x");
-    debugWriteHex64(initial_console_report.display_checksum);
-    debugWrite("\r\n");
 
     const pci_inventory = enumeratePci(acpi_info);
-    const usb_keyboard_ready = inspectXhci(pci_inventory, &frame_allocator, &graphical_console);
+    const graphical_console: ?*framebuffer_console.Console = if (graphical_console_storage) |*console|
+        console
+    else
+        null;
+    const usb_keyboard_ready = inspectXhci(pci_inventory, &frame_allocator, graphical_console);
     const nvme_storage_ready = inspectNvme(pci_inventory, &frame_allocator);
     const ahci_storage_ready = inspectAhci(pci_inventory, &frame_allocator);
     if (!nvme_storage_ready and !ahci_storage_ready) {
@@ -142,44 +153,47 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     testCooperativeScheduler(&frame_allocator);
     testPreemptiveScheduler(&frame_allocator, apic_timer_info.ticks_per_second);
     testUserMode(&frame_allocator);
-    initializeSerial();
 
-    const report = graphical_console.report();
-    debugWrite("Framebuffer console active: ");
-    debugWriteUsizeDecimal(report.width);
-    debugWrite("x");
-    debugWriteUsizeDecimal(report.height);
-    debugWrite(", stride ");
-    debugWriteUsizeDecimal(report.stride);
-    debugWrite(", lines ");
-    debugWriteUsizeDecimal(report.lines);
-    debugWrite(", glyphs ");
-    debugWriteUsizeDecimal(report.glyphs);
-    debugWrite(", resets ");
-    debugWriteUsizeDecimal(report.resets);
-    debugWrite(", lit pixels ");
-    debugWriteUsizeDecimal(report.lit_pixels);
-    debugWrite(", checksum 0x");
-    debugWriteHex64(report.checksum);
-    debugWrite(", cursor ");
-    debugWrite(if (report.cursor_visible) "visible" else "hidden");
-    debugWrite(", draws ");
-    debugWriteUsizeDecimal(report.cursor_draws);
-    debugWrite(", erases ");
-    debugWriteUsizeDecimal(report.cursor_erases);
-    debugWrite(", display lit pixels ");
-    debugWriteUsizeDecimal(report.display_lit_pixels);
-    debugWrite(", display checksum 0x");
-    debugWriteHex64(report.display_checksum);
-    debugWrite("\r\n");
-    if (usb_keyboard_ready) {
-        debugWrite("Framebuffer transcript: clear, error recovery, and Up-arrow history recall\r\n");
+    if (graphical_console) |console| {
+        const report = console.report();
+        debugWrite("Framebuffer console active: ");
+        debugWriteUsizeDecimal(report.width);
+        debugWrite("x");
+        debugWriteUsizeDecimal(report.height);
+        debugWrite(", stride ");
+        debugWriteUsizeDecimal(report.stride);
+        debugWrite(", lines ");
+        debugWriteUsizeDecimal(report.lines);
+        debugWrite(", glyphs ");
+        debugWriteUsizeDecimal(report.glyphs);
+        debugWrite(", resets ");
+        debugWriteUsizeDecimal(report.resets);
+        debugWrite(", lit pixels ");
+        debugWriteUsizeDecimal(report.lit_pixels);
+        debugWrite(", checksum 0x");
+        debugWriteHex64(report.checksum);
+        debugWrite(", cursor ");
+        debugWrite(if (report.cursor_visible) "visible" else "hidden");
+        debugWrite(", draws ");
+        debugWriteUsizeDecimal(report.cursor_draws);
+        debugWrite(", erases ");
+        debugWriteUsizeDecimal(report.cursor_erases);
+        debugWrite(", display lit pixels ");
+        debugWriteUsizeDecimal(report.display_lit_pixels);
+        debugWrite(", display checksum 0x");
+        debugWriteHex64(report.display_checksum);
+        debugWrite("\r\n");
+        if (usb_keyboard_ready) {
+            debugWrite("Framebuffer transcript: clear, error recovery, and Up-arrow history recall\r\n");
+        } else {
+            debugWrite("Framebuffer transcript: startup prompt; USB keyboard unavailable\r\n");
+        }
+        debugWrite("Framebuffer retained and written directly at 0x");
+        debugWriteHex64(@intCast(info.framebuffer.?.base));
+        debugWrite("\r\n");
     } else {
-        debugWrite("Framebuffer transcript: startup prompt; USB keyboard unavailable\r\n");
+        debugWrite("Framebuffer console unavailable; serial-only diagnostics active\r\n");
     }
-    debugWrite("Framebuffer retained and written directly at 0x");
-    debugWriteHex64(@intCast(framebuffer.base));
-    debugWrite("\r\n");
 
     debugWrite("ZigOs boot sequence complete: kernel foundations and hardware probes passed.\r\n");
     zigos_halt_forever();
@@ -1202,7 +1216,7 @@ fn serialFailure(reason: []const u8) noreturn {
 fn inspectXhci(
     inventory: pci.Inventory,
     allocator: *memory.FrameAllocator,
-    graphical_console: *framebuffer_console.Console,
+    graphical_console: ?*framebuffer_console.Console,
 ) bool {
     var controller_function: ?pci.Function = null;
     for (inventory.functions[0..inventory.retained_count]) |function| {
@@ -1283,6 +1297,10 @@ fn inspectXhci(
         debugWrite("USB keyboard unavailable; continuing without interactive shell\r\n");
         return false;
     }
+    const console = graphical_console orelse {
+        debugWrite("Framebuffer console unavailable; continuing without interactive USB shell\r\n");
+        return false;
+    };
 
     var ownership = xhci.takeOwnership(controller, allocator) orelse
         xhciFailure("controller reset, ring installation, or Enable Slot completion failed");
@@ -1646,7 +1664,7 @@ fn inspectXhci(
     debugWriteHex64(release_report.event_trb_pointer);
     debugWrite("\r\n");
     debugWrite("Keyboard event queue verified: #1 USB usage 0x04 pressed -> 'a'; #2 USB usage 0x04 released -> 'a'; dropped 0\r\n");
-    runUsbShell(controller, &ownership, &mutable_hid_endpoint, allocator, graphical_console);
+    runUsbShell(controller, &ownership, &mutable_hid_endpoint, allocator, console);
     return true;
 }
 
