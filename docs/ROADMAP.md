@@ -109,3 +109,10 @@
 - [x] Repeated xHCI report rearming during interactive input
 - [x] Native `help`, `cpu` and `mem` command dispatch
 - [x] QEMU-injected end-to-end `help` command proof
+
+## 0.9 - Graphical console
+
+- [x] Direct GOP framebuffer clearing with retained post-UEFI ownership
+- [x] Built-in scaled 5x7 bitmap font renderer
+- [x] On-screen ZigOs banner and native-shell transcript
+- [x] Deterministic framebuffer pixel-checksum regression gate

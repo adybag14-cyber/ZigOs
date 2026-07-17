@@ -24,6 +24,7 @@ const xhci = @import("xhci.zig");
 const smp = @import("smp.zig");
 const serial = @import("serial.zig");
 const shell = @import("shell.zig");
+const framebuffer_console = @import("framebuffer_console.zig");
 const hpet = @import("hpet.zig");
 
 const cc = std.os.uefi.cc;
@@ -92,12 +93,29 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     initializeSerial();
 
     if (info.framebuffer) |framebuffer| {
-        paintFramebuffer(framebuffer);
+        const report = framebuffer_console.render(framebuffer) orelse
+            framebufferConsoleFailure("GOP geometry, pixel format, or bitmap rendering failed");
+        debugWrite("Framebuffer console active: ");
+        debugWriteUsizeDecimal(report.width);
+        debugWrite("x");
+        debugWriteUsizeDecimal(report.height);
+        debugWrite(", stride ");
+        debugWriteUsizeDecimal(report.stride);
+        debugWrite(", lines ");
+        debugWriteUsizeDecimal(report.lines);
+        debugWrite(", glyphs ");
+        debugWriteUsizeDecimal(report.glyphs);
+        debugWrite(", lit pixels ");
+        debugWriteUsizeDecimal(report.lit_pixels);
+        debugWrite(", checksum 0x");
+        debugWriteHex64(report.checksum);
+        debugWrite("\r\n");
+        debugWrite("Framebuffer transcript: ZigOs | Experimental x86-64 | zigos> help | commands: help cpu mem\r\n");
         debugWrite("Framebuffer retained and written directly at 0x");
         debugWriteHex64(@intCast(framebuffer.base));
         debugWrite("\r\n");
     } else {
-        debugWrite("No writable framebuffer was retained.\r\n");
+        framebufferConsoleFailure("no writable GOP framebuffer was retained");
     }
 
     debugWrite("ZigOs boot sequence complete: kernel foundations and hardware probes passed.\r\n");
@@ -2294,50 +2312,11 @@ fn userModeFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn paintFramebuffer(framebuffer: boot.FramebufferInfo) void {
-    if (framebuffer.base == 0 or framebuffer.size < 4) return;
-    if (framebuffer.pixel_format == 3) return;
-
-    const rows: u32 = @min(framebuffer.height, 48);
-    const columns: u32 = @min(framebuffer.width, framebuffer.pixels_per_scan_line);
-    const maximum_pixels = framebuffer.size / @sizeOf(u32);
-    const pixels: [*]volatile u32 = @ptrFromInt(framebuffer.base);
-
-    var y: u32 = 0;
-    while (y < rows) : (y += 1) {
-        var x: u32 = 0;
-        while (x < columns) : (x += 1) {
-            const index = @as(usize, y) * @as(usize, framebuffer.pixels_per_scan_line) + @as(usize, x);
-            if (index >= maximum_pixels) return;
-
-            const red: u8 = @intCast(32 + ((x * 191) / @max(columns, 1)));
-            const green: u8 = @intCast(24 + ((y * 160) / @max(rows, 1)));
-            const blue: u8 = 112;
-            pixels[index] = encodePixel(framebuffer, red, green, blue);
-        }
-    }
-}
-
-fn encodePixel(framebuffer: boot.FramebufferInfo, red: u8, green: u8, blue: u8) u32 {
-    return switch (framebuffer.pixel_format) {
-        0 => @as(u32, red) | (@as(u32, green) << 8) | (@as(u32, blue) << 16),
-        1 => @as(u32, blue) | (@as(u32, green) << 8) | (@as(u32, red) << 16),
-        2 => channelToMask(red, framebuffer.red_mask) |
-            channelToMask(green, framebuffer.green_mask) |
-            channelToMask(blue, framebuffer.blue_mask),
-        else => 0,
-    };
-}
-
-fn channelToMask(value: u8, mask: u32) u32 {
-    if (mask == 0) return 0;
-
-    const shift: u5 = @intCast(@ctz(mask));
-    const normalized_mask = mask >> shift;
-    const width: u6 = @intCast(32 - @clz(normalized_mask));
-    const maximum: u64 = (@as(u64, 1) << width) - 1;
-    const scaled: u32 = @intCast((@as(u64, value) * maximum) / 255);
-    return (scaled << shift) & mask;
+fn framebufferConsoleFailure(reason: []const u8) noreturn {
+    debugWrite("Framebuffer console failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
 }
 
 fn debugWrite(text: []const u8) void {

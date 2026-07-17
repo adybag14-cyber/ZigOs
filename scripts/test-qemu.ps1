@@ -510,6 +510,12 @@ if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B
 if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
     throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
 }
+if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 5, glyphs 57, lit pixels 3168, checksum 0x9108399455DEB815')) {
+    throw 'The deterministic GOP bitmap-console report was not observed.'
+}
+if (-not $output.Contains('Framebuffer transcript: ZigOs | Experimental x86-64 | zigos> help | commands: help cpu mem')) {
+    throw 'The rendered graphical-console transcript marker was not observed.'
+}
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
     throw 'The framebuffer was not retained and accessed after the handoff.'
 }
