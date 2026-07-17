@@ -821,6 +821,9 @@ if ($NvmeOnly) {
         if (-not $output.Contains('AHCI controller active at')) {
             throw 'The q35 AHCI controller was not enumerated in NVMe-only mode.'
         }
+        if (-not $output.Contains('AHCI PCI capabilities: count 2, MSI +0x80, MSI-X absent')) {
+            throw 'The q35 AHCI MSI capability chain was not observed in NVMe-only mode.'
+        }
         if (-not $output.Contains('AHCI controller has no active SATA devices; continuing with NVMe storage')) {
             throw 'The empty AHCI controller was not skipped in NVMe-only mode.'
         }
@@ -835,6 +838,9 @@ if ($NvmeOnly) {
     if (-not $output.Contains('AHCI controller active at')) {
         throw 'The AHCI PCI/BAR discovery marker was not observed.'
     }
+    if (-not $output.Contains('AHCI PCI capabilities: count 2, MSI +0x80, MSI-X absent')) {
+        throw 'The AHCI MSI capability chain was not observed.'
+    }
     if (-not $output.Contains('AHCI port inventory:')) {
         throw 'The AHCI port inventory marker was not observed.'
     }
@@ -843,6 +849,12 @@ if ($NvmeOnly) {
     }
     if (-not $output.Contains('ATA IDENTIFY completed on port 0:')) {
         throw 'The ATA IDENTIFY DEVICE completion marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, "AHCI MSI active: capability \+0x80, vector 0x47, target APIC $expectedLegacyIrqTarget, (32|64)-bit address, control 0x[0-9A-F]{4}")) {
+        throw 'The AHCI MSI vector was not programmed for the selected routable CPU.'
+    }
+    if (-not [regex]::IsMatch($output, 'AHCI IDENTIFY MSI completion verified: interrupt count 1, global IS 0x[0-9A-F]{16}, port IS 0x[0-9A-F]{16}')) {
+        throw 'ATA IDENTIFY did not complete through one AHCI MSI interrupt.'
     }
     if (-not $output.Contains('SATA capacity:')) {
         throw 'The decoded SATA capacity marker was not observed.'
@@ -855,6 +867,9 @@ if ($NvmeOnly) {
     }
     if (-not $output.Contains('READ DMA EXT completed: LBA 0')) {
         throw 'The read-only ATA sector DMA marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, "AHCI READ DMA MSI completion verified: vector 0x47, target APIC $expectedLegacyIrqTarget, interrupt count 1, global IS 0x[0-9A-F]{16}, port IS 0x[0-9A-F]{16}")) {
+        throw 'READ DMA EXT did not complete through one AHCI MSI interrupt.'
     }
     if (-not $output.Contains('LBA 0 FNV-1a64:')) {
         throw 'The LBA 0 sector fingerprint marker was not observed.'

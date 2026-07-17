@@ -15,6 +15,7 @@ const ap_timer_vector: usize = 0x43;
 const external_irq0_vector: usize = 0x44;
 const ps2_keyboard_vector: usize = 0x45;
 const nvme_vector: usize = 0x46;
+const ahci_vector: usize = 0x47;
 const syscall_vector: usize = 0x80;
 const spurious_vector: usize = 0xFF;
 const interrupt_stack_pages: usize = 4;
@@ -82,6 +83,7 @@ extern fn zigos_isr_ap_timer() callconv(cc) void;
 extern fn zigos_isr_external_irq0() callconv(cc) void;
 extern fn zigos_isr_ps2_keyboard() callconv(cc) void;
 extern fn zigos_isr_nvme() callconv(cc) void;
+extern fn zigos_isr_ahci() callconv(cc) void;
 extern fn zigos_isr_syscall() callconv(cc) void;
 extern fn zigos_isr_spurious() callconv(cc) void;
 extern fn zigos_trigger_breakpoint() callconv(cc) void;
@@ -143,6 +145,7 @@ pub fn install(allocator: *memory.FrameAllocator, kernel_stack_top: usize) ?Inst
     setInterruptGate(&idt[external_irq0_vector], @intFromPtr(&zigos_isr_external_irq0), code_selector, 1);
     setInterruptGate(&idt[ps2_keyboard_vector], @intFromPtr(&zigos_isr_ps2_keyboard), code_selector, 1);
     setInterruptGate(&idt[nvme_vector], @intFromPtr(&zigos_isr_nvme), code_selector, 1);
+    setInterruptGate(&idt[ahci_vector], @intFromPtr(&zigos_isr_ahci), code_selector, 1);
     setUserInterruptGate(&idt[syscall_vector], @intFromPtr(&zigos_isr_syscall), code_selector, 1);
     setInterruptGate(&idt[spurious_vector], @intFromPtr(&zigos_isr_spurious), code_selector, 0);
 

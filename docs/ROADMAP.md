@@ -293,3 +293,11 @@
 - The QEMU NVMe controller exposes 65 MSI-X entries in BAR0 at offset `0x2000`; ZigOs programs dedicated I/O entry 1 at `0x2010`, masks legacy INTx, and targets CPU vector `0x46` at the selected routable processor.
 - MSI-X is enabled before I/O completion queue 1 is created, ensuring the vector is registered by device models and hardware before the queue selects table index 1. Every data read then waits for an MSI-X interrupt before consuming its completion entry, while admin commands and devices without MSI-X retain bounded polling.
 - The first LBA read must produce exactly one MSI-X interrupt, and the complete GPT/FAT/PE traversal continues over the same interrupt-driven queue.
+
+## 2.7 - AHCI MSI command completion
+
+- The PCI MSI capability parser supports 32/64-bit message addresses, single-message enablement, optional per-vector masking, configuration readback, and legacy INTx disablement over ECAM or configuration mechanism 1.
+- QEMU's ICH9 AHCI controller exposes MSI at capability offset `0x80`; ZigOs programs vector `0x47` for the selected routable CPU.
+- AHCI global interrupt enable and the active port's D2H/PIO/DMA/descriptor/error interrupt mask are enabled only after stale global and port status are cleared.
+- The MSI handler records and clears global/port W1C status, increments an atomic completion counter, and acknowledges the local APIC.
+- ATA IDENTIFY, READ DMA EXT, and all later FAT traversal reads wait for MSI before validating `PxCI`, transfer length, and task-file error state. Controllers without MSI retain bounded polling.

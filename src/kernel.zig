@@ -162,7 +162,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
         null;
     const usb_keyboard_ready = inspectXhci(pci_inventory, &frame_allocator, graphical_console);
     const nvme_storage_ready = inspectNvme(pci_inventory, &frame_allocator, legacy_irq_target);
-    const ahci_storage_ready = inspectAhci(pci_inventory, &frame_allocator);
+    const ahci_storage_ready = inspectAhci(pci_inventory, &frame_allocator, legacy_irq_target);
     if (!nvme_storage_ready and !ahci_storage_ready) {
         storageFailure("no supported NVMe namespace or SATA device was usable");
     }
@@ -2629,7 +2629,7 @@ fn nvmeFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool {
+fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator, interrupt_target: ?u8) bool {
     var controller_function: ?pci.Function = null;
     for (inventory.functions[0..inventory.retained_count]) |function| {
         if (function.class_code == 0x01 and function.subclass == 0x06 and function.programming_interface == 0x01) {
@@ -2646,6 +2646,26 @@ fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool
         debugWrite("AHCI controller registers were unusable; continuing with another storage backend\r\n");
         return false;
     };
+
+    const pci_capabilities = pci.inspectCapabilities(function) orelse
+        ahciFailure("PCI capability list was malformed");
+    debugWrite("AHCI PCI capabilities: count ");
+    debugWriteU64Decimal(pci_capabilities.count);
+    debugWrite(", MSI ");
+    if (pci_capabilities.msi_offset) |offset| {
+        debugWrite("+0x");
+        debugWriteHex8(offset);
+    } else {
+        debugWrite("absent");
+    }
+    debugWrite(", MSI-X ");
+    if (pci_capabilities.msix_offset) |offset| {
+        debugWrite("+0x");
+        debugWriteHex8(offset);
+    } else {
+        debugWrite("absent");
+    }
+    debugWrite("\r\n");
 
     debugWrite("AHCI controller active at ");
     debugWriteHex16(function.segment);
@@ -2698,7 +2718,7 @@ fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool
         debugWrite("AHCI controller has no active SATA devices; continuing with NVMe storage\r\n");
         return false;
     }
-    const identity = ahci.identifyFirstSata(controller, allocator) orelse
+    const identity = ahci.identifyFirstSata(controller, allocator, interrupt_target) orelse
         ahciFailure("ATA IDENTIFY DEVICE DMA command did not complete successfully");
     debugWrite("ATA IDENTIFY completed on port ");
     debugWriteU64Decimal(identity.port_index);
@@ -2732,6 +2752,30 @@ fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool
     debugWrite(", transferred ");
     debugWriteU64Decimal(identity.transferred_bytes);
     debugWrite(" bytes\r\n");
+    if (identity.msi_enabled) {
+        if (identity.completion_interrupt_count != 1) {
+            ahciFailure("ATA IDENTIFY did not complete through exactly one MSI interrupt");
+        }
+        debugWrite("AHCI MSI active: capability +0x");
+        debugWriteHex8(identity.msi_capability_offset);
+        debugWrite(", vector 0x");
+        debugWriteHex8(identity.interrupt_vector);
+        debugWrite(", target APIC ");
+        debugWriteU64Decimal(identity.interrupt_target_apic_id);
+        debugWrite(if (identity.msi_address_64_bit) ", 64-bit address" else ", 32-bit address");
+        debugWrite(", control 0x");
+        debugWriteHex16(identity.msi_control);
+        debugWrite("\r\n");
+        debugWrite("AHCI IDENTIFY MSI completion verified: interrupt count ");
+        debugWriteU64Decimal(identity.completion_interrupt_count);
+        debugWrite(", global IS 0x");
+        debugWriteHex64(identity.completion_global_status);
+        debugWrite(", port IS 0x");
+        debugWriteHex64(identity.completion_port_status);
+        debugWrite("\r\n");
+    } else {
+        debugWrite("AHCI MSI unavailable; bounded command polling retained\r\n");
+    }
     const sector_zero = ahci.readOneSector(controller, identity, 0) orelse
         ahciFailure("READ DMA EXT for LBA 0 did not complete successfully");
     debugWrite("READ DMA EXT completed: LBA ");
@@ -2741,6 +2785,22 @@ fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool
     debugWrite(" bytes at 0x");
     debugWriteHex64(@intCast(sector_zero.buffer_address));
     debugWrite("\r\n");
+    if (identity.msi_enabled) {
+        if (sector_zero.completion_interrupt_count != 1) {
+            ahciFailure("READ DMA EXT did not complete through exactly one MSI interrupt");
+        }
+        debugWrite("AHCI READ DMA MSI completion verified: vector 0x");
+        debugWriteHex8(identity.interrupt_vector);
+        debugWrite(", target APIC ");
+        debugWriteU64Decimal(identity.interrupt_target_apic_id);
+        debugWrite(", interrupt count ");
+        debugWriteU64Decimal(sector_zero.completion_interrupt_count);
+        debugWrite(", global IS 0x");
+        debugWriteHex64(sector_zero.completion_global_status);
+        debugWrite(", port IS 0x");
+        debugWriteHex64(sector_zero.completion_port_status);
+        debugWrite("\r\n");
+    }
     debugWrite("LBA 0 first 16 bytes:");
     for (sector_zero.first_bytes) |byte| {
         debugWrite(" ");

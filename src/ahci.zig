@@ -1,10 +1,12 @@
 const std = @import("std");
 const pci = @import("pci.zig");
 const memory = @import("memory.zig");
+const apic = @import("apic.zig");
 
 const cc = std.os.uefi.cc;
 
 const pci_command_memory_space: u16 = 1 << 1;
+const pci_command_bus_master: u16 = 1 << 2;
 const bar_memory_space: u32 = 1;
 const bar_type_mask: u32 = 0x6;
 const bar_type_32_bit: u32 = 0x0;
@@ -70,8 +72,14 @@ pub fn inspect(function: pci.Function) ?Controller {
         return null;
     }
 
-    const command = pci.readConfiguration16(function, 0x04);
-    if ((command & pci_command_memory_space) == 0) return null;
+    var command = pci.readConfiguration16(function, 0x04);
+    const required_command = pci_command_memory_space | pci_command_bus_master;
+    if ((command & required_command) != required_command) {
+        command |= required_command;
+        pci.writeConfiguration16(function, 0x04, command);
+        command = pci.readConfiguration16(function, 0x04);
+        if ((command & required_command) != required_command) return null;
+    }
 
     const bar5 = pci.readConfiguration32(function, 0x24);
     if ((bar5 & bar_memory_space) != 0) return null;
@@ -182,7 +190,19 @@ const command_list_running: u32 = 1 << 15;
 const task_file_busy: u32 = 1 << 7;
 const task_file_data_request: u32 = 1 << 3;
 const task_file_error_status: u32 = 1 << 30;
+const global_host_interrupt_enable: u32 = 1 << 1;
 const global_host_ahci_enable: u32 = 1 << 31;
+const port_interrupt_d2h_register_fis: u32 = 1 << 0;
+const port_interrupt_pio_setup_fis: u32 = 1 << 1;
+const port_interrupt_dma_setup_fis: u32 = 1 << 2;
+const port_interrupt_descriptor_processed: u32 = 1 << 5;
+const port_interrupt_task_file_error: u32 = 1 << 30;
+const port_interrupt_completion_mask: u32 = port_interrupt_d2h_register_fis |
+    port_interrupt_pio_setup_fis |
+    port_interrupt_dma_setup_fis |
+    port_interrupt_descriptor_processed |
+    port_interrupt_task_file_error;
+pub const interrupt_vector: u8 = 0x47;
 const identify_device_command: u8 = 0xEC;
 const register_host_to_device_fis: u8 = 0x27;
 const command_fis_length_dwords: u16 = 5;
@@ -220,11 +240,48 @@ pub const IdentifyResult = struct {
     command_table_address: usize,
     identify_buffer_address: usize,
     transferred_bytes: u32,
+    msi_enabled: bool,
+    msi_capability_offset: u8,
+    msi_control: u16,
+    msi_address_64_bit: bool,
+    interrupt_target_apic_id: u8,
+    interrupt_vector: u8,
+    completion_interrupt_count: u64,
+    completion_global_status: u32,
+    completion_port_status: u32,
 };
 
-extern fn zigos_memory_fence() callconv(cc) void;
+const InterruptSetup = struct {
+    enabled: bool,
+    capability_offset: u8,
+    control: u16,
+    address_64_bit: bool,
+    target_apic_id: u8,
+};
 
-pub fn identifyFirstSata(controller: Controller, allocator: *memory.FrameAllocator) ?IdentifyResult {
+const CompletionReport = struct {
+    interrupt_count: u64,
+    global_status: u32,
+    port_status: u32,
+};
+
+var interrupt_count: u64 = 0;
+var active_abar: usize = 0;
+var active_port_index: u8 = 0;
+var last_global_interrupt_status: u32 = 0;
+var last_port_interrupt_status: u32 = 0;
+var msi_interrupts_enabled: bool = false;
+
+extern fn zigos_memory_fence() callconv(cc) void;
+extern fn zigos_cpu_relax() callconv(cc) void;
+extern fn zigos_enable_interrupts() callconv(cc) void;
+extern fn zigos_disable_interrupts() callconv(cc) void;
+
+pub fn identifyFirstSata(
+    controller: Controller,
+    allocator: *memory.FrameAllocator,
+    interrupt_target: ?u8,
+) ?IdentifyResult {
     var target_port: ?u8 = null;
     for (controller.ports[0..controller.retained_port_count]) |port| {
         if (port.active and port.device_type == .sata) {
@@ -233,6 +290,12 @@ pub fn identifyFirstSata(controller: Controller, allocator: *memory.FrameAllocat
         }
     }
     const port_index = target_port orelse return null;
+    msi_interrupts_enabled = false;
+    active_abar = 0;
+    active_port_index = 0;
+    @atomicStore(u64, &interrupt_count, 0, .release);
+    @atomicStore(u32, &last_global_interrupt_status, 0, .release);
+    @atomicStore(u32, &last_port_interrupt_status, 0, .release);
     const port_base = controller.abar + port_base_offset + @as(usize, port_index) * port_stride;
 
     var global_control = read32(controller.abar, ghc_offset);
@@ -261,8 +324,30 @@ pub fn identifyFirstSata(controller: Controller, allocator: *memory.FrameAllocat
     write32(port_base, fis_base_offset, @truncate(received_fis_address));
     write32(port_base, fis_base_upper_offset, @truncate(received_fis_address >> 32));
     write32(port_base, port_interrupt_enable_offset, 0);
-    write32(port_base, port_interrupt_status_offset, 0xFFFF_FFFF);
+    clearCommandInterruptStatus(controller.abar, port_base, port_index);
     write32(port_base, port_sata_error_offset, 0xFFFF_FFFF);
+
+    const interrupt_setup = configureMsi(controller, port_index, interrupt_target) orelse return null;
+    if (interrupt_setup.enabled) {
+        write32(port_base, port_interrupt_enable_offset, port_interrupt_completion_mask);
+        if ((read32(port_base, port_interrupt_enable_offset) & port_interrupt_completion_mask) !=
+            port_interrupt_completion_mask)
+        {
+            return null;
+        }
+        global_control = read32(controller.abar, ghc_offset) |
+            global_host_ahci_enable |
+            global_host_interrupt_enable;
+        write32(controller.abar, ghc_offset, global_control);
+        if ((read32(controller.abar, ghc_offset) &
+            (global_host_ahci_enable | global_host_interrupt_enable)) !=
+            (global_host_ahci_enable | global_host_interrupt_enable))
+        {
+            return null;
+        }
+        clearCommandInterruptStatus(controller.abar, port_base, port_index);
+        @atomicStore(u64, &interrupt_count, 0, .release);
+    }
 
     const header: *volatile CommandHeader = @ptrFromInt(command_list_address);
     header.* = .{
@@ -292,21 +377,18 @@ pub fn identifyFirstSata(controller: Controller, allocator: *memory.FrameAllocat
     if (!startCommandEngine(port_base)) return null;
     if (!waitForTaskFileReady(port_base)) return null;
 
-    write32(port_base, port_interrupt_status_offset, 0xFFFF_FFFF);
+    clearCommandInterruptStatus(controller.abar, port_base, port_index);
+    const completion_baseline = interruptCount();
     zigos_memory_fence();
     write32(port_base, port_command_issue_offset, 1);
 
-    var completed = false;
-    var iteration: usize = 0;
-    while (iteration < maximum_poll_iterations) : (iteration += 1) {
-        const interrupt_status = read32(port_base, port_interrupt_status_offset);
-        if ((interrupt_status & task_file_error_status) != 0) return null;
-        if ((read32(port_base, port_command_issue_offset) & 1) == 0) {
-            completed = true;
-            break;
-        }
-    }
-    if (!completed) return null;
+    const completion = waitForCommandCompletion(
+        controller.abar,
+        port_base,
+        port_index,
+        interrupt_setup,
+        completion_baseline,
+    ) orelse return null;
     zigos_memory_fence();
 
     const transferred_bytes = header.prd_byte_count;
@@ -342,6 +424,15 @@ pub fn identifyFirstSata(controller: Controller, allocator: *memory.FrameAllocat
         .command_table_address = command_table_address,
         .identify_buffer_address = identify_buffer_address,
         .transferred_bytes = transferred_bytes,
+        .msi_enabled = interrupt_setup.enabled,
+        .msi_capability_offset = interrupt_setup.capability_offset,
+        .msi_control = interrupt_setup.control,
+        .msi_address_64_bit = interrupt_setup.address_64_bit,
+        .interrupt_target_apic_id = interrupt_setup.target_apic_id,
+        .interrupt_vector = if (interrupt_setup.enabled) interrupt_vector else 0,
+        .completion_interrupt_count = completion.interrupt_count,
+        .completion_global_status = completion.global_status,
+        .completion_port_status = completion.port_status,
     };
     decodeAtaString(words, 27, 20, &result.model);
     decodeAtaString(words, 10, 10, &result.serial_number);
@@ -466,6 +557,9 @@ pub const ReadResult = struct {
     fnv1a64: u64,
     trailing_signature: u16,
     first_bytes: [16]u8,
+    completion_interrupt_count: u64,
+    completion_global_status: u32,
+    completion_port_status: u32,
 };
 
 pub fn readOneSector(controller: Controller, identity: IdentifyResult, lba: u64) ?ReadResult {
@@ -512,12 +606,25 @@ pub fn readOneSector(controller: Controller, identity: IdentifyResult, lba: u64)
         .byte_count_and_interrupt = identity.logical_sector_size - 1 | (@as(u32, 1) << 31),
     };
 
-    write32(port_base, port_interrupt_status_offset, 0xFFFF_FFFF);
+    clearCommandInterruptStatus(controller.abar, port_base, identity.port_index);
     write32(port_base, port_sata_error_offset, 0xFFFF_FFFF);
+    const completion_baseline = interruptCount();
     zigos_memory_fence();
     write32(port_base, port_command_issue_offset, 1);
 
-    if (!waitForSlotCompletion(port_base)) return null;
+    const completion = waitForCommandCompletion(
+        controller.abar,
+        port_base,
+        identity.port_index,
+        .{
+            .enabled = identity.msi_enabled,
+            .capability_offset = identity.msi_capability_offset,
+            .control = identity.msi_control,
+            .address_64_bit = identity.msi_address_64_bit,
+            .target_apic_id = identity.interrupt_target_apic_id,
+        },
+        completion_baseline,
+    ) orelse return null;
     zigos_memory_fence();
 
     const transferred_bytes = header.prd_byte_count;
@@ -538,17 +645,140 @@ pub fn readOneSector(controller: Controller, identity: IdentifyResult, lba: u64)
         .fnv1a64 = fnv1a(bytes),
         .trailing_signature = trailing_signature,
         .first_bytes = first_bytes,
+        .completion_interrupt_count = completion.interrupt_count,
+        .completion_global_status = completion.global_status,
+        .completion_port_status = completion.port_status,
     };
 }
 
-fn waitForSlotCompletion(port_base: usize) bool {
-    var iteration: usize = 0;
-    while (iteration < maximum_poll_iterations) : (iteration += 1) {
-        const interrupt_status = read32(port_base, port_interrupt_status_offset);
-        if ((interrupt_status & task_file_error_status) != 0) return false;
-        if ((read32(port_base, port_command_issue_offset) & 1) == 0) return true;
+fn configureMsi(controller: Controller, port_index: u8, interrupt_target: ?u8) ?InterruptSetup {
+    const target_apic_id = interrupt_target orelse return .{
+        .enabled = false,
+        .capability_offset = 0,
+        .control = 0,
+        .address_64_bit = false,
+        .target_apic_id = 0,
+    };
+    const capabilities = pci.inspectCapabilities(controller.pci_function) orelse return null;
+    if (capabilities.msi_offset == null) return .{
+        .enabled = false,
+        .capability_offset = 0,
+        .control = 0,
+        .address_64_bit = false,
+        .target_apic_id = target_apic_id,
+    };
+    const capability = pci.inspectMsi(controller.pci_function) orelse return null;
+    var implemented_index: u8 = 0;
+    while (implemented_index < maximum_ports) : (implemented_index += 1) {
+        if ((controller.ports_implemented & (@as(u32, 1) << @intCast(implemented_index))) == 0) continue;
+        const implemented_base = controller.abar + port_base_offset +
+            @as(usize, implemented_index) * port_stride;
+        write32(implemented_base, port_interrupt_enable_offset, 0);
+        write32(implemented_base, port_interrupt_status_offset, 0xFFFF_FFFF);
     }
-    return false;
+    write32(controller.abar, interrupt_status_offset, controller.ports_implemented);
+    const programming = pci.programMsi(
+        controller.pci_function,
+        capability,
+        target_apic_id,
+        interrupt_vector,
+    ) orelse return null;
+
+    active_abar = controller.abar;
+    active_port_index = port_index;
+    @atomicStore(u32, &last_global_interrupt_status, 0, .release);
+    @atomicStore(u32, &last_port_interrupt_status, 0, .release);
+    @atomicStore(u64, &interrupt_count, 0, .release);
+    msi_interrupts_enabled = true;
+    return .{
+        .enabled = true,
+        .capability_offset = programming.capability_offset,
+        .control = programming.control,
+        .address_64_bit = programming.address_64_bit,
+        .target_apic_id = programming.target_apic_id,
+    };
+}
+
+fn waitForCommandCompletion(
+    abar: usize,
+    port_base: usize,
+    port_index: u8,
+    setup: InterruptSetup,
+    baseline: u64,
+) ?CompletionReport {
+    if (!setup.enabled) {
+        var iteration: usize = 0;
+        while (iteration < maximum_poll_iterations) : (iteration += 1) {
+            const port_status = read32(port_base, port_interrupt_status_offset);
+            if ((port_status & port_interrupt_task_file_error) != 0) return null;
+            if ((read32(port_base, port_command_issue_offset) & 1) == 0) {
+                return .{
+                    .interrupt_count = 0,
+                    .global_status = read32(abar, interrupt_status_offset),
+                    .port_status = port_status,
+                };
+            }
+        }
+        return null;
+    }
+
+    const local_target = apic.currentId() == setup.target_apic_id;
+    if (local_target) zigos_enable_interrupts();
+    var iteration: usize = 0;
+    while (interruptCount() == baseline and iteration < maximum_poll_iterations) : (iteration += 1) {
+        zigos_cpu_relax();
+    }
+    const observed = interruptCount();
+    if (local_target) zigos_disable_interrupts();
+    if (observed == baseline) return null;
+
+    var completion_iteration: usize = 0;
+    while ((read32(port_base, port_command_issue_offset) & 1) != 0 and
+        completion_iteration < maximum_poll_iterations) : (completion_iteration += 1)
+    {
+        zigos_cpu_relax();
+    }
+    if ((read32(port_base, port_command_issue_offset) & 1) != 0) return null;
+
+    const global_status = @atomicLoad(u32, &last_global_interrupt_status, .acquire);
+    const port_status = @atomicLoad(u32, &last_port_interrupt_status, .acquire);
+    if ((port_status & port_interrupt_task_file_error) != 0) return null;
+    if ((global_status & (@as(u32, 1) << @intCast(port_index))) == 0) return null;
+    if ((port_status & port_interrupt_completion_mask) == 0) return null;
+    return .{
+        .interrupt_count = observed - baseline,
+        .global_status = global_status,
+        .port_status = port_status,
+    };
+}
+
+fn clearCommandInterruptStatus(abar: usize, port_base: usize, port_index: u8) void {
+    write32(port_base, port_interrupt_status_offset, 0xFFFF_FFFF);
+    write32(abar, interrupt_status_offset, @as(u32, 1) << @intCast(port_index));
+    @atomicStore(u32, &last_global_interrupt_status, 0, .release);
+    @atomicStore(u32, &last_port_interrupt_status, 0, .release);
+}
+
+pub fn interruptCount() u64 {
+    return @atomicLoad(u64, &interrupt_count, .acquire);
+}
+
+export fn zigos_ahci_interrupt_handler() callconv(cc) void {
+    const abar = active_abar;
+    const port_index = active_port_index;
+    if (!msi_interrupts_enabled or abar == 0 or port_index >= maximum_ports) {
+        apic.acknowledgeInterrupt();
+        return;
+    }
+    const global_status = read32(abar, interrupt_status_offset);
+    const port_base = abar + port_base_offset + @as(usize, port_index) * port_stride;
+    const port_status = read32(port_base, port_interrupt_status_offset);
+    @atomicStore(u32, &last_global_interrupt_status, global_status, .release);
+    @atomicStore(u32, &last_port_interrupt_status, port_status, .release);
+    if (port_status != 0) write32(port_base, port_interrupt_status_offset, port_status);
+    if (global_status != 0) write32(abar, interrupt_status_offset, global_status);
+    _ = @atomicRmw(u64, &interrupt_count, .Add, 1, .acq_rel);
+    apic.acknowledgeInterrupt();
 }
 
 fn fnv1a(bytes: []const u8) u64 {

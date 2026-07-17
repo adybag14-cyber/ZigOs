@@ -260,6 +260,7 @@ global zigos_isr_ap_timer
 global zigos_isr_external_irq0
 global zigos_isr_ps2_keyboard
 global zigos_isr_nvme
+global zigos_isr_ahci
 global zigos_wait_for_interrupt
 global zigos_enable_interrupts
 global zigos_disable_interrupts
@@ -269,6 +270,7 @@ extern zigos_ap_timer_interrupt_handler
 extern zigos_pit_irq_handler
 extern zigos_ps2_keyboard_irq_handler
 extern zigos_nvme_interrupt_handler
+extern zigos_ahci_interrupt_handler
 
 ; APIC timer vector 0x40, delivered on IST1. Preserve all general-purpose
 ; registers and call the Zig handler, which acknowledges the local APIC.
@@ -531,6 +533,52 @@ zigos_isr_nvme:
     fxsave64 [r13]
     sub rsp, 32
     call zigos_nvme_interrupt_handler
+    add rsp, 32
+    fxrstor64 [rsp]
+    mov rsp, r12
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
+; AHCI MSI vector 0x47, delivered on IST1 to a routable online CPU.
+zigos_isr_ahci:
+    cld
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rsp
+    sub rsp, 512
+    mov r13, rsp
+    fxsave64 [r13]
+    sub rsp, 32
+    call zigos_ahci_interrupt_handler
     add rsp, 32
     fxrstor64 [rsp]
     mov rsp, r12

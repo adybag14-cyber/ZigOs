@@ -76,6 +76,30 @@ pub const MsixCapability = struct {
     pending_offset: u32,
 };
 
+pub const MsiCapability = struct {
+    capability_offset: u8,
+    control: u16,
+    multiple_message_capable: u3,
+    multiple_message_enabled: u3,
+    address_64_bit: bool,
+    per_vector_masking: bool,
+    message_data_offset: u8,
+    mask_bits_offset: ?u8,
+};
+
+pub const MsiProgramming = struct {
+    capability_offset: u8,
+    control: u16,
+    message_address_low: u32,
+    message_address_high: u32,
+    message_data: u16,
+    mask_bits: ?u32,
+    pci_command: u16,
+    target_apic_id: u8,
+    vector: u8,
+    address_64_bit: bool,
+};
+
 pub const Inventory = struct {
     access_method: AccessMethod,
     mcfg_address: ?usize,
@@ -418,6 +442,99 @@ pub fn findCapability(function: Function, capability_id: u8) ?u8 {
         capability_msix => capabilities.msix_offset,
         capability_pcie => capabilities.pcie_offset,
         else => null,
+    };
+}
+
+pub fn inspectMsi(function: Function) ?MsiCapability {
+    const capability_offset = findCapability(function, capability_msi) orelse return null;
+    const control = readConfiguration16(function, @as(usize, capability_offset) + 2);
+    const address_64_bit = (control & (1 << 7)) != 0;
+    const per_vector_masking = (control & (1 << 8)) != 0;
+    const message_data_offset_u16: u16 = @as(u16, capability_offset) +
+        (if (address_64_bit) @as(u16, 12) else @as(u16, 8));
+    if (message_data_offset_u16 > 0xFE) return null;
+    const mask_offset_u16: u16 = message_data_offset_u16 + 4;
+    if (per_vector_masking and mask_offset_u16 > 0xFC) return null;
+    return .{
+        .capability_offset = capability_offset,
+        .control = control,
+        .multiple_message_capable = @truncate(control >> 1),
+        .multiple_message_enabled = @truncate(control >> 4),
+        .address_64_bit = address_64_bit,
+        .per_vector_masking = per_vector_masking,
+        .message_data_offset = @intCast(message_data_offset_u16),
+        .mask_bits_offset = if (per_vector_masking) @intCast(mask_offset_u16) else null,
+    };
+}
+
+pub fn programMsi(
+    function: Function,
+    capability: MsiCapability,
+    target_apic_id: u8,
+    vector: u8,
+) ?MsiProgramming {
+    if (vector < 0x20 or vector == 0xFF) return null;
+    const base: usize = capability.capability_offset;
+    const disabled_control = capability.control & ~@as(u16, 0x0071);
+    writeConfiguration16(function, base + 2, disabled_control);
+    const disabled_readback = readConfiguration16(function, base + 2);
+    if ((disabled_readback & 1) != 0 or ((disabled_readback >> 4) & 0x7) != 0) return null;
+
+    var mask_bits: ?u32 = null;
+    if (capability.mask_bits_offset) |mask_offset| {
+        const masked = readConfiguration32(function, mask_offset) | 1;
+        writeConfiguration32(function, mask_offset, masked);
+        if ((readConfiguration32(function, mask_offset) & 1) == 0) return null;
+    }
+
+    const message_address_low = @as(u32, 0xFEE0_0000) |
+        (@as(u32, target_apic_id) << 12);
+    writeConfiguration32(function, base + 4, message_address_low);
+    var message_address_high: u32 = 0;
+    if (capability.address_64_bit) {
+        writeConfiguration32(function, base + 8, 0);
+        message_address_high = readConfiguration32(function, base + 8);
+    }
+    writeConfiguration16(function, capability.message_data_offset, vector);
+
+    if (capability.mask_bits_offset) |mask_offset| {
+        const unmasked = readConfiguration32(function, mask_offset) & ~@as(u32, 1);
+        writeConfiguration32(function, mask_offset, unmasked);
+        mask_bits = readConfiguration32(function, mask_offset);
+        if ((mask_bits.? & 1) != 0) return null;
+    }
+
+    const enabled_control = disabled_control | 1;
+    writeConfiguration16(function, base + 2, enabled_control);
+    const control_readback = readConfiguration16(function, base + 2);
+    if ((control_readback & 1) == 0 or ((control_readback >> 4) & 0x7) != 0) return null;
+
+    var pci_command = readConfiguration16(function, 0x04);
+    pci_command |= 1 << 10;
+    writeConfiguration16(function, 0x04, pci_command);
+    pci_command = readConfiguration16(function, 0x04);
+    if ((pci_command & (1 << 10)) == 0) return null;
+
+    const address_low_readback = readConfiguration32(function, base + 4);
+    const data_readback = readConfiguration16(function, capability.message_data_offset);
+    if (address_low_readback != message_address_low or
+        message_address_high != 0 or
+        @as(u8, @truncate(data_readback)) != vector)
+    {
+        return null;
+    }
+
+    return .{
+        .capability_offset = capability.capability_offset,
+        .control = control_readback,
+        .message_address_low = address_low_readback,
+        .message_address_high = message_address_high,
+        .message_data = data_readback,
+        .mask_bits = mask_bits,
+        .pci_command = pci_command,
+        .target_apic_id = target_apic_id,
+        .vector = vector,
+        .address_64_bit = capability.address_64_bit,
     };
 }
 
