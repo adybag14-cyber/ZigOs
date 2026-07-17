@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [int]$TimeoutSeconds = 30,
+    [ValidateRange(4, 64)]
+    [int]$CpuCount = 4,
     [switch]$NvmeOnly,
     [switch]$NoUsbKeyboard,
     [switch]$UsbMouseOnly,
@@ -264,7 +266,7 @@ $arguments = @(
     '-machine', $machineType,
     '-m', '256M',
     '-cpu', 'max',
-    '-smp', '4',
+    '-smp', $CpuCount,
     '-device', 'qemu-xhci,id=xhci',
     '-drive', "file=$nvmePath,if=none,id=nvme0,format=raw,cache=unsafe",
     '-device', 'nvme,drive=nvme0,serial=ZIGOSNVME',
@@ -290,7 +292,7 @@ if ($NoGraphics) {
     $arguments += @('-vga', 'none')
 }
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPUs: $CpuCount, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -438,11 +440,19 @@ if (-not $output.Contains('ACPI verified: revision')) {
 if (-not $output.Contains('MADT topology:')) {
     throw 'The validated MADT topology marker was not observed.'
 }
-if (-not $output.Contains('MADT topology: 4 processors')) {
-    throw 'The four-CPU MADT topology marker was not observed.'
+if (-not $output.Contains("MADT topology: $CpuCount processors")) {
+    throw "The expected $CpuCount-CPU MADT topology marker was not observed."
 }
-if (-not $output.Contains('MADT processor IDs: 0(xAPIC) 1(xAPIC) 2(xAPIC) 3(xAPIC)')) {
-    throw 'The expected retained MADT APIC-ID set was not observed.'
+$expectedProcessorIds = 'MADT processor IDs:'
+for ($processorId = 0; $processorId -lt $CpuCount; $processorId++) {
+    $expectedProcessorIds += " $processorId(xAPIC)"
+}
+if (-not $output.Contains($expectedProcessorIds)) {
+    throw "The expected retained MADT APIC-ID set for $CpuCount CPUs was not observed."
+}
+$expectedParkedAps = [Math]::Max(0, $CpuCount - 4)
+if (-not [regex]::IsMatch($output, "SMP startup: BSP APIC 0, MADT processors $CpuCount, AP targets 3, discovered APs $($CpuCount - 1), parked APs $expectedParkedAps, trampoline 0x[0-9A-F]{16}, SIPI vector 0x[0-9A-F]{2}")) {
+    throw 'The selected-versus-parked SMP topology marker was not observed.'
 }
 if (-not $output.Contains('Local APIC enabled:')) {
     throw 'The local APIC enablement marker was not observed.'

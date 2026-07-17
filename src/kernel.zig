@@ -861,6 +861,10 @@ fn startApplicationProcessors(
     debugWriteU64Decimal(report.madt_processor_count);
     debugWrite(", AP targets ");
     debugWriteUsizeDecimal(report.target_count);
+    debugWrite(", discovered APs ");
+    debugWriteUsizeDecimal(report.discovered_application_processors);
+    debugWrite(", parked APs ");
+    debugWriteUsizeDecimal(report.parked_application_processors);
     debugWrite(", trampoline 0x");
     debugWriteHex64(@intCast(report.trampoline_base));
     debugWrite(", SIPI vector 0x");
@@ -995,7 +999,7 @@ fn startApplicationProcessors(
     debugWrite("\r\n");
 
     if (report.online_count != report.target_count) {
-        smpFailure("not every MADT application processor reached long mode");
+        smpFailure("not every selected application processor reached long mode");
     }
     debugWrite("SMP synchronization complete: ");
     debugWriteU64Decimal(report.sync_participants);
@@ -1046,7 +1050,9 @@ fn startApplicationProcessors(
     debugWriteUsizeDecimal(report.online_count);
     debugWrite("/");
     debugWriteUsizeDecimal(report.target_count);
-    debugWrite(" application processors online\r\n");
+    debugWrite(" selected application processors online; ");
+    debugWriteUsizeDecimal(report.parked_application_processors);
+    debugWrite(" additional application processors left parked\r\n");
 }
 
 fn smpFailure(reason: []const u8) noreturn {

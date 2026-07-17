@@ -220,3 +220,12 @@
 - [x] Full 256-bus legacy PCI scan with multifunction-device support
 - [x] i440FX/PIIX machine boot with ACPI MCFG absent
 - [x] NVMe, xHCI, SMP, scheduling, and userspace over legacy PCI configuration
+
+
+## 1.9 - High-core-count SMP topology
+
+- [x] MADT processor discovery separated from the actively started AP set
+- [x] Up to three APs selected for the current validated multicore scheduler
+- [x] Additional processors left safely parked instead of causing boot failure
+- [x] Selected-versus-parked processor counts reported explicitly
+- [x] Eight-CPU QEMU regression with three APs active and four additional APs parked

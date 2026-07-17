@@ -23,6 +23,7 @@ const boot_signature: u64 = 0x5A49_474F_5341_5031;
 const initial_actual_apic_id: u32 = 0xFFFF_FFFF;
 const startup_timeout_iterations: usize = 2000;
 const startup_poll_nanoseconds: u64 = 100_000;
+const maximum_active_application_processors: usize = 3;
 
 const ApBootData = extern struct {
     signature: u64,
@@ -91,6 +92,8 @@ pub const ApReport = struct {
 pub const Report = struct {
     bsp_apic_id: u32,
     madt_processor_count: u32,
+    discovered_application_processors: usize,
+    parked_application_processors: usize,
     target_count: usize,
     online_count: usize,
     startup_vector: u8,
@@ -154,6 +157,8 @@ pub fn start(
     var report = Report{
         .bsp_apic_id = local_apic.apic_id,
         .madt_processor_count = madt.processor_count,
+        .discovered_application_processors = 0,
+        .parked_application_processors = 0,
         .target_count = 0,
         .online_count = 0,
         .startup_vector = startup_vector,
@@ -190,6 +195,11 @@ pub fn start(
 
     for (madt.processors[0..madt.stored_processor_count]) |processor| {
         if (processor.apic_id == local_apic.apic_id) continue;
+        report.discovered_application_processors += 1;
+        if (report.target_count >= maximum_active_application_processors) {
+            report.parked_application_processors += 1;
+            continue;
+        }
         if (report.target_count >= report.processors.len) return null;
 
         const stack_base = allocator.allocateContiguousBelow(stack_pages, memory.four_gib) orelse return null;
@@ -318,7 +328,12 @@ pub fn start(
         report.online_count += 1;
     }
 
-    if (report.target_count + 1 != madt.processor_count) return null;
+    if (report.target_count == 0 or
+        report.target_count != @min(report.discovered_application_processors, maximum_active_application_processors) or
+        report.parked_application_processors + report.target_count != report.discovered_application_processors)
+    {
+        return null;
+    }
     if (!runMailboxRound(&report, reference)) {
         debugWrite("SMP stage failure: mailbox\r\n");
         return null;
