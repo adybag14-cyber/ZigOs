@@ -229,3 +229,12 @@
 - [x] Additional processors left safely parked instead of causing boot failure
 - [x] Selected-versus-parked processor counts reported explicitly
 - [x] Eight-CPU QEMU regression with three APs active and four additional APs parked
+
+
+## 2.0 - Low-core-count topology
+
+- [x] Uniprocessor boot without INIT/SIPI or AP validation stages
+- [x] One- and two-AP mailbox, FIFO, IPI, timer, scheduler, and local-task validation
+- [x] Work stealing enabled only with three selected APs
+- [x] Ticket-lock/barrier participant count sized to BSP plus active APs
+- [x] One-, two-, three-, and four-CPU QEMU topology regressions

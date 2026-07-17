@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [int]$TimeoutSeconds = 30,
-    [ValidateRange(4, 64)]
+    [ValidateRange(1, 64)]
     [int]$CpuCount = 4,
     [switch]$NvmeOnly,
     [switch]$NoUsbKeyboard,
@@ -450,8 +450,9 @@ for ($processorId = 0; $processorId -lt $CpuCount; $processorId++) {
 if (-not $output.Contains($expectedProcessorIds)) {
     throw "The expected retained MADT APIC-ID set for $CpuCount CPUs was not observed."
 }
+$expectedActiveAps = [Math]::Min(3, [Math]::Max(0, $CpuCount - 1))
 $expectedParkedAps = [Math]::Max(0, $CpuCount - 4)
-if (-not [regex]::IsMatch($output, "SMP startup: BSP APIC 0, MADT processors $CpuCount, AP targets 3, discovered APs $($CpuCount - 1), parked APs $expectedParkedAps, trampoline 0x[0-9A-F]{16}, SIPI vector 0x[0-9A-F]{2}")) {
+if (-not [regex]::IsMatch($output, "SMP startup: BSP APIC 0, MADT processors $CpuCount, AP targets $expectedActiveAps, discovered APs $($CpuCount - 1), parked APs $expectedParkedAps, trampoline 0x[0-9A-F]{16}, SIPI vector 0x[0-9A-F]{2}")) {
     throw 'The selected-versus-parked SMP topology marker was not observed.'
 }
 if (-not $output.Contains('Local APIC enabled:')) {
@@ -485,58 +486,83 @@ if (-not $output.Contains('Maskable interrupt vector 0x0040 handled')) {
     throw 'The APIC timer interrupt round trip was not observed.'
 }
 $descriptorMatches = [regex]::Matches($output, 'AP private descriptors: GDT 0x[0-9A-F]+, TSS 0x[0-9A-F]+, IDT 0x[0-9A-F]+, CS 0x0008, TR 0x0018, checksum 0x(?!0000000000000000)[0-9A-F]{16}')
-if ($descriptorMatches.Count -ne 3) {
-    throw 'All three AP-private GDT/TSS/IDT verification records were not observed.'
+if ($descriptorMatches.Count -ne $expectedActiveAps) {
+    throw "The expected $expectedActiveAps AP-private descriptor records were not observed."
 }
-$mailboxMatches = [regex]::Matches($output, 'AP mailbox complete: APIC [123], epoch 1, input 0x[0-9A-F]{16}, result 0x(?!0000000000000000)[0-9A-F]{16}')
-if ($mailboxMatches.Count -ne 3) {
-    throw 'All three AP mailbox completion records were not observed.'
+$mailboxMatches = [regex]::Matches($output, 'AP mailbox complete: APIC [1-9][0-9]*, epoch 1, input 0x[0-9A-F]{16}, result 0x(?!0000000000000000)[0-9A-F]{16}')
+if ($mailboxMatches.Count -ne $expectedActiveAps) {
+    throw "The expected $expectedActiveAps AP mailbox completion records were not observed."
 }
-$runQueueMatches = [regex]::Matches($output, 'AP run queue complete: APIC [123], queued 4, completed 4, last sequence 4, checksum 0x(?!0000000000000000)[0-9A-F]{16}')
-if ($runQueueMatches.Count -ne 3) {
-    throw 'All three per-CPU FIFO run-queue completion records were not observed.'
+$runQueueMatches = [regex]::Matches($output, 'AP run queue complete: APIC [1-9][0-9]*, queued 4, completed 4, last sequence 4, checksum 0x(?!0000000000000000)[0-9A-F]{16}')
+if ($runQueueMatches.Count -ne $expectedActiveAps) {
+    throw "The expected $expectedActiveAps per-AP FIFO run-queue records were not observed."
 }
-$stealMatches = [regex]::Matches($output, 'AP work stealing: APIC [23] executed 2 stolen jobs')
-if ($stealMatches.Count -ne 2) {
-    throw 'Both idle application processors did not execute their deterministic steal quotas.'
+if ($expectedActiveAps -eq 3) {
+    $stealMatches = [regex]::Matches($output, 'AP work stealing: APIC [1-9][0-9]* executed 2 stolen jobs')
+    if ($stealMatches.Count -ne 2) {
+        throw 'Both idle application processors did not execute their deterministic steal quotas.'
+    }
+    if (-not [regex]::IsMatch($output, 'Work stealing complete: source APIC [1-9][0-9]*, jobs 8, owner 4, stolen 4, checksum 0x(?!0000000000000000)[0-9A-F]{16}')) {
+        throw 'The deterministic multicore work-stealing verification marker was not observed.'
+    }
+} else {
+    if (-not $output.Contains('Work stealing skipped: requires three selected application processors')) {
+        throw 'The low-core-count work-stealing skip marker was not observed.'
+    }
+    if ($output.Contains('Work stealing complete:')) {
+        throw 'Work stealing unexpectedly ran without three selected application processors.'
+    }
 }
-if (-not [regex]::IsMatch($output, 'Work stealing complete: source APIC 1, jobs 8, owner 4, stolen 4, checksum 0x(?!0000000000000000)[0-9A-F]{16}')) {
-    throw 'The deterministic multicore work-stealing verification marker was not observed.'
+
+if ($expectedActiveAps -eq 0) {
+    if (-not $output.Contains('SMP validation skipped: uniprocessor topology; BSP APIC 0 remains the only active processor')) {
+        throw 'The uniprocessor SMP fallback marker was not observed.'
+    }
+    if ([regex]::IsMatch($output, '^AP online:', [Text.RegularExpressions.RegexOptions]::Multiline)) {
+        throw 'An application processor unexpectedly started in uniprocessor mode.'
+    }
+} else {
+    $ipiWakeMatches = [regex]::Matches($output, 'AP targeted IPI: APIC [1-9][0-9]*, vector 0x42, wake 1, halts [2-9][0-9]*, checksum 0x(?!0000000000000000)[0-9A-F]{16}')
+    if ($ipiWakeMatches.Count -ne $expectedActiveAps) {
+        throw "The expected $expectedActiveAps AP targeted-IPI wake records were not observed."
+    }
+    if (-not $output.Contains("Targeted AP wakeups complete: vector 0x42, $expectedActiveAps/$expectedActiveAps APs woke from HLT and acknowledged EOI")) {
+        throw 'The targeted AP IPI/HLT/EOI aggregate marker was not observed.'
+    }
+    $apTimerMatches = [regex]::Matches($output, 'AP local timer: APIC [1-9][0-9]*, vector 0x43, count [1-9][0-9]*, interrupts 1, epoch 1, halts [3-9][0-9]*')
+    if ($apTimerMatches.Count -ne $expectedActiveAps) {
+        throw "The expected $expectedActiveAps AP local-timer records were not observed."
+    }
+    if (-not [regex]::IsMatch($output, "Per-AP timers complete: vector 0x43, count [1-9][0-9]*, $expectedActiveAps/$expectedActiveAps APs woke autonomously from local timer interrupts")) {
+        throw 'The per-AP autonomous local-timer aggregate marker was not observed.'
+    }
+    $tickSchedulerMatches = [regex]::Matches($output, 'AP tick scheduler: APIC [1-9][0-9]*, jobs 3, ticks 3, dispatches 3, halts [6-9][0-9]*, checksum 0x(?!0000000000000000)[0-9A-F]{16}')
+    if ($tickSchedulerMatches.Count -ne $expectedActiveAps) {
+        throw "The expected $expectedActiveAps per-AP tick-scheduler records were not observed."
+    }
+    if (-not [regex]::IsMatch($output, "Per-AP tick schedulers complete: jobs 3/core, quantum count [1-9][0-9]*, $expectedActiveAps/$expectedActiveAps APs dispatched exactly one job per timer tick")) {
+        throw 'The aggregate per-AP tick-scheduler marker was not observed.'
+    }
+    $apTaskMatches = [regex]::Matches($output, 'AP local tasks: APIC [1-9][0-9]*, stacks 0x[0-9A-F]+/0x[0-9A-F]+, switches 13, yields 5/7, trace ABABABABABBB, canaries intact')
+    if ($apTaskMatches.Count -ne $expectedActiveAps) {
+        throw "The expected $expectedActiveAps AP local-task records were not observed."
+    }
+    $expectedContextSwitches = 13 * $expectedActiveAps
+    if (-not $output.Contains("Per-AP task contexts complete: $expectedActiveAps/$expectedActiveAps APs, total context switches $expectedContextSwitches, trace ABABABABABBB on every core")) {
+        throw 'The aggregate per-AP task-context verification marker was not observed.'
+    }
+    $syncWorkerMatches = [regex]::Matches($output, 'AP synchronization worker: APIC [1-9][0-9]*, worker [1-9][0-9]*, acquisitions 4096, barrier generation 1')
+    if ($syncWorkerMatches.Count -ne $expectedActiveAps) {
+        throw "The expected $expectedActiveAps AP ticket-lock/barrier records were not observed."
+    }
+    $expectedSyncParticipants = $expectedActiveAps + 1
+    $expectedSyncIncrements = $expectedSyncParticipants * 4096
+    if (-not [regex]::IsMatch($output, "SMP synchronization complete: $expectedSyncParticipants participants, $expectedSyncIncrements locked increments, tickets $expectedSyncIncrements/$expectedSyncIncrements, barrier generation 1, checksum 0x(?!0000000000000000)[0-9A-F]{16}")) {
+        throw 'The topology-sized ticket-lock and barrier verification marker was not observed.'
+    }
 }
-$ipiWakeMatches = [regex]::Matches($output, 'AP targeted IPI: APIC [123], vector 0x42, wake 1, halts [2-9][0-9]*, checksum 0x(?!0000000000000000)[0-9A-F]{16}')
-if ($ipiWakeMatches.Count -ne 3) {
-    throw 'All three application processors did not wake from HLT through targeted vector 0x42.'
-}
-if (-not $output.Contains('Targeted AP wakeups complete: vector 0x42, 3/3 APs woke from HLT and acknowledged EOI')) {
-    throw 'The targeted AP IPI/HLT/EOI aggregate marker was not observed.'
-}
-$apTimerMatches = [regex]::Matches($output, 'AP local timer: APIC [123], vector 0x43, count [1-9][0-9]*, interrupts 1, epoch 1, halts [3-9][0-9]*')
-if ($apTimerMatches.Count -ne 3) {
-    throw 'All three application processors did not handle their private local-APIC timer interrupt.'
-}
-if (-not [regex]::IsMatch($output, 'Per-AP timers complete: vector 0x43, count [1-9][0-9]*, 3/3 APs woke autonomously from local timer interrupts')) {
-    throw 'The per-AP autonomous local-timer aggregate marker was not observed.'
-}
-$tickSchedulerMatches = [regex]::Matches($output, 'AP tick scheduler: APIC [123], jobs 3, ticks 3, dispatches 3, halts [6-9][0-9]*, checksum 0x(?!0000000000000000)[0-9A-F]{16}')
-if ($tickSchedulerMatches.Count -ne 3) {
-    throw 'All three per-AP tick schedulers did not dispatch exactly one job per timer quantum.'
-}
-if (-not [regex]::IsMatch($output, 'Per-AP tick schedulers complete: jobs 3/core, quantum count [1-9][0-9]*, 3/3 APs dispatched exactly one job per timer tick')) {
-    throw 'The aggregate per-AP tick-scheduler marker was not observed.'
-}
-$apTaskMatches = [regex]::Matches($output, 'AP local tasks: APIC [123], stacks 0x[0-9A-F]+/0x[0-9A-F]+, switches 13, yields 5/7, trace ABABABABABBB, canaries intact')
-if ($apTaskMatches.Count -ne 3) {
-    throw 'All three application processors did not complete their independent two-stack cooperative task experiment.'
-}
-if (-not $output.Contains('Per-AP task contexts complete: 3/3 APs, total context switches 39, trace ABABABABABBB on every core')) {
-    throw 'The aggregate per-AP task-context verification marker was not observed.'
-}
-$syncWorkerMatches = [regex]::Matches($output, 'AP synchronization worker: APIC [123], worker [123], acquisitions 4096, barrier generation 1')
-if ($syncWorkerMatches.Count -ne 3) {
-    throw 'All three AP ticket-lock/barrier workers did not complete.'
-}
-if (-not [regex]::IsMatch($output, 'SMP synchronization complete: 4 participants, 16384 locked increments, tickets 16384/16384, barrier generation 1, checksum 0x(?!0000000000000000)[0-9A-F]{16}')) {
-    throw 'The four-core ticket-lock and barrier verification marker was not observed.'
+if (-not $output.Contains("SMP startup complete: $expectedActiveAps/$expectedActiveAps selected application processors online; $expectedParkedAps additional application processors left parked")) {
+    throw 'The selected-AP startup and parked-CPU marker was not observed.'
 }
 if ($NoGraphics) {
     if (-not $output.Contains('GOP framebuffer: unavailable or BLT-only')) {

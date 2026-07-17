@@ -986,21 +986,35 @@ fn startApplicationProcessors(
         }
     }
 
-    debugWrite("Work stealing complete: source APIC ");
-    debugWriteU64Decimal(report.work_stealing_source_apic);
-    debugWrite(", jobs ");
-    debugWriteU64Decimal(report.work_stealing_jobs);
-    debugWrite(", owner ");
-    debugWriteU64Decimal(report.work_stealing_owner_jobs);
-    debugWrite(", stolen ");
-    debugWriteU64Decimal(report.work_stealing_stolen_jobs);
-    debugWrite(", checksum 0x");
-    debugWriteHex64(report.work_stealing_checksum);
-    debugWrite("\r\n");
+    if (report.target_count == 3) {
+        debugWrite("Work stealing complete: source APIC ");
+        debugWriteU64Decimal(report.work_stealing_source_apic);
+        debugWrite(", jobs ");
+        debugWriteU64Decimal(report.work_stealing_jobs);
+        debugWrite(", owner ");
+        debugWriteU64Decimal(report.work_stealing_owner_jobs);
+        debugWrite(", stolen ");
+        debugWriteU64Decimal(report.work_stealing_stolen_jobs);
+        debugWrite(", checksum 0x");
+        debugWriteHex64(report.work_stealing_checksum);
+        debugWrite("\r\n");
+    } else {
+        debugWrite("Work stealing skipped: requires three selected application processors\r\n");
+    }
 
     if (report.online_count != report.target_count) {
         smpFailure("not every selected application processor reached long mode");
     }
+    if (report.target_count == 0) {
+        debugWrite("SMP validation skipped: uniprocessor topology; BSP APIC ");
+        debugWriteU64Decimal(report.bsp_apic_id);
+        debugWrite(" remains the only active processor\r\n");
+        debugWrite("SMP startup complete: 0/0 selected application processors online; ");
+        debugWriteUsizeDecimal(report.parked_application_processors);
+        debugWrite(" additional application processors left parked\r\n");
+        return;
+    }
+
     debugWrite("SMP synchronization complete: ");
     debugWriteU64Decimal(report.sync_participants);
     debugWrite(" participants, ");

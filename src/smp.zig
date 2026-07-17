@@ -328,12 +328,12 @@ pub fn start(
         report.online_count += 1;
     }
 
-    if (report.target_count == 0 or
-        report.target_count != @min(report.discovered_application_processors, maximum_active_application_processors) or
+    if (report.target_count != @min(report.discovered_application_processors, maximum_active_application_processors) or
         report.parked_application_processors + report.target_count != report.discovered_application_processors)
     {
         return null;
     }
+    if (report.target_count == 0) return report;
     if (!runMailboxRound(&report, reference)) {
         debugWrite("SMP stage failure: mailbox\r\n");
         return null;
@@ -342,7 +342,7 @@ pub fn start(
         debugWrite("SMP stage failure: FIFO\r\n");
         return null;
     }
-    if (!runWorkStealingRound(&report, reference)) {
+    if (report.target_count == 3 and !runWorkStealingRound(&report, reference)) {
         debugWrite("SMP stage failure: stealing\r\n");
         return null;
     }
@@ -814,7 +814,7 @@ fn runLocalTaskRound(
 
 fn runSynchronizationRound(report: *Report, reference: hpet.Device) bool {
     const epoch: u32 = 1;
-    const participants: u32 = 4;
+    const participants: u32 = @intCast(report.target_count + 1);
     const iterations: u32 = 4096;
     var experiment = synchronization.Experiment.init(participants) orelse return false;
 
