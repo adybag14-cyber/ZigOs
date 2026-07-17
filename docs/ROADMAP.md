@@ -184,3 +184,12 @@
 - [x] Interactive shell started only when a keyboard is available
 - [x] Keyboard-less startup prompt retained on the framebuffer
 - [x] Combined NVMe-only and keyboard-less full-system QEMU regression
+
+
+## 1.5 - Non-keyboard USB devices
+
+- [x] Boot-HID keyboard and mouse protocol classification
+- [x] Device descriptor and configuration descriptor reads for a USB mouse
+- [x] Connected boot mouse rejected as an interactive keyboard without a fatal error
+- [x] No keyboard endpoint configuration or shell startup for mouse-only systems
+- [x] Combined NVMe-only and USB-mouse-only full-system QEMU regression

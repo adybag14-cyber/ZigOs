@@ -1433,6 +1433,20 @@ fn inspectXhci(
     debugWrite(", max power ");
     debugWriteU64Decimal(configuration.maximum_power_ma);
     debugWrite(" mA\r\n");
+    if (configuration.interface_protocol != 1) {
+        debugWrite("USB HID boot interface is not a keyboard: class ");
+        debugWriteU64Decimal(configuration.interface_class);
+        debugWrite("/");
+        debugWriteU64Decimal(configuration.interface_subclass);
+        debugWrite("/");
+        debugWriteU64Decimal(configuration.interface_protocol);
+        debugWrite(", interface ");
+        debugWriteU64Decimal(configuration.interface_number);
+        debugWrite(", endpoint 0x");
+        debugWriteHex8(configuration.endpoint_address);
+        debugWrite("; continuing without interactive shell\r\n");
+        return false;
+    }
     debugWrite("HID boot keyboard interface: number ");
     debugWriteU64Decimal(configuration.interface_number);
     debugWrite(", alternate ");

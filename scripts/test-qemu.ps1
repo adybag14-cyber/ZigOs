@@ -2,7 +2,8 @@
 param(
     [int]$TimeoutSeconds = 30,
     [switch]$NvmeOnly,
-    [switch]$NoUsbKeyboard
+    [switch]$NoUsbKeyboard,
+    [switch]$UsbMouseOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -277,11 +278,13 @@ $arguments = @(
 if (-not $NvmeOnly) {
     $arguments += @('-drive', "format=raw,file=fat:rw:$fatPath")
 }
-if (-not $NoUsbKeyboard) {
+if ($UsbMouseOnly) {
+    $arguments += @('-device', 'usb-mouse,bus=xhci.0,port=1')
+} elseif (-not $NoUsbKeyboard) {
     $arguments += @('-device', 'usb-kbd,bus=xhci.0,port=1')
 }
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -296,7 +299,7 @@ try {
         Start-Sleep -Milliseconds 25
         if (Test-Path $debugLog) {
             $text = Get-Content $debugLog -Raw -ErrorAction SilentlyContinue
-            if (-not $NoUsbKeyboard -and $text -and -not $keyInjected -and $text.Contains($inputMarker)) {
+            if (-not $NoUsbKeyboard -and -not $UsbMouseOnly -and $text -and -not $keyInjected -and $text.Contains($inputMarker)) {
                 $client = [System.Net.Sockets.TcpClient]::new()
                 try {
                     $client.Connect('127.0.0.1', $monitorPort)
@@ -313,7 +316,7 @@ try {
                     $client.Dispose()
                 }
             }
-            if (-not $NoUsbKeyboard -and $text -and $keyInjected -and -not $shellInjected -and $text.Contains($shellMarker)) {
+            if (-not $NoUsbKeyboard -and -not $UsbMouseOnly -and $text -and $keyInjected -and -not $shellInjected -and $text.Contains($shellMarker)) {
                 $client = [System.Net.Sockets.TcpClient]::new()
                 try {
                     $client.Connect('127.0.0.1', $monitorPort)
@@ -548,6 +551,30 @@ if ($NoUsbKeyboard) {
     }
     if ($output.Contains('xHCI ownership active:') -or $output.Contains('ZigOs shell input armed:')) {
         throw 'xHCI ownership or the interactive shell unexpectedly started without a USB keyboard.'
+    }
+} elseif ($UsbMouseOnly) {
+    if (-not $output.Contains('USB keyboard attachment visible: 1 connected xHCI port(s); read-only discovery complete')) {
+        throw 'The connected USB mouse was not visible in the xHCI port inventory.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI ownership active: DCBAA 0x[0-9A-F]{16}, command ring 0x[0-9A-F]{16}, event ring 0x[0-9A-F]{16}, ERST 0x[0-9A-F]{16}, page size 4096, scratchpads 0, slots [1-9][0-9]*')) {
+        throw 'The xHCI controller was not taken over for the USB mouse identification path.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI Address Device completed: slot [1-9][0-9]*, USB address [1-9][0-9]*, slot state [2-9][0-9]*, EP0 state [1-7], completion 1, context size (32|64), device context 0x[0-9A-F]{16}, input context 0x[0-9A-F]{16}, EP0 ring 0x[0-9A-F]{16}')) {
+        throw 'The USB mouse was not addressed through xHCI.'
+    }
+    if (-not [regex]::IsMatch($output, 'USB configuration descriptor: total [1-9][0-9]* bytes, value [1-9][0-9]*, interfaces [1-9][0-9]*, attributes 0x[0-9A-F]{2}, max power [0-9]+ mA')) {
+        throw 'The USB mouse configuration descriptor was not read.'
+    }
+    if (-not [regex]::IsMatch($output, 'USB HID boot interface is not a keyboard: class 3/1/2, interface [0-9]+, endpoint 0x8[1-9A-F]; continuing without interactive shell')) {
+        throw 'The boot-protocol USB mouse was not classified and skipped correctly.'
+    }
+    if (-not $output.Contains('Interactive input ready: USB keyboard no')) {
+        throw 'The USB-mouse-only input readiness marker was not observed.'
+    }
+    if ($output.Contains('HID boot keyboard interface:') -or
+        $output.Contains('xHCI HID endpoint configured:') -or
+        $output.Contains('ZigOs shell input armed:')) {
+        throw 'The USB mouse was incorrectly configured as a keyboard.'
     }
 } else {
     if (-not [regex]::IsMatch($output, 'USB keyboard attachment visible: [1-9][0-9]* connected xHCI port\(s\); read-only discovery complete')) {
@@ -851,7 +878,7 @@ if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B
 if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
     throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
 }
-if ($NoUsbKeyboard) {
+if ($NoUsbKeyboard -or $UsbMouseOnly) {
     if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 4, glyphs 31, resets 0, lit pixels 1744, checksum 0x866AA691AB18DEB5, cursor visible, draws 6, erases 5, display lit pixels 1764, display checksum 0x7CF72F9AF061C761')) {
         throw 'The unchanged startup-prompt framebuffer state was not observed without a USB keyboard.'
     }

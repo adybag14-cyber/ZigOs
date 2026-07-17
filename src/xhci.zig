@@ -55,6 +55,7 @@ const usb_descriptor_type_hid: u8 = 0x21;
 const usb_class_hid: u8 = 3;
 const usb_hid_subclass_boot: u8 = 1;
 const usb_hid_protocol_keyboard: u8 = 1;
+const usb_hid_protocol_mouse: u8 = 2;
 const usb_endpoint_direction_in: u8 = 0x80;
 const usb_endpoint_transfer_interrupt: u8 = 3;
 const usb_device_descriptor_length: usize = 18;
@@ -872,7 +873,8 @@ pub fn readHidConfiguration(
                 if (descriptor_length >= 9 and
                     bytes[offset + 5] == usb_class_hid and
                     bytes[offset + 6] == usb_hid_subclass_boot and
-                    bytes[offset + 7] == usb_hid_protocol_keyboard)
+                    (bytes[offset + 7] == usb_hid_protocol_keyboard or
+                        bytes[offset + 7] == usb_hid_protocol_mouse))
                 {
                     interface_found = true;
                     interface_number = bytes[offset + 2];
