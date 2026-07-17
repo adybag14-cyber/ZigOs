@@ -45,6 +45,7 @@ const x2apic_current_count_msr: u32 = 0x839;
 const x2apic_divide_configuration_msr: u32 = 0x83E;
 const x2apic_icr_msr: u32 = 0x830;
 
+extern fn zigos_cpu_has_x2apic() callconv(cc) u8;
 extern fn zigos_read_msr(index: u32) callconv(cc) u64;
 extern fn zigos_write_msr(index: u32, value: u64) callconv(cc) void;
 extern fn zigos_out8(port: u16, value: u8) callconv(cc) void;
@@ -81,12 +82,16 @@ var timer_interrupt_count: u64 = 0;
 var timer_hook: ?TimerHook = null;
 
 pub fn initialize(madt: acpi.MadtInfo) ?Information {
+    const x2apic_supported = zigos_cpu_has_x2apic() != 0;
     var base_msr = zigos_read_msr(ia32_apic_base_msr);
-    if ((base_msr & apic_global_enable) == 0) {
-        zigos_write_msr(ia32_apic_base_msr, base_msr | apic_global_enable);
+    var requested_base = base_msr | apic_global_enable;
+    if (x2apic_supported) requested_base |= x2apic_enable;
+    if (requested_base != base_msr) {
+        zigos_write_msr(ia32_apic_base_msr, requested_base);
         base_msr = zigos_read_msr(ia32_apic_base_msr);
-        if ((base_msr & apic_global_enable) == 0) return null;
     }
+    if ((base_msr & apic_global_enable) == 0) return null;
+    if (x2apic_supported and (base_msr & x2apic_enable) == 0) return null;
 
     const x2apic = (base_msr & x2apic_enable) != 0;
     const pic_masked = if (madt.legacy_pic_compatible) maskLegacyPic() else false;
@@ -144,6 +149,19 @@ pub fn initialize(madt: acpi.MadtInfo) ?Information {
 }
 
 pub fn initializeCurrentProcessor() bool {
+    var base_msr = zigos_read_msr(ia32_apic_base_msr);
+    var requested_base = base_msr | apic_global_enable;
+    if (active_x2apic) {
+        if (zigos_cpu_has_x2apic() == 0) return false;
+        requested_base |= x2apic_enable;
+    }
+    if (requested_base != base_msr) {
+        zigos_write_msr(ia32_apic_base_msr, requested_base);
+        base_msr = zigos_read_msr(ia32_apic_base_msr);
+    }
+    if ((base_msr & apic_global_enable) == 0) return false;
+    if (((base_msr & x2apic_enable) != 0) != active_x2apic) return false;
+
     if (active_x2apic) {
         zigos_write_msr(x2apic_task_priority_msr, 0);
         const old_spurious: u32 = @truncate(zigos_read_msr(x2apic_spurious_msr));

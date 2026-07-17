@@ -64,7 +64,7 @@ const RunQueueEntry = struct {
     completed: u32,
     executor_apic_id: u32,
     stolen: u32,
-    reserved: u32,
+    executor_state_index: u32,
 };
 
 const LocalTaskStatus = enum(u32) {
@@ -383,8 +383,6 @@ pub fn initialize(state: *State, actual_apic_id: u32) bool {
     state.active_cs = @truncate(zigos_read_cs());
     state.active_tr = @truncate(zigos_read_tr());
     if (state.active_cs != code_selector or state.active_tr != tss_selector) return false;
-    if (!apic.initializeCurrentProcessor()) return false;
-
     state.work_checksum = calculateWorkChecksum(actual_apic_id, state.index);
     state.descriptor_ready = 1;
     zigos_memory_fence();
@@ -938,10 +936,10 @@ pub fn enqueueRunQueue(state: *State, sequence: u32, input: u64) bool {
     writeVolatileU64(&entry.result, 0);
     entry.executor_apic_id = 0;
     entry.stolen = 0;
+    entry.executor_state_index = 0;
     entry.sequence = sequence;
     entry.command = run_queue_command;
     entry.input = input;
-    entry.reserved = 0;
     zigos_memory_fence();
     writeVolatileU32(&state.run_queue_head, head +% 1);
     zigos_memory_fence();
@@ -1061,6 +1059,7 @@ fn runQueueStep(victim: *State, executor: *State, stealing: bool) bool {
     const result = calculateRunQueueWork(executor_apic_id, sequence, entry.input);
     entry.executor_apic_id = executor_apic_id;
     entry.stolen = @intFromBool(was_stolen);
+    entry.executor_state_index = executor.index;
     writeVolatileU64(&entry.result, result);
 
     if (atomicLoadU32(&stealing_enabled) == 0) {
@@ -1112,10 +1111,13 @@ pub fn verifyWorkStealing(
     while (index < expected_jobs) : (index += 1) {
         const entry = &source.run_queue[queueIndex(index)];
         const sequence = index + 1;
+        const executor_index: usize = @intCast(entry.executor_state_index);
+        const state_count: usize = @intCast(atomicLoadU32(&active_state_count));
         if (atomicLoadU32(&entry.completed) != 1 or
             entry.sequence != sequence or
             entry.command != run_queue_command or
-            entry.executor_apic_id >= 64)
+            executor_index >= state_count or
+            states[executor_index].expected_apic_id != entry.executor_apic_id)
         {
             return null;
         }
@@ -1129,7 +1131,7 @@ pub fn verifyWorkStealing(
         const result = readVolatileU64(&entry.result);
         const expected = calculateRunQueueWork(entry.executor_apic_id, sequence, entry.input);
         if (result != expected) return null;
-        executor_mask |= @as(u64, 1) << @intCast(entry.executor_apic_id);
+        executor_mask |= @as(u64, 1) << @intCast(executor_index);
         checksum ^= workStealingToken(sequence, entry.executor_apic_id, result);
     }
     if (owner_jobs != expected_owner_jobs or stolen_jobs != expected_stolen_jobs) return null;

@@ -10,7 +10,9 @@ param(
     [switch]$LegacyPci,
     [switch]$Nvme4k,
     [switch]$NoPs2,
-    [switch]$NoHpet
+    [switch]$NoHpet,
+    [switch]$SparseApicIds,
+    [switch]$NoX2Apic
 )
 
 $ErrorActionPreference = 'Stop'
@@ -82,6 +84,10 @@ $monitorListener.Stop()
 $monitorEndpoint = "tcp:127.0.0.1:$monitorPort,server=on,wait=off"
 
 $machineType = if ($LegacyPci) { 'pc' } else { 'q35' }
+if ($SparseApicIds) {
+    if ($LegacyPci) { throw '-SparseApicIds is currently supported only with the q35 test machine.' }
+    if ($CpuCount -ne 4) { throw '-SparseApicIds requires -CpuCount 4.' }
+}
 $machineOptions = @()
 if ($NoPs2) {
     if ($LegacyPci) { throw '-NoPs2 is currently supported only with the q35 test machine.' }
@@ -96,11 +102,17 @@ $machineArgument = if ($machineOptions.Count -eq 0) {
 } else {
     "$machineType,$($machineOptions -join ',')"
 }
+$smpArgument = if ($SparseApicIds) {
+    'cpus=4,maxcpus=6,sockets=2,cores=3,threads=1'
+} else {
+    [string]$CpuCount
+}
+$cpuArgument = if ($NoX2Apic) { 'max,-x2apic' } else { 'max' }
 $arguments = @(
     '-machine', $machineArgument,
     '-m', '256M',
-    '-cpu', 'max',
-    '-smp', $CpuCount,
+    '-cpu', $cpuArgument,
+    '-smp', $smpArgument,
     '-device', 'qemu-xhci,id=xhci',
     '-drive', "file=$nvmePath,if=none,id=nvme0,format=raw,cache=unsafe",
     '-device', "nvme,drive=nvme0,serial=ZIGOSNVME,logical_block_size=$nvmeBlockSize,physical_block_size=$nvmeBlockSize",
@@ -126,7 +138,7 @@ if ($NoGraphics) {
     $arguments += @('-vga', 'none')
 }
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPUs: $CpuCount, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2, no HPET: $NoHpet)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPU: $cpuArgument, CPUs: $CpuCount, SMP: $smpArgument, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2, no HPET: $NoHpet, sparse APIC IDs: $SparseApicIds, no x2APIC: $NoX2Apic)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -274,23 +286,50 @@ if (-not $output.Contains('ACPI verified: revision')) {
 if (-not $output.Contains('MADT topology:')) {
     throw 'The validated MADT topology marker was not observed.'
 }
-if (-not $output.Contains("MADT topology: $CpuCount processors")) {
-    throw "The expected $CpuCount-CPU MADT topology marker was not observed."
+$expectedMadtProcessorCount = $CpuCount
+$expectedApicIds = if ($SparseApicIds) { @(0, 1, 2, 4) } else { @(0..($CpuCount - 1)) }
+if (-not $output.Contains("MADT topology: $expectedMadtProcessorCount processors")) {
+    throw "The expected $expectedMadtProcessorCount-processor MADT topology marker was not observed."
 }
 $expectedProcessorIds = 'MADT processor IDs:'
-for ($processorId = 0; $processorId -lt $CpuCount; $processorId++) {
+foreach ($processorId in $expectedApicIds) {
     $expectedProcessorIds += " $processorId(xAPIC)"
 }
 if (-not $output.Contains($expectedProcessorIds)) {
-    throw "The expected retained MADT APIC-ID set for $CpuCount CPUs was not observed."
+    throw "The expected retained MADT APIC-ID set was not observed: $($expectedApicIds -join ',')."
 }
 $expectedActiveAps = [Math]::Min(3, [Math]::Max(0, $CpuCount - 1))
-$expectedParkedAps = [Math]::Max(0, $CpuCount - 4)
-if (-not [regex]::IsMatch($output, "SMP startup: BSP APIC 0, MADT processors $CpuCount, AP targets $expectedActiveAps, discovered APs $($CpuCount - 1), parked APs $expectedParkedAps, trampoline 0x[0-9A-F]{16}, SIPI vector 0x[0-9A-F]{2}")) {
+$expectedParkedAps = [Math]::Max(0, $expectedMadtProcessorCount - 1 - $expectedActiveAps)
+if (-not [regex]::IsMatch($output, "SMP startup: BSP APIC 0, MADT processors $expectedMadtProcessorCount, AP targets $expectedActiveAps, discovered APs $($expectedMadtProcessorCount - 1), parked APs $expectedParkedAps, trampoline 0x[0-9A-F]{16}, SIPI vector 0x[0-9A-F]{2}")) {
     throw 'The selected-versus-parked SMP topology marker was not observed.'
 }
 if (-not $output.Contains('Local APIC enabled:')) {
     throw 'The local APIC enablement marker was not observed.'
+}
+if ($NoX2Apic) {
+    if (-not $output.Contains('Local APIC enabled: xAPIC ID 0')) {
+        throw 'The CPUID-disabled x2APIC matrix did not retain xAPIC mode.'
+    }
+    if ($output.Contains('Local APIC enabled: x2APIC')) {
+        throw 'x2APIC unexpectedly enabled while the CPUID feature was disabled.'
+    }
+} else {
+    if (-not $output.Contains('Local APIC enabled: x2APIC ID 0')) {
+        throw 'The default QEMU CPU did not enter x2APIC mode.'
+    }
+}
+if ($SparseApicIds) {
+    if (-not $output.Contains('Local APIC enabled: x2APIC ID 0')) {
+        throw 'The sparse-APIC-ID matrix did not enter x2APIC mode.'
+    }
+    foreach ($activeApicId in @(1, 2, 4)) {
+        if (-not $output.Contains("AP online: expected APIC $activeApicId, actual APIC $activeApicId, state 2")) {
+            throw "Sparse APIC ID $activeApicId did not start and validate."
+        }
+    }
+    if ($output.Contains('AP online: expected APIC 3,')) {
+        throw 'The sparse topology unexpectedly collapsed APIC ID 4 into contiguous ID 3.'
+    }
 }
 if (-not $output.Contains('APIC SVR verified at 0x')) {
     throw 'The local APIC SVR verification marker was not observed.'

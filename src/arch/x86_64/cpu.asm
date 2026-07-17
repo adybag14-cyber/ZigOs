@@ -8,6 +8,7 @@ default rel
 section .text
 
 global zigos_cpuid_vendor
+global zigos_cpu_has_x2apic
 global zigos_read_cr0
 global zigos_read_cr3
 global zigos_read_cr4
@@ -23,6 +24,19 @@ zigos_cpuid_vendor:
     mov [r8 + 4], edx
     mov [r8 + 8], ecx
     mov byte [r8 + 12], 0
+    pop rbx
+    ret
+
+; u8 zigos_cpu_has_x2apic(void)
+; CPUID.01H:ECX[21] advertises the x2APIC architecture. RBX is preserved
+; because it is non-volatile in the Microsoft x64 ABI used by UEFI.
+zigos_cpu_has_x2apic:
+    push rbx
+    mov eax, 1
+    cpuid
+    bt ecx, 21
+    setc al
+    movzx eax, al
     pop rbx
     ret
 

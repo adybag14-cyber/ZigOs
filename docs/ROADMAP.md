@@ -267,3 +267,12 @@
 - [x] APIC timer calibration and interrupt wake-up using PIT timing
 - [x] SMP INIT/SIPI startup and validation rounds using PIT delays
 - [x] q35 `hpet=off` full-system QEMU regression
+
+## 2.4 - x2APIC and sparse processor identifiers
+
+- ZigOs detects CPUID x2APIC support and enters x2APIC mode on the BSP when available.
+- Every application processor enables and verifies its own IA32_APIC_BASE x2APIC state before reading x2APIC MSRs or its 32-bit APIC ID.
+- `scripts/test-qemu.ps1 -NoX2Apic` removes CPUID x2APIC support and verifies the complete xAPIC MMIO fallback, including AP startup, fixed IPIs, local timers, and work stealing.
+- INIT/SIPI and fixed IPIs retain full 32-bit destination IDs in x2APIC mode.
+- Work-stealing participant masks use stable per-CPU state slots rather than hardware APIC IDs, so sparse or greater-than-63 identifiers cannot overflow a 64-bit mask.
+- `scripts/test-qemu.ps1 -SparseApicIds` uses a six-slot topology with four online processors. QEMU retains MADT IDs `0,1,2,4`; ZigOs starts IDs `1,2,4` and completes the full multicore validation suite without assuming contiguous hardware identifiers.

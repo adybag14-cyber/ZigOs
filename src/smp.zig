@@ -370,9 +370,11 @@ pub fn start(
 }
 
 export fn zigos_ap_entry(data: *volatile ApBootData, per_cpu_state: *percpu.State) callconv(cc) noreturn {
-    const actual_apic_id = apic.currentId();
+    const apic_ready = apic.initializeCurrentProcessor();
+    const actual_apic_id = if (apic_ready) apic.currentId() else initial_actual_apic_id;
     data.actual_apic_id = actual_apic_id;
-    const valid_boot = data.signature == boot_signature and
+    const valid_boot = apic_ready and
+        data.signature == boot_signature and
         data.per_cpu_state == @intFromPtr(per_cpu_state) and
         actual_apic_id == data.expected_apic_id;
     const descriptors_ready = valid_boot and percpu.initialize(per_cpu_state, actual_apic_id);
@@ -525,8 +527,7 @@ fn runWorkStealingRound(report: *Report, reference: time_reference.Reference) bo
         const expected = if (index == source_index) 0 else thief_quota;
         if (state_report.steal_completed != expected) return false;
         processor.stolen_jobs_executed = state_report.steal_completed;
-        if (processor.actual_apic_id >= 64) return false;
-        expected_mask |= @as(u64, 1) << @intCast(processor.actual_apic_id);
+        expected_mask |= @as(u64, 1) << @intCast(index);
     }
     if (verification.executor_mask != expected_mask) return false;
 
