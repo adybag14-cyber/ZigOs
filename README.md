@@ -8,9 +8,9 @@ The project deliberately uses the canonical Zig builds published by [`adybag14-c
 
 > ZigOs is a research and learning operating system. It is not ready for production use or general physical-hardware support.
 
-## Current milestone: 3.5
+## Current milestone: 3.6
 
-The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, and interrupt-to-kernel completion queues.
+The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, and a persistent queue owner with reusable frame APIs.
 
 The deterministic networking sequence is:
 
@@ -122,7 +122,9 @@ Assembly is used where exact instruction, register, descriptor, interrupt-entry,
 - Intel 82574L/e1000e discovery and ownership.
 - DMA RX/TX rings with eight descriptors, writeback checks, recycling, and wrap.
 - Independent 32-entry ISR-to-kernel TX/RX completion queues with atomic pending masks, coalesced-completion ready masks, high-water tracking, and overflow detection.
-- The deterministic network flow produces exactly ten TX and nine RX completion records, each dequeued once with zero overflow.
+- A retained `Device` owner exposes reusable frame submission, receive, and release operations with persistent TX/RX cursors and DMA addresses.
+- After DHCP/ARP/ICMP/TFTP bootstrap, a second ICMP exchange uses TX descriptor 2 and RX descriptor 1 through the generic queue APIs, advancing cursors to 3 and 2.
+- The complete flow produces eleven TX and ten RX completion records, each dequeued once with zero overflow.
 - MSI-X vector `0x49` routed to a valid BSP or application-processor destination.
 - DHCP Discover/Offer/Request/ACK with BOOTP identity and option validation.
 - Runtime lease fields for local address, subnet mask, server, lease duration, and optional router/DNS data.

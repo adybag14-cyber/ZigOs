@@ -89,6 +89,8 @@ const icmp_echo_request: u8 = 8;
 const icmp_header_bytes: usize = 8;
 const icmp_identifier: u16 = 0x5A49;
 const icmp_sequence: u16 = 1;
+const persistent_icmp_identifier: u16 = 0x5A50;
+const persistent_icmp_sequence: u16 = 2;
 const icmp_payload = "ZigOs-ICMP-ECHO!";
 const icmp_ipv4_total_bytes: usize = ipv4_header_bytes + icmp_header_bytes + icmp_payload.len;
 const icmp_ethernet_frame_bytes: usize = 14 + icmp_ipv4_total_bytes;
@@ -142,6 +144,71 @@ pub const Controller = struct {
     mac_address: [6]u8,
     link_up: bool,
     link_speed_mbps: u16,
+};
+
+pub const Device = struct {
+    bar0: usize,
+    rx_ring_address: usize,
+    tx_ring_address: usize,
+    tx_buffer_address: usize,
+    rx_buffer_addresses: [ring_descriptor_count]usize,
+    tx_producer: u16,
+    rx_consumer: u16,
+    interrupt_target_apic_id: u8,
+    local_mac: [6]u8,
+    local_ipv4: [4]u8,
+    gateway_mac: [6]u8,
+    gateway_ipv4: [4]u8,
+    tx_submissions: u64,
+    rx_deliveries: u64,
+    last_tx_interrupt_count: u64,
+    last_rx_interrupt_count: u64,
+    tx_cursor_wraps: u16,
+    rx_cursor_wraps: u16,
+    rx_recycled_descriptors: u16,
+    rx_descriptor_wraps: u16,
+    previous_recycled_rx_descriptor: ?usize,
+};
+
+pub const TxCompletion = struct {
+    descriptor_index: u16,
+    next_cursor: u16,
+    frame_length: u16,
+    interrupt_count: u64,
+    interrupt_cause: u32,
+};
+
+pub const ReceivedFrame = struct {
+    descriptor_index: u16,
+    next_cursor: u16,
+    frame_length: u16,
+    bytes: []const u8,
+    interrupt_count: u64,
+    interrupt_cause: u32,
+};
+
+pub const PersistentQueueReport = struct {
+    tx: TxCompletion,
+    rx_descriptor_index: u16,
+    rx_next_cursor: u16,
+    rx_frame_length: u16,
+    rx_interrupt_count: u64,
+    rx_interrupt_cause: u32,
+    identifier: u16,
+    sequence: u16,
+    ttl: u8,
+    payload_length: u16,
+    tx_submissions: u64,
+    rx_deliveries: u64,
+    tx_cursor_wraps: u16,
+    rx_cursor_wraps: u16,
+    tx_queue_enqueues: u64,
+    tx_queue_dequeues: u64,
+    rx_queue_enqueues: u64,
+    rx_queue_dequeues: u64,
+    queue_overflows: u64,
+    tx_pending_mask: u32,
+    rx_pending_mask: u32,
 };
 
 pub const NetworkResult = struct {
@@ -234,6 +301,7 @@ pub const NetworkResult = struct {
     completion_queue_overflows: u64,
     tx_pending_mask_after_stream: u32,
     rx_pending_mask_after_stream: u32,
+    persistent: PersistentQueueReport,
 };
 
 var active_bar0: usize = 0;
@@ -251,6 +319,7 @@ var tx_ready_mask: u32 = 0;
 var rx_ready_mask: u32 = 0;
 var tx_completion_queue: CompletionQueue = undefined;
 var rx_completion_queue: CompletionQueue = undefined;
+var active_device_storage: ?Device = null;
 
 extern fn zigos_memory_fence() callconv(cc) void;
 extern fn zigos_cpu_relax() callconv(cc) void;
@@ -498,6 +567,8 @@ pub fn initializeAndTestNetwork(
         parsed.gateway_mac_address,
         ack.lease.address,
         ack.lease.router,
+        icmp_identifier,
+        icmp_sequence,
     );
     tx_descriptors[3] = makeTxDescriptor(tx_buffer_address, ethernet_minimum_frame_bytes);
     if (!armTxDescriptor(3)) return null;
@@ -518,6 +589,8 @@ pub fn initializeAndTestNetwork(
         parsed.gateway_mac_address,
         ack.lease.address,
         ack.lease.router,
+        icmp_identifier,
+        icmp_sequence,
     ) orelse return null;
     const icmp_tx_interrupt_count = txInterruptCount() - icmp_tx_baseline;
     const icmp_rx_interrupt_count = rxInterruptCount() - icmp_rx_baseline;
@@ -711,6 +784,35 @@ pub fn initializeAndTestNetwork(
         return null;
     }
 
+    active_device_storage = .{
+        .bar0 = controller.bar0,
+        .rx_ring_address = rx_ring_address,
+        .tx_ring_address = tx_ring_address,
+        .tx_buffer_address = tx_buffer_address,
+        .rx_buffer_addresses = rx_buffer_addresses,
+        .tx_producer = tftp_tx_tail_after_ack,
+        .rx_consumer = rx_head_after_stream,
+        .interrupt_target_apic_id = target_apic_id,
+        .local_mac = controller.mac_address,
+        .local_ipv4 = ack.lease.address,
+        .gateway_mac = parsed.gateway_mac_address,
+        .gateway_ipv4 = ack.lease.router,
+        .tx_submissions = 0,
+        .rx_deliveries = 0,
+        .last_tx_interrupt_count = txInterruptCount(),
+        .last_rx_interrupt_count = rxInterruptCount(),
+        .tx_cursor_wraps = 0,
+        .rx_cursor_wraps = 0,
+        .rx_recycled_descriptors = 0,
+        .rx_descriptor_wraps = 0,
+        .previous_recycled_rx_descriptor = 0,
+    };
+    const device = activeDevice() orelse return null;
+    const persistent = verifyPersistentQueueOwner(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
+
     return .{
         .rx_ring_address = rx_ring_address,
         .tx_ring_address = tx_ring_address,
@@ -801,6 +903,158 @@ pub fn initializeAndTestNetwork(
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask_after_stream = tx_pending_mask_after_stream,
         .rx_pending_mask_after_stream = rx_pending_mask_after_stream,
+        .persistent = persistent,
+    };
+}
+
+pub fn activeDevice() ?*Device {
+    if (active_device_storage) |*device| return device;
+    return null;
+}
+
+pub fn submitFrame(device: *Device, frame: []const u8) ?TxCompletion {
+    if (device.bar0 == 0 or frame.len == 0 or frame.len > memory.page_size or
+        device.tx_producer >= ring_descriptor_count)
+    {
+        return null;
+    }
+    const descriptor_index: usize = device.tx_producer;
+    const tx_buffer = @as([*]u8, @ptrFromInt(device.tx_buffer_address))[0..memory.page_size];
+    @memset(tx_buffer, 0);
+    @memcpy(tx_buffer[0..frame.len], frame);
+    const descriptors: [*]volatile TxDescriptor = @ptrFromInt(device.tx_ring_address);
+    descriptors[descriptor_index] = makeTxDescriptor(device.tx_buffer_address, @intCast(frame.len));
+    if (!armTxDescriptor(descriptor_index)) return null;
+    zigos_memory_fence();
+
+    const baseline = device.last_tx_interrupt_count;
+    const next_cursor: u16 = @intCast((descriptor_index + 1) % ring_descriptor_count);
+    if (next_cursor == 0) device.tx_cursor_wraps +|= 1;
+    write32(device.bar0, tdt_offset, next_cursor);
+    _ = read32(device.bar0, status_offset);
+    if (!waitForTx(descriptors, descriptor_index, baseline, device.interrupt_target_apic_id)) return null;
+    const observed = txInterruptCount();
+    if (observed == baseline) return null;
+
+    device.tx_producer = next_cursor;
+    device.tx_submissions +|= 1;
+    device.last_tx_interrupt_count = observed;
+    return .{
+        .descriptor_index = @intCast(descriptor_index),
+        .next_cursor = next_cursor,
+        .frame_length = @intCast(frame.len),
+        .interrupt_count = observed - baseline,
+        .interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire),
+    };
+}
+
+pub fn receiveFrame(device: *Device) ?ReceivedFrame {
+    if (device.bar0 == 0 or device.rx_consumer >= ring_descriptor_count) return null;
+    const descriptor_index: usize = device.rx_consumer;
+    const descriptors: [*]volatile RxDescriptor = @ptrFromInt(device.rx_ring_address);
+    const baseline = device.last_rx_interrupt_count;
+    if (!waitForRx(descriptors, descriptor_index, baseline, device.interrupt_target_apic_id)) return null;
+    zigos_memory_fence();
+    const frame_length = validateRxDescriptor(descriptors, descriptor_index) orelse return null;
+    const next_cursor: u16 = @intCast((descriptor_index + 1) % ring_descriptor_count);
+    if (next_cursor == 0) device.rx_cursor_wraps +|= 1;
+    device.rx_consumer = next_cursor;
+    device.rx_deliveries +|= 1;
+    const observed = rxInterruptCount();
+    if (observed == baseline) return null;
+    device.last_rx_interrupt_count = observed;
+    return .{
+        .descriptor_index = @intCast(descriptor_index),
+        .next_cursor = next_cursor,
+        .frame_length = frame_length,
+        .bytes = @as(
+            [*]const u8,
+            @ptrFromInt(device.rx_buffer_addresses[descriptor_index]),
+        )[0..frame_length],
+        .interrupt_count = observed - baseline,
+        .interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire),
+    };
+}
+
+pub fn releaseFrame(device: *Device, frame: ReceivedFrame) bool {
+    return recycleRxDescriptor(
+        device.bar0,
+        @ptrFromInt(device.rx_ring_address),
+        frame.descriptor_index,
+        &device.rx_recycled_descriptors,
+        &device.rx_descriptor_wraps,
+        &device.previous_recycled_rx_descriptor,
+    );
+}
+
+fn verifyPersistentQueueOwner(device: *Device) ?PersistentQueueReport {
+    var request = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+    buildIcmpEchoRequest(
+        &request,
+        device.local_mac,
+        device.gateway_mac,
+        device.local_ipv4,
+        device.gateway_ipv4,
+        persistent_icmp_identifier,
+        persistent_icmp_sequence,
+    );
+    const tx = submitFrame(device, &request) orelse return null;
+    const rx = receiveFrame(device) orelse return null;
+    const parsed = parseIcmpEchoReply(
+        rx.bytes,
+        device.local_mac,
+        device.gateway_mac,
+        device.local_ipv4,
+        device.gateway_ipv4,
+        persistent_icmp_identifier,
+        persistent_icmp_sequence,
+    ) orelse return null;
+    if (!releaseFrame(device, rx)) return null;
+
+    const tx_queue_enqueues = completionQueueEnqueued(&tx_completion_queue);
+    const tx_queue_dequeues = completionQueueDequeued(&tx_completion_queue);
+    const rx_queue_enqueues = completionQueueEnqueued(&rx_completion_queue);
+    const rx_queue_dequeues = completionQueueDequeued(&rx_completion_queue);
+    const queue_overflows = completionQueueOverflow(&tx_completion_queue) +
+        completionQueueOverflow(&rx_completion_queue);
+    const final_tx_pending = @atomicLoad(u32, &tx_pending_mask, .acquire);
+    const final_rx_pending = @atomicLoad(u32, &rx_pending_mask, .acquire);
+    if (tx.descriptor_index != 2 or tx.next_cursor != 3 or
+        rx.descriptor_index != 1 or rx.next_cursor != 2 or
+        device.tx_submissions != 1 or device.rx_deliveries != 1 or
+        device.tx_cursor_wraps != 0 or device.rx_cursor_wraps != 0 or
+        device.rx_recycled_descriptors != 1 or device.rx_descriptor_wraps != 0 or
+        tx_queue_enqueues != 11 or tx_queue_dequeues != 11 or
+        rx_queue_enqueues != 10 or rx_queue_dequeues != 10 or
+        queue_overflows != 0 or final_tx_pending != 0 or
+        final_rx_pending != all_rx_descriptors_pending or
+        tx_ready_mask != 0 or rx_ready_mask != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .tx = tx,
+        .rx_descriptor_index = rx.descriptor_index,
+        .rx_next_cursor = rx.next_cursor,
+        .rx_frame_length = rx.frame_length,
+        .rx_interrupt_count = rx.interrupt_count,
+        .rx_interrupt_cause = rx.interrupt_cause,
+        .identifier = parsed.identifier,
+        .sequence = parsed.sequence,
+        .ttl = parsed.ttl,
+        .payload_length = parsed.payload_length,
+        .tx_submissions = device.tx_submissions,
+        .rx_deliveries = device.rx_deliveries,
+        .tx_cursor_wraps = device.tx_cursor_wraps,
+        .rx_cursor_wraps = device.rx_cursor_wraps,
+        .tx_queue_enqueues = tx_queue_enqueues,
+        .tx_queue_dequeues = tx_queue_dequeues,
+        .rx_queue_enqueues = rx_queue_enqueues,
+        .rx_queue_dequeues = rx_queue_dequeues,
+        .queue_overflows = queue_overflows,
+        .tx_pending_mask = final_tx_pending,
+        .rx_pending_mask = final_rx_pending,
     };
 }
 
@@ -1066,6 +1320,8 @@ fn buildIcmpEchoRequest(
     gateway_mac: [6]u8,
     local_ipv4: [4]u8,
     gateway_ipv4: [4]u8,
+    identifier: u16,
+    sequence: u16,
 ) void {
     @memset(frame, 0);
     @memcpy(frame[0..6], &gateway_mac);
@@ -1076,7 +1332,7 @@ fn buildIcmpEchoRequest(
     frame[ip_offset] = 0x45;
     frame[ip_offset + 1] = 0;
     writeNetwork16(frame, ip_offset + 2, icmp_ipv4_total_bytes);
-    writeNetwork16(frame, ip_offset + 4, icmp_identifier);
+    writeNetwork16(frame, ip_offset + 4, identifier);
     writeNetwork16(frame, ip_offset + 6, ipv4_dont_fragment);
     frame[ip_offset + 8] = 64;
     frame[ip_offset + 9] = ipv4_protocol_icmp;
@@ -1090,8 +1346,8 @@ fn buildIcmpEchoRequest(
     frame[icmp_offset] = icmp_echo_request;
     frame[icmp_offset + 1] = 0;
     writeNetwork16(frame, icmp_offset + 2, 0);
-    writeNetwork16(frame, icmp_offset + 4, icmp_identifier);
-    writeNetwork16(frame, icmp_offset + 6, icmp_sequence);
+    writeNetwork16(frame, icmp_offset + 4, identifier);
+    writeNetwork16(frame, icmp_offset + 6, sequence);
     @memcpy(frame[icmp_offset + icmp_header_bytes .. icmp_offset + icmp_header_bytes + icmp_payload.len], icmp_payload);
     const icmp_checksum = internetChecksum(frame[icmp_offset .. icmp_offset + icmp_header_bytes + icmp_payload.len]);
     writeNetwork16(frame, icmp_offset + 2, icmp_checksum);
@@ -1103,6 +1359,8 @@ fn parseIcmpEchoReply(
     gateway_mac: [6]u8,
     local_ipv4: [4]u8,
     gateway_ipv4: [4]u8,
+    expected_identifier: u16,
+    expected_sequence: u16,
 ) ?ParsedIcmp {
     if (frame.len < 14 + ipv4_header_bytes + icmp_header_bytes) return null;
     if (!std.mem.eql(u8, frame[0..6], &local_mac) or
@@ -1133,7 +1391,7 @@ fn parseIcmpEchoReply(
     if (internetChecksum(frame[icmp_offset .. icmp_offset + icmp_length]) != 0) return null;
     const identifier = readNetwork16(frame, icmp_offset + 4);
     const sequence = readNetwork16(frame, icmp_offset + 6);
-    if (identifier != icmp_identifier or sequence != icmp_sequence) return null;
+    if (identifier != expected_identifier or sequence != expected_sequence) return null;
     const payload = frame[icmp_offset + icmp_header_bytes .. icmp_offset + icmp_length];
     if (!std.mem.eql(u8, payload, icmp_payload)) return null;
 
@@ -1226,13 +1484,13 @@ export fn zigos_e1000e_interrupt_handler() callconv(cc) void {
     const cause = read32(bar0, icr_offset);
     if ((cause & interrupt_txq0) != 0) {
         @atomicStore(u32, &last_tx_cause, cause, .release);
-        scanTxCompletions();
         _ = @atomicRmw(u64, &tx_interrupt_count, .Add, 1, .acq_rel);
+        scanTxCompletions();
     }
     if ((cause & interrupt_rxq0) != 0) {
         @atomicStore(u32, &last_rx_cause, cause, .release);
-        scanRxCompletions();
         _ = @atomicRmw(u64, &rx_interrupt_count, .Add, 1, .acq_rel);
+        scanRxCompletions();
     }
     if (cause != 0) _ = @atomicRmw(u64, &total_interrupt_count, .Add, 1, .acq_rel);
     apic.acknowledgeInterrupt();

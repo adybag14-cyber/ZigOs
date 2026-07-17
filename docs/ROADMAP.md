@@ -381,3 +381,13 @@
 - Coalesced or out-of-order records are retained in consumer-side ready masks until the matching descriptor is requested.
 - The complete DHCP, ARP, ICMP, and five-block TFTP sequence must produce exactly ten TX and nine RX queue records, with matching dequeue totals, no overflow, no pending TX descriptor, and all eight RX descriptors returned to hardware.
 - The same queue path is exercised for BSP-local MSI-X delivery, remote APIC delivery, legacy PCI configuration, x2APIC ID 256, and PIT-only timing.
+
+
+## 3.6 - Persistent e1000e queue ownership
+
+- The initialized e1000e rings, DMA buffers, RX buffer map, interrupt target, lease, gateway, and producer/consumer cursors are retained in a persistent `Device` owner.
+- `submitFrame` copies a caller-supplied Ethernet frame into the owned TX DMA buffer, arms the current descriptor, advances TDT, and consumes the matching ISR completion record.
+- `receiveFrame` consumes the next RX completion, exposes the bounded DMA frame, and advances the software consumer cursor; `releaseFrame` clears and returns that descriptor to hardware.
+- After the scripted DHCP/ARP/ICMP/TFTP bootstrap, a second ICMP Echo (`identifier 0x5A50`, sequence `2`) runs solely through these reusable APIs.
+- The follow-up exchange reuses TX descriptor 2 and RX descriptor 1, advances cursors to 3 and 2, and leaves all pending/ready masks clean.
+- Final completion totals are eleven TX and ten RX records with matching dequeue counts and zero overflow across BSP-local, remote AP, legacy PCI, APIC-ID-256, and PIT-only modes.

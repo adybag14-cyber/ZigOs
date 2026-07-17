@@ -658,6 +658,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e completion queues active: TX 10/10, RX 9/9, high-water [1-9][0-9]*/[1-9][0-9]*, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
         throw 'The e1000e ISR-to-kernel completion queues did not deliver every TX/RX descriptor exactly once.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e persistent queue owner verified: TX descriptor 2 -> cursor 3, RX descriptor 1 -> cursor 2, ICMP 0x5A50/2, frames 60/60, interrupts [1-9][0-9]*/[1-9][0-9]*, submissions 1, deliveries 1, cursors wrapped 0/0, final queues TX 11/11, RX 10/10, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
+        throw 'The persistent e1000e owner did not complete a second ICMP exchange through reusable queue APIs.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
