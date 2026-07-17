@@ -9,15 +9,16 @@ const maximum_data_bytes: usize = 512;
 
 pub const server_port: u16 = 69;
 pub const client_port: u16 = 40_000;
-pub const file_name = "zigos.txt";
+pub const file_name = "zigos.bin";
 pub const mode = "octet";
-pub const expected_payload = "ZigOs deterministic TFTP payload v1\n";
-pub const expected_payload_fnv1a64: u64 = 0x6FA5_A2AB_46F6_99B6;
+pub const expected_file_bytes: usize = 1280;
+pub const expected_block_count: u16 = 3;
+pub const initial_fnv1a64: u64 = 0xCBF2_9CE4_8422_2325;
+pub const expected_payload_fnv1a64: u64 = 0x3CE1_8B39_91BE_5925;
 
 pub const Data = struct {
     block: u16,
-    payload_length: u16,
-    payload_fnv1a64: u64,
+    payload: []const u8,
     final_block: bool,
 };
 
@@ -32,20 +33,23 @@ pub fn buildReadRequest(buffer: []u8) ?[]const u8 {
     return buffer[0..length];
 }
 
-pub fn parseData(payload: []const u8) ?Data {
-    if (payload.len < 4) return null;
+pub fn parseData(payload: []const u8, expected_block: u16, file_offset: usize) ?Data {
+    if (payload.len < 4 or expected_block == 0 or file_offset >= expected_file_bytes) return null;
     const opcode = readNetwork16(payload, 0);
     if (opcode == opcode_error) return null;
-    if (opcode != opcode_data or readNetwork16(payload, 2) != first_block) return null;
+    if (opcode != opcode_data or readNetwork16(payload, 2) != expected_block) return null;
+
     const data = payload[4..];
-    if (data.len > maximum_data_bytes or !std.mem.eql(u8, data, expected_payload)) return null;
-    const hash = fnv1a64(data);
-    if (hash != expected_payload_fnv1a64) return null;
+    const expected_length = @min(maximum_data_bytes, expected_file_bytes - file_offset);
+    if (data.len != expected_length) return null;
+    for (data, 0..) |byte, index| {
+        if (byte != fixtureByte(file_offset + index)) return null;
+    }
+    const final_block = file_offset + data.len == expected_file_bytes and data.len < maximum_data_bytes;
     return .{
-        .block = first_block,
-        .payload_length = @intCast(data.len),
-        .payload_fnv1a64 = hash,
-        .final_block = data.len < maximum_data_bytes,
+        .block = expected_block,
+        .payload = data,
+        .final_block = final_block,
     };
 }
 
@@ -56,13 +60,17 @@ pub fn buildAcknowledgement(buffer: []u8, block: u16) ?[]const u8 {
     return buffer[0..4];
 }
 
-fn fnv1a64(bytes: []const u8) u64 {
-    var hash: u64 = 0xCBF2_9CE4_8422_2325;
+pub fn updatePayloadHash(initial_hash: u64, bytes: []const u8) u64 {
+    var hash = initial_hash;
     for (bytes) |byte| {
         hash ^= byte;
         hash *%= 0x0000_0100_0000_01B3;
     }
     return hash;
+}
+
+pub fn fixtureByte(index: usize) u8 {
+    return @truncate(index * 37 + 11);
 }
 
 fn writeNetwork16(bytes: []u8, offset: usize, value: u16) void {
@@ -75,7 +83,8 @@ fn readNetwork16(bytes: []const u8, offset: usize) u16 {
 }
 
 comptime {
-    if (expected_payload.len != 36) @compileError("TFTP fixture payload length changed unexpectedly");
+    if (expected_file_bytes != 1280) @compileError("TFTP fixture length changed unexpectedly");
+    if (expected_block_count != 3) @compileError("TFTP block count changed unexpectedly");
     if (file_name.len != 9) @compileError("TFTP fixture filename changed unexpectedly");
     if (mode.len != 5) @compileError("TFTP transfer mode changed unexpectedly");
 }

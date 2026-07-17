@@ -62,17 +62,17 @@ if (-not $codeSource -or -not $varsSource) {
 
 New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 $tftpRoot = Join-Path $buildDir 'tftp-root'
-$tftpFile = Join-Path $tftpRoot 'zigos.txt'
+$tftpFile = Join-Path $tftpRoot 'zigos.bin'
 if ($Network) {
     New-Item -ItemType Directory -Force -Path $tftpRoot | Out-Null
-    [System.IO.File]::WriteAllText(
-        $tftpFile,
-        "ZigOs deterministic TFTP payload v1`n",
-        [System.Text.UTF8Encoding]::new($false)
-    )
-    $tftpBytes = [System.IO.File]::ReadAllBytes($tftpFile)
-    if ($tftpBytes.Length -ne 36) {
-        throw "The deterministic TFTP fixture had $($tftpBytes.Length) bytes instead of 36."
+    $tftpBytes = [byte[]]::new(1280)
+    for ($index = 0; $index -lt $tftpBytes.Length; $index++) {
+        $tftpBytes[$index] = [byte](($index * 37 + 11) -band 0xFF)
+    }
+    [System.IO.File]::WriteAllBytes($tftpFile, $tftpBytes)
+    $tftpHash = (Get-FileHash -Path $tftpFile -Algorithm SHA256).Hash
+    if ($tftpBytes.Length -ne 1280 -or $tftpHash -ne '9E56C920BB08B3E00A4E0034224F877C21945DCB09ECCD6CEAF2D843E8CFDE39') {
+        throw "The deterministic multi-block TFTP fixture was invalid: $($tftpBytes.Length) bytes, SHA-256 $tftpHash."
     }
 }
 $codeImage = Join-Path $buildDir 'ovmf-code.fd'
@@ -643,14 +643,14 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e ICMP echo reply received: 10\.0\.2\.2 -> 10\.0\.2\.15, [4-9][0-9] bytes, TTL [1-9][0-9]*, payload 16 bytes, RX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
         throw 'The e1000e RX ring did not validate the IPv4 and ICMP checksums, echo identity, and payload.'
     }
-    if (-not [regex]::IsMatch($output, 'e1000e TFTP RRQ transmitted: zigos\.txt mode octet, 60 bytes, UDP 40000 -> 69, TX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
+    if (-not [regex]::IsMatch($output, 'e1000e TFTP RRQ transmitted: zigos\.bin mode octet, 60 bytes, UDP 40000 -> 69, TX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
         throw 'The TFTP read request did not complete through the reusable UDP builder and TX MSI-X.'
     }
-    if (-not [regex]::IsMatch($output, 'e1000e TFTP DATA received: block 1, payload 36 bytes, FNV-1a64 0x6FA5A2AB46F699B6, frame 82 bytes, server port [1-9][0-9]*, TTL [1-9][0-9]*, UDP checksum (present|absent), final yes, RX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
-        throw 'The TFTP DATA packet or deterministic host fixture was not validated.'
+    if (-not [regex]::IsMatch($output, 'e1000e TFTP stream received: blocks 3, payload 1280 bytes, FNV-1a64 0x3CE18B3991BE5925, frames 558/558/302, server port [1-9][0-9]*, TTL [1-9][0-9]*, UDP checksum (present|absent), final yes, RX interrupts [3-9][0-9]*, cause 0x[0-9A-F]{16}')) {
+        throw 'The three-block TFTP DATA stream or cumulative fixture hash was not validated.'
     }
-    if (-not [regex]::IsMatch($output, 'e1000e TFTP ACK transmitted: block 1, 60 bytes, UDP 40000 -> [1-9][0-9]*, TX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
-        throw 'The final TFTP acknowledgement did not complete through TX DMA and MSI-X.'
+    if (-not [regex]::IsMatch($output, 'e1000e TFTP ACK stream transmitted: blocks 1-3, frames 60/60/60, UDP 40000 -> [1-9][0-9]*, TX interrupts [3-9][0-9]*, tail 0, cause 0x[0-9A-F]{16}')) {
+        throw 'The TFTP acknowledgement stream did not wrap the TX descriptor tail to zero.'
     }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {

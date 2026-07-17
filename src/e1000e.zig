@@ -192,15 +192,16 @@ pub const NetworkResult = struct {
     icmp_reply_ttl: u8,
     icmp_payload_length: u16,
     tftp_rrq_length: u16,
-    tftp_data_frame_length: u16,
-    tftp_ack_length: u16,
+    tftp_data_frame_lengths: [tftp.expected_block_count]u16,
+    tftp_ack_lengths: [tftp.expected_block_count]u16,
     tftp_server_port: u16,
-    tftp_block: u16,
-    tftp_payload_length: u16,
+    tftp_block_count: u16,
+    tftp_payload_length: u32,
     tftp_payload_fnv1a64: u64,
     tftp_reply_ttl: u8,
     tftp_udp_checksum_present: bool,
     tftp_final_block: bool,
+    tftp_tx_tail_after_ack: u16,
     tftp_rrq_tx_interrupt_count: u64,
     tftp_data_rx_interrupt_count: u64,
     tftp_ack_tx_interrupt_count: u64,
@@ -465,47 +466,127 @@ pub fn initializeAndTestNetwork(
     tx_descriptors[4] = makeTxDescriptor(tx_buffer_address, rrq_length);
     zigos_memory_fence();
     const tftp_rrq_tx_baseline = txInterruptCount();
-    const tftp_data_rx_baseline = rxInterruptCount();
+    var next_data_rx_baseline = rxInterruptCount();
     write32(controller.bar0, tdt_offset, 5);
     _ = read32(controller.bar0, status_offset);
     if (!waitForTx(tx_descriptors, 4, tftp_rrq_tx_baseline, target_apic_id)) return null;
-    if (!waitForRx(rx_descriptors, 4, tftp_data_rx_baseline, target_apic_id)) return null;
-    zigos_memory_fence();
-    const tftp_data_frame_length = validateRxDescriptor(rx_descriptors, 4) orelse return null;
-    const tftp_data_frame = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[4]))[0..tftp_data_frame_length];
-    const tftp_datagram = udp.parseFrame(tftp_data_frame, .{
-        .destination_mac = controller.mac_address,
-        .source_mac = parsed.gateway_mac_address,
-        .destination_ipv4 = ack.lease.address,
-        .source_ipv4 = ack.lease.router,
-        .destination_port = tftp.client_port,
-    }) orelse return null;
-    const tftp_data = tftp.parseData(tftp_datagram.payload) orelse return null;
-    if (!tftp_data.final_block) return null;
     const tftp_rrq_tx_interrupt_count = txInterruptCount() - tftp_rrq_tx_baseline;
-    const tftp_data_rx_interrupt_count = rxInterruptCount() - tftp_data_rx_baseline;
     const tftp_rrq_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
-    const tftp_data_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
 
-    const acknowledgement = tftp.buildAcknowledgement(&tftp_payload_buffer, tftp_data.block) orelse return null;
-    const tftp_ack_length = udp.buildFrame(tx_buffer, .{
-        .source_mac = controller.mac_address,
-        .destination_mac = parsed.gateway_mac_address,
-        .source_ipv4 = ack.lease.address,
-        .destination_ipv4 = ack.lease.router,
-        .source_port = tftp.client_port,
-        .destination_port = tftp_datagram.source_port,
-        .identification = 0x5A51,
-        .payload = acknowledgement,
-    }) orelse return null;
-    tx_descriptors[5] = makeTxDescriptor(tx_buffer_address, tftp_ack_length);
-    zigos_memory_fence();
-    const tftp_ack_tx_baseline = txInterruptCount();
-    write32(controller.bar0, tdt_offset, 6);
-    _ = read32(controller.bar0, status_offset);
-    if (!waitForTx(tx_descriptors, 5, tftp_ack_tx_baseline, target_apic_id)) return null;
-    const tftp_ack_tx_interrupt_count = txInterruptCount() - tftp_ack_tx_baseline;
-    const tftp_ack_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
+    var tftp_data_frame_lengths = std.mem.zeroes([tftp.expected_block_count]u16);
+    var tftp_ack_lengths = std.mem.zeroes([tftp.expected_block_count]u16);
+    var tftp_server_port: u16 = 0;
+    var tftp_reply_ttl: u8 = 0;
+    var tftp_udp_checksum_present = true;
+    var tftp_final_block = false;
+    var tftp_block_count: u16 = 0;
+    var tftp_payload_length: usize = 0;
+    var tftp_payload_fnv1a64 = tftp.initial_fnv1a64;
+    var tftp_data_rx_interrupt_count: u64 = 0;
+    var tftp_ack_tx_interrupt_count: u64 = 0;
+    var tftp_data_rx_interrupt_cause: u32 = 0;
+    var tftp_ack_tx_interrupt_cause: u32 = 0;
+
+    while (tftp_block_count < tftp.expected_block_count) {
+        const sequence_index: usize = tftp_block_count;
+        const rx_descriptor_index = 4 + sequence_index;
+        if (!waitForRx(
+            rx_descriptors,
+            rx_descriptor_index,
+            next_data_rx_baseline,
+            target_apic_id,
+        )) return null;
+        zigos_memory_fence();
+        const data_frame_length = validateRxDescriptor(
+            rx_descriptors,
+            rx_descriptor_index,
+        ) orelse return null;
+        const data_frame = @as(
+            [*]const u8,
+            @ptrFromInt(rx_buffer_addresses[rx_descriptor_index]),
+        )[0..data_frame_length];
+        const datagram = udp.parseFrame(data_frame, .{
+            .destination_mac = controller.mac_address,
+            .source_mac = parsed.gateway_mac_address,
+            .destination_ipv4 = ack.lease.address,
+            .source_ipv4 = ack.lease.router,
+            .destination_port = tftp.client_port,
+            .source_port = if (tftp_server_port == 0) null else tftp_server_port,
+        }) orelse return null;
+        if (tftp_server_port == 0) {
+            tftp_server_port = datagram.source_port;
+            tftp_reply_ttl = datagram.ttl;
+        } else if (datagram.source_port != tftp_server_port or datagram.ttl != tftp_reply_ttl) {
+            return null;
+        }
+        tftp_udp_checksum_present = tftp_udp_checksum_present and datagram.udp_checksum_present;
+
+        const expected_block: u16 = tftp_block_count + 1;
+        const data = tftp.parseData(
+            datagram.payload,
+            expected_block,
+            tftp_payload_length,
+        ) orelse return null;
+        tftp_data_frame_lengths[sequence_index] = datagram.frame_length;
+        tftp_payload_fnv1a64 = tftp.updatePayloadHash(tftp_payload_fnv1a64, data.payload);
+        tftp_payload_length += data.payload.len;
+        tftp_final_block = data.final_block;
+        tftp_block_count += 1;
+        const data_interrupt_observed = rxInterruptCount();
+        if (data_interrupt_observed == next_data_rx_baseline) return null;
+        tftp_data_rx_interrupt_count += data_interrupt_observed - next_data_rx_baseline;
+        tftp_data_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
+
+        if (tftp_final_block != (tftp_block_count == tftp.expected_block_count)) return null;
+        const next_block_rx_baseline = if (!tftp_final_block) rxInterruptCount() else 0;
+        const acknowledgement = tftp.buildAcknowledgement(
+            &tftp_payload_buffer,
+            data.block,
+        ) orelse return null;
+        const acknowledgement_length = udp.buildFrame(tx_buffer, .{
+            .source_mac = controller.mac_address,
+            .destination_mac = parsed.gateway_mac_address,
+            .source_ipv4 = ack.lease.address,
+            .destination_ipv4 = ack.lease.router,
+            .source_port = tftp.client_port,
+            .destination_port = tftp_server_port,
+            .identification = 0x5A51 + tftp_block_count - 1,
+            .payload = acknowledgement,
+        }) orelse return null;
+        tftp_ack_lengths[sequence_index] = acknowledgement_length;
+        const tx_descriptor_index = 5 + sequence_index;
+        tx_descriptors[tx_descriptor_index] = makeTxDescriptor(
+            tx_buffer_address,
+            acknowledgement_length,
+        );
+        zigos_memory_fence();
+        const acknowledgement_tx_baseline = txInterruptCount();
+        const next_tx_tail: u16 = @intCast((tx_descriptor_index + 1) % ring_descriptor_count);
+        write32(controller.bar0, tdt_offset, next_tx_tail);
+        _ = read32(controller.bar0, status_offset);
+        if (!waitForTx(
+            tx_descriptors,
+            tx_descriptor_index,
+            acknowledgement_tx_baseline,
+            target_apic_id,
+        )) return null;
+        const acknowledgement_interrupt_observed = txInterruptCount();
+        if (acknowledgement_interrupt_observed == acknowledgement_tx_baseline) return null;
+        tftp_ack_tx_interrupt_count += acknowledgement_interrupt_observed - acknowledgement_tx_baseline;
+        tftp_ack_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
+        if (!tftp_final_block) next_data_rx_baseline = next_block_rx_baseline;
+    }
+
+    if (!tftp_final_block or
+        tftp_block_count != tftp.expected_block_count or
+        tftp_payload_length != tftp.expected_file_bytes or
+        tftp_payload_fnv1a64 != tftp.expected_payload_fnv1a64 or
+        tftp_server_port == 0 or
+        read32(controller.bar0, tdt_offset) != 0)
+    {
+        return null;
+    }
+    const tftp_tx_tail_after_ack: u16 = @truncate(read32(controller.bar0, tdt_offset));
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -567,15 +648,16 @@ pub fn initializeAndTestNetwork(
         .icmp_reply_ttl = icmp.ttl,
         .icmp_payload_length = icmp.payload_length,
         .tftp_rrq_length = rrq_length,
-        .tftp_data_frame_length = tftp_datagram.frame_length,
-        .tftp_ack_length = tftp_ack_length,
-        .tftp_server_port = tftp_datagram.source_port,
-        .tftp_block = tftp_data.block,
-        .tftp_payload_length = tftp_data.payload_length,
-        .tftp_payload_fnv1a64 = tftp_data.payload_fnv1a64,
-        .tftp_reply_ttl = tftp_datagram.ttl,
-        .tftp_udp_checksum_present = tftp_datagram.udp_checksum_present,
-        .tftp_final_block = tftp_data.final_block,
+        .tftp_data_frame_lengths = tftp_data_frame_lengths,
+        .tftp_ack_lengths = tftp_ack_lengths,
+        .tftp_server_port = tftp_server_port,
+        .tftp_block_count = tftp_block_count,
+        .tftp_payload_length = @intCast(tftp_payload_length),
+        .tftp_payload_fnv1a64 = tftp_payload_fnv1a64,
+        .tftp_reply_ttl = tftp_reply_ttl,
+        .tftp_udp_checksum_present = tftp_udp_checksum_present,
+        .tftp_final_block = tftp_final_block,
+        .tftp_tx_tail_after_ack = tftp_tx_tail_after_ack,
         .tftp_rrq_tx_interrupt_count = tftp_rrq_tx_interrupt_count,
         .tftp_data_rx_interrupt_count = tftp_data_rx_interrupt_count,
         .tftp_ack_tx_interrupt_count = tftp_ack_tx_interrupt_count,

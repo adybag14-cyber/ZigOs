@@ -1629,15 +1629,18 @@ fn inspectE1000e(
     debugWriteHex64(network.tftp_rrq_tx_interrupt_cause);
     debugWrite("\r\n");
 
-    debugWrite("e1000e TFTP DATA received: block ");
-    debugWriteU64Decimal(network.tftp_block);
+    debugWrite("e1000e TFTP stream received: blocks ");
+    debugWriteU64Decimal(network.tftp_block_count);
     debugWrite(", payload ");
     debugWriteU64Decimal(network.tftp_payload_length);
     debugWrite(" bytes, FNV-1a64 0x");
     debugWriteHex64(network.tftp_payload_fnv1a64);
-    debugWrite(", frame ");
-    debugWriteU64Decimal(network.tftp_data_frame_length);
-    debugWrite(" bytes, server port ");
+    debugWrite(", frames ");
+    for (network.tftp_data_frame_lengths, 0..) |length, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(length);
+    }
+    debugWrite(", server port ");
     debugWriteU64Decimal(network.tftp_server_port);
     debugWrite(", TTL ");
     debugWriteU64Decimal(network.tftp_reply_ttl);
@@ -1651,16 +1654,21 @@ fn inspectE1000e(
     debugWriteHex64(network.tftp_data_rx_interrupt_cause);
     debugWrite("\r\n");
 
-    debugWrite("e1000e TFTP ACK transmitted: block ");
-    debugWriteU64Decimal(network.tftp_block);
-    debugWrite(", ");
-    debugWriteU64Decimal(network.tftp_ack_length);
-    debugWrite(" bytes, UDP ");
+    debugWrite("e1000e TFTP ACK stream transmitted: blocks 1-");
+    debugWriteU64Decimal(network.tftp_block_count);
+    debugWrite(", frames ");
+    for (network.tftp_ack_lengths, 0..) |length, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(length);
+    }
+    debugWrite(", UDP ");
     debugWriteU64Decimal(tftp.client_port);
     debugWrite(" -> ");
     debugWriteU64Decimal(network.tftp_server_port);
     debugWrite(", TX interrupts ");
     debugWriteU64Decimal(network.tftp_ack_tx_interrupt_count);
+    debugWrite(", tail ");
+    debugWriteU64Decimal(network.tftp_tx_tail_after_ack);
     debugWrite(", cause 0x");
     debugWriteHex64(network.tftp_ack_tx_interrupt_cause);
     debugWrite("\r\n");
