@@ -8,6 +8,7 @@ param(
     [switch]$UsbMouseOnly,
     [switch]$NoGraphics,
     [switch]$LegacyPci,
+    [switch]$LegacyAhci,
     [switch]$Nvme4k,
     [switch]$NoPs2,
     [switch]$NoHpet,
@@ -17,6 +18,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($LegacyAhci) { $LegacyPci = $true }
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $efiRoot = Join-Path $repoRoot 'zig-out'
 $efiImage = Join-Path $efiRoot 'EFI\BOOT\BOOTX64.EFI'
@@ -95,6 +97,10 @@ if ($HighApicId) {
     if ($SparseApicIds) { throw '-HighApicId and -SparseApicIds are separate topology matrices.' }
     if ($NoX2Apic) { throw '-HighApicId requires x2APIC support.' }
 }
+if ($LegacyAhci) {
+    if ($NvmeOnly) { throw '-LegacyAhci requires the SATA FAT disk.' }
+    if ($NoPs2 -or $NoHpet) { throw '-LegacyAhci uses the fixed i440FX firmware topology.' }
+}
 $machineOptions = @()
 if ($NoPs2) {
     if ($LegacyPci) { throw '-NoPs2 is currently supported only with the q35 test machine.' }
@@ -145,7 +151,15 @@ $arguments += @(
     '-no-reboot'
 )
 if (-not $NvmeOnly) {
-    $arguments += @('-drive', "format=raw,file=fat:rw:$fatPath")
+    if ($LegacyAhci) {
+        $arguments += @(
+            '-device', 'ich9-ahci,id=ahci',
+            '-drive', "if=none,id=sata0,format=raw,file=fat:rw:$fatPath",
+            '-device', 'ide-hd,drive=sata0,bus=ahci.0'
+        )
+    } else {
+        $arguments += @('-drive', "format=raw,file=fat:rw:$fatPath")
+    }
 }
 if ($UsbMouseOnly) {
     $arguments += @('-device', 'usb-mouse,bus=xhci.0,port=1')
@@ -156,7 +170,7 @@ if ($NoGraphics) {
     $arguments += @('-vga', 'none')
 }
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPU: $cpuArgument, CPUs: $CpuCount, SMP: $smpArgument, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2, no HPET: $NoHpet, sparse APIC IDs: $SparseApicIds, no x2APIC: $NoX2Apic, high APIC ID: $HighApicId)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPU: $cpuArgument, CPUs: $CpuCount, SMP: $smpArgument, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, legacy AHCI: $LegacyAhci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2, no HPET: $NoHpet, sparse APIC IDs: $SparseApicIds, no x2APIC: $NoX2Apic, high APIC ID: $HighApicId)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -870,6 +884,14 @@ if ($NvmeOnly) {
     }
     if (-not [regex]::IsMatch($output, "AHCI READ DMA MSI completion verified: vector 0x47, target APIC $expectedLegacyIrqTarget, interrupt count 1, global IS 0x[0-9A-F]{16}, port IS 0x[0-9A-F]{16}")) {
         throw 'READ DMA EXT did not complete through one AHCI MSI interrupt.'
+    }
+    if ($LegacyAhci) {
+        if (-not $output.Contains('Legacy PCI configuration active: mechanism #1 ports 0x0CF8/0x0CFC, buses scanned 256')) {
+            throw 'The legacy-AHCI matrix did not use PCI configuration mechanism 1.'
+        }
+        if (-not [regex]::IsMatch($output, 'AHCI controller active at 0000:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], ABAR 0x[0-9A-F]{16}')) {
+            throw 'The add-on ICH9 AHCI controller was not enumerated through legacy PCI configuration.'
+        }
     }
     if (-not $output.Contains('LBA 0 FNV-1a64:')) {
         throw 'The LBA 0 sector fingerprint marker was not observed.'

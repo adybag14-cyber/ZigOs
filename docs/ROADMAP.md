@@ -301,3 +301,4 @@
 - AHCI global interrupt enable and the active port's D2H/PIO/DMA/descriptor/error interrupt mask are enabled only after stale global and port status are cleared.
 - The MSI handler records and clears global/port W1C status, increments an atomic completion counter, and acknowledges the local APIC.
 - ATA IDENTIFY, READ DMA EXT, and all later FAT traversal reads wait for MSI before validating `PxCI`, transfer length, and task-file error state. Controllers without MSI retain bounded polling.
+- `scripts/test-qemu.ps1 -LegacyAhci` attaches an ICH9 AHCI function to i440FX, enumerates it through `0xCF8/0xCFC`, and proves the same MSI setup and command completions without ACPI MCFG/ECAM.
