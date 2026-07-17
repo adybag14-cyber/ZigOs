@@ -2,11 +2,13 @@ const std = @import("std");
 const pci = @import("pci.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
+const apic = @import("apic.zig");
 
 const cc = std.os.uefi.cc;
 
 const pci_command_memory_space: u16 = 1 << 1;
 const pci_command_bus_master: u16 = 1 << 2;
+const pci_command_interrupt_disable: u16 = 1 << 10;
 
 const cap_offset: usize = 0x00;
 const version_offset: usize = 0x08;
@@ -38,6 +40,13 @@ const identify_active_namespace_list: u32 = 0x02;
 const maximum_poll_iterations: usize = 100_000_000;
 const requested_queue_depth: u16 = 16;
 const mmio_probe_size: u64 = 16 * 1024;
+const nvme_interrupt_vector: u8 = 0x46;
+pub const io_msix_table_index: u16 = 1;
+const msix_entry_size: u64 = 16;
+const msix_function_mask: u16 = 1 << 14;
+const msix_enable: u16 = 1 << 15;
+const msix_vector_mask: u32 = 1;
+const msi_message_address_base: u32 = 0xFEE0_0000;
 
 pub const FailureStage = enum(u8) {
     none,
@@ -52,6 +61,7 @@ pub const FailureStage = enum(u8) {
     namespace_list,
     identify_namespace,
     create_io_queues,
+    msix,
     io_read,
 };
 
@@ -64,6 +74,19 @@ pub var last_controller_configuration: u32 = 0;
 pub var last_command_opcode: u8 = 0;
 pub var last_bar: u64 = 0;
 pub var last_mapping_present: bool = false;
+pub var last_msix_control: u16 = 0;
+pub var last_msix_message_address_low: u32 = 0;
+pub var last_msix_message_address_high: u32 = 0;
+pub var last_msix_message_data: u32 = 0;
+pub var last_msix_vector_control: u32 = 0;
+pub var last_interrupt_baseline: u64 = 0;
+pub var last_interrupt_observed: u64 = 0;
+pub var last_completion_status_after_interrupt_wait: u16 = 0;
+pub var last_completion_phase_expected: u1 = 0;
+pub var last_interrupt_wait_timed_out: bool = false;
+var interrupt_count: u64 = 0;
+var io_interrupts_enabled: bool = false;
+var interrupt_target_apic_id: u8 = 0;
 
 const Submission = extern struct {
     opcode: u8,
@@ -89,6 +112,13 @@ const Completion = extern struct {
     submission_queue_id: u16,
     command_id: u16,
     status: u16,
+};
+
+const MsixTableEntry = extern struct {
+    message_address_low: u32,
+    message_address_high: u32,
+    message_data: u32,
+    vector_control: u32,
 };
 
 const CompletionRecord = struct {
@@ -137,6 +167,13 @@ pub const Controller = struct {
     identify_controller_address: usize,
     namespace_list_address: usize,
     identify_namespace_address: usize,
+    msix_enabled: bool,
+    msix_capability_offset: u8,
+    msix_table_address: usize,
+    msix_vector_count: u16,
+    msix_mapping_table_pages: u64,
+    interrupt_vector: u8,
+    interrupt_target_apic_id: u8,
 };
 
 pub const ReadResult = struct {
@@ -147,11 +184,15 @@ pub const ReadResult = struct {
     first_bytes: [16]u8,
     mbr_signature: u16,
     fnv1a64: u64,
+    completion_interrupt_count: u64,
 };
 
 extern fn zigos_memory_fence() callconv(cc) void;
+extern fn zigos_cpu_relax() callconv(cc) void;
+extern fn zigos_enable_interrupts() callconv(cc) void;
+extern fn zigos_disable_interrupts() callconv(cc) void;
 
-pub fn initialize(function: pci.Function, allocator: *memory.FrameAllocator) ?Controller {
+pub fn initialize(function: pci.Function, allocator: *memory.FrameAllocator, interrupt_target: ?u8) ?Controller {
     last_failure_stage = .pci_command;
     last_completion_status = 0;
     last_completion_command_id = 0;
@@ -161,6 +202,19 @@ pub fn initialize(function: pci.Function, allocator: *memory.FrameAllocator) ?Co
     last_command_opcode = 0;
     last_bar = 0;
     last_mapping_present = false;
+    last_msix_control = 0;
+    last_msix_message_address_low = 0;
+    last_msix_message_address_high = 0;
+    last_msix_message_data = 0;
+    last_msix_vector_control = 0;
+    last_interrupt_baseline = 0;
+    last_interrupt_observed = 0;
+    last_completion_status_after_interrupt_wait = 0;
+    last_completion_phase_expected = 0;
+    last_interrupt_wait_timed_out = false;
+    @atomicStore(u64, &interrupt_count, 0, .release);
+    io_interrupts_enabled = false;
+    interrupt_target_apic_id = 0;
     if (function.class_code != 0x01 or function.subclass != 0x08 or function.programming_interface != 0x02) {
         return null;
     }
@@ -284,6 +338,13 @@ pub fn initialize(function: pci.Function, allocator: *memory.FrameAllocator) ?Co
         .identify_controller_address = allocator.allocateBelow(memory.four_gib) orelse return null,
         .namespace_list_address = allocator.allocateBelow(memory.four_gib) orelse return null,
         .identify_namespace_address = allocator.allocateBelow(memory.four_gib) orelse return null,
+        .msix_enabled = false,
+        .msix_capability_offset = 0,
+        .msix_table_address = 0,
+        .msix_vector_count = 0,
+        .msix_mapping_table_pages = 0,
+        .interrupt_vector = 0,
+        .interrupt_target_apic_id = 0,
     };
     zeroPage(controller.identify_controller_address);
     zeroPage(controller.namespace_list_address);
@@ -295,6 +356,10 @@ pub fn initialize(function: pci.Function, allocator: *memory.FrameAllocator) ?Co
     if (!identifyActiveNamespace(&controller)) return null;
     last_failure_stage = .identify_namespace;
     if (!identifyNamespace(&controller)) return null;
+    if (interrupt_target) |target_apic_id| {
+        last_failure_stage = .msix;
+        if (!enableMsix(&controller, allocator, target_apic_id)) return null;
+    }
     last_failure_stage = .create_io_queues;
     if (!createIoQueues(&controller)) return null;
     last_failure_stage = .none;
@@ -332,6 +397,7 @@ pub fn readOneBlock(controller: *Controller, allocator: *memory.FrameAllocator, 
         .first_bytes = undefined,
         .mbr_signature = 0,
         .fnv1a64 = 0xCBF2_9CE4_8422_2325,
+        .completion_interrupt_count = interruptCount(),
     };
     for (0..result.first_bytes.len) |index| result.first_bytes[index] = bytes[index];
     var index: usize = 0;
@@ -451,6 +517,10 @@ fn createIoQueues(controller: *Controller) bool {
     completion_command.command_dword10 = @as(u32, controller.io_queue.queue_id) |
         (@as(u32, controller.io_queue.depth - 1) << 16);
     completion_command.command_dword11 = 1;
+    if (controller.msix_enabled) {
+        completion_command.command_dword11 |= (1 << 1) |
+            (@as(u32, io_msix_table_index) << 16);
+    }
     _ = submit(
         controller.bar,
         controller.doorbell_stride,
@@ -508,11 +578,38 @@ fn submit(
 
     queue.submission_tail += 1;
     if (queue.submission_tail == queue.depth) queue.submission_tail = 0;
+    const wait_for_interrupt = queue.queue_id != 0 and io_interrupts_enabled;
+    const interrupt_baseline = if (wait_for_interrupt) interruptCount() else 0;
     write32(
         bar,
         doorbell_base_offset + @as(usize, 2 * queue.queue_id) * doorbell_stride,
         queue.submission_tail,
     );
+
+    if (wait_for_interrupt) {
+        const local_interrupt_target = apic.currentId() == interrupt_target_apic_id;
+        if (local_interrupt_target) zigos_enable_interrupts();
+        last_interrupt_baseline = interrupt_baseline;
+        last_completion_phase_expected = queue.completion_phase;
+        last_interrupt_wait_timed_out = false;
+        var interrupt_wait_iterations: usize = 0;
+        while (interruptCount() == interrupt_baseline and
+            interrupt_wait_iterations < maximum_poll_iterations) : (interrupt_wait_iterations += 1)
+        {
+            zigos_cpu_relax();
+        }
+        last_interrupt_observed = interruptCount();
+        if (local_interrupt_target) zigos_disable_interrupts();
+        if (last_interrupt_observed == interrupt_baseline) {
+            const timed_out_completion: *volatile Completion = @ptrFromInt(
+                queue.completion_address + @as(usize, queue.completion_head) * @sizeOf(Completion),
+            );
+            last_completion_status_after_interrupt_wait = timed_out_completion.status;
+            last_interrupt_wait_timed_out = true;
+            return null;
+        }
+        zigos_memory_fence();
+    }
 
     var iteration: usize = 0;
     while (iteration < maximum_poll_iterations) : (iteration += 1) {
@@ -548,6 +645,95 @@ fn submit(
         return record;
     }
     return null;
+}
+
+fn enableMsix(controller: *Controller, allocator: *memory.FrameAllocator, target_apic_id: u8) bool {
+    const capabilities = pci.inspectCapabilities(controller.pci_function) orelse return false;
+    if (capabilities.msix_offset == null) return true;
+    const descriptor = pci.inspectMsix(controller.pci_function) orelse return false;
+    if (descriptor.table_size <= io_msix_table_index) return false;
+
+    const table_bar = pci.decodeMemoryBar(
+        controller.pci_function,
+        descriptor.table_bar_index,
+    ) orelse return false;
+    const entry_offset = @as(u64, descriptor.table_offset) +
+        @as(u64, io_msix_table_index) * msix_entry_size;
+    if (table_bar > std.math.maxInt(u64) - entry_offset) return false;
+    const table_address = table_bar + entry_offset;
+    if (table_address > std.math.maxInt(usize)) return false;
+    if (table_address > std.math.maxInt(u64) - msix_entry_size) return false;
+
+    var mapping_table_pages: u64 = 0;
+    if (!paging.isIdentityRangeMapped(table_address, msix_entry_size)) {
+        const mapping = paging.mapIdentityMmio(
+            allocator,
+            table_address,
+            msix_entry_size,
+        ) orelse return false;
+        mapping_table_pages = mapping.table_pages;
+    }
+
+    const control_offset = @as(usize, descriptor.capability_offset) + 2;
+    const masked_control = (descriptor.control | msix_function_mask) & ~msix_enable;
+    pci.writeConfiguration16(controller.pci_function, control_offset, masked_control);
+    const masked_readback = pci.readConfiguration16(controller.pci_function, control_offset);
+    if ((masked_readback & (msix_enable | msix_function_mask)) != msix_function_mask) return false;
+
+    const entry: *volatile MsixTableEntry = @ptrFromInt(@as(usize, @intCast(table_address)));
+    entry.vector_control = msix_vector_mask;
+    zigos_memory_fence();
+    entry.message_address_low = msi_message_address_base | (@as(u32, target_apic_id) << 12);
+    entry.message_address_high = 0;
+    entry.message_data = nvme_interrupt_vector;
+    zigos_memory_fence();
+    entry.vector_control = 0;
+    zigos_memory_fence();
+
+    const enabled_control = (descriptor.control | msix_enable) & ~msix_function_mask;
+    pci.writeConfiguration16(controller.pci_function, control_offset, enabled_control);
+    const enabled_readback = pci.readConfiguration16(controller.pci_function, control_offset);
+    last_msix_control = enabled_readback;
+    last_msix_message_address_low = entry.message_address_low;
+    last_msix_message_address_high = entry.message_address_high;
+    last_msix_message_data = entry.message_data;
+    last_msix_vector_control = entry.vector_control;
+    if ((enabled_readback & (msix_enable | msix_function_mask)) != msix_enable) return false;
+    if (last_msix_message_address_low != (msi_message_address_base | (@as(u32, target_apic_id) << 12)) or
+        last_msix_message_address_high != 0 or
+        last_msix_message_data != nvme_interrupt_vector or
+        (last_msix_vector_control & msix_vector_mask) != 0)
+    {
+        return false;
+    }
+
+    var command = pci.readConfiguration16(controller.pci_function, 0x04);
+    command |= pci_command_interrupt_disable;
+    pci.writeConfiguration16(controller.pci_function, 0x04, command);
+    command = pci.readConfiguration16(controller.pci_function, 0x04);
+    if ((command & pci_command_interrupt_disable) == 0) return false;
+
+    controller.pci_command = command;
+    controller.msix_enabled = true;
+    controller.msix_capability_offset = descriptor.capability_offset;
+    controller.msix_table_address = @intCast(table_address);
+    controller.msix_vector_count = descriptor.table_size;
+    controller.msix_mapping_table_pages = mapping_table_pages;
+    controller.interrupt_vector = nvme_interrupt_vector;
+    controller.interrupt_target_apic_id = target_apic_id;
+    @atomicStore(u64, &interrupt_count, 0, .release);
+    interrupt_target_apic_id = target_apic_id;
+    io_interrupts_enabled = true;
+    return true;
+}
+
+pub fn interruptCount() u64 {
+    return @atomicLoad(u64, &interrupt_count, .acquire);
+}
+
+export fn zigos_nvme_interrupt_handler() callconv(cc) void {
+    _ = @atomicRmw(u64, &interrupt_count, .Add, 1, .acq_rel);
+    apic.acknowledgeInterrupt();
 }
 
 fn emptySubmission(opcode: u8, namespace_id: u32) Submission {
@@ -646,4 +832,5 @@ fn write64(base: usize, offset: usize, value: anytype) void {
 comptime {
     if (@sizeOf(Submission) != 64) @compileError("NVMe submission entries must be 64 bytes");
     if (@sizeOf(Completion) != 16) @compileError("NVMe completion entries must be 16 bytes");
+    if (@sizeOf(MsixTableEntry) != 16) @compileError("MSI-X table entries must be 16 bytes");
 }

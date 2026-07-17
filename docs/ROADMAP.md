@@ -285,3 +285,11 @@
 - IOAPIC initialization leaves all redirection entries masked with a neutral destination until a routable processor is online.
 - IRQ0 and IRQ1 handlers may execute on the selected AP while the BSP verifies their atomic completion counters using the active HPET/PIT reference clock.
 - The normal multicore regression deliberately routes PIT and PS/2 interrupts to APIC 1, proving the same fallback required by a real system whose BSP APIC ID exceeds the IOAPIC destination width.
+
+## 2.6 - PCI capability lists and NVMe MSI-X
+
+- Conventional PCI capability lists are validated for status-bit presence, header layout, 4-byte alignment, range, cycles, and linked-list termination on both ECAM and legacy configuration backends.
+- ZigOs decodes MSI, MSI-X, PCIe capability offsets and arbitrary 32/64-bit memory BARs selected by an MSI-X BIR field.
+- The QEMU NVMe controller exposes 65 MSI-X entries in BAR0 at offset `0x2000`; ZigOs programs dedicated I/O entry 1 at `0x2010`, masks legacy INTx, and targets CPU vector `0x46` at the selected routable processor.
+- MSI-X is enabled before I/O completion queue 1 is created, ensuring the vector is registered by device models and hardware before the queue selects table index 1. Every data read then waits for an MSI-X interrupt before consuming its completion entry, while admin commands and devices without MSI-X retain bounded polling.
+- The first LBA read must produce exactly one MSI-X interrupt, and the complete GPT/FAT/PE traversal continues over the same interrupt-driven queue.

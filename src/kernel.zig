@@ -161,7 +161,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     else
         null;
     const usb_keyboard_ready = inspectXhci(pci_inventory, &frame_allocator, graphical_console);
-    const nvme_storage_ready = inspectNvme(pci_inventory, &frame_allocator);
+    const nvme_storage_ready = inspectNvme(pci_inventory, &frame_allocator, legacy_irq_target);
     const ahci_storage_ready = inspectAhci(pci_inventory, &frame_allocator);
     if (!nvme_storage_ready and !ahci_storage_ready) {
         storageFailure("no supported NVMe namespace or SATA device was usable");
@@ -1970,7 +1970,7 @@ fn xhciFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool {
+fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator, interrupt_target: ?u8) bool {
     var controller_function: ?pci.Function = null;
     for (inventory.functions[0..inventory.retained_count]) |function| {
         if (function.class_code == 0x01 and function.subclass == 0x08 and function.programming_interface == 0x02) {
@@ -1983,7 +1983,43 @@ fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool
         debugWrite("NVMe controller not present; continuing without NVMe storage\r\n");
         return false;
     };
-    var controller = nvme.initialize(function, allocator) orelse {
+    const pci_capabilities = pci.inspectCapabilities(function) orelse
+        nvmeFailure("PCI capability list was malformed");
+    debugWrite("NVMe PCI capabilities: count ");
+    debugWriteU64Decimal(pci_capabilities.count);
+    debugWrite(", MSI ");
+    if (pci_capabilities.msi_offset) |offset| {
+        debugWrite("+0x");
+        debugWriteHex8(offset);
+    } else {
+        debugWrite("absent");
+    }
+    debugWrite(", MSI-X ");
+    if (pci_capabilities.msix_offset) |offset| {
+        debugWrite("+0x");
+        debugWriteHex8(offset);
+    } else {
+        debugWrite("absent");
+    }
+    debugWrite("\r\n");
+    if (pci_capabilities.msix_offset != null) {
+        const msix = pci.inspectMsix(function) orelse
+            nvmeFailure("NVMe PCI MSI-X capability was malformed");
+        debugWrite("NVMe MSI-X descriptor: vectors ");
+        debugWriteU64Decimal(msix.table_size);
+        debugWrite(", table BAR ");
+        debugWriteU64Decimal(msix.table_bar_index);
+        debugWrite(" +0x");
+        debugWriteHex64(msix.table_offset);
+        debugWrite(", PBA BAR ");
+        debugWriteU64Decimal(msix.pending_bar_index);
+        debugWrite(" +0x");
+        debugWriteHex64(msix.pending_offset);
+        debugWrite("\r\n");
+    } else {
+        debugWrite("NVMe MSI-X descriptor unavailable; bounded I/O polling will be used\r\n");
+    }
+    var controller = nvme.initialize(function, allocator, interrupt_target) orelse {
         debugWrite("NVMe initialization diagnostics: BAR 0x");
         debugWriteHex64(nvme.last_bar);
         debugWrite(", mapping present ");
@@ -2082,8 +2118,47 @@ fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool
     debugWriteU64Decimal(controller.io_queue.depth);
     debugWrite("\r\n");
 
-    const block_zero = nvme.readOneBlock(&controller, allocator, 0) orelse
+    if (controller.msix_enabled) {
+        debugWrite("NVMe MSI-X active: vector 0x");
+        debugWriteHex8(controller.interrupt_vector);
+        debugWrite(", table index ");
+        debugWriteU64Decimal(nvme.io_msix_table_index);
+        debugWrite(", target APIC ");
+        debugWriteU64Decimal(controller.interrupt_target_apic_id);
+        debugWrite(", table 0x");
+        debugWriteHex64(@intCast(controller.msix_table_address));
+        debugWrite(", vectors ");
+        debugWriteU64Decimal(controller.msix_vector_count);
+        debugWrite(", mapping table pages ");
+        debugWriteU64Decimal(controller.msix_mapping_table_pages);
+        debugWrite("\r\n");
+    } else {
+        debugWrite("NVMe MSI-X unavailable; I/O completion polling retained\r\n");
+    }
+
+    const block_zero = nvme.readOneBlock(&controller, allocator, 0) orelse {
+        debugWrite("NVMe MSI-X read diagnostics: control 0x");
+        debugWriteHex16(nvme.last_msix_control);
+        debugWrite(", address 0x");
+        debugWriteHex64((@as(u64, nvme.last_msix_message_address_high) << 32) |
+            nvme.last_msix_message_address_low);
+        debugWrite(", data 0x");
+        debugWriteHex64(nvme.last_msix_message_data);
+        debugWrite(", vector control 0x");
+        debugWriteHex64(nvme.last_msix_vector_control);
+        debugWrite(", interrupt ");
+        debugWriteU64Decimal(nvme.last_interrupt_baseline);
+        debugWrite(" -> ");
+        debugWriteU64Decimal(nvme.last_interrupt_observed);
+        debugWrite(", CQ status 0x");
+        debugWriteHex16(nvme.last_completion_status_after_interrupt_wait);
+        debugWrite(", expected phase ");
+        debugWriteU64Decimal(nvme.last_completion_phase_expected);
+        debugWrite(", timeout ");
+        debugWrite(if (nvme.last_interrupt_wait_timed_out) "yes" else "no");
+        debugWrite("\r\n");
         nvmeFailure("read-only NVM Read command for LBA 0 failed");
+    };
     debugWrite("NVMe READ completed: namespace ");
     debugWriteU64Decimal(block_zero.namespace_id);
     debugWrite(", LBA ");
@@ -2093,6 +2168,18 @@ fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool
     debugWrite(" bytes at 0x");
     debugWriteHex64(@intCast(block_zero.buffer_address));
     debugWrite("\r\n");
+    if (controller.msix_enabled) {
+        if (block_zero.completion_interrupt_count != 1) {
+            nvmeFailure("first NVM Read did not complete through exactly one MSI-X interrupt");
+        }
+        debugWrite("NVMe MSI-X I/O completion verified: vector 0x");
+        debugWriteHex8(controller.interrupt_vector);
+        debugWrite(", target APIC ");
+        debugWriteU64Decimal(controller.interrupt_target_apic_id);
+        debugWrite(", interrupt count ");
+        debugWriteU64Decimal(block_zero.completion_interrupt_count);
+        debugWrite("\r\n");
+    }
     debugWrite("NVMe LBA 0 first 16 bytes:");
     for (block_zero.first_bytes) |byte| {
         debugWrite(" ");
@@ -2530,6 +2617,7 @@ fn nvmeFailureStageName(stage: nvme.FailureStage) []const u8 {
         .namespace_list => "namespace-list",
         .identify_namespace => "identify-namespace",
         .create_io_queues => "create-io-queues",
+        .msix => "msix",
         .io_read => "io-read",
     };
 }

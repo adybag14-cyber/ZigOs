@@ -54,6 +54,28 @@ pub const Function = struct {
 
 pub const maximum_retained_functions: usize = 64;
 
+pub const capability_msi: u8 = 0x05;
+pub const capability_pcie: u8 = 0x10;
+pub const capability_msix: u8 = 0x11;
+
+pub const CapabilityList = struct {
+    present: bool,
+    count: u8,
+    msi_offset: ?u8,
+    msix_offset: ?u8,
+    pcie_offset: ?u8,
+};
+
+pub const MsixCapability = struct {
+    capability_offset: u8,
+    control: u16,
+    table_size: u16,
+    table_bar_index: u3,
+    table_offset: u32,
+    pending_bar_index: u3,
+    pending_offset: u32,
+};
+
 pub const Inventory = struct {
     access_method: AccessMethod,
     mcfg_address: ?usize,
@@ -330,6 +352,128 @@ pub fn writeConfiguration16(function: Function, offset: usize, value: u16) void 
             high.* = @truncate(value >> 8);
         },
         .legacy_io => legacyWrite16(function, offset, value),
+    }
+}
+
+
+pub fn inspectCapabilities(function: Function) ?CapabilityList {
+    const status = readConfiguration16(function, 0x06);
+    if ((status & (1 << 4)) == 0) {
+        return .{
+            .present = false,
+            .count = 0,
+            .msi_offset = null,
+            .msix_offset = null,
+            .pcie_offset = null,
+        };
+    }
+
+    const header_layout = function.header_type & 0x7F;
+    if (header_layout != 0x00 and header_layout != 0x01) return null;
+    var offset = readConfiguration8(function, 0x34);
+    if (offset == 0) return null;
+
+    var visited: u64 = 0;
+    var result = CapabilityList{
+        .present = true,
+        .count = 0,
+        .msi_offset = null,
+        .msix_offset = null,
+        .pcie_offset = null,
+    };
+    while (offset != 0) {
+        if (offset < 0x40 or (offset & 0x03) != 0) return null;
+        const slot: u6 = @intCast(offset >> 2);
+        const bit = @as(u64, 1) << slot;
+        if ((visited & bit) != 0) return null;
+        visited |= bit;
+        if (result.count == std.math.maxInt(u8)) return null;
+        result.count += 1;
+
+        const capability_id = readConfiguration8(function, offset);
+        switch (capability_id) {
+            capability_msi => {
+                if (result.msi_offset == null) result.msi_offset = offset;
+            },
+            capability_msix => {
+                if (result.msix_offset == null) result.msix_offset = offset;
+            },
+            capability_pcie => {
+                if (result.pcie_offset == null) result.pcie_offset = offset;
+            },
+            else => {},
+        }
+
+        const next = readConfiguration8(function, @as(usize, offset) + 1);
+        if (next != 0 and (next < 0x40 or (next & 0x03) != 0)) return null;
+        offset = next;
+    }
+    return result;
+}
+
+pub fn findCapability(function: Function, capability_id: u8) ?u8 {
+    const capabilities = inspectCapabilities(function) orelse return null;
+    return switch (capability_id) {
+        capability_msi => capabilities.msi_offset,
+        capability_msix => capabilities.msix_offset,
+        capability_pcie => capabilities.pcie_offset,
+        else => null,
+    };
+}
+
+pub fn inspectMsix(function: Function) ?MsixCapability {
+    const capability_offset = findCapability(function, capability_msix) orelse return null;
+    const control = readConfiguration16(function, @as(usize, capability_offset) + 2);
+    const table_descriptor = readConfiguration32(function, @as(usize, capability_offset) + 4);
+    const pending_descriptor = readConfiguration32(function, @as(usize, capability_offset) + 8);
+    const table_bar_index: u3 = @intCast(table_descriptor & 0x7);
+    const pending_bar_index: u3 = @intCast(pending_descriptor & 0x7);
+    if (table_bar_index >= 6 or pending_bar_index >= 6) return null;
+    return .{
+        .capability_offset = capability_offset,
+        .control = control,
+        .table_size = @intCast((control & 0x07FF) + 1),
+        .table_bar_index = table_bar_index,
+        .table_offset = table_descriptor & 0xFFFF_FFF8,
+        .pending_bar_index = pending_bar_index,
+        .pending_offset = pending_descriptor & 0xFFFF_FFF8,
+    };
+}
+
+pub fn decodeMemoryBar(function: Function, bar_index: u3) ?u64 {
+    if (bar_index >= 6) return null;
+    const offset = 0x10 + @as(usize, bar_index) * 4;
+    const low = readConfiguration32(function, offset);
+    if ((low & 1) != 0) return null;
+    const memory_type = (low >> 1) & 0x3;
+    const low_base = @as(u64, low & 0xFFFF_FFF0);
+    const base = switch (memory_type) {
+        0, 1 => low_base,
+        2 => blk: {
+            if (bar_index >= 5) return null;
+            const high = readConfiguration32(function, offset + 4);
+            break :blk low_base | (@as(u64, high) << 32);
+        },
+        else => return null,
+    };
+    if (base == 0) return null;
+    return base;
+}
+
+pub fn writeConfiguration32(function: Function, offset: usize, value: u32) void {
+    switch (function.access_method) {
+        .ecam => {
+            const register: *volatile u32 = @ptrFromInt(function.configuration_address + offset);
+            register.* = value;
+            _ = register.*;
+        },
+        .legacy_io => {
+            zigos_out32(
+                configuration_address_port,
+                legacyAddress(function.bus, function.device, function.function, offset),
+            );
+            zigos_out32(configuration_data_port, value);
+        },
     }
 }
 

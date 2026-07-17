@@ -726,6 +726,12 @@ if ($NoGraphics) {
         throw 'The USB-keyboard readiness marker was not observed.'
     }
 }
+if (-not $output.Contains('NVMe PCI capabilities: count 3, MSI absent, MSI-X +0x40')) {
+    throw 'The validated NVMe PCI MSI-X capability chain was not observed.'
+}
+if (-not $output.Contains('NVMe MSI-X descriptor: vectors 65, table BAR 0 +0x0000000000002000, PBA BAR 0 +0x0000000000003000')) {
+    throw 'The NVMe MSI-X table and pending-bit-array descriptors were not observed.'
+}
 if (-not [regex]::IsMatch($output, 'NVMe controller active at [0-9A-F]{4}:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], vendor 0x[0-9A-F]{4}, device 0x[0-9A-F]{4}, BAR 0x[0-9A-F]{16}')) {
     throw 'The NVMe PCI function and BAR marker was not observed.'
 }
@@ -749,6 +755,12 @@ if (-not [regex]::IsMatch($output, "NVMe namespace [1-9][0-9]*: $($nvmeMetadata.
 }
 if (-not [regex]::IsMatch($output, 'NVMe queues active: admin SQ 0x[0-9A-F]{16}, admin CQ 0x[0-9A-F]{16}, I/O SQ 0x[0-9A-F]{16}, I/O CQ 0x[0-9A-F]{16}, depth 16')) {
     throw 'The ZigOs-owned NVMe admin and I/O queues were not observed.'
+}
+if (-not [regex]::IsMatch($output, "NVMe MSI-X active: vector 0x46, table index 1, target APIC $expectedLegacyIrqTarget, table 0x[0-9A-F]{12}2010, vectors 65, mapping table pages [0-9]+")) {
+    throw 'The NVMe MSI-X vector was not programmed for the selected routable CPU.'
+}
+if (-not $output.Contains("NVMe MSI-X I/O completion verified: vector 0x46, target APIC $expectedLegacyIrqTarget, interrupt count 1")) {
+    throw 'The first NVMe data read did not complete through MSI-X.'
 }
 if (-not [regex]::IsMatch($output, "NVMe READ completed: namespace [1-9][0-9]*, LBA 0, $nvmeBlockSize bytes at 0x[0-9A-F]{16}")) {
     throw 'The read-only NVMe LBA 0 command was not observed.'
