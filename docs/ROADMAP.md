@@ -302,3 +302,13 @@
 - The MSI handler records and clears global/port W1C status, increments an atomic completion counter, and acknowledges the local APIC.
 - ATA IDENTIFY, READ DMA EXT, and all later FAT traversal reads wait for MSI before validating `PxCI`, transfer length, and task-file error state. Controllers without MSI retain bounded polling.
 - `scripts/test-qemu.ps1 -LegacyAhci` attaches an ICH9 AHCI function to i440FX, enumerates it through `0xCF8/0xCFC`, and proves the same MSI setup and command completions without ACPI MCFG/ECAM.
+
+## 2.8 - xHCI MSI-X event delivery
+
+- The PCI capability walk discovers the qemu-xhci MSI-X capability at `0x90`, validates 16 vectors, and decodes the BAR0 table/PBA offsets at `0x3000`/`0x3800`.
+- ZigOs programs table entry 0 for CPU vector `0x48`, enables USBCMD.INTE and runtime interrupter 0, and installs the ISR in both BSP and per-AP IDTs.
+- Enable Slot completion requires both a valid event TRB and an MSI-X counter advance, eliminating the event-visible/ISR-pending race.
+- Before each later synchronous command or control transfer, ZigOs drains already-ready port-status events, advances ERDP/EHB, then captures a fresh pre-doorbell interrupt baseline; the matching completion is accepted only after MSI-X activity advances that baseline.
+- HID interrupt-IN arms capture their interrupt baseline before ringing the endpoint doorbell and block until both an MSI-X counter advance and the matching event TRB are visible; interrupt coalescing is accepted.
+- The regression harness uses a retried HMP connection with a settling interval and proves press, release, and the complete native shell session over xHCI MSI-X. Five consecutive cold interactive boots are used as the race-regression gate.
+- NVMe controller-ready and queue-completion waits use a five-second HPET deadline when available, with a bounded PIT-only fallback; SQ/CQ doorbell writes are flushed by a CSTS read to prevent posted-write timing from becoming a CPU-iteration race.

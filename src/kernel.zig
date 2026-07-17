@@ -160,8 +160,18 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
         console
     else
         null;
-    const usb_keyboard_ready = inspectXhci(pci_inventory, &frame_allocator, graphical_console);
-    const nvme_storage_ready = inspectNvme(pci_inventory, &frame_allocator, legacy_irq_target);
+    const usb_keyboard_ready = inspectXhci(
+        pci_inventory,
+        &frame_allocator,
+        graphical_console,
+        legacy_irq_target,
+    );
+    const nvme_storage_ready = inspectNvme(
+        pci_inventory,
+        &frame_allocator,
+        timer_setup.reference,
+        legacy_irq_target,
+    );
     const ahci_storage_ready = inspectAhci(pci_inventory, &frame_allocator, legacy_irq_target);
     if (!nvme_storage_ready and !ahci_storage_ready) {
         storageFailure("no supported NVMe namespace or SATA device was usable");
@@ -1330,6 +1340,7 @@ fn inspectXhci(
     inventory: pci.Inventory,
     allocator: *memory.FrameAllocator,
     graphical_console: ?*framebuffer_console.Console,
+    interrupt_target: ?u8,
 ) bool {
     var controller_function: ?pci.Function = null;
     for (inventory.functions[0..inventory.retained_count]) |function| {
@@ -1345,6 +1356,44 @@ fn inspectXhci(
         debugWrite("xHCI controller not present; continuing without USB input\r\n");
         return false;
     };
+    const pci_capabilities = pci.inspectCapabilities(function) orelse {
+        debugWrite("xHCI PCI capability list was malformed; continuing without USB input\r\n");
+        return false;
+    };
+    debugWrite("xHCI PCI capabilities: count ");
+    debugWriteU64Decimal(pci_capabilities.count);
+    debugWrite(", MSI ");
+    if (pci_capabilities.msi_offset) |offset| {
+        debugWrite("+0x");
+        debugWriteHex8(offset);
+    } else {
+        debugWrite("absent");
+    }
+    debugWrite(", MSI-X ");
+    if (pci_capabilities.msix_offset) |offset| {
+        debugWrite("+0x");
+        debugWriteHex8(offset);
+    } else {
+        debugWrite("absent");
+    }
+    debugWrite("\r\n");
+    if (pci_capabilities.msix_offset != null) {
+        const msix = pci.inspectMsix(function) orelse {
+            debugWrite("xHCI MSI-X capability was malformed; continuing without USB input\r\n");
+            return false;
+        };
+        debugWrite("xHCI MSI-X descriptor: vectors ");
+        debugWriteU64Decimal(msix.table_size);
+        debugWrite(", table BAR ");
+        debugWriteU64Decimal(msix.table_bar_index);
+        debugWrite(" +0x");
+        debugWriteHex64(msix.table_offset);
+        debugWrite(", PBA BAR ");
+        debugWriteU64Decimal(msix.pending_bar_index);
+        debugWrite(" +0x");
+        debugWriteHex64(msix.pending_offset);
+        debugWrite("\r\n");
+    }
     const controller = xhci.inspect(function, allocator) orelse {
         debugWrite("xHCI controller registers were unusable; continuing without USB input\r\n");
         return false;
@@ -1415,8 +1464,8 @@ fn inspectXhci(
         return false;
     };
 
-    var ownership = xhci.takeOwnership(controller, allocator) orelse
-        xhciFailure("controller reset, ring installation, or Enable Slot completion failed");
+    var ownership = xhci.takeOwnership(controller, allocator, interrupt_target) orelse
+        xhciFailure("controller reset, MSI-X setup, ring installation, or Enable Slot completion failed");
     debugWrite("xHCI ownership active: DCBAA 0x");
     debugWriteHex64(@intCast(ownership.dcbaa_address));
     debugWrite(", command ring 0x");
@@ -1442,6 +1491,35 @@ fn inspectXhci(
     debugWriteU64Decimal(ownership.event_cycle);
     debugWrite(if (ownership.controller_running) ", controller running" else ", controller halted");
     debugWrite(if (ownership.legacy_handoff_performed) ", legacy handoff claimed\r\n" else ", no legacy handoff required\r\n");
+    if (ownership.interrupts_enabled) {
+        if (ownership.enable_slot_interrupt_count != 1) {
+            xhciFailure("Enable Slot did not complete through exactly one xHCI MSI-X interrupt");
+        }
+        debugWrite("xHCI MSI-X active: capability +0x");
+        debugWriteHex8(ownership.msix_capability_offset);
+        debugWrite(", table entry 0 at 0x");
+        debugWriteHex64(@intCast(ownership.msix_table_address));
+        debugWrite(", vectors ");
+        debugWriteU64Decimal(ownership.msix_vector_count);
+        debugWrite(", vector 0x");
+        debugWriteHex8(ownership.interrupt_vector);
+        debugWrite(", target APIC ");
+        debugWriteU64Decimal(ownership.interrupt_target_apic_id);
+        debugWrite(", control 0x");
+        debugWriteHex16(ownership.msix_control);
+        debugWrite(", mapping pages ");
+        debugWriteU64Decimal(ownership.msix_mapping_table_pages);
+        debugWrite("\r\n");
+        debugWrite("xHCI Enable Slot MSI-X completion verified: interrupt count ");
+        debugWriteU64Decimal(ownership.enable_slot_interrupt_count);
+        debugWrite(", USBSTS 0x");
+        debugWriteHex64(ownership.enable_slot_usbsts);
+        debugWrite(", IMAN 0x");
+        debugWriteHex64(ownership.enable_slot_iman);
+        debugWrite("\r\n");
+    } else {
+        debugWrite("xHCI MSI-X unavailable; bounded event-ring polling retained\r\n");
+    }
     const addressed = xhci.addressConnectedDevice(controller, &ownership, allocator) orelse {
         const diagnostic = xhci.address_diagnostics;
         debugWrite("xHCI Address Device failure: stage ");
@@ -1679,12 +1757,17 @@ fn inspectXhci(
     if (keyboard_report.first_key != 0x04) {
         xhciFailure("first HID report was not the injected A-key press");
     }
+    if (ownership.interrupts_enabled and keyboard_report.interrupt_count == 0) {
+        xhciFailure("A-key press completed without an xHCI MSI-X interrupt");
+    }
     debugWrite("HID keyboard press report received: completion ");
     debugWriteU64Decimal(keyboard_report.completion_code);
     debugWrite(", residual ");
     debugWriteU64Decimal(keyboard_report.transfer_residual);
     debugWrite(", length ");
     debugWriteU64Decimal(keyboard_report.report_length);
+    debugWrite(", MSI-X interrupts ");
+    debugWriteU64Decimal(keyboard_report.interrupt_count);
     debugWrite(", modifier 0x");
     debugWriteHex8(keyboard_report.modifier);
     debugWrite(", keys");
@@ -1731,12 +1814,17 @@ fn inspectXhci(
     for (release_report.keys) |key| {
         if (key != 0) xhciFailure("release report retained a pressed key usage");
     }
+    if (ownership.interrupts_enabled and release_report.interrupt_count == 0) {
+        xhciFailure("key release completed without an xHCI MSI-X interrupt");
+    }
     debugWrite("HID keyboard release report received: completion ");
     debugWriteU64Decimal(release_report.completion_code);
     debugWrite(", residual ");
     debugWriteU64Decimal(release_report.transfer_residual);
     debugWrite(", length ");
     debugWriteU64Decimal(release_report.report_length);
+    debugWrite(", MSI-X interrupts ");
+    debugWriteU64Decimal(release_report.interrupt_count);
     debugWrite(", modifier 0x");
     debugWriteHex8(release_report.modifier);
     debugWrite(", keys");
@@ -1777,7 +1865,15 @@ fn inspectXhci(
     debugWriteHex64(release_report.event_trb_pointer);
     debugWrite("\r\n");
     debugWrite("Keyboard event queue verified: #1 USB usage 0x04 pressed -> 'a'; #2 USB usage 0x04 released -> 'a'; dropped 0\r\n");
+    const shell_interrupt_baseline = xhci.interruptCount();
     runUsbShell(controller, &ownership, &mutable_hid_endpoint, allocator, console);
+    const shell_interrupt_count = xhci.interruptCount() - shell_interrupt_baseline;
+    if (ownership.interrupts_enabled and shell_interrupt_count == 0) {
+        xhciFailure("interactive shell completed without xHCI MSI-X input interrupts");
+    }
+    debugWrite("xHCI shell MSI-X input verified: ");
+    debugWriteU64Decimal(shell_interrupt_count);
+    debugWrite(" interrupt(s) after the shell arm marker\r\n");
     return true;
 }
 
@@ -1970,7 +2066,12 @@ fn xhciFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator, interrupt_target: ?u8) bool {
+fn inspectNvme(
+    inventory: pci.Inventory,
+    allocator: *memory.FrameAllocator,
+    reference: time_reference.Reference,
+    interrupt_target: ?u8,
+) bool {
     var controller_function: ?pci.Function = null;
     for (inventory.functions[0..inventory.retained_count]) |function| {
         if (function.class_code == 0x01 and function.subclass == 0x08 and function.programming_interface == 0x02) {
@@ -2019,7 +2120,7 @@ fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator, inte
     } else {
         debugWrite("NVMe MSI-X descriptor unavailable; bounded I/O polling will be used\r\n");
     }
-    var controller = nvme.initialize(function, allocator, interrupt_target) orelse {
+    var controller = nvme.initialize(function, allocator, reference, interrupt_target) orelse {
         debugWrite("NVMe initialization diagnostics: BAR 0x");
         debugWriteHex64(nvme.last_bar);
         debugWrite(", mapping present ");

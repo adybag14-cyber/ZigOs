@@ -2,8 +2,11 @@ const std = @import("std");
 const pci = @import("pci.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
+const apic = @import("apic.zig");
 
 const pci_command_memory_space: u16 = 1 << 1;
+const pci_command_bus_master: u16 = 1 << 2;
+const pci_command_interrupt_disable: u16 = 1 << 10;
 const bar_io_space: u32 = 1;
 const bar_type_mask: u32 = 0x6;
 const bar_type_32_bit: u32 = 0x0;
@@ -15,7 +18,9 @@ const trbs_per_page: usize = page_bytes / @sizeOf(Trb);
 const maximum_poll_count: usize = 200_000_000;
 const usbcmd_run_stop: u32 = 1 << 0;
 const usbcmd_host_controller_reset: u32 = 1 << 1;
+const usbcmd_interrupt_enable: u32 = 1 << 2;
 const usbsts_halted: u32 = 1 << 0;
+const usbsts_event_interrupt: u32 = 1 << 3;
 const usbsts_controller_not_ready: u32 = 1 << 11;
 const command_ring_cycle_state: u64 = 1;
 const trb_cycle: u32 = 1 << 0;
@@ -88,10 +93,21 @@ const interrupter_imod: usize = 0x04;
 const interrupter_erstsz: usize = 0x08;
 const interrupter_erstba: usize = 0x10;
 const interrupter_erdp: usize = 0x18;
+const interrupter_pending: u32 = 1 << 0;
+const interrupter_enable: u32 = 1 << 1;
+pub const interrupt_vector: u8 = 0x48;
+pub const msix_table_index: u16 = 0;
+const msix_entry_size: u64 = 16;
+const msix_function_mask: u16 = 1 << 14;
+const msix_enable: u16 = 1 << 15;
+const msix_vector_mask: u32 = 1;
+const msi_message_address_base: u32 = 0xFEE0_0000;
 
 const cc = std.os.uefi.cc;
 extern fn zigos_memory_fence() callconv(cc) void;
 extern fn zigos_cpu_relax() callconv(cc) void;
+extern fn zigos_enable_interrupts() callconv(cc) void;
+extern fn zigos_disable_interrupts() callconv(cc) void;
 
 const Trb = extern struct {
     parameter: u64,
@@ -103,6 +119,23 @@ const EventRingSegmentTableEntry = extern struct {
     ring_segment_base: u64,
     ring_segment_size: u32,
     reserved: u32,
+};
+
+const MsixTableEntry = extern struct {
+    message_address_low: u32,
+    message_address_high: u32,
+    message_data: u32,
+    vector_control: u32,
+};
+
+const InterruptSetup = struct {
+    enabled: bool,
+    capability_offset: u8,
+    control: u16,
+    table_address: usize,
+    vector_count: u16,
+    mapping_table_pages: u64,
+    target_apic_id: u8,
 };
 
 pub const Ownership = struct {
@@ -121,6 +154,17 @@ pub const Ownership = struct {
     legacy_handoff_performed: bool,
     command_producer_index: u16,
     event_consumer_index: u16,
+    interrupts_enabled: bool,
+    interrupt_vector: u8,
+    interrupt_target_apic_id: u8,
+    msix_capability_offset: u8,
+    msix_control: u16,
+    msix_table_address: usize,
+    msix_vector_count: u16,
+    msix_mapping_table_pages: u64,
+    enable_slot_interrupt_count: u64,
+    enable_slot_usbsts: u32,
+    enable_slot_iman: u32,
 };
 
 pub const AddressStage = enum(u8) {
@@ -268,6 +312,7 @@ pub const HidEndpoint = struct {
 pub const HidInputArm = struct {
     buffer_address: usize,
     expected_event_trb_pointer: usize,
+    interrupt_baseline: u64,
     protocol_completion: u8,
     idle_completion: u8,
     endpoint_id: u5,
@@ -278,6 +323,7 @@ pub const HidInputArm = struct {
 pub const HidKeyboardReport = struct {
     buffer_address: usize,
     completion_code: u8,
+    interrupt_count: u64,
     transfer_residual: u32,
     report_length: u16,
     modifier: u8,
@@ -298,6 +344,14 @@ pub const Port = struct {
     powered: bool,
     speed_id: u4,
 };
+
+var event_interrupt_count: u64 = 0;
+var event_interrupts_enabled: bool = false;
+var active_operational_base: usize = 0;
+var active_interrupter_base: usize = 0;
+var active_interrupt_target_apic_id: u8 = 0;
+var last_interrupt_usbsts: u32 = 0;
+var last_interrupt_iman: u32 = 0;
 
 pub const Controller = struct {
     pci_function: pci.Function,
@@ -334,8 +388,14 @@ pub fn inspect(function: pci.Function, allocator: *memory.FrameAllocator) ?Contr
         return null;
     }
 
-    const command = pci.readConfiguration16(function, 0x04);
-    if ((command & pci_command_memory_space) == 0) return null;
+    var command = pci.readConfiguration16(function, 0x04);
+    const required_command = pci_command_memory_space | pci_command_bus_master;
+    if ((command & required_command) != required_command) {
+        command |= required_command;
+        pci.writeConfiguration16(function, 0x04, command);
+        command = pci.readConfiguration16(function, 0x04);
+        if ((command & required_command) != required_command) return null;
+    }
     const bar0 = pci.readConfiguration32(function, 0x10);
     if ((bar0 & bar_io_space) != 0) return null;
     const bar_type = bar0 & bar_type_mask;
@@ -422,15 +482,25 @@ pub fn inspect(function: pci.Function, allocator: *memory.FrameAllocator) ?Contr
 pub fn takeOwnership(
     controller: Controller,
     allocator: *memory.FrameAllocator,
+    interrupt_target: ?u8,
 ) ?Ownership {
     const operational_base = controller.base_address + controller.capability_length;
     const runtime_base = controller.base_address + controller.runtime_offset;
     const doorbell_base = controller.base_address + controller.doorbell_offset;
     const interrupter_base = runtime_base + interrupter0_offset;
 
+    event_interrupts_enabled = false;
+    active_operational_base = 0;
+    active_interrupter_base = 0;
+    active_interrupt_target_apic_id = 0;
+    @atomicStore(u64, &event_interrupt_count, 0, .release);
+    @atomicStore(u32, &last_interrupt_usbsts, 0, .release);
+    @atomicStore(u32, &last_interrupt_iman, 0, .release);
+
     const legacy_handoff_performed = claimLegacyOwnership(controller) orelse return null;
     if (!stopController(operational_base)) return null;
     if (!resetController(operational_base)) return null;
+    const interrupt_setup = configureMsix(controller, allocator, interrupt_target) orelse return null;
 
     const supported_page_sizes = read32(operational_base, operational_pagesize);
     if ((supported_page_sizes & 1) == 0) return null;
@@ -467,12 +537,27 @@ pub fn takeOwnership(
     write64(interrupter_base, interrupter_erstba, erst_address);
     write64(interrupter_base, interrupter_erdp, event_ring_address);
     write32(interrupter_base, interrupter_imod, 0);
-    write32(interrupter_base, interrupter_iman, 1);
+    write32(operational_base, operational_usbsts, usbsts_event_interrupt);
+    write32(interrupter_base, interrupter_iman, interrupter_pending);
+    if (interrupt_setup.enabled) {
+        active_operational_base = operational_base;
+        active_interrupter_base = interrupter_base;
+        active_interrupt_target_apic_id = interrupt_setup.target_apic_id;
+        @atomicStore(u64, &event_interrupt_count, 0, .release);
+        event_interrupts_enabled = true;
+        write32(
+            interrupter_base,
+            interrupter_iman,
+            interrupter_enable | interrupter_pending,
+        );
+        if ((read32(interrupter_base, interrupter_iman) & interrupter_enable) == 0) return null;
+    }
     write32(operational_base, operational_config, controller.maximum_slots);
     zigos_memory_fence();
 
     var command = read32(operational_base, operational_usbcmd);
     command |= usbcmd_run_stop;
+    if (interrupt_setup.enabled) command |= usbcmd_interrupt_enable;
     write32(operational_base, operational_usbcmd, command);
     if (!waitRegisterBits(
         operational_base,
@@ -485,10 +570,26 @@ pub fn takeOwnership(
     enable_slot.parameter = 0;
     enable_slot.status = 0;
     enable_slot.control = (trb_type_enable_slot << trb_type_shift) | trb_cycle;
+    const enable_slot_interrupt_baseline = interruptCount();
     zigos_memory_fence();
     write32(doorbell_base, 0, 0);
 
-    const event = waitForEvent(event_ring_address, 1) orelse return null;
+    const event = waitForEvent(
+        event_ring_address,
+        1,
+        enable_slot_interrupt_baseline,
+    ) orelse {
+        return null;
+    };
+    const enable_slot_interrupt_observed = if (interrupt_setup.enabled)
+        waitForInterruptAdvance(enable_slot_interrupt_baseline) orelse {
+            return null;
+        }
+    else
+        interruptCount();
+    if (interrupt_setup.enabled and enable_slot_interrupt_observed == enable_slot_interrupt_baseline) {
+        return null;
+    }
     const event_type = (event.control >> trb_type_shift) & 0x3F;
     const completion_code: u8 = @truncate(event.status >> 24);
     const slot_id: u8 = @truncate(event.control >> 24);
@@ -527,6 +628,17 @@ pub fn takeOwnership(
         .legacy_handoff_performed = legacy_handoff_performed,
         .command_producer_index = 1,
         .event_consumer_index = 1,
+        .interrupts_enabled = interrupt_setup.enabled,
+        .interrupt_vector = if (interrupt_setup.enabled) interrupt_vector else 0,
+        .interrupt_target_apic_id = interrupt_setup.target_apic_id,
+        .msix_capability_offset = interrupt_setup.capability_offset,
+        .msix_control = interrupt_setup.control,
+        .msix_table_address = interrupt_setup.table_address,
+        .msix_vector_count = interrupt_setup.vector_count,
+        .msix_mapping_table_pages = interrupt_setup.mapping_table_pages,
+        .enable_slot_interrupt_count = enable_slot_interrupt_observed - enable_slot_interrupt_baseline,
+        .enable_slot_usbsts = @atomicLoad(u32, &last_interrupt_usbsts, .acquire),
+        .enable_slot_iman = @atomicLoad(u32, &last_interrupt_iman, .acquire),
     };
 }
 
@@ -609,6 +721,11 @@ pub fn addressConnectedDevice(
     command.control = (address_device_command_type << trb_type_shift) |
         (@as(u32, ownership.slot_id) << 24) |
         ownership.event_cycle;
+    const preexisting_port_events = drainReadyPortStatusEvents(
+        controller,
+        ownership,
+    ) orelse return null;
+    const interrupt_baseline = interruptCount();
     zigos_memory_fence();
     write32(doorbell_base, 0, 0);
     address_diagnostics.stage = .command_submitted;
@@ -618,6 +735,7 @@ pub fn addressConnectedDevice(
         ownership,
         command_address,
         ownership.slot_id,
+        interrupt_baseline,
     ) orelse return null;
     const event = completion.event;
     const event_type = (event.control >> trb_type_shift) & 0x3F;
@@ -659,7 +777,8 @@ pub fn addressConnectedDevice(
         .completion_code = completion_code,
         .command_pointer = command_pointer,
         .reset_port_status = reset_port_status,
-        .skipped_port_status_events = completion.skipped_port_status_events,
+        .skipped_port_status_events = preexisting_port_events +|
+            completion.skipped_port_status_events,
         .transfer_producer_index = 0,
         .transfer_cycle = 1,
     };
@@ -702,6 +821,8 @@ pub fn readDeviceDescriptor(
         trb_interrupt_on_completion | cycle;
     zigos_memory_fence();
 
+    _ = drainReadyPortStatusEvents(controller, ownership) orelse return null;
+    const interrupt_baseline = interruptCount();
     const doorbell_base = controller.base_address + controller.doorbell_offset;
     write32(
         doorbell_base,
@@ -716,6 +837,7 @@ pub fn readDeviceDescriptor(
         status_trb_address,
         device.slot_id,
         1,
+        interrupt_baseline,
     ) orelse return null;
     device.transfer_producer_index += 3;
 
@@ -768,11 +890,16 @@ fn waitForTransferCompletion(
     expected_trb_pointer: usize,
     expected_slot_id: u8,
     expected_endpoint_id: u5,
+    interrupt_baseline: u64,
 ) ?TransferCompletion {
     var skipped_port_status_events: u8 = 0;
     var events_seen: usize = 0;
     while (events_seen < 32) : (events_seen += 1) {
-        const event = consumeEvent(controller, ownership) orelse return null;
+        const event = consumeEvent(
+            controller,
+            ownership,
+            interrupt_baseline,
+        ) orelse return null;
         const event_type = (event.control >> trb_type_shift) & 0x3F;
         if (event_type == trb_type_port_status_change) {
             skipped_port_status_events +|= 1;
@@ -982,6 +1109,8 @@ fn controlInDescriptor(
         trb_interrupt_on_completion | cycle;
     zigos_memory_fence();
 
+    _ = drainReadyPortStatusEvents(controller, ownership) orelse return null;
+    const interrupt_baseline = interruptCount();
     const doorbell_base = controller.base_address + controller.doorbell_offset;
     write32(doorbell_base, @as(usize, device.slot_id) * @sizeOf(u32), 1);
     const status_trb_address = device.transfer_ring_address +
@@ -992,6 +1121,7 @@ fn controlInDescriptor(
         status_trb_address,
         device.slot_id,
         1,
+        interrupt_baseline,
     ) orelse return null;
     device.transfer_producer_index += 3;
     return completion;
@@ -1072,6 +1202,8 @@ pub fn configureHidEndpoint(
     command.control = (trb_type_configure_endpoint << trb_type_shift) |
         (@as(u32, device.slot_id) << 24) |
         ownership.event_cycle;
+    _ = drainReadyPortStatusEvents(controller, ownership) orelse return null;
+    const interrupt_baseline = interruptCount();
     zigos_memory_fence();
     const doorbell_base = controller.base_address + controller.doorbell_offset;
     write32(doorbell_base, 0, 0);
@@ -1080,6 +1212,7 @@ pub fn configureHidEndpoint(
         ownership,
         command_address,
         device.slot_id,
+        interrupt_baseline,
     ) orelse return null;
     ownership.command_producer_index += 1;
 
@@ -1140,6 +1273,8 @@ fn controlNoData(
         trb_interrupt_on_completion | trb_direction_in | cycle;
     zigos_memory_fence();
 
+    _ = drainReadyPortStatusEvents(controller, ownership) orelse return null;
+    const interrupt_baseline = interruptCount();
     const doorbell_base = controller.base_address + controller.doorbell_offset;
     write32(doorbell_base, @as(usize, device.slot_id) * @sizeOf(u32), 1);
     const status_trb_address = device.transfer_ring_address +
@@ -1150,6 +1285,7 @@ fn controlNoData(
         status_trb_address,
         device.slot_id,
         1,
+        interrupt_baseline,
     ) orelse return null;
     device.transfer_producer_index += 2;
     return completion;
@@ -1214,6 +1350,7 @@ pub fn armHidKeyboardInput(
         endpoint.transfer_cycle;
     zigos_memory_fence();
 
+    const interrupt_baseline = interruptCount();
     const doorbell_base = controller.base_address + controller.doorbell_offset;
     write32(
         doorbell_base,
@@ -1225,6 +1362,7 @@ pub fn armHidKeyboardInput(
         .buffer_address = buffer_address,
         .expected_event_trb_pointer = endpoint.transfer_ring_address +
             producer_index * @sizeOf(Trb),
+        .interrupt_baseline = interrupt_baseline,
         .protocol_completion = protocol.completion_code,
         .idle_completion = idle.completion_code,
         .endpoint_id = endpoint.endpoint_id,
@@ -1256,6 +1394,7 @@ pub fn armNextHidKeyboardInput(
         endpoint.transfer_cycle;
     zigos_memory_fence();
 
+    const interrupt_baseline = interruptCount();
     const doorbell_base = controller.base_address + controller.doorbell_offset;
     write32(
         doorbell_base,
@@ -1267,6 +1406,7 @@ pub fn armNextHidKeyboardInput(
         .buffer_address = buffer_address,
         .expected_event_trb_pointer = endpoint.transfer_ring_address +
             producer_index * @sizeOf(Trb),
+        .interrupt_baseline = interrupt_baseline,
         .protocol_completion = 0,
         .idle_completion = 0,
         .endpoint_id = endpoint.endpoint_id,
@@ -1286,7 +1426,10 @@ pub fn waitHidKeyboardInput(
         arm.expected_event_trb_pointer,
         arm.slot_id,
         arm.endpoint_id,
+        arm.interrupt_baseline,
     ) orelse return null;
+    const completion_interrupt_count = interruptCount() - arm.interrupt_baseline;
+    if (event_interrupts_enabled and completion_interrupt_count == 0) return null;
     if (completion.transfer_residual > arm.requested_length) return null;
     const report_length: u16 = @intCast(arm.requested_length - completion.transfer_residual);
     if (report_length < 8) return null;
@@ -1303,6 +1446,7 @@ pub fn waitHidKeyboardInput(
     return .{
         .buffer_address = arm.buffer_address,
         .completion_code = completion.completion_code,
+        .interrupt_count = completion_interrupt_count,
         .transfer_residual = completion.transfer_residual,
         .report_length = report_length,
         .modifier = bytes[0],
@@ -1322,11 +1466,16 @@ fn waitForHidTransferCompletion(
     expected_trb_pointer: usize,
     expected_slot_id: u8,
     expected_endpoint_id: u5,
+    interrupt_baseline: u64,
 ) ?TransferCompletion {
     var skipped_port_status_events: u8 = 0;
     var events_seen: usize = 0;
     while (events_seen < 32) : (events_seen += 1) {
-        const event = consumeEvent(controller, ownership) orelse return null;
+        const event = consumeHidEventBlocking(
+            controller,
+            ownership,
+            interrupt_baseline,
+        ) orelse return null;
         const event_type = (event.control >> trb_type_shift) & 0x3F;
         if (event_type == trb_type_port_status_change) {
             skipped_port_status_events +|= 1;
@@ -1468,11 +1617,16 @@ fn waitForCommandCompletion(
     ownership: *Ownership,
     command_address: usize,
     expected_slot_id: u8,
+    interrupt_baseline: u64,
 ) ?CommandCompletion {
     var skipped_port_status_events: u8 = 0;
     var events_seen: usize = 0;
     while (events_seen < 32) : (events_seen += 1) {
-        const event = consumeEvent(controller, ownership) orelse return null;
+        const event = consumeEvent(
+            controller,
+            ownership,
+            interrupt_baseline,
+        ) orelse return null;
         const event_type = (event.control >> trb_type_shift) & 0x3F;
         if (event_type == trb_type_port_status_change) {
             skipped_port_status_events +|= 1;
@@ -1496,11 +1650,107 @@ fn waitForCommandCompletion(
     return null;
 }
 
-fn consumeEvent(controller: Controller, ownership: *Ownership) ?Trb {
+fn drainReadyPortStatusEvents(
+    controller: Controller,
+    ownership: *Ownership,
+) ?u8 {
+    if (ownership.event_consumer_index >= trbs_per_page) return null;
+    const delivery_baseline = interruptCount();
+    var drained: u8 = 0;
+    while (drained < 32) {
+        const event_address = ownership.event_ring_address +
+            @as(usize, ownership.event_consumer_index) * @sizeOf(Trb);
+        const event_pointer: *const volatile Trb = @ptrFromInt(event_address);
+        const event = readReadyEvent(event_pointer, ownership.event_cycle) orelse break;
+        const event_type = (event.control >> trb_type_shift) & 0x3F;
+        if (event_type != trb_type_port_status_change) return null;
+
+        ownership.event_consumer_index += 1;
+        if (ownership.event_consumer_index == trbs_per_page) {
+            ownership.event_consumer_index = 0;
+            ownership.event_cycle ^= 1;
+        }
+        drained += 1;
+    }
+    if (drained == 0) return 0;
+
+    const interrupter_base = controller.base_address +
+        controller.runtime_offset + interrupter0_offset;
+    const next_event_address = ownership.event_ring_address +
+        @as(usize, ownership.event_consumer_index) * @sizeOf(Trb);
+    write64(
+        interrupter_base,
+        interrupter_erdp,
+        @as(u64, @intCast(next_event_address)) | event_handler_busy,
+    );
+    zigos_memory_fence();
+
+    if (event_interrupts_enabled) {
+        const usb_status = read32(
+            controller.base_address + controller.capability_length,
+            operational_usbsts,
+        );
+        const iman = read32(interrupter_base, interrupter_iman);
+        const delivery_pending = (usb_status & usbsts_event_interrupt) != 0 or
+            (iman & interrupter_pending) != 0;
+        if (delivery_pending and interruptCount() == delivery_baseline) {
+            _ = waitForInterruptAdvance(delivery_baseline) orelse return null;
+        }
+    }
+    return drained;
+}
+
+fn consumeHidEventBlocking(
+    controller: Controller,
+    ownership: *Ownership,
+    interrupt_baseline: u64,
+) ?Trb {
     if (ownership.event_consumer_index >= trbs_per_page) return null;
     const event_address = ownership.event_ring_address +
         @as(usize, ownership.event_consumer_index) * @sizeOf(Trb);
-    const event = waitForEvent(event_address, ownership.event_cycle) orelse return null;
+    const event_pointer: *const volatile Trb = @ptrFromInt(event_address);
+    const local_target = apic.currentId() == active_interrupt_target_apic_id;
+    if (event_interrupts_enabled and local_target) zigos_enable_interrupts();
+    var event: ?Trb = null;
+    while (event == null) {
+        const interrupt_observed = !event_interrupts_enabled or
+            interruptCount() != interrupt_baseline;
+        if (interrupt_observed) event = readReadyEvent(event_pointer, ownership.event_cycle);
+        if (event == null) zigos_cpu_relax();
+    }
+    if (event_interrupts_enabled and local_target) zigos_disable_interrupts();
+
+    ownership.event_consumer_index += 1;
+    if (ownership.event_consumer_index == trbs_per_page) {
+        ownership.event_consumer_index = 0;
+        ownership.event_cycle ^= 1;
+    }
+    const interrupter_base = controller.base_address +
+        controller.runtime_offset + interrupter0_offset;
+    const next_event_address = ownership.event_ring_address +
+        @as(usize, ownership.event_consumer_index) * @sizeOf(Trb);
+    write64(
+        interrupter_base,
+        interrupter_erdp,
+        @as(u64, @intCast(next_event_address)) | event_handler_busy,
+    );
+    zigos_memory_fence();
+    return event.?;
+}
+
+fn consumeEvent(
+    controller: Controller,
+    ownership: *Ownership,
+    interrupt_baseline: u64,
+) ?Trb {
+    if (ownership.event_consumer_index >= trbs_per_page) return null;
+    const event_address = ownership.event_ring_address +
+        @as(usize, ownership.event_consumer_index) * @sizeOf(Trb);
+    const event = waitForEvent(
+        event_address,
+        ownership.event_cycle,
+        interrupt_baseline,
+    ) orelse return null;
 
     ownership.event_consumer_index += 1;
     if (ownership.event_consumer_index == trbs_per_page) {
@@ -1520,22 +1770,185 @@ fn consumeEvent(controller: Controller, ownership: *Ownership) ?Trb {
     return event;
 }
 
-fn waitForEvent(event_ring_address: usize, expected_cycle: u1) ?Trb {
+fn waitForEvent(
+    event_ring_address: usize,
+    expected_cycle: u1,
+    interrupt_baseline: u64,
+) ?Trb {
     const event: *const volatile Trb = @ptrFromInt(event_ring_address);
-    var polls: usize = 0;
-    while (polls < maximum_poll_count) : (polls += 1) {
-        zigos_memory_fence();
-        const control = event.control;
-        if ((control & trb_cycle) == expected_cycle) {
-            return .{
-                .parameter = event.parameter,
-                .status = event.status,
-                .control = control,
-            };
+    if (!event_interrupts_enabled) {
+        var polls: usize = 0;
+        while (polls < maximum_poll_count) : (polls += 1) {
+            if (readReadyEvent(event, expected_cycle)) |ready| return ready;
+            zigos_cpu_relax();
         }
+        return null;
+    }
+
+    if (interruptCount() == interrupt_baseline) {
+        const local_target = apic.currentId() == active_interrupt_target_apic_id;
+        if (local_target) zigos_enable_interrupts();
+        var waits: usize = 0;
+        while (interruptCount() == interrupt_baseline and waits < maximum_poll_count) : (waits += 1) {
+            zigos_cpu_relax();
+        }
+        const observed = interruptCount();
+        if (local_target) zigos_disable_interrupts();
+        if (observed == interrupt_baseline) return null;
+    }
+    zigos_memory_fence();
+
+    var visibility_polls: usize = 0;
+    while (visibility_polls < maximum_poll_count) : (visibility_polls += 1) {
+        if (readReadyEvent(event, expected_cycle)) |ready| return ready;
         zigos_cpu_relax();
     }
     return null;
+}
+
+fn waitForInterruptAdvance(baseline: u64) ?u64 {
+    if (interruptCount() != baseline) return interruptCount();
+    const local_target = apic.currentId() == active_interrupt_target_apic_id;
+    if (local_target) zigos_enable_interrupts();
+    var waits: usize = 0;
+    while (interruptCount() == baseline and waits < maximum_poll_count) : (waits += 1) {
+        zigos_cpu_relax();
+    }
+    const observed = interruptCount();
+    if (local_target) zigos_disable_interrupts();
+    if (observed == baseline) return null;
+    return observed;
+}
+
+fn readReadyEvent(event: *const volatile Trb, expected_cycle: u1) ?Trb {
+    zigos_memory_fence();
+    const control = event.control;
+    if ((control & trb_cycle) != expected_cycle) return null;
+    return .{
+        .parameter = event.parameter,
+        .status = event.status,
+        .control = control,
+    };
+}
+
+fn configureMsix(
+    controller: Controller,
+    allocator: *memory.FrameAllocator,
+    interrupt_target: ?u8,
+) ?InterruptSetup {
+    const target_apic_id = interrupt_target orelse return .{
+        .enabled = false,
+        .capability_offset = 0,
+        .control = 0,
+        .table_address = 0,
+        .vector_count = 0,
+        .mapping_table_pages = 0,
+        .target_apic_id = 0,
+    };
+    const capabilities = pci.inspectCapabilities(controller.pci_function) orelse return null;
+    if (capabilities.msix_offset == null) return .{
+        .enabled = false,
+        .capability_offset = 0,
+        .control = 0,
+        .table_address = 0,
+        .vector_count = 0,
+        .mapping_table_pages = 0,
+        .target_apic_id = target_apic_id,
+    };
+    const descriptor = pci.inspectMsix(controller.pci_function) orelse return null;
+    if (descriptor.table_size <= msix_table_index) return null;
+    const table_bar = pci.decodeMemoryBar(
+        controller.pci_function,
+        descriptor.table_bar_index,
+    ) orelse return null;
+    const entry_offset = @as(u64, descriptor.table_offset) +
+        @as(u64, msix_table_index) * msix_entry_size;
+    if (table_bar > std.math.maxInt(u64) - entry_offset) return null;
+    const table_address = table_bar + entry_offset;
+    if (table_address > std.math.maxInt(usize)) return null;
+
+    var mapping_table_pages: u64 = 0;
+    if (!paging.isIdentityRangeMapped(table_address, msix_entry_size)) {
+        const mapping = paging.mapIdentityMmio(
+            allocator,
+            table_address,
+            msix_entry_size,
+        ) orelse return null;
+        mapping_table_pages = mapping.table_pages;
+    }
+
+    const control_offset = @as(usize, descriptor.capability_offset) + 2;
+    const disabled_control = (descriptor.control | msix_function_mask) & ~msix_enable;
+    pci.writeConfiguration16(controller.pci_function, control_offset, disabled_control);
+    const disabled_readback = pci.readConfiguration16(controller.pci_function, control_offset);
+    if ((disabled_readback & (msix_enable | msix_function_mask)) != msix_function_mask) return null;
+
+    const entry: *volatile MsixTableEntry = @ptrFromInt(@as(usize, @intCast(table_address)));
+    entry.vector_control = msix_vector_mask;
+    zigos_memory_fence();
+    const message_address = msi_message_address_base | (@as(u32, target_apic_id) << 12);
+    entry.message_address_low = message_address;
+    entry.message_address_high = 0;
+    entry.message_data = interrupt_vector;
+    zigos_memory_fence();
+    entry.vector_control = 0;
+    zigos_memory_fence();
+    if (entry.message_address_low != message_address or
+        entry.message_address_high != 0 or
+        @as(u8, @truncate(entry.message_data)) != interrupt_vector or
+        (entry.vector_control & msix_vector_mask) != 0)
+    {
+        return null;
+    }
+
+    const enabled_control = (descriptor.control | msix_enable) & ~msix_function_mask;
+    pci.writeConfiguration16(controller.pci_function, control_offset, enabled_control);
+    const enabled_readback = pci.readConfiguration16(controller.pci_function, control_offset);
+    if ((enabled_readback & (msix_enable | msix_function_mask)) != msix_enable) return null;
+
+    var pci_command = pci.readConfiguration16(controller.pci_function, 0x04);
+    pci_command |= pci_command_interrupt_disable;
+    pci.writeConfiguration16(controller.pci_function, 0x04, pci_command);
+    pci_command = pci.readConfiguration16(controller.pci_function, 0x04);
+    if ((pci_command & pci_command_interrupt_disable) == 0) return null;
+
+    return .{
+        .enabled = true,
+        .capability_offset = descriptor.capability_offset,
+        .control = enabled_readback,
+        .table_address = @intCast(table_address),
+        .vector_count = descriptor.table_size,
+        .mapping_table_pages = mapping_table_pages,
+        .target_apic_id = target_apic_id,
+    };
+}
+
+pub fn interruptCount() u64 {
+    return @atomicLoad(u64, &event_interrupt_count, .acquire);
+}
+
+export fn zigos_xhci_interrupt_handler() callconv(cc) void {
+    const operational_base = active_operational_base;
+    const interrupter_base = active_interrupter_base;
+    if (!event_interrupts_enabled or operational_base == 0 or interrupter_base == 0) {
+        apic.acknowledgeInterrupt();
+        return;
+    }
+    const usb_status = read32(operational_base, operational_usbsts);
+    const iman = read32(interrupter_base, interrupter_iman);
+    @atomicStore(u32, &last_interrupt_usbsts, usb_status, .release);
+    @atomicStore(u32, &last_interrupt_iman, iman, .release);
+    if ((usb_status & usbsts_event_interrupt) != 0) {
+        write32(operational_base, operational_usbsts, usbsts_event_interrupt);
+    }
+    write32(
+        interrupter_base,
+        interrupter_iman,
+        (iman & interrupter_enable) | interrupter_pending,
+    );
+    zigos_memory_fence();
+    _ = @atomicRmw(u64, &event_interrupt_count, .Add, 1, .acq_rel);
+    apic.acknowledgeInterrupt();
 }
 
 fn waitRegisterBits(base: usize, offset: usize, mask: u32, set: bool) bool {
@@ -1593,4 +2006,5 @@ comptime {
     if (@sizeOf(EventRingSegmentTableEntry) != 16) {
         @compileError("xHCI ERST entry must be 16 bytes");
     }
+    if (@sizeOf(MsixTableEntry) != 16) @compileError("MSI-X table entries must be 16 bytes");
 }

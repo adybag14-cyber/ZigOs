@@ -3,6 +3,8 @@ const pci = @import("pci.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
 const apic = @import("apic.zig");
+const hpet = @import("hpet.zig");
+const time_reference = @import("time_reference.zig");
 
 const cc = std.os.uefi.cc;
 
@@ -37,7 +39,8 @@ const identify_namespace: u32 = 0x00;
 const identify_controller: u32 = 0x01;
 const identify_active_namespace_list: u32 = 0x02;
 
-const maximum_poll_iterations: usize = 100_000_000;
+const maximum_poll_iterations: usize = 500_000_000;
+const command_timeout_nanoseconds: u64 = 5_000_000_000;
 const requested_queue_depth: u16 = 16;
 const mmio_probe_size: u64 = 16 * 1024;
 const nvme_interrupt_vector: u8 = 0x46;
@@ -174,6 +177,7 @@ pub const Controller = struct {
     msix_mapping_table_pages: u64,
     interrupt_vector: u8,
     interrupt_target_apic_id: u8,
+    reference: time_reference.Reference,
 };
 
 pub const ReadResult = struct {
@@ -192,7 +196,12 @@ extern fn zigos_cpu_relax() callconv(cc) void;
 extern fn zigos_enable_interrupts() callconv(cc) void;
 extern fn zigos_disable_interrupts() callconv(cc) void;
 
-pub fn initialize(function: pci.Function, allocator: *memory.FrameAllocator, interrupt_target: ?u8) ?Controller {
+pub fn initialize(
+    function: pci.Function,
+    allocator: *memory.FrameAllocator,
+    reference: time_reference.Reference,
+    interrupt_target: ?u8,
+) ?Controller {
     last_failure_stage = .pci_command;
     last_completion_status = 0;
     last_completion_command_id = 0;
@@ -264,7 +273,7 @@ pub fn initialize(function: pci.Function, allocator: *memory.FrameAllocator, int
     if (final_doorbell_offset > mapped_bytes) return null;
 
     last_failure_stage = .disable;
-    if (!disableController(bar)) return null;
+    if (!disableController(bar, reference)) return null;
 
     last_failure_stage = .allocation;
     const queue_depth: u16 = @intCast(@min(maximum_queue_entries, @as(u32, requested_queue_depth)));
@@ -287,7 +296,7 @@ pub fn initialize(function: pci.Function, allocator: *memory.FrameAllocator, int
         controller_configuration_offset,
         controller_enable | io_submission_entry_size | io_completion_entry_size,
     );
-    if (!waitForReady(bar, true)) return null;
+    if (!waitForReady(bar, reference, true)) return null;
 
     const io_submission_address = allocator.allocateBelow(memory.four_gib) orelse return null;
     const io_completion_address = allocator.allocateBelow(memory.four_gib) orelse return null;
@@ -345,6 +354,7 @@ pub fn initialize(function: pci.Function, allocator: *memory.FrameAllocator, int
         .msix_mapping_table_pages = 0,
         .interrupt_vector = 0,
         .interrupt_target_apic_id = 0,
+        .reference = reference,
     };
     zeroPage(controller.identify_controller_address);
     zeroPage(controller.namespace_list_address);
@@ -379,6 +389,7 @@ pub fn readOneBlock(controller: *Controller, allocator: *memory.FrameAllocator, 
     command.command_dword11 = @truncate(lba >> 32);
     command.command_dword12 = 0;
     _ = submit(
+        controller.reference,
         controller.bar,
         controller.doorbell_stride,
         &controller.next_command_id,
@@ -446,6 +457,7 @@ fn identifyController(controller: *Controller) bool {
     command.prp1 = controller.identify_controller_address;
     command.command_dword10 = identify_controller;
     _ = submit(
+        controller.reference,
         controller.bar,
         controller.doorbell_stride,
         &controller.next_command_id,
@@ -468,6 +480,7 @@ fn identifyActiveNamespace(controller: *Controller) bool {
     command.prp1 = controller.namespace_list_address;
     command.command_dword10 = identify_active_namespace_list;
     _ = submit(
+        controller.reference,
         controller.bar,
         controller.doorbell_stride,
         &controller.next_command_id,
@@ -486,6 +499,7 @@ fn identifyNamespace(controller: *Controller) bool {
     command.prp1 = controller.identify_namespace_address;
     command.command_dword10 = identify_namespace;
     _ = submit(
+        controller.reference,
         controller.bar,
         controller.doorbell_stride,
         &controller.next_command_id,
@@ -522,6 +536,7 @@ fn createIoQueues(controller: *Controller) bool {
             (@as(u32, io_msix_table_index) << 16);
     }
     _ = submit(
+        controller.reference,
         controller.bar,
         controller.doorbell_stride,
         &controller.next_command_id,
@@ -535,6 +550,7 @@ fn createIoQueues(controller: *Controller) bool {
         (@as(u32, controller.io_queue.depth - 1) << 16);
     submission_command.command_dword11 = 1 | (@as(u32, controller.io_queue.queue_id) << 16);
     _ = submit(
+        controller.reference,
         controller.bar,
         controller.doorbell_stride,
         &controller.next_command_id,
@@ -544,6 +560,7 @@ fn createIoQueues(controller: *Controller) bool {
         var cleanup = emptySubmission(admin_delete_io_completion_queue, 0);
         cleanup.command_dword10 = controller.io_queue.queue_id;
         _ = submit(
+            controller.reference,
             controller.bar,
             controller.doorbell_stride,
             &controller.next_command_id,
@@ -556,6 +573,7 @@ fn createIoQueues(controller: *Controller) bool {
 }
 
 fn submit(
+    reference: time_reference.Reference,
     bar: usize,
     doorbell_stride: usize,
     next_command_id: *u16,
@@ -585,6 +603,7 @@ fn submit(
         doorbell_base_offset + @as(usize, 2 * queue.queue_id) * doorbell_stride,
         queue.submission_tail,
     );
+    _ = read32(bar, controller_status_offset);
 
     if (wait_for_interrupt) {
         const local_interrupt_target = apic.currentId() == interrupt_target_apic_id;
@@ -592,9 +611,10 @@ fn submit(
         last_interrupt_baseline = interrupt_baseline;
         last_completion_phase_expected = queue.completion_phase;
         last_interrupt_wait_timed_out = false;
+        const interrupt_deadline = startDeadline(reference, command_timeout_nanoseconds);
         var interrupt_wait_iterations: usize = 0;
         while (interruptCount() == interrupt_baseline and
-            interrupt_wait_iterations < maximum_poll_iterations) : (interrupt_wait_iterations += 1)
+            !deadlineExpired(interrupt_deadline, interrupt_wait_iterations)) : (interrupt_wait_iterations += 1)
         {
             zigos_cpu_relax();
         }
@@ -611,14 +631,18 @@ fn submit(
         zigos_memory_fence();
     }
 
+    const completion_deadline = startDeadline(reference, command_timeout_nanoseconds);
     var iteration: usize = 0;
-    while (iteration < maximum_poll_iterations) : (iteration += 1) {
+    while (!deadlineExpired(completion_deadline, iteration)) : (iteration += 1) {
         const completion: *volatile Completion = @ptrFromInt(
             queue.completion_address + @as(usize, queue.completion_head) * @sizeOf(Completion),
         );
         const status = completion.status;
         last_completion_status = status;
-        if ((status & 1) != queue.completion_phase) continue;
+        if ((status & 1) != queue.completion_phase) {
+            zigos_cpu_relax();
+            continue;
+        }
         zigos_memory_fence();
         const record = CompletionRecord{
             .result = completion.result,
@@ -642,6 +666,7 @@ fn submit(
             doorbell_base_offset + @as(usize, 2 * queue.queue_id + 1) * doorbell_stride,
             queue.completion_head,
         );
+        _ = read32(bar, controller_status_offset);
         return record;
     }
     return null;
@@ -755,25 +780,77 @@ fn emptySubmission(opcode: u8, namespace_id: u32) Submission {
     };
 }
 
-fn disableController(bar: usize) bool {
+fn disableController(bar: usize, reference: time_reference.Reference) bool {
     const configuration = read32(bar, controller_configuration_offset);
     if ((configuration & controller_enable) != 0) {
         write32(bar, controller_configuration_offset, configuration & ~controller_enable);
     }
-    return waitForReady(bar, false);
+    return waitForReady(bar, reference, false);
 }
 
-fn waitForReady(bar: usize, expected_ready: bool) bool {
+fn waitForReady(bar: usize, reference: time_reference.Reference, expected_ready: bool) bool {
+    const deadline = startDeadline(reference, command_timeout_nanoseconds);
     var iteration: usize = 0;
-    while (iteration < maximum_poll_iterations) : (iteration += 1) {
+    while (!deadlineExpired(deadline, iteration)) : (iteration += 1) {
         const status = read32(bar, controller_status_offset);
         last_controller_status = status;
         last_controller_configuration = read32(bar, controller_configuration_offset);
         if ((status & controller_fatal_status) != 0) return false;
         const ready = (status & controller_ready) != 0;
         if (ready == expected_ready) return true;
+        zigos_cpu_relax();
     }
     return false;
+}
+
+const PollDeadline = struct {
+    device: ?hpet.Device,
+    start_counter: u64,
+    timeout_ticks: u64,
+};
+
+fn startDeadline(reference: time_reference.Reference, timeout_nanoseconds: u64) PollDeadline {
+    const device = reference.hpet_device orelse return .{
+        .device = null,
+        .start_counter = 0,
+        .timeout_ticks = 0,
+    };
+    if (device.period_femtoseconds == 0) return .{
+        .device = null,
+        .start_counter = 0,
+        .timeout_ticks = 0,
+    };
+    const numerator = @as(u128, timeout_nanoseconds) * 1_000_000;
+    const ticks_u128 = (numerator + device.period_femtoseconds - 1) /
+        device.period_femtoseconds;
+    if (ticks_u128 == 0 or ticks_u128 > std.math.maxInt(u64)) return .{
+        .device = null,
+        .start_counter = 0,
+        .timeout_ticks = 0,
+    };
+    const ticks: u64 = @intCast(ticks_u128);
+    if (!device.counter_64_bit and ticks > std.math.maxInt(u32)) return .{
+        .device = null,
+        .start_counter = 0,
+        .timeout_ticks = 0,
+    };
+    return .{
+        .device = device,
+        .start_counter = device.readCounter(),
+        .timeout_ticks = ticks,
+    };
+}
+
+fn deadlineExpired(deadline: PollDeadline, fallback_iteration: usize) bool {
+    const device = deadline.device orelse return fallback_iteration >= maximum_poll_iterations;
+    const current = device.readCounter();
+    if (device.counter_64_bit) {
+        return current -% deadline.start_counter >= deadline.timeout_ticks;
+    }
+    const current32: u32 = @truncate(current);
+    const start32: u32 = @truncate(deadline.start_counter);
+    const ticks32: u32 = @intCast(deadline.timeout_ticks);
+    return current32 -% start32 >= ticks32;
 }
 
 fn copyTrimmedAscii(source: [*]volatile u8, offset: usize, length: usize, destination: []u8) void {

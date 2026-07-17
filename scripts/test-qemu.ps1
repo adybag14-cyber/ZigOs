@@ -86,6 +86,43 @@ $monitorPort = ([System.Net.IPEndPoint]$monitorListener.LocalEndpoint).Port
 $monitorListener.Stop()
 $monitorEndpoint = "tcp:127.0.0.1:$monitorPort,server=on,wait=off"
 
+function Send-QemuMonitorCommands {
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Commands,
+        [int]$DelayMilliseconds = 180
+    )
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 8; $attempt++) {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        try {
+            $client.Connect('127.0.0.1', $monitorPort)
+            $stream = $client.GetStream()
+            $writer = [System.IO.StreamWriter]::new($stream, [System.Text.Encoding]::ASCII)
+            $writer.NewLine = "`n"
+            $writer.AutoFlush = $true
+
+            # Give HMP time to publish its greeting/prompt before the first command.
+            Start-Sleep -Milliseconds 150
+            foreach ($command in $Commands) {
+                $writer.WriteLine($command)
+                Start-Sleep -Milliseconds $DelayMilliseconds
+            }
+            Start-Sleep -Milliseconds 250
+            $writer.Dispose()
+            $client.Dispose()
+            return
+        }
+        catch {
+            $lastError = $_
+            $client.Dispose()
+            Start-Sleep -Milliseconds 150
+        }
+    }
+    throw "QEMU monitor command delivery failed after 8 attempts: $lastError"
+}
+
 $machineType = if ($LegacyPci) { 'pc' } else { 'q35' }
 if ($SparseApicIds) {
     if ($LegacyPci) { throw '-SparseApicIds is currently supported only with the q35 test machine.' }
@@ -186,41 +223,13 @@ try {
         if (Test-Path $debugLog) {
             $text = Get-Content $debugLog -Raw -ErrorAction SilentlyContinue
             if (-not $NoUsbKeyboard -and -not $UsbMouseOnly -and -not $NoGraphics -and $text -and -not $keyInjected -and $text.Contains($inputMarker)) {
-                $client = [System.Net.Sockets.TcpClient]::new()
-                try {
-                    $client.Connect('127.0.0.1', $monitorPort)
-                    $stream = $client.GetStream()
-                    $writer = [System.IO.StreamWriter]::new($stream, [System.Text.Encoding]::ASCII)
-                    $writer.NewLine = "`n"
-                    $writer.AutoFlush = $true
-                    Start-Sleep -Milliseconds 50
-                    $writer.WriteLine('sendkey a 500')
-                    $keyInjected = $true
-                    $writer.Dispose()
-                }
-                finally {
-                    $client.Dispose()
-                }
+                Send-QemuMonitorCommands -Commands @('sendkey a 500') -DelayMilliseconds 300
+                $keyInjected = $true
             }
             if (-not $NoUsbKeyboard -and -not $UsbMouseOnly -and -not $NoGraphics -and $text -and $keyInjected -and -not $shellInjected -and $text.Contains($shellMarker)) {
-                $client = [System.Net.Sockets.TcpClient]::new()
-                try {
-                    $client.Connect('127.0.0.1', $monitorPort)
-                    $stream = $client.GetStream()
-                    $writer = [System.IO.StreamWriter]::new($stream, [System.Text.Encoding]::ASCII)
-                    $writer.NewLine = "`n"
-                    $writer.AutoFlush = $true
-                    Start-Sleep -Milliseconds 50
-                    foreach ($key in @('h', 'e', 'l', 'x', 'backspace', 'p', 'ret', 'c', 'p', 'u', 'ret', 'm', 'e', 'm', 'ret', 's', 'c', 'r', 'o', 'l', 'l', 'ret', 'c', 'l', 'e', 'a', 'r', 'ret', 'h', 'e', 'l', 'p', 'ret', 'n', 'o', 'p', 'e', 'ret', 'ret', 'h', 'e', 'l', 'p', 'ret', 'up', 'ret')) {
-                        $writer.WriteLine("sendkey $key 120")
-                        Start-Sleep -Milliseconds 180
-                    }
-                    $shellInjected = $true
-                    $writer.Dispose()
-                }
-                finally {
-                    $client.Dispose()
-                }
+                $shellKeys = @('h', 'e', 'l', 'x', 'backspace', 'p', 'ret', 'c', 'p', 'u', 'ret', 'm', 'e', 'm', 'ret', 's', 'c', 'r', 'o', 'l', 'l', 'ret', 'c', 'l', 'e', 'a', 'r', 'ret', 'h', 'e', 'l', 'p', 'ret', 'n', 'o', 'p', 'e', 'ret', 'ret', 'h', 'e', 'l', 'p', 'ret', 'up', 'ret')
+                Send-QemuMonitorCommands -Commands @($shellKeys | ForEach-Object { "sendkey $_ 120" }) -DelayMilliseconds 180
+                $shellInjected = $true
             }
             if ($text -and $text.Contains($marker)) {
                 $captured = $true
@@ -574,6 +583,13 @@ if ($LegacyPci) {
 if (-not [regex]::IsMatch($output, 'xHCI capabilities: version [0-9]+\.[0-9A-F]{2}, [1-9][0-9]* slots, [1-9][0-9]* interrupters, [1-9][0-9]* ports, (32|64)-bit addressing, (32|64)-byte contexts, doorbells \+0x[0-9A-F]{16}, runtime \+0x[0-9A-F]{16}')) {
     throw 'The xHCI capability-register report was not observed.'
 }
+if (-not [regex]::IsMatch($output, 'xHCI PCI capabilities: count [1-9][0-9]*, MSI absent, MSI-X \+0x90')) {
+    throw 'The xHCI PCI MSI-X capability chain was not observed.'
+}
+if (-not $output.Contains('xHCI MSI-X descriptor: vectors 16, table BAR 0 +0x0000000000003000, PBA BAR 0 +0x0000000000003800')) {
+    throw 'The xHCI MSI-X table and pending-bit-array descriptor was not decoded.'
+}
+
 if ($NoGraphics) {
     if (-not $output.Contains('USB keyboard attachment visible: 1 connected xHCI port(s); read-only discovery complete')) {
         throw 'The connected keyboard was not visible during serial-only xHCI discovery.'
@@ -587,6 +603,7 @@ if ($NoGraphics) {
     if ($output.Contains('xHCI ownership active:') -or $output.Contains('ZigOs shell input armed:')) {
         throw 'xHCI ownership or the shell unexpectedly started without a framebuffer console.'
     }
+    if ($output.Contains('xHCI MSI-X active:')) { throw 'xHCI MSI-X unexpectedly activated without an owned input path.' }
 } elseif ($NoUsbKeyboard) {
     if (-not $output.Contains('USB keyboard attachment visible: 0 connected xHCI port(s); read-only discovery complete')) {
         throw 'The zero-device xHCI port inventory was not observed.'
@@ -600,12 +617,19 @@ if ($NoGraphics) {
     if ($output.Contains('xHCI ownership active:') -or $output.Contains('ZigOs shell input armed:')) {
         throw 'xHCI ownership or the interactive shell unexpectedly started without a USB keyboard.'
     }
+    if ($output.Contains('xHCI MSI-X active:')) { throw 'xHCI MSI-X unexpectedly activated without an owned input path.' }
 } elseif ($UsbMouseOnly) {
     if (-not $output.Contains('USB keyboard attachment visible: 1 connected xHCI port(s); read-only discovery complete')) {
         throw 'The connected USB mouse was not visible in the xHCI port inventory.'
     }
     if (-not [regex]::IsMatch($output, 'xHCI ownership active: DCBAA 0x[0-9A-F]{16}, command ring 0x[0-9A-F]{16}, event ring 0x[0-9A-F]{16}, ERST 0x[0-9A-F]{16}, page size 4096, scratchpads 0, slots [1-9][0-9]*')) {
         throw 'The xHCI controller was not taken over for the USB mouse identification path.'
+    }
+    if (-not [regex]::IsMatch($output, "xHCI MSI-X active: capability \+0x90, table entry 0 at 0x[0-9A-F]{16}, vectors 16, vector 0x48, target APIC $expectedLegacyIrqTarget, control 0x[0-9A-F]{4}, mapping pages [0-9]+")) {
+        throw 'The xHCI MSI-X vector was not programmed for the selected routable CPU.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI Enable Slot MSI-X completion verified: interrupt count 1, USBSTS 0x[0-9A-F]{16}, IMAN 0x[0-9A-F]{16}')) {
+        throw 'xHCI Enable Slot did not complete through exactly one MSI-X interrupt.'
     }
     if (-not [regex]::IsMatch($output, 'xHCI Address Device completed: slot [1-9][0-9]*, USB address [1-9][0-9]*, slot state [2-9][0-9]*, EP0 state [1-7], completion 1, context size (32|64), device context 0x[0-9A-F]{16}, input context 0x[0-9A-F]{16}, EP0 ring 0x[0-9A-F]{16}')) {
         throw 'The USB mouse was not addressed through xHCI.'
@@ -630,6 +654,12 @@ if ($NoGraphics) {
     }
     if (-not [regex]::IsMatch($output, 'xHCI ownership active: DCBAA 0x[0-9A-F]{16}, command ring 0x[0-9A-F]{16}, event ring 0x[0-9A-F]{16}, ERST 0x[0-9A-F]{16}, page size 4096, scratchpads 0, slots [1-9][0-9]*')) {
         throw 'The ZigOs-owned xHCI DCBAA/command/event ring installation marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, "xHCI MSI-X active: capability \+0x90, table entry 0 at 0x[0-9A-F]{16}, vectors 16, vector 0x48, target APIC $expectedLegacyIrqTarget, control 0x[0-9A-F]{4}, mapping pages [0-9]+")) {
+        throw 'The xHCI MSI-X vector was not programmed for the selected routable CPU.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI Enable Slot MSI-X completion verified: interrupt count 1, USBSTS 0x[0-9A-F]{16}, IMAN 0x[0-9A-F]{16}')) {
+        throw 'xHCI Enable Slot did not complete through exactly one MSI-X interrupt.'
     }
     if (-not [regex]::IsMatch($output, 'xHCI command completed: Enable Slot, completion 1, slot [1-9][0-9]*, command pointer 0x[0-9A-F]{16}, event cycle 1, controller running, (legacy handoff claimed|no legacy handoff required)')) {
         throw 'The xHCI Enable Slot command-completion event was not observed.'
@@ -676,13 +706,13 @@ if ($NoGraphics) {
     if (-not [regex]::IsMatch($output, 'HID input transfer armed: slot [1-9][0-9]*, endpoint 3, length 8, TRB 0x[0-9A-F]{16}, buffer 0x[0-9A-F]{16}; waiting for QEMU key injection')) {
         throw 'The xHCI interrupt-IN keyboard transfer was not armed.'
     }
-    if (-not [regex]::IsMatch($output, 'HID keyboard press report received: completion (1|13), residual 0, length 8, modifier 0x00, keys 0x04 0x00 0x00 0x00 0x00 0x00')) {
+    if (-not [regex]::IsMatch($output, 'HID keyboard press report received: completion (1|13), residual 0, length 8, MSI-X interrupts [1-9][0-9]*, modifier 0x00, keys 0x04 0x00 0x00 0x00 0x00 0x00')) {
         throw 'The expected eight-byte A-key HID boot report was not observed.'
     }
     if (-not [regex]::IsMatch($output, 'HID release transfer armed: slot [1-9][0-9]*, endpoint 3, length 8, TRB 0x[0-9A-F]{16}, buffer 0x[0-9A-F]{16}; waiting for key release')) {
         throw 'The reusable second HID interrupt-IN transfer was not armed.'
     }
-    if (-not [regex]::IsMatch($output, 'HID keyboard release report received: completion (1|13), residual 0, length 8, modifier 0x00, keys 0x00 0x00 0x00 0x00 0x00 0x00')) {
+    if (-not [regex]::IsMatch($output, 'HID keyboard release report received: completion (1|13), residual 0, length 8, MSI-X interrupts [1-9][0-9]*, modifier 0x00, keys 0x00 0x00 0x00 0x00 0x00 0x00')) {
         throw 'The expected all-keys-released HID boot report was not observed.'
     }
     if (-not [regex]::IsMatch($output, 'USB keyboard input verified: HID usage 0x04 \(A\), slot [1-9][0-9]*, endpoint 3, press TRB 0x[0-9A-F]{16}, release TRB 0x[0-9A-F]{16}')) {
@@ -696,6 +726,9 @@ if ($NoGraphics) {
     }
     if (-not $output.Contains('ZigOs shell input armed: commands help cpu mem scroll clear; waiting for QEMU session')) {
         throw 'The persistent native ZigOs shell input marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI shell MSI-X input verified: [1-9][0-9]* interrupt\(s\) after the shell arm marker')) {
+        throw 'The persistent shell did not complete through xHCI MSI-X input interrupts.'
     }
     if (-not $output.Contains('zigos> help') -or -not $output.Contains('commands: help cpu mem')) {
         throw 'The native shell help command or response was not observed.'
