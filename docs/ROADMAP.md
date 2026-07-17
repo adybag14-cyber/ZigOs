@@ -60,7 +60,7 @@
 - [x] USB EP0 GET_DESCRIPTOR transfer and device-descriptor parsing
 - [x] Configuration, interface, HID and interrupt-endpoint descriptor parsing
 - [x] SET_CONFIGURATION and xHCI interrupt-IN endpoint configuration
-- [ ] HID boot protocol/idle setup and keyboard input transfers
+- [x] HID boot protocol/idle setup and injected keyboard input transfer
 
 ## 0.5 - Runtime
 

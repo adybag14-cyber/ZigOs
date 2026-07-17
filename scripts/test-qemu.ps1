@@ -55,6 +55,12 @@ $varsPath = $varsImage.Replace('\', '/')
 $debugPath = $debugLog.Replace('\', '/')
 $serialPath = $serialLog.Replace('\', '/')
 
+$monitorListener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+$monitorListener.Start()
+$monitorPort = ([System.Net.IPEndPoint]$monitorListener.LocalEndpoint).Port
+$monitorListener.Stop()
+$monitorEndpoint = "tcp:127.0.0.1:$monitorPort,server=on,wait=off"
+
 $arguments = @(
     '-machine', 'q35',
     '-m', '256M',
@@ -69,7 +75,7 @@ $arguments = @(
     '-global', 'isa-debugcon.iobase=0xe9',
     '-display', 'none',
     '-serial', "file:$serialPath",
-    '-monitor', 'none',
+    '-monitor', $monitorEndpoint,
     '-net', 'none',
     '-no-reboot'
 )
@@ -79,12 +85,31 @@ $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStand
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
 $captured = $false
+$keyInjected = $false
+$inputMarker = 'HID input transfer armed:'
 
 try {
     while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 200
+        Start-Sleep -Milliseconds 25
         if (Test-Path $debugLog) {
             $text = Get-Content $debugLog -Raw -ErrorAction SilentlyContinue
+            if ($text -and -not $keyInjected -and $text.Contains($inputMarker)) {
+                $client = [System.Net.Sockets.TcpClient]::new()
+                try {
+                    $client.Connect('127.0.0.1', $monitorPort)
+                    $stream = $client.GetStream()
+                    $writer = [System.IO.StreamWriter]::new($stream, [System.Text.Encoding]::ASCII)
+                    $writer.NewLine = "`n"
+                    $writer.AutoFlush = $true
+                    Start-Sleep -Milliseconds 50
+                    $writer.WriteLine('sendkey a 200')
+                    $keyInjected = $true
+                    $writer.Dispose()
+                }
+                finally {
+                    $client.Dispose()
+                }
+            }
             if ($text -and $text.Contains($marker)) {
                 $captured = $true
                 break
@@ -324,6 +349,21 @@ if (-not [regex]::IsMatch($output, 'xHCI HID endpoint configured: address 0x81, 
 }
 if (-not [regex]::IsMatch($output, 'xHCI Configure Endpoint completed: completion 1, endpoint state 1, slot context entries 3, input context 0x[0-9A-F]{16}, interrupt ring 0x[0-9A-F]{16}')) {
     throw 'The xHCI Configure Endpoint command-completion marker was not observed.'
+}
+if (-not $keyInjected) {
+    throw 'The QEMU HMP harness never injected the A key after the HID arm marker.'
+}
+if (-not [regex]::IsMatch($output, 'HID boot protocol ready: SET_PROTOCOL completion 1, SET_IDLE completion 1')) {
+    throw 'The HID boot-protocol and idle-rate control transfers were not observed.'
+}
+if (-not [regex]::IsMatch($output, 'HID input transfer armed: slot [1-9][0-9]*, endpoint 3, length 8, TRB 0x[0-9A-F]{16}, buffer 0x[0-9A-F]{16}; waiting for QEMU key injection')) {
+    throw 'The xHCI interrupt-IN keyboard transfer was not armed.'
+}
+if (-not [regex]::IsMatch($output, 'HID keyboard report received: completion (1|13), residual 0, length 8, modifier 0x00, keys 0x04 0x00 0x00 0x00 0x00 0x00')) {
+    throw 'The expected eight-byte A-key HID boot report was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'USB keyboard input verified: HID usage 0x04 \(A\), slot [1-9][0-9]*, endpoint 3, event TRB 0x[0-9A-F]{16}')) {
+    throw 'The final USB keyboard usage verification marker was not observed.'
 }
 if (-not $output.Contains('AHCI controller active at')) {
     throw 'The AHCI PCI/BAR discovery marker was not observed.'

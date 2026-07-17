@@ -1376,6 +1376,57 @@ fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWrite(", interrupt ring 0x");
     debugWriteHex64(@intCast(hid_endpoint.transfer_ring_address));
     debugWrite("\r\n");
+    var mutable_hid_endpoint = hid_endpoint;
+    const input_arm = xhci.armHidKeyboardInput(
+        controller,
+        &ownership,
+        &mutable_addressed,
+        configuration,
+        &mutable_hid_endpoint,
+        allocator,
+    ) orelse xhciFailure("HID SET_PROTOCOL/SET_IDLE or interrupt-IN arm failed");
+    debugWrite("HID boot protocol ready: SET_PROTOCOL completion ");
+    debugWriteU64Decimal(input_arm.protocol_completion);
+    debugWrite(", SET_IDLE completion ");
+    debugWriteU64Decimal(input_arm.idle_completion);
+    debugWrite("\r\n");
+    debugWrite("HID input transfer armed: slot ");
+    debugWriteU64Decimal(input_arm.slot_id);
+    debugWrite(", endpoint ");
+    debugWriteU64Decimal(input_arm.endpoint_id);
+    debugWrite(", length ");
+    debugWriteU64Decimal(input_arm.requested_length);
+    debugWrite(", TRB 0x");
+    debugWriteHex64(@intCast(input_arm.expected_event_trb_pointer));
+    debugWrite(", buffer 0x");
+    debugWriteHex64(@intCast(input_arm.buffer_address));
+    debugWrite("; waiting for QEMU key injection\r\n");
+
+    const keyboard_report = xhci.waitHidKeyboardInput(controller, &ownership, input_arm) orelse
+        xhciFailure("HID interrupt-IN transfer did not return the injected A-key report");
+    debugWrite("HID keyboard report received: completion ");
+    debugWriteU64Decimal(keyboard_report.completion_code);
+    debugWrite(", residual ");
+    debugWriteU64Decimal(keyboard_report.transfer_residual);
+    debugWrite(", length ");
+    debugWriteU64Decimal(keyboard_report.report_length);
+    debugWrite(", modifier 0x");
+    debugWriteHex8(keyboard_report.modifier);
+    debugWrite(", keys");
+    for (keyboard_report.keys) |key| {
+        debugWrite(" 0x");
+        debugWriteHex8(key);
+    }
+    debugWrite("\r\n");
+    debugWrite("USB keyboard input verified: HID usage 0x");
+    debugWriteHex8(keyboard_report.first_key);
+    debugWrite(" (A), slot ");
+    debugWriteU64Decimal(keyboard_report.slot_id);
+    debugWrite(", endpoint ");
+    debugWriteU64Decimal(keyboard_report.endpoint_id);
+    debugWrite(", event TRB 0x");
+    debugWriteHex64(keyboard_report.event_trb_pointer);
+    debugWrite("\r\n");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {

@@ -12,7 +12,7 @@ const bar_address_mask: u32 = 0xFFFF_FFF0;
 const maximum_ports: usize = 32;
 const page_bytes: usize = 4096;
 const trbs_per_page: usize = page_bytes / @sizeOf(Trb);
-const maximum_poll_count: usize = 20_000_000;
+const maximum_poll_count: usize = 200_000_000;
 const usbcmd_run_stop: u32 = 1 << 0;
 const usbcmd_host_controller_reset: u32 = 1 << 1;
 const usbsts_halted: u32 = 1 << 0;
@@ -23,6 +23,7 @@ const trb_toggle_cycle: u32 = 1 << 1;
 const trb_type_shift: u5 = 10;
 const trb_type_link: u32 = 6;
 const trb_type_enable_slot: u32 = 9;
+const trb_type_normal: u32 = 1;
 const trb_type_setup_stage: u32 = 2;
 const trb_type_data_stage: u32 = 3;
 const trb_type_status_stage: u32 = 4;
@@ -40,6 +41,12 @@ const trb_direction_in: u32 = 1 << 16;
 const setup_transfer_type_in: u32 = 3 << 16;
 const usb_request_get_descriptor: u8 = 6;
 const usb_request_set_configuration: u8 = 9;
+const usb_hid_request_set_idle: u8 = 0x0A;
+const usb_hid_request_set_protocol: u8 = 0x0B;
+const usb_request_type_hid_interface_out: u8 = 0x21;
+const usb_hid_boot_protocol: u16 = 0;
+const usb_hid_usage_a: u8 = 0x04;
+const completion_short_packet: u8 = 13;
 const usb_descriptor_type_device: u8 = 1;
 const usb_descriptor_type_configuration: u8 = 2;
 const usb_descriptor_type_interface: u8 = 4;
@@ -239,6 +246,7 @@ pub const HidConfiguration = struct {
 pub const HidEndpoint = struct {
     configuration_value: u8,
     set_configuration_completion: u8,
+    slot_id: u8,
     endpoint_address: u8,
     endpoint_id: u5,
     endpoint_type: u3,
@@ -252,6 +260,33 @@ pub const HidEndpoint = struct {
     command_pointer: u64,
     endpoint_state: u3,
     slot_context_entries: u5,
+    transfer_producer_index: u16,
+    transfer_cycle: u1,
+};
+
+pub const HidInputArm = struct {
+    buffer_address: usize,
+    expected_event_trb_pointer: usize,
+    protocol_completion: u8,
+    idle_completion: u8,
+    endpoint_id: u5,
+    slot_id: u8,
+    requested_length: u16,
+};
+
+pub const HidKeyboardReport = struct {
+    buffer_address: usize,
+    completion_code: u8,
+    transfer_residual: u32,
+    report_length: u16,
+    modifier: u8,
+    reserved: u8,
+    keys: [6]u8,
+    first_key: u8,
+    endpoint_id: u5,
+    slot_id: u8,
+    event_trb_pointer: u64,
+    skipped_port_status_events: u8,
 };
 
 pub const Port = struct {
@@ -1058,6 +1093,7 @@ pub fn configureHidEndpoint(
     return .{
         .configuration_value = configuration.configuration_value,
         .set_configuration_completion = set_configuration.completion_code,
+        .slot_id = device.slot_id,
         .endpoint_address = configuration.endpoint_address,
         .endpoint_id = endpoint_id,
         .endpoint_type = endpoint_type_interrupt_in,
@@ -1071,6 +1107,8 @@ pub fn configureHidEndpoint(
         .command_pointer = completion.event.parameter & ~@as(u64, 0xF),
         .endpoint_state = endpoint_state,
         .slot_context_entries = slot_context_entries,
+        .transfer_producer_index = 0,
+        .transfer_cycle = 1,
     };
 }
 
@@ -1128,6 +1166,152 @@ fn endpointInterval(speed_id: u4, descriptor_interval: u8) ?u8 {
         },
         else => null,
     };
+}
+
+pub fn armHidKeyboardInput(
+    controller: Controller,
+    ownership: *Ownership,
+    device: *AddressedDevice,
+    configuration: HidConfiguration,
+    endpoint: *HidEndpoint,
+    allocator: *memory.FrameAllocator,
+) ?HidInputArm {
+    const protocol = controlNoData(
+        controller,
+        ownership,
+        device,
+        usb_request_type_hid_interface_out,
+        usb_hid_request_set_protocol,
+        usb_hid_boot_protocol,
+        configuration.interface_number,
+    ) orelse return null;
+    const idle = controlNoData(
+        controller,
+        ownership,
+        device,
+        usb_request_type_hid_interface_out,
+        usb_hid_request_set_idle,
+        0,
+        configuration.interface_number,
+    ) orelse return null;
+
+    if (endpoint.transfer_producer_index >= trbs_per_page - 1 or
+        endpoint.max_packet_size == 0 or endpoint.max_packet_size > page_bytes)
+    {
+        return null;
+    }
+    const buffer_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    clearPage(buffer_address);
+    const ring = trbPage(endpoint.transfer_ring_address);
+    const producer_index: usize = endpoint.transfer_producer_index;
+    const normal = &ring[producer_index];
+    normal.parameter = buffer_address;
+    normal.status = endpoint.max_packet_size;
+    normal.control = (trb_type_normal << trb_type_shift) |
+        trb_interrupt_on_short_packet |
+        trb_interrupt_on_completion |
+        endpoint.transfer_cycle;
+    zigos_memory_fence();
+
+    const doorbell_base = controller.base_address + controller.doorbell_offset;
+    write32(
+        doorbell_base,
+        @as(usize, endpoint.slot_id) * @sizeOf(u32),
+        endpoint.endpoint_id,
+    );
+    endpoint.transfer_producer_index += 1;
+    return .{
+        .buffer_address = buffer_address,
+        .expected_event_trb_pointer = endpoint.transfer_ring_address +
+            producer_index * @sizeOf(Trb),
+        .protocol_completion = protocol.completion_code,
+        .idle_completion = idle.completion_code,
+        .endpoint_id = endpoint.endpoint_id,
+        .slot_id = endpoint.slot_id,
+        .requested_length = endpoint.max_packet_size,
+    };
+}
+
+pub fn waitHidKeyboardInput(
+    controller: Controller,
+    ownership: *Ownership,
+    arm: HidInputArm,
+) ?HidKeyboardReport {
+    const completion = waitForHidTransferCompletion(
+        controller,
+        ownership,
+        arm.expected_event_trb_pointer,
+        arm.slot_id,
+        arm.endpoint_id,
+    ) orelse return null;
+    if (completion.transfer_residual > arm.requested_length) return null;
+    const report_length: u16 = @intCast(arm.requested_length - completion.transfer_residual);
+    if (report_length < 8) return null;
+    const bytes = @as([*]const u8, @ptrFromInt(arm.buffer_address));
+    var keys: [6]u8 = undefined;
+    @memcpy(keys[0..], bytes[2..8]);
+    var first_key: u8 = 0;
+    for (keys) |key| {
+        if (key != 0) {
+            first_key = key;
+            break;
+        }
+    }
+    if (first_key != usb_hid_usage_a) return null;
+    return .{
+        .buffer_address = arm.buffer_address,
+        .completion_code = completion.completion_code,
+        .transfer_residual = completion.transfer_residual,
+        .report_length = report_length,
+        .modifier = bytes[0],
+        .reserved = bytes[1],
+        .keys = keys,
+        .first_key = first_key,
+        .endpoint_id = completion.endpoint_id,
+        .slot_id = completion.slot_id,
+        .event_trb_pointer = completion.event_trb_pointer,
+        .skipped_port_status_events = completion.skipped_port_status_events,
+    };
+}
+
+fn waitForHidTransferCompletion(
+    controller: Controller,
+    ownership: *Ownership,
+    expected_trb_pointer: usize,
+    expected_slot_id: u8,
+    expected_endpoint_id: u5,
+) ?TransferCompletion {
+    var skipped_port_status_events: u8 = 0;
+    var events_seen: usize = 0;
+    while (events_seen < 32) : (events_seen += 1) {
+        const event = consumeEvent(controller, ownership) orelse return null;
+        const event_type = (event.control >> trb_type_shift) & 0x3F;
+        if (event_type == trb_type_port_status_change) {
+            skipped_port_status_events +|= 1;
+            continue;
+        }
+        if (event_type != trb_type_transfer_event) return null;
+        const completion_code: u8 = @truncate(event.status >> 24);
+        const transfer_residual = event.status & 0x00FF_FFFF;
+        const endpoint_id: u5 = @truncate(event.control >> 16);
+        const slot_id: u8 = @truncate(event.control >> 24);
+        const event_trb_pointer = event.parameter & ~@as(u64, 0xF);
+        if ((completion_code != completion_success and completion_code != completion_short_packet) or
+            slot_id != expected_slot_id or endpoint_id != expected_endpoint_id or
+            event_trb_pointer != expected_trb_pointer)
+        {
+            return null;
+        }
+        return .{
+            .completion_code = completion_code,
+            .transfer_residual = transfer_residual,
+            .endpoint_id = endpoint_id,
+            .slot_id = slot_id,
+            .event_trb_pointer = event_trb_pointer,
+            .skipped_port_status_events = skipped_port_status_events,
+        };
+    }
+    return null;
 }
 
 fn firstConnectedPort(controller: Controller) ?Port {
