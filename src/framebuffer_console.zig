@@ -25,6 +25,7 @@ pub const Report = struct {
     newlines: usize,
     backspaces: usize,
     scrolls: usize,
+    resets: usize,
     lit_pixels: usize,
     checksum: u64,
 };
@@ -49,6 +50,7 @@ pub const Console = struct {
     newlines: usize,
     backspaces: usize,
     scrolls: usize,
+    resets: usize,
 
     pub fn init(framebuffer: boot.FramebufferInfo) ?Console {
         if (framebuffer.base == 0 or framebuffer.pixel_format == 3) return null;
@@ -89,8 +91,9 @@ pub const Console = struct {
             .newlines = 0,
             .backspaces = 0,
             .scrolls = 0,
+            .resets = 0,
         };
-        console.clear();
+        console.clearPixels();
         console.writeAccent("ZigOs");
         console.put('\n');
         console.write("Experimental x86-64");
@@ -98,6 +101,19 @@ pub const Console = struct {
         console.put('\n');
         console.write("zigos> ");
         return console;
+    }
+
+    pub fn reset(self: *Console) void {
+        self.clearPixels();
+        self.cursor_column = 0;
+        self.cursor_row = 0;
+        self.lines = 1;
+        self.glyphs = 0;
+        self.writes = 0;
+        self.newlines = 0;
+        self.backspaces = 0;
+        self.scrolls = 0;
+        self.resets += 1;
     }
 
     pub fn write(self: *Console, text: []const u8) void {
@@ -153,12 +169,13 @@ pub const Console = struct {
             .newlines = self.newlines,
             .backspaces = self.backspaces,
             .scrolls = self.scrolls,
+            .resets = self.resets,
             .lit_pixels = lit_pixels,
             .checksum = checksum,
         };
     }
 
-    fn clear(self: *Console) void {
+    fn clearPixels(self: *Console) void {
         var index: usize = 0;
         while (index < self.pixel_count) : (index += 1) {
             self.pixels[index] = self.background;

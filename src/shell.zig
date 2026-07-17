@@ -8,6 +8,7 @@ pub const Response = enum {
     cpu,
     memory,
     scroll,
+    clear_screen,
     empty,
     unknown,
 };
@@ -59,10 +60,11 @@ pub const Shell = struct {
 
     pub fn responseText(response: Response) []const u8 {
         return switch (response) {
-            .help => "commands: help cpu mem",
+            .help => "commands: help cpu mem scroll clear",
             .cpu => "cpu: x86-64 SMP online",
             .memory => "memory: normalized UEFI layout active",
             .scroll => "scroll: 32 lines",
+            .clear_screen => "clear: screen reset",
             .empty => "",
             .unknown => "error: unknown command",
         };
@@ -80,6 +82,7 @@ pub const Shell = struct {
         if (std.mem.eql(u8, command, "cpu")) return .cpu;
         if (std.mem.eql(u8, command, "mem")) return .memory;
         if (std.mem.eql(u8, command, "scroll")) return .scroll;
+        if (std.mem.eql(u8, command, "clear")) return .clear_screen;
         return .unknown;
     }
 };

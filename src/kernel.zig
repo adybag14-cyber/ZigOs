@@ -124,12 +124,14 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWriteUsizeDecimal(report.lines);
     debugWrite(", glyphs ");
     debugWriteUsizeDecimal(report.glyphs);
+    debugWrite(", resets ");
+    debugWriteUsizeDecimal(report.resets);
     debugWrite(", lit pixels ");
     debugWriteUsizeDecimal(report.lit_pixels);
     debugWrite(", checksum 0x");
     debugWriteHex64(report.checksum);
     debugWrite("\r\n");
-    debugWrite("Framebuffer transcript: persistent shell help, cpu, mem and scroll; 32 scroll lines rendered\r\n");
+    debugWrite("Framebuffer transcript: clear reset followed by a live help command\r\n");
     debugWrite("Framebuffer retained and written directly at 0x");
     debugWriteHex64(@intCast(framebuffer.base));
     debugWrite("\r\n");
@@ -1586,8 +1588,8 @@ fn runUsbShell(
     allocator: *memory.FrameAllocator,
     graphical_console: *framebuffer_console.Console,
 ) void {
-    const expected_commands = [_][]const u8{ "help", "cpu", "mem", "scroll" };
-    const expected_responses = [_]shell.Response{ .help, .cpu, .memory, .scroll };
+    const expected_commands = [_][]const u8{ "help", "cpu", "mem", "scroll", "clear", "help" };
+    const expected_responses = [_]shell.Response{ .help, .cpu, .memory, .scroll, .clear_screen, .help };
     var command_shell = shell.Shell.init();
     var previous_keys = std.mem.zeroes([6]u8);
     var previous_modifiers: u8 = 0;
@@ -1595,14 +1597,14 @@ fn runUsbShell(
     var completed_commands: usize = 0;
     var marker_printed = false;
 
-    while (report_count < 96) : (report_count += 1) {
+    while (report_count < 128) : (report_count += 1) {
         const arm = xhci.armNextHidKeyboardInput(
             controller,
             endpoint,
             allocator,
         ) orelse xhciFailure("shell HID input transfer could not be armed");
         if (!marker_printed) {
-            debugWrite("ZigOs shell input armed: commands help cpu mem scroll; waiting for QEMU session\r\n");
+            debugWrite("ZigOs shell input armed: commands help cpu mem scroll clear; waiting for QEMU session\r\n");
             marker_printed = true;
         }
         const report = xhci.waitHidKeyboardInput(controller, ownership, arm) orelse
@@ -1639,14 +1641,6 @@ fn runUsbShell(
                     xhciFailure("persistent native shell command order or dispatch failed");
                 }
 
-                graphical_console.write(response_text);
-                if (response == .scroll) {
-                    var line_index: usize = 0;
-                    while (line_index < 32) : (line_index += 1) {
-                        graphical_console.put('\n');
-                        graphical_console.write("scroll line");
-                    }
-                }
                 debugWrite("zigos> ");
                 debugWrite(command);
                 debugWrite("\r\n");
@@ -1655,8 +1649,48 @@ fn runUsbShell(
                 completed_commands += 1;
 
                 if (completed_commands == 1) {
+                    graphical_console.write(response_text);
                     debugWrite("Framebuffer line editing verified: helx<BS>p -> help\r\n");
+                } else if (response == .scroll) {
+                    graphical_console.write(response_text);
+                    var line_index: usize = 0;
+                    while (line_index < 32) : (line_index += 1) {
+                        graphical_console.put('\n');
+                        graphical_console.write("scroll line");
+                    }
+                    const scroll_report = graphical_console.report();
+                    if (scroll_report.cursor_row != 36 or scroll_report.cursor_column != 11 or
+                        scroll_report.lines != 43 or scroll_report.writes != 531 or
+                        scroll_report.newlines != 42 or scroll_report.backspaces != 1 or
+                        scroll_report.scrolls != 6 or scroll_report.resets != 0 or
+                        scroll_report.checksum != 0x9F06_BA73_625A_D44D)
+                    {
+                        xhciFailure("framebuffer scroll state before clear was not deterministic");
+                    }
+                    debugWrite("Framebuffer scrolling verified before clear: 32 lines, 37 rows, 6 scrolls, checksum 0x");
+                    debugWriteHex64(scroll_report.checksum);
+                    debugWrite("\r\n");
+                } else if (response == .clear_screen) {
+                    graphical_console.reset();
+                    graphical_console.write("zigos> ");
+                    const clear_report = graphical_console.report();
+                    if (clear_report.cursor_row != 0 or clear_report.cursor_column != 7 or
+                        clear_report.lines != 1 or clear_report.glyphs != 7 or
+                        clear_report.writes != 7 or clear_report.newlines != 0 or
+                        clear_report.backspaces != 0 or clear_report.scrolls != 0 or
+                        clear_report.resets != 1 or
+                        clear_report.checksum != 0x5E87_5379_DEFF_239D)
+                    {
+                        xhciFailure("framebuffer clear did not reset pixels, cursor, and accounting");
+                    }
+                    debugWrite("Framebuffer clear verified: cursor row 0, column 7, writes 7, resets 1, checksum 0x");
+                    debugWriteHex64(clear_report.checksum);
+                    debugWrite("\r\n");
+                    continue;
+                } else {
+                    graphical_console.write(response_text);
                 }
+
                 if (completed_commands < expected_commands.len) {
                     graphical_console.put('\n');
                     graphical_console.write("zigos> ");
@@ -1664,15 +1698,17 @@ fn runUsbShell(
                 }
 
                 const console_report = graphical_console.report();
-                if (console_report.cursor_row != 36 or console_report.cursor_column != 11 or
-                    console_report.lines != 43 or console_report.glyphs != 518 or
-                    console_report.writes != 518 or console_report.newlines != 42 or
-                    console_report.backspaces != 1 or console_report.scrolls != 6)
+                if (console_report.cursor_row != 1 or console_report.cursor_column != 35 or
+                    console_report.lines != 2 or console_report.glyphs != 46 or
+                    console_report.writes != 46 or console_report.newlines != 1 or
+                    console_report.backspaces != 0 or console_report.scrolls != 0 or
+                    console_report.resets != 1 or
+                    console_report.lit_pixels != 2416 or
+                    console_report.checksum != 0x8E5C_0D15_279B_25C5)
                 {
-                    xhciFailure("persistent framebuffer shell cursor or write accounting failed");
+                    xhciFailure("post-clear framebuffer shell state was not deterministic");
                 }
-                debugWrite("Framebuffer scrolling verified: 32 lines, 37 rows, 6 scrolls\r\n");
-                debugWrite("Framebuffer persistent shell: cursor row ");
+                debugWrite("Framebuffer post-clear shell: cursor row ");
                 debugWriteUsizeDecimal(console_report.cursor_row);
                 debugWrite(", column ");
                 debugWriteUsizeDecimal(console_report.cursor_column);
@@ -1682,21 +1718,19 @@ fn runUsbShell(
                 debugWriteUsizeDecimal(console_report.writes);
                 debugWrite(", newlines ");
                 debugWriteUsizeDecimal(console_report.newlines);
-                debugWrite(", backspaces ");
-                debugWriteUsizeDecimal(console_report.backspaces);
-                debugWrite(", scrolls ");
-                debugWriteUsizeDecimal(console_report.scrolls);
+                debugWrite(", resets ");
+                debugWriteUsizeDecimal(console_report.resets);
                 debugWrite(", checksum 0x");
                 debugWriteHex64(console_report.checksum);
                 debugWrite("\r\n");
-                debugWrite("ZigOs shell session complete: help, cpu, mem, scroll; commands 4, reports ");
+                debugWrite("ZigOs shell session complete: help, cpu, mem, scroll, clear, help; commands 6, reports ");
                 debugWriteU64Decimal(report_count + 1);
                 debugWrite(", rejected 0\r\n");
                 return;
             }
         }
     }
-    xhciFailure("native shell did not complete four commands within 96 reports");
+    xhciFailure("native shell did not complete six commands within 128 reports");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {

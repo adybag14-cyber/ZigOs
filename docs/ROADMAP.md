@@ -123,3 +123,5 @@
 - [x] Prompt continuation and distinct command-response rendering
 - [x] Native `scroll` shell command with six real framebuffer scroll operations
 - [x] Overlapping pixel-row copy and bottom-line clearing verification
+- [x] Native `clear` command with full pixel, cursor, and terminal-accounting reset
+- [x] Continued USB input and `help` dispatch after framebuffer reset
