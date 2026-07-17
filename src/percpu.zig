@@ -18,6 +18,7 @@ const ps2_keyboard_vector: u8 = 0x45;
 const nvme_vector: u8 = 0x46;
 const ahci_vector: u8 = 0x47;
 const xhci_vector: u8 = 0x48;
+const e1000e_vector: u8 = 0x49;
 const run_queue_command: u32 = 2;
 const run_queue_checksum_seed: u64 = 0xCBF2_9CE4_8422_2325;
 const work_stealing_checksum_seed: u64 = 0x5753_5445_414C_494E;
@@ -232,6 +233,7 @@ extern fn zigos_isr_ps2_keyboard() callconv(cc) void;
 extern fn zigos_isr_nvme() callconv(cc) void;
 extern fn zigos_isr_ahci() callconv(cc) void;
 extern fn zigos_isr_xhci() callconv(cc) void;
+extern fn zigos_isr_e1000e() callconv(cc) void;
 extern fn zigos_wait_for_interrupt() callconv(cc) void;
 extern fn zigos_memory_fence() callconv(cc) void;
 extern fn zigos_cpu_relax() callconv(cc) void;
@@ -404,6 +406,12 @@ pub fn initialize(state: *State, actual_apic_id: u32) bool {
     setInterruptGate(
         &state.idt[xhci_vector],
         @intFromPtr(&zigos_isr_xhci),
+        code_selector,
+        1,
+    );
+    setInterruptGate(
+        &state.idt[e1000e_vector],
+        @intFromPtr(&zigos_isr_e1000e),
         code_selector,
         1,
     );

@@ -312,3 +312,13 @@
 - HID interrupt-IN arms capture their interrupt baseline before ringing the endpoint doorbell and block until both an MSI-X counter advance and the matching event TRB are visible; interrupt coalescing is accepted.
 - The regression harness uses a retried HMP connection with a settling interval and proves press, release, and the complete native shell session over xHCI MSI-X. Five consecutive cold interactive boots are used as the race-regression gate.
 - NVMe controller-ready and queue-completion waits use a five-second HPET deadline when available, with a bounded PIT-only fallback; SQ/CQ doorbell writes are flushed by a CSTS read to prevent posted-write timing from becoming a CPU-iteration race.
+
+
+## 2.9 - Intel 82574L networking
+
+- QEMU's `e1000e` function is discovered as Intel `8086:10D3`, with BAR0 register MMIO and a five-entry MSI-X table in BAR3.
+- ZigOs performs a software reset, restores and validates the station MAC address, and verifies the 1 Gb/s link before enabling DMA.
+- Eight-entry legacy RX and TX descriptor rings use page-backed buffers below 4 GiB and queue 0 for the first deterministic exchange.
+- MSI-X table entry 0 targets vector `0x49` on the selected routable CPU; IVAR maps both RXQ0 and TXQ0 to that vector and the ISR records queue-specific causes.
+- A padded Ethernet ARP request advertises `10.0.2.15` and resolves QEMU user networking's `10.0.2.2` gateway.
+- The reply must match the local MAC, ARP opcode 2, sender IPv4 `10.0.2.2`, and target IPv4 `10.0.2.15` after both DMA descriptor writeback and MSI-X delivery.

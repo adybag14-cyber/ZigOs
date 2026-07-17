@@ -23,6 +23,7 @@ const scheduler = @import("scheduler.zig");
 const preemptive = @import("preemptive.zig");
 const user_mode = @import("user_mode.zig");
 const xhci = @import("xhci.zig");
+const e1000e = @import("e1000e.zig");
 const smp = @import("smp.zig");
 const serial = @import("serial.zig");
 const shell = @import("shell.zig");
@@ -156,6 +157,11 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     }
 
     const pci_inventory = enumeratePci(acpi_info);
+    const network_ready = inspectE1000e(
+        pci_inventory,
+        &frame_allocator,
+        legacy_irq_target,
+    );
     const graphical_console: ?*framebuffer_console.Console = if (graphical_console_storage) |*console|
         console
     else
@@ -183,6 +189,9 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWrite(if (nvme_storage_ready) "yes" else "no");
     debugWrite(", AHCI ");
     debugWrite(if (ahci_storage_ready) "yes" else "no");
+    debugWrite("\r\n");
+    debugWrite("Network interfaces ready: Intel 82574L ");
+    debugWrite(if (network_ready) "yes" else "no");
     debugWrite("\r\n");
     initializeKernelHeap(&frame_allocator);
     testCooperativeScheduler(&frame_allocator);
@@ -1331,6 +1340,181 @@ fn initializeSerial() void {
 
 fn serialFailure(reason: []const u8) noreturn {
     debugWrite("Serial initialization failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn inspectE1000e(
+    inventory: pci.Inventory,
+    allocator: *memory.FrameAllocator,
+    interrupt_target: ?u8,
+) bool {
+    var network_function: ?pci.Function = null;
+    for (inventory.functions[0..inventory.retained_count]) |function| {
+        if (function.vendor_id == 0x8086 and function.device_id == 0x10D3 and
+            function.class_code == 0x02 and function.subclass == 0x00)
+        {
+            network_function = function;
+            break;
+        }
+    }
+
+    const function = network_function orelse {
+        debugWrite("Intel 82574L network controller not present; continuing without networking\r\n");
+        return false;
+    };
+    const capabilities = pci.inspectCapabilities(function) orelse
+        networkFailure("PCI capability list was malformed");
+    debugWrite("e1000e PCI capabilities: count ");
+    debugWriteU64Decimal(capabilities.count);
+    debugWrite(", MSI ");
+    if (capabilities.msi_offset) |offset| {
+        debugWrite("+0x");
+        debugWriteHex8(offset);
+    } else {
+        debugWrite("absent");
+    }
+    debugWrite(", MSI-X ");
+    if (capabilities.msix_offset) |offset| {
+        debugWrite("+0x");
+        debugWriteHex8(offset);
+    } else {
+        debugWrite("absent");
+    }
+    debugWrite("\r\n");
+
+    if (pci.inspectMsi(function)) |msi| {
+        debugWrite("e1000e MSI descriptor: ");
+        debugWrite(if (msi.address_64_bit) "64" else "32");
+        debugWrite("-bit address, messages capable ");
+        debugWriteU64Decimal(@as(u64, 1) << msi.multiple_message_capable);
+        debugWrite(", per-vector mask ");
+        debugWrite(if (msi.per_vector_masking) "yes" else "no");
+        debugWrite("\r\n");
+    }
+    if (pci.inspectMsix(function)) |msix| {
+        debugWrite("e1000e MSI-X descriptor: vectors ");
+        debugWriteU64Decimal(msix.table_size);
+        debugWrite(", table BAR ");
+        debugWriteU64Decimal(msix.table_bar_index);
+        debugWrite(" +0x");
+        debugWriteHex64(msix.table_offset);
+        debugWrite(", PBA BAR ");
+        debugWriteU64Decimal(msix.pending_bar_index);
+        debugWrite(" +0x");
+        debugWriteHex64(msix.pending_offset);
+        debugWrite("\r\n");
+    }
+
+    var controller = e1000e.inspect(function, allocator) orelse
+        networkFailure("PCI command, BAR mapping, MAC, or status registers were invalid");
+    debugWrite("e1000e controller discovered at ");
+    debugWriteHex16(function.segment);
+    debugWrite(":");
+    debugWriteHex8(function.bus);
+    debugWrite(":");
+    debugWriteHex8(function.device);
+    debugWrite(".");
+    debugWriteU64Decimal(function.function);
+    debugWrite(", vendor 0x");
+    debugWriteHex16(function.vendor_id);
+    debugWrite(", device 0x");
+    debugWriteHex16(function.device_id);
+    debugWrite(", BAR0 0x");
+    debugWriteHex64(controller.bar0);
+    debugWrite(", identity map 0x");
+    debugWriteHex64(controller.mapped_base);
+    debugWrite(" + ");
+    debugWriteU64Decimal(controller.mapped_bytes);
+    debugWrite(" bytes using ");
+    debugWriteU64Decimal(controller.mapping_table_pages);
+    debugWrite(" new table page(s)\r\n");
+
+    debugWrite("e1000e MAC ");
+    for (controller.mac_address, 0..) |octet, index| {
+        if (index != 0) debugWrite(":");
+        debugWriteHex8(octet);
+    }
+    debugWrite(", link ");
+    debugWrite(if (controller.link_up) "up" else "down");
+    debugWrite(", speed ");
+    debugWriteU64Decimal(controller.link_speed_mbps);
+    debugWrite(" Mb/s, CTRL 0x");
+    debugWriteHex64(controller.control);
+    debugWrite(", STATUS 0x");
+    debugWriteHex64(controller.status);
+    debugWrite(", CTRL_EXT 0x");
+    debugWriteHex64(controller.control_extended);
+    debugWrite("\r\n");
+
+    const target_apic_id = interrupt_target orelse
+        networkFailure("no routable online CPU was available for MSI-X");
+    const arp = e1000e.initializeAndExchangeArp(
+        &controller,
+        allocator,
+        target_apic_id,
+    ) orelse networkFailure("reset, DMA rings, MSI-X, transmit, or ARP receive validation failed");
+
+    debugWrite("e1000e rings active: RX 0x");
+    debugWriteHex64(arp.rx_ring_address);
+    debugWrite(", TX 0x");
+    debugWriteHex64(arp.tx_ring_address);
+    debugWrite(", descriptors ");
+    debugWriteU64Decimal(arp.descriptor_count);
+    debugWrite(", TX buffer 0x");
+    debugWriteHex64(arp.tx_buffer_address);
+    debugWrite(", RX buffer 0x");
+    debugWriteHex64(arp.rx_buffer_address);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e MSI-X active: capability +0x");
+    debugWriteHex8(arp.msix_capability_offset);
+    debugWrite(", table entry 0 at 0x");
+    debugWriteHex64(arp.msix_table_address);
+    debugWrite(", vectors ");
+    debugWriteU64Decimal(arp.msix_vector_count);
+    debugWrite(", vector 0x");
+    debugWriteHex8(e1000e.interrupt_vector);
+    debugWrite(", target APIC ");
+    debugWriteU64Decimal(arp.interrupt_target_apic_id);
+    debugWrite(", control 0x");
+    debugWriteHex16(arp.msix_control);
+    debugWrite(", mapping pages ");
+    debugWriteU64Decimal(arp.msix_mapping_table_pages);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e ARP request transmitted: 10.0.2.15 -> 10.0.2.2, ");
+    debugWriteU64Decimal(arp.transmitted_length);
+    debugWrite(" bytes, TX interrupts ");
+    debugWriteU64Decimal(arp.tx_interrupt_count);
+    debugWrite(", cause 0x");
+    debugWriteHex64(arp.tx_interrupt_cause);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e ARP reply received: gateway MAC ");
+    for (arp.gateway_mac_address, 0..) |octet, index| {
+        if (index != 0) debugWrite(":");
+        debugWriteHex8(octet);
+    }
+    debugWrite(", opcode ");
+    debugWriteU64Decimal(arp.arp_opcode);
+    debugWrite(", sender ");
+    debugWriteIpv4(arp.sender_ipv4);
+    debugWrite(", target ");
+    debugWriteIpv4(arp.target_ipv4);
+    debugWrite(", ");
+    debugWriteU64Decimal(arp.received_length);
+    debugWrite(" bytes, RX interrupts ");
+    debugWriteU64Decimal(arp.rx_interrupt_count);
+    debugWrite(", cause 0x");
+    debugWriteHex64(arp.rx_interrupt_cause);
+    debugWrite("\r\n");
+    return true;
+}
+
+fn networkFailure(reason: []const u8) noreturn {
+    debugWrite("Network discovery failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();
@@ -3511,6 +3695,13 @@ fn debugWrite(text: []const u8) void {
     for (text) |character| {
         zigos_debug_putc(character);
         _ = serial.putByte(character);
+    }
+}
+
+fn debugWriteIpv4(address: [4]u8) void {
+    for (address, 0..) |octet, index| {
+        if (index != 0) debugWrite(".");
+        debugWriteU64Decimal(octet);
     }
 }
 

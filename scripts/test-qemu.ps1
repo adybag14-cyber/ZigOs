@@ -14,7 +14,8 @@ param(
     [switch]$NoHpet,
     [switch]$SparseApicIds,
     [switch]$NoX2Apic,
-    [switch]$HighApicId
+    [switch]$HighApicId,
+    [switch]$Network
 )
 
 $ErrorActionPreference = 'Stop'
@@ -184,9 +185,16 @@ $arguments += @(
     '-display', 'none',
     '-serial', "file:$serialPath",
     '-monitor', $monitorEndpoint,
-    '-net', 'none',
     '-no-reboot'
 )
+if ($Network) {
+    $arguments += @(
+        '-netdev', 'user,id=net0,restrict=on',
+        '-device', 'e1000e,netdev=net0,mac=52:54:00:12:34:56'
+    )
+} else {
+    $arguments += @('-net', 'none')
+}
 if (-not $NvmeOnly) {
     if ($LegacyAhci) {
         $arguments += @(
@@ -207,7 +215,7 @@ if ($NoGraphics) {
     $arguments += @('-vga', 'none')
 }
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPU: $cpuArgument, CPUs: $CpuCount, SMP: $smpArgument, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, legacy AHCI: $LegacyAhci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2, no HPET: $NoHpet, sparse APIC IDs: $SparseApicIds, no x2APIC: $NoX2Apic, high APIC ID: $HighApicId)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPU: $cpuArgument, CPUs: $CpuCount, SMP: $smpArgument, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, legacy AHCI: $LegacyAhci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2, no HPET: $NoHpet, sparse APIC IDs: $SparseApicIds, no x2APIC: $NoX2Apic, high APIC ID: $HighApicId, network: $Network)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -570,6 +578,48 @@ if (-not $output.Contains('PCI inventory:')) {
 }
 if (-not $output.Contains('PCI function ')) {
     throw 'No enumerated PCI function was printed.'
+}
+if ($Network) {
+    if (-not [regex]::IsMatch($output, 'PCI function 0000:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7] vendor 0x8086 device 0x10D3 class 02:00:00 header 0x00')) {
+        throw 'The QEMU Intel 82574L PCI function was not enumerated.'
+    }
+    if (-not [regex]::IsMatch($output, 'e1000e PCI capabilities: count [1-9][0-9]*, MSI \+0x[0-9A-F]{2}, MSI-X \+0x[0-9A-F]{2}')) {
+        throw 'The e1000e MSI/MSI-X capability chain was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'e1000e MSI-X descriptor: vectors [1-9][0-9]*, table BAR [0-5] \+0x[0-9A-F]{16}, PBA BAR [0-5] \+0x[0-9A-F]{16}')) {
+        throw 'The e1000e MSI-X table and PBA descriptor was not decoded.'
+    }
+    if (-not [regex]::IsMatch($output, 'e1000e controller discovered at 0000:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], vendor 0x8086, device 0x10D3, BAR0 0x(?!0000000000000000)[0-9A-F]{16}, identity map 0x[0-9A-F]{16} \+ [1-9][0-9]* bytes using [0-9]+ new table page\(s\)')) {
+        throw 'The e1000e BAR0 and MMIO mapping marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'e1000e MAC 52:54:00:12:34:56, link up, speed 1000 Mb/s, CTRL 0x[0-9A-F]{16}, STATUS 0x[0-9A-F]{16}, CTRL_EXT 0x[0-9A-F]{16}')) {
+        throw 'The e1000e MAC/link/status registers were not validated.'
+    }
+    if (-not $output.Contains('Network interfaces ready: Intel 82574L yes')) {
+        throw 'The e1000e network readiness marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'e1000e rings active: RX 0x[0-9A-F]{16}, TX 0x[0-9A-F]{16}, descriptors 8, TX buffer 0x[0-9A-F]{16}, RX buffer 0x[0-9A-F]{16}')) {
+        throw 'The e1000e RX/TX DMA rings were not activated.'
+    }
+    if (-not [regex]::IsMatch($output, "e1000e MSI-X active: capability \+0xA0, table entry 0 at 0x[0-9A-F]{16}, vectors 5, vector 0x49, target APIC $expectedLegacyIrqTarget, control 0x[0-9A-F]{4}, mapping pages [0-9]+")) {
+        throw 'The e1000e MSI-X vector was not programmed for the selected routable CPU.'
+    }
+    if (-not [regex]::IsMatch($output, 'e1000e ARP request transmitted: 10\.0\.2\.15 -> 10\.0\.2\.2, 60 bytes, TX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
+        throw 'The e1000e ARP request did not complete through TX DMA and MSI-X.'
+    }
+    if (-not [regex]::IsMatch($output, 'e1000e ARP reply received: gateway MAC ([0-9A-F]{2}:){5}[0-9A-F]{2}, opcode 2, sender 10\.0\.2\.2, target 10\.0\.2\.15, [4-9][0-9] bytes, RX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
+        throw 'The e1000e RX ring did not receive and validate the QEMU gateway ARP reply.'
+    }
+} else {
+    if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
+        throw 'The network-absent fallback marker was not observed.'
+    }
+    if (-not $output.Contains('Network interfaces ready: Intel 82574L no')) {
+        throw 'The network-absent readiness marker was not observed.'
+    }
+    if ($output.Contains('e1000e controller discovered at')) {
+        throw 'An e1000e controller unexpectedly initialized without -Network.'
+    }
 }
 if ($LegacyPci) {
     if (-not [regex]::IsMatch($output, 'xHCI controller discovered at 0000:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], vendor 0x[0-9A-F]{4}, device 0x[0-9A-F]{4}, MMIO 0x(?!0000000000000000)[0-9A-F]{16}, sparse identity map 0x[0-9A-F]{16} \+ [1-9][0-9]* bytes using [0-9]+ new table page\(s\)')) {
