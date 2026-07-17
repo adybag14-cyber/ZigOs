@@ -341,3 +341,13 @@
 - The ACK supplies the local IPv4 address, subnet mask, server identifier, lease duration, and server MAC address. Router and DNS options remain explicitly tracked as advertised or absent; QEMU user networking omits both, so the validated server identifier becomes the gateway fallback while DNS remains unset.
 - ARP and ICMP move to descriptors 2 and 3 and consume the acknowledged address and router instead of compile-time network constants.
 - Every Discover, Offer, Request, ACK, ARP, and ICMP stage requires fresh queue-specific MSI-X activity and the matching descriptor writeback.
+
+
+## 3.2 - Reusable UDP and TFTP
+
+- A protocol-independent Ethernet II, IPv4, and UDP builder emits padded frames with IPv4 and UDP pseudoheader checksums.
+- The matching parser validates MAC/IP endpoints, IPv4 header length and checksum, non-fragmentation, UDP ports and length, and any nonzero UDP checksum before exposing the payload.
+- The QEMU user-network TFTP root contains a deterministic 36-byte `zigos.txt` fixture and remains available with `restrict=on`.
+- TX descriptor 4 sends an octet-mode RRQ from UDP port 40000 to the validated router/TFTP server on port 69; RX descriptor 4 accepts DATA block 1 from the server's selected transfer port.
+- The TFTP payload must match the exact fixture and FNV-1a64 `6FA5A2AB46F699B6`, and a sub-512-byte DATA block is treated as final.
+- TX descriptor 5 sends ACK block 1 back to the actual transfer port, with fresh TXQ0/RXQ0 MSI-X progress required for RRQ, DATA, and ACK.

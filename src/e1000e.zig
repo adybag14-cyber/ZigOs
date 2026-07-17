@@ -4,6 +4,8 @@ const memory = @import("memory.zig");
 const paging = @import("paging.zig");
 const apic = @import("apic.zig");
 const dhcp = @import("dhcp.zig");
+const udp = @import("udp.zig");
+const tftp = @import("tftp.zig");
 
 const cc = std.os.uefi.cc;
 const pci_command_memory_space: u16 = 1 << 1;
@@ -189,6 +191,22 @@ pub const NetworkResult = struct {
     icmp_sequence: u16,
     icmp_reply_ttl: u8,
     icmp_payload_length: u16,
+    tftp_rrq_length: u16,
+    tftp_data_frame_length: u16,
+    tftp_ack_length: u16,
+    tftp_server_port: u16,
+    tftp_block: u16,
+    tftp_payload_length: u16,
+    tftp_payload_fnv1a64: u64,
+    tftp_reply_ttl: u8,
+    tftp_udp_checksum_present: bool,
+    tftp_final_block: bool,
+    tftp_rrq_tx_interrupt_count: u64,
+    tftp_data_rx_interrupt_count: u64,
+    tftp_ack_tx_interrupt_count: u64,
+    tftp_rrq_tx_interrupt_cause: u32,
+    tftp_data_rx_interrupt_cause: u32,
+    tftp_ack_tx_interrupt_cause: u32,
 };
 
 var active_bar0: usize = 0;
@@ -427,6 +445,67 @@ pub fn initializeAndTestNetwork(
         ack.lease.address,
         ack.lease.router,
     ) orelse return null;
+    const icmp_tx_interrupt_count = txInterruptCount() - icmp_tx_baseline;
+    const icmp_rx_interrupt_count = rxInterruptCount() - icmp_rx_baseline;
+    const icmp_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
+    const icmp_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
+
+    var tftp_payload_buffer: [128]u8 = undefined;
+    const read_request = tftp.buildReadRequest(&tftp_payload_buffer) orelse return null;
+    const rrq_length = udp.buildFrame(tx_buffer, .{
+        .source_mac = controller.mac_address,
+        .destination_mac = parsed.gateway_mac_address,
+        .source_ipv4 = ack.lease.address,
+        .destination_ipv4 = ack.lease.router,
+        .source_port = tftp.client_port,
+        .destination_port = tftp.server_port,
+        .identification = 0x5A50,
+        .payload = read_request,
+    }) orelse return null;
+    tx_descriptors[4] = makeTxDescriptor(tx_buffer_address, rrq_length);
+    zigos_memory_fence();
+    const tftp_rrq_tx_baseline = txInterruptCount();
+    const tftp_data_rx_baseline = rxInterruptCount();
+    write32(controller.bar0, tdt_offset, 5);
+    _ = read32(controller.bar0, status_offset);
+    if (!waitForTx(tx_descriptors, 4, tftp_rrq_tx_baseline, target_apic_id)) return null;
+    if (!waitForRx(rx_descriptors, 4, tftp_data_rx_baseline, target_apic_id)) return null;
+    zigos_memory_fence();
+    const tftp_data_frame_length = validateRxDescriptor(rx_descriptors, 4) orelse return null;
+    const tftp_data_frame = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[4]))[0..tftp_data_frame_length];
+    const tftp_datagram = udp.parseFrame(tftp_data_frame, .{
+        .destination_mac = controller.mac_address,
+        .source_mac = parsed.gateway_mac_address,
+        .destination_ipv4 = ack.lease.address,
+        .source_ipv4 = ack.lease.router,
+        .destination_port = tftp.client_port,
+    }) orelse return null;
+    const tftp_data = tftp.parseData(tftp_datagram.payload) orelse return null;
+    if (!tftp_data.final_block) return null;
+    const tftp_rrq_tx_interrupt_count = txInterruptCount() - tftp_rrq_tx_baseline;
+    const tftp_data_rx_interrupt_count = rxInterruptCount() - tftp_data_rx_baseline;
+    const tftp_rrq_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
+    const tftp_data_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
+
+    const acknowledgement = tftp.buildAcknowledgement(&tftp_payload_buffer, tftp_data.block) orelse return null;
+    const tftp_ack_length = udp.buildFrame(tx_buffer, .{
+        .source_mac = controller.mac_address,
+        .destination_mac = parsed.gateway_mac_address,
+        .source_ipv4 = ack.lease.address,
+        .destination_ipv4 = ack.lease.router,
+        .source_port = tftp.client_port,
+        .destination_port = tftp_datagram.source_port,
+        .identification = 0x5A51,
+        .payload = acknowledgement,
+    }) orelse return null;
+    tx_descriptors[5] = makeTxDescriptor(tx_buffer_address, tftp_ack_length);
+    zigos_memory_fence();
+    const tftp_ack_tx_baseline = txInterruptCount();
+    write32(controller.bar0, tdt_offset, 6);
+    _ = read32(controller.bar0, status_offset);
+    if (!waitForTx(tx_descriptors, 5, tftp_ack_tx_baseline, target_apic_id)) return null;
+    const tftp_ack_tx_interrupt_count = txInterruptCount() - tftp_ack_tx_baseline;
+    const tftp_ack_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -479,14 +558,30 @@ pub fn initializeAndTestNetwork(
         .target_ipv4 = parsed.target_ipv4,
         .icmp_transmitted_length = ethernet_minimum_frame_bytes,
         .icmp_received_length = icmp_received_length,
-        .icmp_tx_interrupt_count = txInterruptCount() - icmp_tx_baseline,
-        .icmp_rx_interrupt_count = rxInterruptCount() - icmp_rx_baseline,
-        .icmp_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire),
-        .icmp_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire),
+        .icmp_tx_interrupt_count = icmp_tx_interrupt_count,
+        .icmp_rx_interrupt_count = icmp_rx_interrupt_count,
+        .icmp_tx_interrupt_cause = icmp_tx_interrupt_cause,
+        .icmp_rx_interrupt_cause = icmp_rx_interrupt_cause,
         .icmp_identifier = icmp.identifier,
         .icmp_sequence = icmp.sequence,
         .icmp_reply_ttl = icmp.ttl,
         .icmp_payload_length = icmp.payload_length,
+        .tftp_rrq_length = rrq_length,
+        .tftp_data_frame_length = tftp_datagram.frame_length,
+        .tftp_ack_length = tftp_ack_length,
+        .tftp_server_port = tftp_datagram.source_port,
+        .tftp_block = tftp_data.block,
+        .tftp_payload_length = tftp_data.payload_length,
+        .tftp_payload_fnv1a64 = tftp_data.payload_fnv1a64,
+        .tftp_reply_ttl = tftp_datagram.ttl,
+        .tftp_udp_checksum_present = tftp_datagram.udp_checksum_present,
+        .tftp_final_block = tftp_data.final_block,
+        .tftp_rrq_tx_interrupt_count = tftp_rrq_tx_interrupt_count,
+        .tftp_data_rx_interrupt_count = tftp_data_rx_interrupt_count,
+        .tftp_ack_tx_interrupt_count = tftp_ack_tx_interrupt_count,
+        .tftp_rrq_tx_interrupt_cause = tftp_rrq_tx_interrupt_cause,
+        .tftp_data_rx_interrupt_cause = tftp_data_rx_interrupt_cause,
+        .tftp_ack_tx_interrupt_cause = tftp_ack_tx_interrupt_cause,
     };
 }
 

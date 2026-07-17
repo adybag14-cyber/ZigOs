@@ -24,6 +24,7 @@ const preemptive = @import("preemptive.zig");
 const user_mode = @import("user_mode.zig");
 const xhci = @import("xhci.zig");
 const e1000e = @import("e1000e.zig");
+const tftp = @import("tftp.zig");
 const smp = @import("smp.zig");
 const serial = @import("serial.zig");
 const shell = @import("shell.zig");
@@ -1454,7 +1455,7 @@ fn inspectE1000e(
         &controller,
         allocator,
         target_apic_id,
-    ) orelse networkFailure("reset, DMA rings, MSI-X, DHCP, ARP, or ICMP validation failed");
+    ) orelse networkFailure("reset, DMA rings, MSI-X, DHCP, ARP, ICMP, UDP, or TFTP validation failed");
 
     debugWrite("e1000e rings active: RX 0x");
     debugWriteHex64(network.rx_ring_address);
@@ -1610,6 +1611,58 @@ fn inspectE1000e(
     debugWriteU64Decimal(network.icmp_rx_interrupt_count);
     debugWrite(", cause 0x");
     debugWriteHex64(network.icmp_rx_interrupt_cause);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e TFTP RRQ transmitted: ");
+    debugWrite(tftp.file_name);
+    debugWrite(" mode ");
+    debugWrite(tftp.mode);
+    debugWrite(", ");
+    debugWriteU64Decimal(network.tftp_rrq_length);
+    debugWrite(" bytes, UDP ");
+    debugWriteU64Decimal(tftp.client_port);
+    debugWrite(" -> ");
+    debugWriteU64Decimal(tftp.server_port);
+    debugWrite(", TX interrupts ");
+    debugWriteU64Decimal(network.tftp_rrq_tx_interrupt_count);
+    debugWrite(", cause 0x");
+    debugWriteHex64(network.tftp_rrq_tx_interrupt_cause);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e TFTP DATA received: block ");
+    debugWriteU64Decimal(network.tftp_block);
+    debugWrite(", payload ");
+    debugWriteU64Decimal(network.tftp_payload_length);
+    debugWrite(" bytes, FNV-1a64 0x");
+    debugWriteHex64(network.tftp_payload_fnv1a64);
+    debugWrite(", frame ");
+    debugWriteU64Decimal(network.tftp_data_frame_length);
+    debugWrite(" bytes, server port ");
+    debugWriteU64Decimal(network.tftp_server_port);
+    debugWrite(", TTL ");
+    debugWriteU64Decimal(network.tftp_reply_ttl);
+    debugWrite(", UDP checksum ");
+    debugWrite(if (network.tftp_udp_checksum_present) "present" else "absent");
+    debugWrite(", final ");
+    debugWrite(if (network.tftp_final_block) "yes" else "no");
+    debugWrite(", RX interrupts ");
+    debugWriteU64Decimal(network.tftp_data_rx_interrupt_count);
+    debugWrite(", cause 0x");
+    debugWriteHex64(network.tftp_data_rx_interrupt_cause);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e TFTP ACK transmitted: block ");
+    debugWriteU64Decimal(network.tftp_block);
+    debugWrite(", ");
+    debugWriteU64Decimal(network.tftp_ack_length);
+    debugWrite(" bytes, UDP ");
+    debugWriteU64Decimal(tftp.client_port);
+    debugWrite(" -> ");
+    debugWriteU64Decimal(network.tftp_server_port);
+    debugWrite(", TX interrupts ");
+    debugWriteU64Decimal(network.tftp_ack_tx_interrupt_count);
+    debugWrite(", cause 0x");
+    debugWriteHex64(network.tftp_ack_tx_interrupt_cause);
     debugWrite("\r\n");
     return true;
 }
