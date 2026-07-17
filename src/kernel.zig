@@ -7,6 +7,7 @@ const exceptions = @import("exceptions.zig");
 const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
 const ioapic = @import("ioapic.zig");
+const pit = @import("pit.zig");
 const pci = @import("pci.zig");
 const ahci = @import("ahci.zig");
 const partition = @import("partition.zig");
@@ -61,7 +62,8 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
 
     const acpi_info = discoverAcpi(info);
     const local_apic_info = initializeApic(acpi_info);
-    initializeIoApic(acpi_info, local_apic_info);
+    const io_apic_info = initializeIoApic(acpi_info, local_apic_info);
+    testExternalIrq(acpi_info, local_apic_info, io_apic_info);
     const apic_timer_info = testApicTimer(acpi_info);
     startApplicationProcessors(
         info,
@@ -440,7 +442,7 @@ fn exceptionTestFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn initializeIoApic(discovery: acpi.Discovery, local_apic: apic.Information) void {
+fn initializeIoApic(discovery: acpi.Discovery, local_apic: apic.Information) ioapic.Information {
     const madt = discovery.madt orelse ioApicFailure("validated ACPI did not contain a MADT");
     const information = ioapic.initialize(madt, local_apic.apic_id) orelse
         ioApicFailure("IOAPIC register discovery or redirection masking failed");
@@ -477,6 +479,56 @@ fn initializeIoApic(discovery: acpi.Discovery, local_apic: apic.Information) voi
         debugWriteHex16(override.flags);
         debugWrite("\r\n");
     }
+    return information;
+}
+
+fn testExternalIrq(
+    discovery: acpi.Discovery,
+    local_apic: apic.Information,
+    information: ioapic.Information,
+) void {
+    const vector: u8 = 0x44;
+    const milliseconds: u32 = 10;
+    const madt = discovery.madt orelse ioApicFailure("validated ACPI did not contain a MADT");
+    var selected_override: ?acpi.InterruptOverride = null;
+    for (madt.overrides[0..madt.stored_override_count]) |override| {
+        if (override.bus_source == 0 and override.irq_source == 0) {
+            selected_override = override;
+            break;
+        }
+    }
+    const override = selected_override orelse
+        ioApicFailure("MADT did not expose the ISA IRQ0 override required by this proof");
+    pit.reset();
+    const route = ioapic.route(
+        information,
+        override.global_system_interrupt,
+        vector,
+        local_apic.apic_id,
+        override.flags,
+    ) orelse ioApicFailure("IOAPIC IRQ0 route programming or readback failed");
+    const divisor = pit.armOneShotMilliseconds(milliseconds) orelse
+        ioApicFailure("PIT one-shot divisor was invalid");
+    pit.waitForInterrupt();
+    if (pit.count() != 1) ioApicFailure("PIT IRQ0 did not arrive exactly once");
+    if (!ioapic.mask(information, override.global_system_interrupt)) {
+        ioApicFailure("IOAPIC IRQ0 route could not be remasked after EOI");
+    }
+    debugWrite("External IRQ routed: ISA IRQ 0 -> GSI ");
+    debugWriteU64Decimal(route.global_system_interrupt);
+    debugWrite(" -> vector 0x");
+    debugWriteHex8(route.vector);
+    debugWrite(", BSP APIC ");
+    debugWriteU64Decimal(route.destination_apic_id);
+    debugWrite(", PIT divisor ");
+    debugWriteU64Decimal(divisor);
+    debugWrite(", count ");
+    debugWriteU64Decimal(pit.count());
+    debugWrite(", active-");
+    debugWrite(if (route.active_low) "low" else "high");
+    debugWrite(", ");
+    debugWrite(if (route.level_triggered) "level" else "edge");
+    debugWrite(", remasked after EOI\r\n");
 }
 
 fn ioApicFailure(reason: []const u8) noreturn {

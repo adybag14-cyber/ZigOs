@@ -188,6 +188,9 @@ if (-not $output.Contains('IOAPIC initialized:')) {
 if (-not $output.Contains('IOAPIC redirection table fully masked:')) {
     throw 'The IOAPIC redirection-mask verification marker was not observed.'
 }
+if (-not [regex]::IsMatch($output, 'External IRQ routed: ISA IRQ 0 -> GSI 2 -> vector 0x44, BSP APIC 0, PIT divisor [1-9][0-9]*, count 1, active-high, edge, remasked after EOI')) {
+    throw 'The MADT/IOAPIC/PIT external IRQ0 round trip was not observed.'
+}
 if (-not $output.Contains('HPET active:')) {
     throw 'The HPET initialization marker was not observed.'
 }

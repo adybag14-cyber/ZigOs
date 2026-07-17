@@ -42,7 +42,7 @@
 - [x] MADT and APIC discovery
 - [x] Local APIC initialization and legacy PIC masking
 - [x] I/O APIC discovery and fully masked redirection table
-- [ ] External IRQ routing through MADT overrides
+- [x] External IRQ routing through MADT overrides
 - [x] PCIe ECAM enumeration from validated MCFG
 - [x] AHCI controller and port inspection through BAR5 MMIO
 - [x] AHCI command-engine ownership and ATA IDENTIFY DEVICE DMA

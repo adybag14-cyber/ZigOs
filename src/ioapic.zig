@@ -7,6 +7,8 @@ const id_register: u32 = 0x00;
 const version_register: u32 = 0x01;
 const arbitration_register: u32 = 0x02;
 const redirection_table_base: u32 = 0x10;
+const redirection_polarity_low: u32 = 1 << 13;
+const redirection_trigger_level: u32 = 1 << 15;
 const redirection_mask: u32 = 1 << 16;
 
 pub const Information = struct {
@@ -18,6 +20,17 @@ pub const Information = struct {
     global_system_interrupt_base: u32,
     first_redirection_low: u32,
     last_redirection_low: u32,
+};
+
+pub const Route = struct {
+    global_system_interrupt: u32,
+    redirection_index: u16,
+    vector: u8,
+    destination_apic_id: u8,
+    active_low: bool,
+    level_triggered: bool,
+    low_value: u32,
+    high_value: u32,
 };
 
 pub fn initialize(madt: acpi.MadtInfo, destination_apic_id: u32) ?Information {
@@ -57,6 +70,69 @@ pub fn initialize(madt: acpi.MadtInfo, destination_apic_id: u32) ?Information {
         .first_redirection_low = first_low,
         .last_redirection_low = last_low,
     };
+}
+
+pub fn route(
+    information: Information,
+    global_system_interrupt: u32,
+    vector: u8,
+    destination_apic_id: u32,
+    madt_flags: u16,
+) ?Route {
+    if (vector < 0x20 or vector >= 0xF0 or destination_apic_id > 0xFF) return null;
+    const redirection_index = redirectionIndex(information, global_system_interrupt) orelse return null;
+    const polarity = madt_flags & 0x3;
+    const trigger = (madt_flags >> 2) & 0x3;
+    const active_low = switch (polarity) {
+        0, 1 => false,
+        3 => true,
+        else => return null,
+    };
+    const level_triggered = switch (trigger) {
+        0, 1 => false,
+        3 => true,
+        else => return null,
+    };
+
+    const low_register = redirection_table_base + @as(u32, redirection_index) * 2;
+    const high_register = low_register + 1;
+    const high_value = destination_apic_id << 24;
+    var low_value: u32 = vector;
+    if (active_low) low_value |= redirection_polarity_low;
+    if (level_triggered) low_value |= redirection_trigger_level;
+
+    writeRegister(information.base_address, low_register, low_value | redirection_mask);
+    writeRegister(information.base_address, high_register, high_value);
+    writeRegister(information.base_address, low_register, low_value);
+    const verified_low = readRegister(information.base_address, low_register);
+    const verified_high = readRegister(information.base_address, high_register);
+    if (verified_low != low_value or verified_high != high_value) return null;
+
+    return .{
+        .global_system_interrupt = global_system_interrupt,
+        .redirection_index = redirection_index,
+        .vector = vector,
+        .destination_apic_id = @intCast(destination_apic_id),
+        .active_low = active_low,
+        .level_triggered = level_triggered,
+        .low_value = verified_low,
+        .high_value = verified_high,
+    };
+}
+
+pub fn mask(information: Information, global_system_interrupt: u32) bool {
+    const redirection_index = redirectionIndex(information, global_system_interrupt) orelse return false;
+    const low_register = redirection_table_base + @as(u32, redirection_index) * 2;
+    const low_value = readRegister(information.base_address, low_register) | redirection_mask;
+    writeRegister(information.base_address, low_register, low_value);
+    return readRegister(information.base_address, low_register) == low_value;
+}
+
+fn redirectionIndex(information: Information, global_system_interrupt: u32) ?u16 {
+    if (global_system_interrupt < information.global_system_interrupt_base) return null;
+    const index = global_system_interrupt - information.global_system_interrupt_base;
+    if (index >= information.redirection_entries) return null;
+    return @intCast(index);
 }
 
 fn readRegister(base: usize, register_index: u32) u32 {
