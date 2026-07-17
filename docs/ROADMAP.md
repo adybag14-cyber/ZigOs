@@ -29,6 +29,7 @@
 - [x] ZigOs-owned x86-64 page tables
 - [x] Identity map required bootstrap firmware, ACPI, stack, and framebuffer regions
 - [x] Higher-half data alias and RIP-relative code-execution proof experiment
+- [x] Sparse high-physical-address MMIO mappings with shared PML4-slot reuse
 - [x] GDT and TSS
 - [x] IDT and assembly interrupt stub proof (vector 3 on IST1)
 - [x] Full CPU exception-vector coverage and fault diagnostics
@@ -53,14 +54,15 @@
 - [x] HPET initialization and local-APIC timer calibration
 - [x] Maskable APIC timer interrupt with EOI and HLT wake-up
 - [x] PS/2 keyboard IRQ and scan-code injection experiment
-- [ ] USB input experiments
+- [x] xHCI capability and connected USB keyboard port discovery
+- [ ] xHCI command/event rings and USB HID input transfers
 
 ## 0.5 - Runtime
 
 - [x] Kernel free-list heap with aligned allocation and coalescing
 - [x] Cooperative task abstraction with independent stacks and ABI-complete context switching
 - [x] APIC-timer pre-emptive scheduler with complete GPR/FX frame switching
-- [ ] Userspace privilege-transition experiment
+- [x] Userspace privilege-transition experiment
 - [x] Minimal DPL3 int 0x80 syscall ABI with return and process exit
 
 ## Long-term experiments

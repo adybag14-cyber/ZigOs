@@ -19,6 +19,8 @@ const present_writable: u64 = 0x003;
 const present_user: u64 = 0x005;
 const present_writable_user: u64 = 0x007;
 const present_writable_large: u64 = 0x083;
+const page_table_address_mask: u64 = 0x000F_FFFF_FFFF_F000;
+const large_page_flag: u64 = 1 << 7;
 
 pub const Installation = struct {
     previous_cr3: u64,
@@ -69,6 +71,69 @@ pub fn installFourGiBIdentityMap(allocator: *memory.FrameAllocator) ?Installatio
     };
 }
 
+pub const IdentityMapping = struct {
+    requested_base: u64,
+    requested_size: u64,
+    mapped_base: u64,
+    mapped_bytes: u64,
+    table_pages: u64,
+};
+
+pub fn mapIdentityMmio(
+    allocator: *memory.FrameAllocator,
+    requested_base: u64,
+    requested_size: u64,
+) ?IdentityMapping {
+    if (active_pml4_address == 0 or requested_size == 0) return null;
+    if (requested_base > std.math.maxInt(u64) - requested_size) return null;
+    const requested_end = requested_base + requested_size;
+    const mapped_base = alignBackward(requested_base, large_page_size);
+    const mapped_end = alignForward(requested_end, large_page_size) orelse return null;
+    if (mapped_end <= mapped_base) return null;
+
+    const pml4 = tableAt(active_pml4_address);
+    var table_pages: u64 = 0;
+    var physical = mapped_base;
+    while (physical < mapped_end) : (physical += large_page_size) {
+        const pml4_index: usize = @intCast((physical >> 39) & 0x1FF);
+        const pdpt_index: usize = @intCast((physical >> 30) & 0x1FF);
+        const directory_index: usize = @intCast((physical >> 21) & 0x1FF);
+
+        const pdpt_result = ensureTable(
+            allocator,
+            &pml4[pml4_index],
+            present_writable,
+        ) orelse return null;
+        if (pdpt_result.allocated) table_pages += 1;
+        const pdpt = tableAt(pdpt_result.address);
+
+        const directory_result = ensureTable(
+            allocator,
+            &pdpt[pdpt_index],
+            present_writable,
+        ) orelse return null;
+        if (directory_result.allocated) table_pages += 1;
+        const directory = tableAt(directory_result.address);
+
+        const expected = physical | present_writable_large;
+        const current = directory[directory_index];
+        if (current == 0) {
+            directory[directory_index] = expected;
+        } else if (current != expected) {
+            return null;
+        }
+    }
+
+    zigos_load_cr3(active_pml4_address);
+    return .{
+        .requested_base = requested_base,
+        .requested_size = requested_size,
+        .mapped_base = mapped_base,
+        .mapped_bytes = mapped_end - mapped_base,
+        .table_pages = table_pages,
+    };
+}
+
 pub const UserMapping = struct {
     code_virtual: usize,
     stack_virtual: usize,
@@ -88,21 +153,31 @@ pub fn mapUserExperiment(
     if ((code_physical & 0xFFF) != 0 or (stack_physical & 0xFFF) != 0) return null;
 
     const pml4 = tableAt(active_pml4_address);
-    if (pml4[user_pml4_index] != 0) return null;
+    var table_pages: u64 = 0;
+    const pdpt_result = ensureTable(
+        allocator,
+        &pml4[user_pml4_index],
+        present_writable_user,
+    ) orelse return null;
+    if (pdpt_result.allocated) table_pages += 1;
+    const pdpt = tableAt(pdpt_result.address);
 
-    const pdpt_address = allocator.allocateBelow(memory.four_gib) orelse return null;
-    const directory_address = allocator.allocateBelow(memory.four_gib) orelse return null;
-    const table_address = allocator.allocateBelow(memory.four_gib) orelse return null;
-    clearTable(pdpt_address);
-    clearTable(directory_address);
-    clearTable(table_address);
+    const directory_result = ensureTable(
+        allocator,
+        &pdpt[0],
+        present_writable_user,
+    ) orelse return null;
+    if (directory_result.allocated) table_pages += 1;
+    const directory = tableAt(directory_result.address);
 
-    const pdpt = tableAt(pdpt_address);
-    const directory = tableAt(directory_address);
-    const table = tableAt(table_address);
-    pml4[user_pml4_index] = @as(u64, @intCast(pdpt_address)) | present_writable_user;
-    pdpt[0] = @as(u64, @intCast(directory_address)) | present_writable_user;
-    directory[0] = @as(u64, @intCast(table_address)) | present_writable_user;
+    const table_result = ensureTable(
+        allocator,
+        &directory[0],
+        present_writable_user,
+    ) orelse return null;
+    if (table_result.allocated) table_pages += 1;
+    const table = tableAt(table_result.address);
+    if (table[0] != 0 or table[1] != 0) return null;
     table[0] = @as(u64, @intCast(code_physical)) | present_user;
     table[1] = @as(u64, @intCast(stack_physical)) | present_writable_user;
 
@@ -116,7 +191,7 @@ pub fn mapUserExperiment(
         .stack_top = stack_virtual + @as(usize, @intCast(memory.page_size)) - 16,
         .code_physical = code_physical,
         .stack_physical = stack_physical,
-        .table_pages = 3,
+        .table_pages = table_pages,
     };
 }
 
@@ -135,6 +210,39 @@ pub fn activePml4Address() ?usize {
 
 pub fn currentCr3() u64 {
     return zigos_read_cr3();
+}
+
+const EnsuredTable = struct {
+    address: usize,
+    allocated: bool,
+};
+
+fn ensureTable(
+    allocator: *memory.FrameAllocator,
+    entry: *volatile u64,
+    flags: u64,
+) ?EnsuredTable {
+    const current = entry.*;
+    if (current == 0) {
+        const address = allocator.allocateBelow(memory.four_gib) orelse return null;
+        clearTable(address);
+        entry.* = @as(u64, @intCast(address)) | flags;
+        return .{ .address = address, .allocated = true };
+    }
+    if ((current & large_page_flag) != 0 or (current & 1) == 0) return null;
+    entry.* = current | flags;
+    const address_u64 = current & page_table_address_mask;
+    if (address_u64 == 0 or address_u64 >= memory.four_gib) return null;
+    return .{ .address = @intCast(address_u64), .allocated = false };
+}
+
+fn alignBackward(value: u64, alignment: u64) u64 {
+    return value & ~(alignment - 1);
+}
+
+fn alignForward(value: u64, alignment: u64) ?u64 {
+    if (value > std.math.maxInt(u64) - (alignment - 1)) return null;
+    return (value + alignment - 1) & ~(alignment - 1);
 }
 
 fn clearTable(address: usize) void {

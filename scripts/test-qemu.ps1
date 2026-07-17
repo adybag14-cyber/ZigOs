@@ -60,6 +60,8 @@ $arguments = @(
     '-m', '256M',
     '-cpu', 'max',
     '-smp', '4',
+    '-device', 'qemu-xhci,id=xhci',
+    '-device', 'usb-kbd,bus=xhci.0,port=1',
     '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$codePath",
     '-drive', "if=pflash,format=raw,unit=1,file=$varsPath",
     '-drive', "format=raw,file=fat:rw:$fatPath",
@@ -274,6 +276,15 @@ if (-not $output.Contains('PCI inventory:')) {
 }
 if (-not $output.Contains('PCI function ')) {
     throw 'No enumerated PCI function was printed.'
+}
+if (-not [regex]::IsMatch($output, 'xHCI controller discovered at [0-9A-F]{4}:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], vendor 0x[0-9A-F]{4}, device 0x[0-9A-F]{4}, MMIO 0x000000C000000000, sparse identity map 0x000000C000000000 \+ 2097152 bytes using [12] new table page\(s\)')) {
+    throw 'The PCI xHCI controller and BAR discovery marker was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'xHCI capabilities: version [0-9]+\.[0-9A-F]{2}, [1-9][0-9]* slots, [1-9][0-9]* interrupters, [1-9][0-9]* ports, (32|64)-bit addressing, (32|64)-byte contexts, doorbells \+0x[0-9A-F]{16}, runtime \+0x[0-9A-F]{16}')) {
+    throw 'The xHCI capability-register report was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'USB keyboard attachment visible: [1-9][0-9]* connected xHCI port\(s\); controller remains read-only')) {
+    throw 'The attached USB keyboard was not visible in any xHCI PORTSC register.'
 }
 if (-not $output.Contains('AHCI controller active at')) {
     throw 'The AHCI PCI/BAR discovery marker was not observed.'

@@ -19,6 +19,7 @@ const heap = @import("heap.zig");
 const scheduler = @import("scheduler.zig");
 const preemptive = @import("preemptive.zig");
 const user_mode = @import("user_mode.zig");
+const xhci = @import("xhci.zig");
 const smp = @import("smp.zig");
 const serial = @import("serial.zig");
 const hpet = @import("hpet.zig");
@@ -80,6 +81,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
         apic_timer_info.ticks_per_second,
     );
     const pci_inventory = enumeratePci(acpi_info);
+    inspectXhci(pci_inventory, &frame_allocator);
     inspectAhci(pci_inventory, &frame_allocator);
     initializeKernelHeap(&frame_allocator);
     testCooperativeScheduler(&frame_allocator);
@@ -1078,6 +1080,86 @@ fn initializeSerial() void {
 
 fn serialFailure(reason: []const u8) noreturn {
     debugWrite("Serial initialization failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
+}
+
+fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void {
+    var controller_function: ?pci.Function = null;
+    for (inventory.functions[0..inventory.retained_count]) |function| {
+        if (function.class_code == 0x0C and
+            function.subclass == 0x03 and
+            function.programming_interface == 0x30)
+        {
+            controller_function = function;
+            break;
+        }
+    }
+    const function = controller_function orelse xhciFailure("no xHCI-class PCI function was enumerated");
+    const controller = xhci.inspect(function, allocator) orelse
+        xhciFailure("xHCI BAR or capability-register validation failed");
+
+    debugWrite("xHCI controller discovered at ");
+    debugWriteHex16(function.segment);
+    debugWrite(":");
+    debugWriteHex8(function.bus);
+    debugWrite(":");
+    debugWriteHex8(function.device);
+    debugWrite(".");
+    debugWriteU64Decimal(function.function);
+    debugWrite(", vendor 0x");
+    debugWriteHex16(function.vendor_id);
+    debugWrite(", device 0x");
+    debugWriteHex16(function.device_id);
+    debugWrite(", MMIO 0x");
+    debugWriteHex64(@intCast(controller.base_address));
+    debugWrite(", sparse identity map 0x");
+    debugWriteHex64(controller.mapping_base);
+    debugWrite(" + ");
+    debugWriteU64Decimal(controller.mapping_bytes);
+    debugWrite(" bytes using ");
+    debugWriteU64Decimal(controller.mapping_table_pages);
+    debugWrite(" new table page(s)\r\n");
+    debugWrite("xHCI capabilities: version ");
+    debugWriteU64Decimal(controller.hci_version >> 8);
+    debugWrite(".");
+    debugWriteHex8(@truncate(controller.hci_version));
+    debugWrite(", ");
+    debugWriteU64Decimal(controller.maximum_slots);
+    debugWrite(" slots, ");
+    debugWriteU64Decimal(controller.maximum_interrupters);
+    debugWrite(" interrupters, ");
+    debugWriteU64Decimal(controller.maximum_ports);
+    debugWrite(" ports, ");
+    debugWrite(if (controller.supports_64_bit_addressing) "64-bit addressing" else "32-bit addressing");
+    debugWrite(if (controller.context_size_64_bytes) ", 64-byte contexts" else ", 32-byte contexts");
+    debugWrite(", doorbells +0x");
+    debugWriteHex64(controller.doorbell_offset);
+    debugWrite(", runtime +0x");
+    debugWriteHex64(controller.runtime_offset);
+    debugWrite("\r\n");
+
+    for (controller.ports[0..controller.retained_port_count]) |port| {
+        debugWrite("xHCI port ");
+        debugWriteU64Decimal(port.number);
+        debugWrite(": ");
+        debugWrite(if (port.connected) "connected" else "disconnected");
+        debugWrite(if (port.enabled) ", enabled" else ", disabled");
+        debugWrite(if (port.powered) ", powered" else ", unpowered");
+        debugWrite(", speed ID ");
+        debugWriteU64Decimal(port.speed_id);
+        debugWrite(", PORTSC 0x");
+        debugWriteHex64(port.port_status_control);
+        debugWrite("\r\n");
+    }
+    debugWrite("USB keyboard attachment visible: ");
+    debugWriteU64Decimal(controller.connected_port_count);
+    debugWrite(" connected xHCI port(s); controller remains read-only\r\n");
+}
+
+fn xhciFailure(reason: []const u8) noreturn {
+    debugWrite("xHCI discovery failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();
