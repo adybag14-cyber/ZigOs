@@ -34,7 +34,7 @@
 - [x] Full CPU exception-vector coverage and fault diagnostics
 - [x] Fatal exception panic path over early debug output
 - [x] COM1 serial diagnostics with loopback self-test and mirrored panic output
-- [ ] Symbolized stack traces
+- [x] Symbolized stack traces
 
 ## 0.4 - Hardware discovery
 

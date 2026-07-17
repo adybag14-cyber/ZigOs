@@ -56,6 +56,7 @@ $zigArgs = @(
     '-target', 'x86_64-uefi-msvc',
     '-O', $Optimize,
     '-fstrip',
+    '-fno-omit-frame-pointer',
     '-fno-stack-check',
     '-fno-stack-protector',
     "-femit-bin=$efiImage"

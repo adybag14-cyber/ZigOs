@@ -4,6 +4,7 @@ const memory = @import("memory.zig");
 const paging = @import("paging.zig");
 const descriptor_tables = @import("descriptor_tables.zig");
 const exceptions = @import("exceptions.zig");
+const stack_trace = @import("stack_trace.zig");
 const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
 const ioapic = @import("ioapic.zig");
@@ -63,7 +64,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     verifyFrameAllocator(&frame_allocator);
     installPaging(info, &frame_allocator);
     installDescriptorTables(info, &frame_allocator);
-    testExceptionRecovery();
+    testExceptionRecovery(info);
 
     const acpi_info = discoverAcpi(info);
     const local_apic_info = initializeApic(acpi_info);
@@ -489,11 +490,31 @@ fn timerFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn testExceptionRecovery() void {
+fn testExceptionRecovery(info: *const boot.BootInfo) void {
+    stack_trace.reset();
+    if (!stack_trace.registerStackRange(info.kernel_stack.base, info.kernel_stack.size)) {
+        exceptionTestFailure("kernel stack could not be registered for unwinding");
+    }
     const result = exceptions.testInvalidOpcodeRecovery() orelse
         exceptionTestFailure("UD2 did not return through the generic exception path");
     if (result.resumed_rip != result.fault_rip + 2) {
         exceptionTestFailure("invalid-opcode handler did not advance RIP by two bytes");
+    }
+    const expected_symbols = [_][]const u8{
+        "zigos_trigger_ud2",
+        "exceptions.traceProbeLevel3",
+        "exceptions.traceProbeLevel2",
+        "exceptions.traceProbeLevel1",
+    };
+    if (result.trace.frame_count < expected_symbols.len or
+        result.trace.symbolized_count < expected_symbols.len)
+    {
+        exceptionTestFailure("exception RBP chain did not yield four symbolized frames");
+    }
+    for (expected_symbols, 0..) |expected, index| {
+        if (!stack_trace.frameHasSymbol(result.trace.frames[index], expected)) {
+            exceptionTestFailure("symbolized exception frame order was incorrect");
+        }
     }
 
     debugWrite("CPU exception coverage active: vectors 0-31 installed on IST1\r\n");
@@ -506,6 +527,21 @@ fn testExceptionRecovery() void {
     debugWrite(" -> 0x");
     debugWriteHex64(result.resumed_rip);
     debugWrite("\r\n");
+    debugWrite("Symbolized exception stack trace: ");
+    for (result.trace.frames[0..expected_symbols.len], 0..) |frame, index| {
+        if (index != 0) debugWrite(" <- ");
+        debugWrite("#");
+        debugWriteUsizeDecimal(index);
+        debugWrite(" ");
+        debugWrite(frame.symbol_name.?);
+        debugWrite("+0x");
+        debugWriteHex64(frame.symbol_offset);
+    }
+    debugWrite("; ");
+    debugWriteUsizeDecimal(result.trace.symbolized_count);
+    debugWrite("/");
+    debugWriteUsizeDecimal(result.trace.frame_count);
+    debugWrite(" frames symbolized\r\n");
 }
 
 fn exceptionTestFailure(reason: []const u8) noreturn {

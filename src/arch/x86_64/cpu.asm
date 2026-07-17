@@ -589,7 +589,10 @@ zigos_read_cr2:
 
 ; Controlled invalid-opcode test. The Zig handler advances RIP by two bytes.
 zigos_trigger_ud2:
+    push rbp
+    mov rbp, rsp
     ud2
+    pop rbp
     ret
 
 section .rdata align=8

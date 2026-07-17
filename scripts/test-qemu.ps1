@@ -170,6 +170,9 @@ if (-not $output.Contains('CPU exception coverage active: vectors 0-31')) {
 if (-not $output.Contains('Invalid-opcode exception recovered: vector 6')) {
     throw 'The controlled UD2 exception recovery marker was not observed.'
 }
+if (-not [regex]::IsMatch($output, 'Symbolized exception stack trace: #0 zigos_trigger_ud2\+0x[0-9A-F]{16} <- #1 exceptions\.traceProbeLevel3\+0x[0-9A-F]{16} <- #2 exceptions\.traceProbeLevel2\+0x[0-9A-F]{16} <- #3 exceptions\.traceProbeLevel1\+0x[0-9A-F]{16}; [4-9][0-9]*/[4-9][0-9]* frames symbolized')) {
+    throw 'The guarded RBP unwind and symbol-resolution proof was not observed.'
+}
 if (-not $output.Contains('ACPI verified: revision')) {
     throw 'The checksum-validated ACPI root walk was not observed.'
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
 const serial = @import("serial.zig");
+const stack_trace = @import("stack_trace.zig");
 
 const cc = std.os.uefi.cc;
 
@@ -38,6 +39,7 @@ pub const RecoveryResult = struct {
     error_code: u64,
     fault_rip: u64,
     resumed_rip: u64,
+    trace: stack_trace.Report,
 };
 
 var recovery_armed: bool = false;
@@ -46,6 +48,8 @@ var last_vector: u64 = 0;
 var last_error_code: u64 = 0;
 var last_fault_rip: u64 = 0;
 var last_resumed_rip: u64 = 0;
+var last_trace: stack_trace.Report = stack_trace.Report.empty();
+var trace_guard: u64 = 0;
 
 pub fn testInvalidOpcodeRecovery() ?RecoveryResult {
     recovery_succeeded = false;
@@ -53,9 +57,11 @@ pub fn testInvalidOpcodeRecovery() ?RecoveryResult {
     last_error_code = 0;
     last_fault_rip = 0;
     last_resumed_rip = 0;
+    last_trace = stack_trace.Report.empty();
+    if (!registerRecoverySymbols()) return null;
 
     recovery_armed = true;
-    zigos_trigger_ud2();
+    traceProbeLevel1();
     recovery_armed = false;
 
     if (!recovery_succeeded or last_vector != 6) return null;
@@ -64,6 +70,7 @@ pub fn testInvalidOpcodeRecovery() ?RecoveryResult {
         .error_code = last_error_code,
         .fault_rip = last_fault_rip,
         .resumed_rip = last_resumed_rip,
+        .trace = last_trace,
     };
 }
 
@@ -73,6 +80,7 @@ export fn zigos_exception_handler(frame: *ExceptionFrame) callconv(cc) void {
     last_fault_rip = frame.rip;
 
     if (recovery_armed and frame.vector == 6) {
+        last_trace = stack_trace.capture(@intCast(frame.rip), @intCast(frame.rbp));
         frame.rip += 2;
         last_resumed_rip = frame.rip;
         recovery_succeeded = true;
@@ -97,8 +105,64 @@ export fn zigos_exception_handler(frame: *ExceptionFrame) callconv(cc) void {
     debugWriteHex64(frame.interrupted_ss);
     debugWrite("\r\nCR2: 0x");
     debugWriteHex64(zigos_read_cr2());
-    debugWrite("\r\nKernel halted.\r\n");
+    debugWrite("\r\n");
+    printStackTrace(stack_trace.capture(@intCast(frame.rip), @intCast(frame.rbp)));
+    debugWrite("Kernel halted.\r\n");
     zigos_halt_forever();
+}
+
+fn registerRecoverySymbols() bool {
+    return stack_trace.registerSymbol("zigos_trigger_ud2", @intFromPtr(&zigos_trigger_ud2)) and
+        stack_trace.registerSymbol("exceptions.traceProbeLevel3", @intFromPtr(&traceProbeLevel3)) and
+        stack_trace.registerSymbol("exceptions.traceProbeLevel2", @intFromPtr(&traceProbeLevel2)) and
+        stack_trace.registerSymbol("exceptions.traceProbeLevel1", @intFromPtr(&traceProbeLevel1)) and
+        stack_trace.registerSymbol(
+            "exceptions.testInvalidOpcodeRecovery",
+            @intFromPtr(&testInvalidOpcodeRecovery),
+        );
+}
+
+noinline fn traceProbeLevel1() void {
+    traceProbeLevel2();
+    touchTraceGuard(1);
+}
+
+noinline fn traceProbeLevel2() void {
+    traceProbeLevel3();
+    touchTraceGuard(2);
+}
+
+noinline fn traceProbeLevel3() void {
+    zigos_trigger_ud2();
+    touchTraceGuard(3);
+}
+
+fn touchTraceGuard(value: u64) void {
+    const pointer: *volatile u64 = &trace_guard;
+    pointer.* +%= value;
+}
+
+fn printStackTrace(report: stack_trace.Report) void {
+    debugWrite("Stack trace: ");
+    if (report.frame_count == 0) {
+        debugWrite("<unavailable>\r\n");
+        return;
+    }
+    for (report.frames[0..report.frame_count], 0..) |frame, index| {
+        if (index != 0) debugWrite(" <- ");
+        debugWrite("#");
+        debugWriteU64Decimal(index);
+        debugWrite(" ");
+        if (frame.symbol_name) |name| {
+            debugWrite(name);
+            debugWrite("+0x");
+            debugWriteHex64(frame.symbol_offset);
+        } else {
+            debugWrite("0x");
+            debugWriteHex64(frame.address);
+        }
+    }
+    debugWrite("\r\n");
 }
 
 fn exceptionName(vector: u64) []const u8 {
