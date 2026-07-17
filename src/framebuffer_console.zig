@@ -8,6 +8,8 @@ const line_spacing: usize = 3;
 const scale: usize = 2;
 const margin_x: usize = 24;
 const margin_y: usize = 24;
+const cursor_width: usize = glyph_width * scale;
+const cursor_height: usize = scale;
 const fnv_offset: u64 = 0xCBF2_9CE4_8422_2325;
 const fnv_prime: u64 = 0x0000_0100_0000_01B3;
 
@@ -26,8 +28,13 @@ pub const Report = struct {
     backspaces: usize,
     scrolls: usize,
     resets: usize,
+    cursor_visible: bool,
+    cursor_draws: usize,
+    cursor_erases: usize,
     lit_pixels: usize,
     checksum: u64,
+    display_lit_pixels: usize,
+    display_checksum: u64,
 };
 
 pub const Console = struct {
@@ -51,6 +58,9 @@ pub const Console = struct {
     backspaces: usize,
     scrolls: usize,
     resets: usize,
+    cursor_visible: bool,
+    cursor_draws: usize,
+    cursor_erases: usize,
 
     pub fn init(framebuffer: boot.FramebufferInfo) ?Console {
         if (framebuffer.base == 0 or framebuffer.pixel_format == 3) return null;
@@ -92,6 +102,9 @@ pub const Console = struct {
             .backspaces = 0,
             .scrolls = 0,
             .resets = 0,
+            .cursor_visible = false,
+            .cursor_draws = 0,
+            .cursor_erases = 0,
         };
         console.clearPixels();
         console.writeAccent("ZigOs");
@@ -104,6 +117,7 @@ pub const Console = struct {
     }
 
     pub fn reset(self: *Console) void {
+        self.hideCursor();
         self.clearPixels();
         self.cursor_column = 0;
         self.cursor_row = 0;
@@ -113,18 +127,28 @@ pub const Console = struct {
         self.newlines = 0;
         self.backspaces = 0;
         self.scrolls = 0;
+        self.cursor_visible = false;
+        self.cursor_draws = 0;
+        self.cursor_erases = 0;
         self.resets += 1;
+        self.showCursor();
     }
 
     pub fn write(self: *Console, text: []const u8) void {
+        self.hideCursor();
         self.writeColor(text, self.foreground);
+        self.showCursor();
     }
 
     pub fn writeAccent(self: *Console, text: []const u8) void {
+        self.hideCursor();
         self.writeColor(text, self.accent);
+        self.showCursor();
     }
 
     pub fn put(self: *Console, character: u8) void {
+        self.hideCursor();
+        defer self.showCursor();
         switch (character) {
             '\r' => return,
             '\n' => {
@@ -144,15 +168,30 @@ pub const Console = struct {
 
     pub fn report(self: *const Console) Report {
         var checksum = fnv_offset;
+        var display_checksum = fnv_offset;
         var lit_pixels: usize = 0;
+        var display_lit_pixels: usize = 0;
+        const cursor_bounds = self.cursorBounds();
         var y: usize = 0;
         while (y < self.height) : (y += 1) {
             var x: usize = 0;
             while (x < self.width) : (x += 1) {
-                const value = self.pixels[y * self.stride + x];
-                if (value != self.background) lit_pixels += 1;
-                checksum ^= value;
+                const display_value = self.pixels[y * self.stride + x];
+                const under_cursor = if (cursor_bounds) |bounds|
+                    x >= bounds.x and x < bounds.x + bounds.width and
+                        y >= bounds.y and y < bounds.y + bounds.height
+                else
+                    false;
+                const content_value = if (self.cursor_visible and under_cursor)
+                    self.background
+                else
+                    display_value;
+                if (content_value != self.background) lit_pixels += 1;
+                if (display_value != self.background) display_lit_pixels += 1;
+                checksum ^= content_value;
                 checksum *%= fnv_prime;
+                display_checksum ^= display_value;
+                display_checksum *%= fnv_prime;
             }
         }
         return .{
@@ -170,9 +209,52 @@ pub const Console = struct {
             .backspaces = self.backspaces,
             .scrolls = self.scrolls,
             .resets = self.resets,
+            .cursor_visible = self.cursor_visible,
+            .cursor_draws = self.cursor_draws,
+            .cursor_erases = self.cursor_erases,
             .lit_pixels = lit_pixels,
             .checksum = checksum,
+            .display_lit_pixels = display_lit_pixels,
+            .display_checksum = display_checksum,
         };
+    }
+
+    const Bounds = struct {
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    };
+
+    fn cursorBounds(self: *const Console) ?Bounds {
+        if (self.cursor_column >= self.columns or self.cursor_row >= self.rows) return null;
+        const cell_width = (glyph_width + glyph_spacing) * scale;
+        const cell_height = (glyph_height + line_spacing) * scale;
+        return .{
+            .x = margin_x + self.cursor_column * cell_width,
+            .y = margin_y + self.cursor_row * cell_height + glyph_height * scale,
+            .width = cursor_width,
+            .height = cursor_height,
+        };
+    }
+
+    fn showCursor(self: *Console) void {
+        if (self.cursor_visible) return;
+        const bounds = self.cursorBounds() orelse return;
+        self.fillRectangle(bounds.x, bounds.y, bounds.width, bounds.height, self.accent);
+        self.cursor_visible = true;
+        self.cursor_draws += 1;
+    }
+
+    fn hideCursor(self: *Console) void {
+        if (!self.cursor_visible) return;
+        const bounds = self.cursorBounds() orelse {
+            self.cursor_visible = false;
+            return;
+        };
+        self.fillRectangle(bounds.x, bounds.y, bounds.width, bounds.height, self.background);
+        self.cursor_visible = false;
+        self.cursor_erases += 1;
     }
 
     fn clearPixels(self: *Console) void {

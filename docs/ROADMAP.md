@@ -127,3 +127,5 @@
 - [x] Continued USB input and `help` dispatch after framebuffer reset
 - [x] Unknown-command error rendering with continued prompt operation
 - [x] Empty-command handling and valid-command recovery in the same USB session
+- [x] Live underline cursor overlay with automatic erase/redraw around terminal mutations
+- [x] Separate content and displayed-pixel checksums preserving transcript regressions

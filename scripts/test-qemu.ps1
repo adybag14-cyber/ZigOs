@@ -318,7 +318,7 @@ if ($syncWorkerMatches.Count -ne 3) {
 if (-not [regex]::IsMatch($output, 'SMP synchronization complete: 4 participants, 16384 locked increments, tickets 16384/16384, barrier generation 1, checksum 0x(?!0000000000000000)[0-9A-F]{16}')) {
     throw 'The four-core ticket-lock and barrier verification marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer terminal initialized: 1280x800, cells 102x37, cursor row 3, column 7, writes 31')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer terminal initialized: 1280x800, cells 102x37, cursor row 3, column 7, writes 31, cursor visible, draws 6, erases 5, display checksum 0x7CF72F9AF061C761')) {
     throw 'The persistent graphical terminal was not initialized before PCI/xHCI discovery.'
 }if (-not $output.Contains('PCIe ECAM active:')) {
     throw 'The PCIe MCFG/ECAM activation marker was not observed.'
@@ -437,7 +437,7 @@ if (-not $output.Contains('Framebuffer unknown command verified: nope -> error: 
 if (-not $output.Contains('Framebuffer empty command verified: prompt continued without an error response')) {
     throw 'The empty-command prompt-continuation proof was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer error recovery shell: cursor row 6, column 35, lines 7, writes 132, newlines 6, resets 1, checksum 0xFE1CD6284B13B031')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer error recovery shell: cursor row 6, column 35, lines 7, writes 132, newlines 6, resets 1, checksum 0xFE1CD6284B13B031, cursor visible, draws 26, erases 25, display checksum 0xC4E5ABA32112C6BD')) {
     throw 'The post-error-recovery framebuffer state was not observed.'
 }
 if (-not [regex]::IsMatch($output, 'ZigOs shell session complete: valid, clear, unknown, empty, recovery; commands 9, reports [1-9][0-9]*, rejected 0')) {
@@ -539,7 +539,7 @@ if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B
 if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
     throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 7, glyphs 132, resets 1, lit pixels 7076, checksum 0xFE1CD6284B13B031')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 7, glyphs 132, resets 1, lit pixels 7076, checksum 0xFE1CD6284B13B031, cursor visible, draws 26, erases 25, display lit pixels 7096, display checksum 0xC4E5ABA32112C6BD')) {
     throw 'The deterministic GOP bitmap-console report was not observed.'
 }
 if (-not $output.Contains('Framebuffer transcript: clear, unknown, empty, and recovered help commands')) {

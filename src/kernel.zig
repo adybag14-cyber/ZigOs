@@ -28,6 +28,7 @@ const framebuffer_console = @import("framebuffer_console.zig");
 const hpet = @import("hpet.zig");
 
 const cc = std.os.uefi.cc;
+const cursor_pixel_count: usize = 20;
 
 var normalized_memory_layout: memory.Layout = undefined;
 var kernel_heap: heap.Heap = undefined;
@@ -88,6 +89,14 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     var graphical_console = framebuffer_console.Console.init(framebuffer) orelse
         framebufferConsoleFailure("GOP geometry, pixel format, or terminal initialization failed");
     const initial_console_report = graphical_console.report();
+    if (!initial_console_report.cursor_visible or
+        initial_console_report.cursor_draws != 6 or
+        initial_console_report.cursor_erases != 5 or
+        initial_console_report.display_lit_pixels != initial_console_report.lit_pixels + cursor_pixel_count or
+        initial_console_report.display_checksum != 0x7CF7_2F9A_F061_C761)
+    {
+        framebufferConsoleFailure("initial framebuffer cursor overlay was not deterministic");
+    }
     debugWrite("Framebuffer terminal initialized: ");
     debugWriteUsizeDecimal(initial_console_report.width);
     debugWrite("x");
@@ -102,6 +111,14 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWriteUsizeDecimal(initial_console_report.cursor_column);
     debugWrite(", writes ");
     debugWriteUsizeDecimal(initial_console_report.writes);
+    debugWrite(", cursor ");
+    debugWrite(if (initial_console_report.cursor_visible) "visible" else "hidden");
+    debugWrite(", draws ");
+    debugWriteUsizeDecimal(initial_console_report.cursor_draws);
+    debugWrite(", erases ");
+    debugWriteUsizeDecimal(initial_console_report.cursor_erases);
+    debugWrite(", display checksum 0x");
+    debugWriteHex64(initial_console_report.display_checksum);
     debugWrite("\r\n");
 
     const pci_inventory = enumeratePci(acpi_info);
@@ -130,6 +147,16 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWriteUsizeDecimal(report.lit_pixels);
     debugWrite(", checksum 0x");
     debugWriteHex64(report.checksum);
+    debugWrite(", cursor ");
+    debugWrite(if (report.cursor_visible) "visible" else "hidden");
+    debugWrite(", draws ");
+    debugWriteUsizeDecimal(report.cursor_draws);
+    debugWrite(", erases ");
+    debugWriteUsizeDecimal(report.cursor_erases);
+    debugWrite(", display lit pixels ");
+    debugWriteUsizeDecimal(report.display_lit_pixels);
+    debugWrite(", display checksum 0x");
+    debugWriteHex64(report.display_checksum);
     debugWrite("\r\n");
     debugWrite("Framebuffer transcript: clear, unknown, empty, and recovered help commands\r\n");
     debugWrite("Framebuffer retained and written directly at 0x");
@@ -1677,6 +1704,10 @@ fn runUsbShell(
                         clear_report.writes != 7 or clear_report.newlines != 0 or
                         clear_report.backspaces != 0 or clear_report.scrolls != 0 or
                         clear_report.resets != 1 or
+                        !clear_report.cursor_visible or clear_report.cursor_draws != 2 or
+                        clear_report.cursor_erases != 1 or
+                        clear_report.display_lit_pixels != clear_report.lit_pixels + cursor_pixel_count or
+                        clear_report.display_checksum == clear_report.checksum or
                         clear_report.checksum != 0x5E87_5379_DEFF_239D)
                     {
                         xhciFailure("framebuffer clear did not reset pixels, cursor, and accounting");
@@ -1708,6 +1739,10 @@ fn runUsbShell(
                     console_report.writes != 132 or console_report.newlines != 6 or
                     console_report.backspaces != 0 or console_report.scrolls != 0 or
                     console_report.resets != 1 or
+                    !console_report.cursor_visible or console_report.cursor_draws != 26 or
+                    console_report.cursor_erases != 25 or
+                    console_report.display_lit_pixels != 7096 or
+                    console_report.display_checksum != 0xC4E5_ABA3_2112_C6BD or
                     console_report.lit_pixels != 7076 or
                     console_report.checksum != 0xFE1C_D628_4B13_B031)
                 {
@@ -1727,6 +1762,12 @@ fn runUsbShell(
                 debugWriteUsizeDecimal(console_report.resets);
                 debugWrite(", checksum 0x");
                 debugWriteHex64(console_report.checksum);
+                debugWrite(", cursor visible, draws ");
+                debugWriteUsizeDecimal(console_report.cursor_draws);
+                debugWrite(", erases ");
+                debugWriteUsizeDecimal(console_report.cursor_erases);
+                debugWrite(", display checksum 0x");
+                debugWriteHex64(console_report.display_checksum);
                 debugWrite("\r\n");
                 debugWrite("ZigOs shell session complete: valid, clear, unknown, empty, recovery; commands 9, reports ");
                 debugWriteU64Decimal(report_count + 1);
