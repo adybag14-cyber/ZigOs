@@ -165,3 +165,12 @@
 - [x] QEMU namespace populated with the current ZigOs BOOTX64.EFI
 - [x] OVMF fallback boot directly from the GPT/FAT NVMe namespace
 - [x] NVMe and AHCI streams cross-checked for identical EFI size and FNV-1a hash
+
+
+## 1.3 - Storage backend fallback
+
+- [x] Independent NVMe and AHCI readiness reporting
+- [x] Boot continuation when an AHCI controller has no attached SATA devices
+- [x] Fatal storage gate only when neither NVMe nor AHCI is usable
+- [x] NVMe-only QEMU mode with no SATA disk attached
+- [x] Full kernel, USB shell, SMP, scheduler, and userspace regression while NVMe-only

@@ -125,8 +125,16 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
 
     const pci_inventory = enumeratePci(acpi_info);
     inspectXhci(pci_inventory, &frame_allocator, &graphical_console);
-    inspectNvme(pci_inventory, &frame_allocator);
-    inspectAhci(pci_inventory, &frame_allocator);
+    const nvme_storage_ready = inspectNvme(pci_inventory, &frame_allocator);
+    const ahci_storage_ready = inspectAhci(pci_inventory, &frame_allocator);
+    if (!nvme_storage_ready and !ahci_storage_ready) {
+        storageFailure("no supported NVMe namespace or SATA device was usable");
+    }
+    debugWrite("Storage backends ready: NVMe ");
+    debugWrite(if (nvme_storage_ready) "yes" else "no");
+    debugWrite(", AHCI ");
+    debugWrite(if (ahci_storage_ready) "yes" else "no");
+    debugWrite("\r\n");
     initializeKernelHeap(&frame_allocator);
     testCooperativeScheduler(&frame_allocator);
     testPreemptiveScheduler(&frame_allocator, apic_timer_info.ticks_per_second);
@@ -1800,7 +1808,7 @@ fn xhciFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void {
+fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool {
     var controller_function: ?pci.Function = null;
     for (inventory.functions[0..inventory.retained_count]) |function| {
         if (function.class_code == 0x01 and function.subclass == 0x08 and function.programming_interface == 0x02) {
@@ -1811,7 +1819,7 @@ fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
 
     const function = controller_function orelse {
         debugWrite("NVMe controller not present; continuing without NVMe storage\r\n");
-        return;
+        return false;
     };
     var controller = nvme.initialize(function, allocator) orelse {
         debugWrite("NVMe initialization diagnostics: BAR 0x");
@@ -2131,6 +2139,7 @@ fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWriteU64Decimal(volume.root_directory_lba);
     debugWrite("\r\n");
     walkNvmeFatBootPath(&controller, allocator, volume);
+    return true;
 }
 
 fn walkNvmeFatBootPath(
@@ -2370,7 +2379,7 @@ fn nvmeFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void {
+fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) bool {
     var controller_function: ?pci.Function = null;
     for (inventory.functions[0..inventory.retained_count]) |function| {
         if (function.class_code == 0x01 and function.subclass == 0x06 and function.programming_interface == 0x01) {
@@ -2379,9 +2388,14 @@ fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
         }
     }
 
-    const function = controller_function orelse ahciFailure("no AHCI-class PCI function was enumerated");
-    const controller = ahci.inspect(function) orelse
-        ahciFailure("AHCI BAR5 or host-register validation failed");
+    const function = controller_function orelse {
+        debugWrite("AHCI controller not present; continuing with another storage backend\r\n");
+        return false;
+    };
+    const controller = ahci.inspect(function) orelse {
+        debugWrite("AHCI controller registers were unusable; continuing with another storage backend\r\n");
+        return false;
+    };
 
     debugWrite("AHCI controller active at ");
     debugWriteHex16(function.segment);
@@ -2425,6 +2439,14 @@ fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
         debugWrite(", CMD 0x");
         debugWriteHex64(port.command);
         debugWrite("\r\n");
+    }
+    var active_sata_count: usize = 0;
+    for (controller.ports[0..controller.retained_port_count]) |port| {
+        if (port.active and port.device_type == .sata) active_sata_count += 1;
+    }
+    if (active_sata_count == 0) {
+        debugWrite("AHCI controller has no active SATA devices; continuing with NVMe storage\r\n");
+        return false;
     }
     const identity = ahci.identifyFirstSata(controller, allocator) orelse
         ahciFailure("ATA IDENTIFY DEVICE DMA command did not complete successfully");
@@ -2481,6 +2503,7 @@ fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWrite(", trailing signature 0x");
     debugWriteHex16(sector_zero.trailing_signature);
     debugWrite("\r\n");
+    return true;
 }
 
 fn inspectPartitionAndFat(
@@ -2814,6 +2837,13 @@ fn printDirectoryEntries(prefix: []const u8, directory: fat.DirectorySector) voi
         debugWriteU64Decimal(entry.file_size);
         debugWrite("\r\n");
     }
+}
+
+fn storageFailure(reason: []const u8) noreturn {
+    debugWrite("Storage discovery failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
+    zigos_halt_forever();
 }
 
 fn filesystemFailure(reason: []const u8) noreturn {

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [int]$TimeoutSeconds = 30
+    [int]$TimeoutSeconds = 30,
+    [switch]$NvmeOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -265,7 +266,6 @@ $arguments = @(
     '-device', 'nvme,drive=nvme0,serial=ZIGOSNVME',
     '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$codePath",
     '-drive', "if=pflash,format=raw,unit=1,file=$varsPath",
-    '-drive', "format=raw,file=fat:rw:$fatPath",
     '-debugcon', "file:$debugPath",
     '-global', 'isa-debugcon.iobase=0xe9',
     '-display', 'none',
@@ -274,8 +274,11 @@ $arguments = @(
     '-net', 'none',
     '-no-reboot'
 )
+if (-not $NvmeOnly) {
+    $arguments += @('-drive', "format=raw,file=fat:rw:$fatPath")
+}
 
-Write-Host "Booting ZigOs in QEMU with $codeSource"
+Write-Host "Booting ZigOs in QEMU with $codeSource (NVMe-only: $NvmeOnly)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -705,64 +708,82 @@ if ([Int64]$nvmeFileMatch.Groups[1].Value -ne $builtEfiSize) {
     throw "The NVMe FAT file size did not match the built EFI image: NVMe=$($nvmeFileMatch.Groups[1].Value), built=$builtEfiSize."
 }
 
-if (-not $output.Contains('AHCI controller active at')) {
-    throw 'The AHCI PCI/BAR discovery marker was not observed.'
-}
-if (-not $output.Contains('AHCI port inventory:')) {
-    throw 'The AHCI port inventory marker was not observed.'
-}
-if (-not $output.Contains('AHCI port 0: SATA active')) {
-    throw 'The expected active SATA port was not observed.'
-}
-if (-not $output.Contains('ATA IDENTIFY completed on port 0:')) {
-    throw 'The ATA IDENTIFY DEVICE completion marker was not observed.'
-}
-if (-not $output.Contains('SATA capacity:')) {
-    throw 'The decoded SATA capacity marker was not observed.'
-}
-if (-not $output.Contains('AHCI DMA structures:')) {
-    throw 'The AHCI DMA structure and transfer marker was not observed.'
-}
-if (-not $output.Contains('transferred 512 bytes')) {
-    throw 'ATA IDENTIFY did not report a complete 512-byte DMA transfer.'
-}
-if (-not $output.Contains('READ DMA EXT completed: LBA 0')) {
-    throw 'The read-only ATA sector DMA marker was not observed.'
-}
-if (-not $output.Contains('LBA 0 FNV-1a64:')) {
-    throw 'The LBA 0 sector fingerprint marker was not observed.'
-}
-if (-not $output.Contains('trailing signature 0xAA55')) {
-    throw 'The expected LBA 0 MBR signature was not observed.'
-}
-if (-not $output.Contains('MBR parsed:')) {
-    throw 'The MBR partition-table parser marker was not observed.'
-}
-if (-not $output.Contains('FAT volume detected: FAT16')) {
-    throw 'The FAT volume classification marker was not observed.'
-}
-if (-not $output.Contains('FAT layout:')) {
-    throw 'The FAT geometry/layout marker was not observed.'
-}
-if (-not $output.Contains('FAT root entry: EFI <DIR>')) {
-    throw 'The FAT root-directory decoding marker was not observed.'
-}
-if (-not $output.Contains('FAT path resolved: EFI cluster')) {
-    throw 'The FAT cluster-chain path-resolution marker was not observed.'
-}
-if (-not $output.Contains('FAT boot file found: EFI/BOOT/BOOTX64.EFI')) {
-    throw 'The FAT boot-file lookup marker was not observed.'
-}
-$ahciFileMatch = [regex]::Match($output, '(?m)^FAT file streamed: ([1-9][0-9]*) bytes across ([1-9][0-9]*) cluster\(s\), last cluster ([1-9][0-9]*), FNV-1a64 0x([0-9A-F]{16})\r?$')
-if (-not $ahciFileMatch.Success) {
-    throw 'The complete AHCI FAT file-stream marker was not observed.'
-}
-if ($nvmeFileMatch.Groups[1].Value -ne $ahciFileMatch.Groups[1].Value -or
-    $nvmeFileMatch.Groups[4].Value -ne $ahciFileMatch.Groups[4].Value) {
-    throw "NVMe and AHCI streamed different BOOTX64.EFI content: NVMe size/hash $($nvmeFileMatch.Groups[1].Value)/$($nvmeFileMatch.Groups[4].Value), AHCI size/hash $($ahciFileMatch.Groups[1].Value)/$($ahciFileMatch.Groups[4].Value)."
-}
-if (-not $output.Contains('On-disk PE verified: AMD64 PE32+, EFI subsystem 10')) {
-    throw 'The on-disk AMD64 PE32+ EFI validation marker was not observed.'
+if ($NvmeOnly) {
+    if (-not $output.Contains('AHCI controller active at')) {
+        throw 'The q35 AHCI controller was not enumerated in NVMe-only mode.'
+    }
+    if (-not $output.Contains('AHCI controller has no active SATA devices; continuing with NVMe storage')) {
+        throw 'The empty AHCI controller was not skipped in NVMe-only mode.'
+    }
+    if ($output.Contains('ATA IDENTIFY completed on port')) {
+        throw 'ATA IDENTIFY unexpectedly ran without a SATA disk in NVMe-only mode.'
+    }
+    if (-not $output.Contains('Storage backends ready: NVMe yes, AHCI no')) {
+        throw 'The NVMe-only storage readiness marker was not observed.'
+    }
+} else {
+    if (-not $output.Contains('AHCI controller active at')) {
+        throw 'The AHCI PCI/BAR discovery marker was not observed.'
+    }
+    if (-not $output.Contains('AHCI port inventory:')) {
+        throw 'The AHCI port inventory marker was not observed.'
+    }
+    if (-not $output.Contains('AHCI port 0: SATA active')) {
+        throw 'The expected active SATA port was not observed.'
+    }
+    if (-not $output.Contains('ATA IDENTIFY completed on port 0:')) {
+        throw 'The ATA IDENTIFY DEVICE completion marker was not observed.'
+    }
+    if (-not $output.Contains('SATA capacity:')) {
+        throw 'The decoded SATA capacity marker was not observed.'
+    }
+    if (-not $output.Contains('AHCI DMA structures:')) {
+        throw 'The AHCI DMA structure and transfer marker was not observed.'
+    }
+    if (-not $output.Contains('transferred 512 bytes')) {
+        throw 'ATA IDENTIFY did not report a complete 512-byte DMA transfer.'
+    }
+    if (-not $output.Contains('READ DMA EXT completed: LBA 0')) {
+        throw 'The read-only ATA sector DMA marker was not observed.'
+    }
+    if (-not $output.Contains('LBA 0 FNV-1a64:')) {
+        throw 'The LBA 0 sector fingerprint marker was not observed.'
+    }
+    if (-not $output.Contains('trailing signature 0xAA55')) {
+        throw 'The expected LBA 0 MBR signature was not observed.'
+    }
+    if (-not $output.Contains('MBR parsed:')) {
+        throw 'The MBR partition-table parser marker was not observed.'
+    }
+    if (-not $output.Contains('FAT volume detected: FAT16')) {
+        throw 'The FAT volume classification marker was not observed.'
+    }
+    if (-not $output.Contains('FAT layout:')) {
+        throw 'The FAT geometry/layout marker was not observed.'
+    }
+    if (-not $output.Contains('FAT root entry: EFI <DIR>')) {
+        throw 'The FAT root-directory decoding marker was not observed.'
+    }
+    if (-not $output.Contains('FAT path resolved: EFI cluster')) {
+        throw 'The FAT cluster-chain path-resolution marker was not observed.'
+    }
+    if (-not $output.Contains('FAT boot file found: EFI/BOOT/BOOTX64.EFI')) {
+        throw 'The FAT boot-file lookup marker was not observed.'
+    }
+    $ahciFileMatch = [regex]::Match($output, '(?m)^FAT file streamed: ([1-9][0-9]*) bytes across ([1-9][0-9]*) cluster\(s\), last cluster ([1-9][0-9]*), FNV-1a64 0x([0-9A-F]{16})\r?$')
+    if (-not $ahciFileMatch.Success) {
+        throw 'The complete AHCI FAT file-stream marker was not observed.'
+    }
+    if ($nvmeFileMatch.Groups[1].Value -ne $ahciFileMatch.Groups[1].Value -or
+        $nvmeFileMatch.Groups[4].Value -ne $ahciFileMatch.Groups[4].Value) {
+        throw "NVMe and AHCI streamed different BOOTX64.EFI content: NVMe size/hash $($nvmeFileMatch.Groups[1].Value)/$($nvmeFileMatch.Groups[4].Value), AHCI size/hash $($ahciFileMatch.Groups[1].Value)/$($ahciFileMatch.Groups[4].Value)."
+    }
+    if (-not $output.Contains('On-disk PE verified: AMD64 PE32+, EFI subsystem 10')) {
+        throw 'The on-disk AMD64 PE32+ EFI validation marker was not observed.'
+    }
+    if (-not $output.Contains('Storage backends ready: NVMe yes, AHCI yes')) {
+        throw 'The dual NVMe/AHCI storage readiness marker was not observed.'
+    }
 }
 if (-not $output.Contains('Kernel heap active:')) {
     throw 'The kernel heap initialization marker was not observed.'
