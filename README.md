@@ -1,86 +1,149 @@
 # ZigOs
 
-ZigOs is an experimental x86-64 operating-system project built from **freestanding Zig and hand-written assembly**.
+[![Build ZigOs](https://github.com/adybag14-cyber/ZigOs/actions/workflows/build.yml/badge.svg)](https://github.com/adybag14-cyber/ZigOs/actions/workflows/build.yml)
 
-The project deliberately uses the canonical Zig builds published by [`adybag14-cyber/zig`](https://github.com/adybag14-cyber/zig/releases). The build scripts do not fall back to a system or stock Zig installation.
+ZigOs is an experimental x86-64 operating system built from **freestanding Zig and hand-written assembly**. It boots as a UEFI application, exits firmware boot services, installs its own low-level execution environment, starts additional processors, drives emulated hardware directly, enters CPL3 userspace, and validates its subsystems in deterministic QEMU boot tests.
 
-## Current milestone: 0.2 firmware handoff
+The project deliberately uses the canonical Zig builds published by [`adybag14-cyber/zig`](https://github.com/adybag14-cyber/zig/releases). Build scripts do not silently fall back to a system or stock Zig installation.
 
-ZigOs now performs a complete transition from UEFI boot services into a kernel-owned execution environment:
+> ZigOs is a research and learning operating system. It is not ready for production use or general physical-hardware support.
+
+## Current milestone: 3.4
+
+The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling and both transmit and receive ring wrap.
+
+The deterministic networking sequence is:
 
 ```text
-Motherboard UEFI / OVMF
+DHCP Discover -> Offer -> Request -> ACK
         |
         v
+ARP gateway resolution
+        |
+        v
+IPv4 / ICMP Echo Request and Reply
+        |
+        v
+UDP / TFTP read of zigos.bin
+        |
+        +--> 5 DATA blocks: 512 / 512 / 512 / 512 / 256 bytes
+        +--> 2,304 bytes validated byte-for-byte
+        +--> cumulative FNV-1a64: 6175986CBBAB5125
+        +--> TX descriptors: 5, 6, 7, 0, 1
+        +--> RX packets:      0, 1, 2, 3, 4, 5, 6, 7, 0
+        +--> final TDT: 2
+        +--> final RDH/RDT: 1 / 0
+```
+
+Every DHCP, ARP, ICMP, TFTP DATA, and TFTP ACK stage requires a fresh queue-specific MSI-X interrupt and the expected descriptor writeback. Receive descriptors are returned to hardware only after their packet has been parsed and its required state preserved.
+
+## Architecture
+
+```text
+UEFI / OVMF
+    |
+    v
 EFI/BOOT/BOOTX64.EFI
-        |
-        v
-Zig firmware entry
-        |
-        +--> NASM CPUID and control-register primitives
-        +--> ACPI RSDP discovery
-        +--> GOP framebuffer discovery
-        +--> 64 KiB ZigOs kernel-stack allocation
-        +--> final UEFI memory-map capture
-        |
-        v
-ExitBootServices
-        |
-        v
-NASM stack-switch trampoline
-        |
-        v
+    |
+    +-- firmware memory-map, ACPI RSDP and GOP discovery
+    +-- final ExitBootServices transition
+    +-- NASM stack switch into kernel ownership
+    |
+    v
 Freestanding Zig kernel
-        |
-        +--> direct debug-port output
-        +--> direct framebuffer write
-        +--> interrupt-disabled halt loop
+    |
+    +-- normalized physical-memory map and frame allocator
+    +-- kernel-owned page tables and higher-half aliases
+    +-- GDT, TSS, IDT, IST exception stacks and stack traces
+    +-- Local APIC, IOAPIC, HPET/PIT and interrupt routing
+    +-- x86-64 SMP startup through a 16-to-64-bit AP trampoline
+    +-- per-CPU state, local timers, IPIs and work stealing
+    +-- PCIe ECAM or legacy PCI configuration mechanism #1
+    +-- xHCI, NVMe, AHCI and Intel 82574L/e1000e drivers
+    +-- framebuffer terminal, PS/2 and USB HID input
+    +-- heap, cooperative and preemptive scheduling
+    +-- isolated CPL3 payload and int 0x80 syscall round trip
+    +-- DHCP, ARP, IPv4, ICMP, UDP and TFTP validation
 ```
 
-After `ExitBootServices` succeeds, ZigOs no longer calls the UEFI console or any UEFI boot service. The kernel continues on its own allocated stack, retains the final memory map, ACPI root pointer and framebuffer description, writes directly to video memory, and then halts safely while interrupts remain disabled.
+Assembly is used where exact instruction, register, descriptor, interrupt-entry, context-switch, or startup control matters. The maintainable kernel and protocol logic remain in Zig.
 
-ZigOs does **not** yet install its own page tables, IDT, APIC configuration, allocator or device drivers. Those are milestone 0.3 and later.
+## Implemented subsystems
 
-## Verified QEMU boot
+### Boot and memory
 
-The current image is compiled and boot-tested with QEMU and EDK2/OVMF. A successful run produces output similar to:
+- Native `x86_64-uefi-msvc` EFI application at `EFI/BOOT/BOOTX64.EFI`.
+- ACPI RSDP, GOP framebuffer, final UEFI memory-map, and kernel-stack discovery.
+- Clean `ExitBootServices` transition with no later dependency on UEFI boot services.
+- Normalized physical-memory layout with protected firmware/kernel regions.
+- Physical frame allocator and kernel heap allocator.
+- Kernel-owned page tables, identity mappings, and higher-half data/code aliases.
+- Deterministic checks that protected ranges cannot be returned by the allocator.
 
-```text
-ZigOs
-Experimental x86-64 operating system in Zig + Assembly
+### CPU, exceptions, interrupts, and SMP
 
-CPU vendor: AuthenticAMD
-CR0 = 0x0000000080010033
-CR3 = 0x000000000FC01000
-CR4 = 0x0000000000000668
+- NASM CPUID, control-register, port-I/O, interrupt, context, and memory-order primitives.
+- GDT, TSS, IDT, IST1 exception stack, vectors 0-31, and recoverable invalid-opcode probe.
+- Frame-pointer stack tracing with kernel symbol lookup.
+- Local APIC/x2APIC, IOAPIC, legacy PIC masking, EOI handling, and routed ISA interrupts.
+- HPET timing with PIT channel 2 fallback when HPET is absent.
+- SMP startup through a one-page real-mode AP trampoline.
+- Per-CPU descriptors, stacks, local timers, targeted IPIs, queues, synchronization, and work stealing.
+- Sparse and high APIC-ID topology validation, including APIC ID 256.
 
-Firmware discovery:
-  Kernel stack: 0x000000000E0AA000 + 65536 bytes
-  ACPI RSDP: 0x000000000FB7E014
-  GOP framebuffer: 1280x800 at 0x0000000080000000
-  Memory descriptors: 117
-  Conventional memory: 219140096 bytes
+### Runtime and userspace
 
-Exiting UEFI boot services...
+- Kernel heap allocation, alignment, splitting, freeing, and coalescing checks.
+- Cooperative task switching with dedicated stacks and canaries.
+- Timer-driven preemptive scheduling with GPR and FX-state preservation.
+- CPL3 code and stack mappings isolated through dedicated user page tables.
+- `int 0x80` syscall frame validation and userspace-to-kernel round trip.
 
-ExitBootServices succeeded.
-ZigOs now owns execution without UEFI boot services.
-Kernel stack: 0x000000000E0AA000 + 65536 bytes
-Final memory descriptors: 117
-Conventional memory: 219140096 bytes
-ACPI RSDP retained at 0x000000000FB7E014
-Framebuffer retained and written directly at 0x0000000080000000
-Milestone 0.2 reached: firmware handoff complete; kernel remains alive.
-```
+### Display and input
 
-Addresses, memory totals, descriptor counts and control-register values vary between machines and emulator configurations.
+- Direct GOP framebuffer terminal with cursor rendering, scrolling, clearing, and checksums.
+- COM1 diagnostics at 115200 8N1.
+- PS/2 keyboard initialization and IOAPIC-routed interrupt delivery.
+- Native xHCI ownership, command/event rings, MSI-X, device enumeration, and boot-keyboard input.
+- Shared keyboard event queue and interactive ZigOs shell with editing and history.
+
+### Storage
+
+- Native NVMe controller ownership, admin/I/O queues, MSI-X completions, and namespace reads.
+- NVMe namespaces with 512-byte and 4 KiB logical blocks.
+- GPT primary/backup headers, partition-array CRCs, and EFI System Partition discovery.
+- Native AHCI ownership, ATA IDENTIFY, READ DMA EXT, and MSI completion.
+- MBR partition parsing and FAT16 volume discovery.
+- FAT directory traversal and streaming verification of `EFI/BOOT/BOOTX64.EFI` from NVMe and AHCI-backed media.
+- Optional NVMe-only and storage-backend fallback test configurations.
+
+### Networking
+
+- Intel 82574L/e1000e discovery and ownership.
+- DMA RX/TX rings with eight descriptors, writeback checks, recycling, and wrap.
+- MSI-X vector `0x49` routed to a valid BSP or application-processor destination.
+- DHCP Discover/Offer/Request/ACK with BOOTP identity and option validation.
+- Runtime lease fields for local address, subnet mask, server, lease duration, and optional router/DNS data.
+- ARP request/reply validation against the leased address and effective gateway.
+- IPv4 and ICMP Echo construction, checksum generation, and reply verification.
+- Reusable Ethernet II, IPv4, and UDP builder/parser with pseudoheader checksum validation.
+- Multi-block TFTP RRQ/DATA/ACK transfer against QEMU's restricted built-in TFTP service.
+- Deterministic 2,304-byte fixture validation, cumulative hash, TX descriptor reuse, and RX descriptor recycling.
 
 ## Requirements
 
-- Windows PowerShell 7 or Windows PowerShell 5.1
-- NASM 2.16 or newer in `PATH`
-- Internet access for the first canonical Zig download
-- QEMU with EDK2/OVMF for emulation, or a FAT32 USB drive for hardware testing
+- Windows PowerShell 5.1 or PowerShell 7.
+- NASM 2.16 or newer in `PATH`.
+- Python 3 for deterministic NVMe test-image generation.
+- Internet access for the first canonical Zig bootstrap.
+- QEMU x86-64 with split EDK2/OVMF code and variable-store images for emulation.
+- Git only for repository operations; it is not required by the build itself.
+
+The pinned compiler version is stored in `.toolchain-version` and is currently:
+
+```text
+0.17.0-dev.1420+5d08e4716
+```
 
 ## Build
 
@@ -88,28 +151,92 @@ Addresses, memory totals, descriptor counts and control-register values vary bet
 .\scripts\build.ps1
 ```
 
+Clean build:
+
+```powershell
+.\scripts\build.ps1 -Clean
+```
+
+Select an optimization mode:
+
+```powershell
+.\scripts\build.ps1 -Optimize Debug
+.\scripts\build.ps1 -Optimize ReleaseSafe
+.\scripts\build.ps1 -Optimize ReleaseFast
+.\scripts\build.ps1 -Optimize ReleaseSmall
+```
+
+`ReleaseSmall` is the default.
+
 The build script:
 
-1. Downloads and verifies the pinned canonical Zig release when absent.
-2. Refuses to build if the compiler version differs from `.toolchain-version`.
-3. Assembles `src/arch/x86_64/cpu.asm` as a Win64 COFF object.
-4. Links Zig and assembly into `zig-out/EFI/BOOT/BOOTX64.EFI`.
-5. Verifies AMD64 PE32+ format and UEFI application subsystem 10.
+1. Bootstraps the pinned canonical Zig release when it is missing.
+2. Refuses to continue when the compiler version differs from `.toolchain-version`.
+3. Assembles the x86-64 hardware layer as Win64 COFF.
+4. Assembles the one-page AP startup trampoline as a flat binary.
+5. Compiles and links the UEFI image.
+6. Verifies AMD64 PE32+, EFI application subsystem 10, and output structure.
 
-## Automated firmware-handoff test
+Output:
+
+```text
+zig-out/
+└── EFI/
+    └── BOOT/
+        └── BOOTX64.EFI
+```
+
+Latest verified kernel image before this README-only update:
+
+```text
+Size:    229,888 bytes
+SHA-256: 5378CF27F1F8FEECCF9822C23E7C9856EE9560395DB56B56D1D65574A6838F9D
+```
+
+## QEMU validation
+
+Run the default full-system test without a network controller:
 
 ```powershell
 .\scripts\test-qemu.ps1
 ```
 
-The test boots the EFI image with split EDK2 pflash firmware and captures port `0xE9`. It fails unless it observes:
+Run the complete networking path:
 
-- CPUID and control-register results from assembly
-- the ZigOs-owned stack before and after handoff
-- successful `ExitBootServices`
-- post-UEFI Zig kernel execution
-- retained ACPI and framebuffer information
-- a direct framebuffer access marker
+```powershell
+.\scripts\test-qemu.ps1 -Network -TimeoutSeconds 75
+```
+
+Useful compatibility matrices:
+
+```powershell
+# BSP-only interrupt destination
+.\scripts\test-qemu.ps1 -Network -CpuCount 1 -TimeoutSeconds 75
+
+# i440FX and legacy PCI configuration mechanism #1
+.\scripts\test-qemu.ps1 -Network -LegacyPci -NvmeOnly -TimeoutSeconds 75
+
+# Topology containing x2APIC ID 256
+.\scripts\test-qemu.ps1 -Network -HighApicId -TimeoutSeconds 75
+
+# HPET and PS/2 absent; PIT timing fallback
+.\scripts\test-qemu.ps1 -Network -NoHpet -NoPs2 -TimeoutSeconds 75
+
+# 4 KiB NVMe logical blocks
+.\scripts\test-qemu.ps1 -Nvme4k
+
+# Serial-only / no graphical adapter
+.\scripts\test-qemu.ps1 -NoGraphics
+
+# No USB keyboard attached
+.\scripts\test-qemu.ps1 -NoUsbKeyboard
+```
+
+Other supported switches include `-NvmeOnly`, `-UsbMouseOnly`, `-LegacyAhci`, `-SparseApicIds`, and `-NoX2Apic`. Some combinations are intentionally rejected when they describe an unsupported QEMU topology.
+
+The harness builds deterministic NVMe and TFTP fixtures, starts QEMU, injects keyboard input through the QEMU monitor, captures port `0xE9` and COM1 output, and rejects the run when expected hardware, interrupt, scheduler, userspace, storage, or network invariants are absent.
+
+The GitHub Actions workflow currently performs the canonical Windows build, Zig formatting check, and EFI artifact upload. The full QEMU hardware matrix is run locally.
 
 ## Run interactively
 
@@ -117,39 +244,81 @@ The test boots the EFI image with split EDK2 pflash firmware and captures port `
 .\scripts\run-qemu.ps1
 ```
 
+This launches a simpler interactive q35/OVMF session using the FAT-backed `zig-out` directory. The automated test harness exercises the broader device and topology matrix.
+
 ## Boot on a physical machine
 
-Copy the contents of `zig-out` onto an empty FAT32 USB drive so this path exists:
+Copy the contents of `zig-out` to an empty FAT32 EFI System Partition so this path exists:
 
 ```text
 EFI\BOOT\BOOTX64.EFI
 ```
 
-Disable Secure Boot unless the image has been signed with a key trusted by the machine. QEMU testing should always come before physical-hardware testing.
+Secure Boot must be disabled unless the image has been signed with a key trusted by the firmware.
+
+Physical-machine execution is experimental. Most current device validation targets QEMU's emulated hardware, particularly q35, e1000e, QEMU xHCI, QEMU NVMe, and AHCI. Use disposable hardware or a virtual machine and preserve important data elsewhere.
 
 ## Repository layout
 
 ```text
-src/main.zig                    UEFI discovery and firmware handoff
-src/boot_info.zig               firmware-to-kernel data contract
-src/kernel.zig                  post-ExitBootServices Zig kernel
-src/arch/x86_64/cpu.asm         x86-64 primitives and stack trampoline
-scripts/bootstrap-toolchain.ps1 canonical Zig downloader and verifier
-scripts/build.ps1               reproducible UEFI build
-scripts/verify-efi.ps1          PE/COFF structural validation
-scripts/test-qemu.ps1           automated headless handoff test
-scripts/run-qemu.ps1            interactive emulator launcher
-docs/ROADMAP.md                 development milestones
+.github/workflows/build.yml       canonical Windows CI build
+.toolchain-version                pinned canonical Zig version
+docs/ROADMAP.md                   completed and planned milestones
+scripts/bootstrap-toolchain.ps1   canonical Zig downloader/verifier
+scripts/build.ps1                 reproducible UEFI build
+scripts/create-nvme-test-image.py deterministic GPT/FAT NVMe image builder
+scripts/run-qemu.ps1              interactive QEMU launcher
+scripts/test-qemu.ps1             headless hardware/system validation matrix
+scripts/verify-efi.ps1            PE/COFF UEFI image verifier
+src/main.zig                      UEFI entry and firmware handoff
+src/kernel.zig                    post-UEFI kernel integration and validation
+src/arch/x86_64/cpu.asm           x86-64 primitives and interrupt/context stubs
+src/arch/x86_64/ap_trampoline.asm 16-to-64-bit AP startup trampoline
+src/memory.zig                    physical frame allocation
+src/paging.zig                    kernel and user page tables
+src/descriptor_tables.zig         GDT, TSS, IDT, and IST setup
+src/exceptions.zig                exception handling and recovery probes
+src/apic.zig / ioapic.zig         local and I/O APIC control
+src/smp.zig / percpu.zig          AP startup and per-CPU execution
+src/scheduler.zig                 cooperative scheduling
+src/preemptive.zig                timer-driven preemptive scheduling
+src/user_mode.zig                 CPL3 and syscall validation
+src/framebuffer_console.zig       graphical terminal
+src/input.zig / ps2.zig           input queue and PS/2 keyboard
+src/xhci.zig                      USB xHCI and HID boot keyboard
+src/pci.zig                       ECAM and legacy PCI enumeration
+src/nvme.zig / ahci.zig           storage-controller drivers
+src/gpt.zig / partition.zig       disk partition parsing
+src/fat.zig / pe.zig              FAT traversal and PE verification
+src/e1000e.zig                    Intel 82574L DMA/MSI-X driver
+src/dhcp.zig                      DHCP client framing and validation
+src/udp.zig                       reusable Ethernet/IPv4/UDP framing
+src/tftp.zig                      deterministic multi-block TFTP client
 ```
 
-## Principles
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the milestone-by-milestone implementation record.
 
-- Assembly only where exact instruction, register or stack control matters.
-- Zig for the maintainable kernel and runtime majority.
-- No silent dependence on hosted operating-system services.
-- Reproducible, pinned canonical Zig toolchain.
-- QEMU-first validation before physical hardware.
+## Current limitations
+
+- x86-64 UEFI only; there is no legacy BIOS boot path.
+- Hardware support is deliberately narrow and primarily validated in QEMU.
+- Networking is currently a deterministic boot-time validation flow, not an asynchronous socket API.
+- There is no TCP, DNS resolver, IPv6, firewall, or general network service framework.
+- The CPL3 component is a controlled validation payload, not a complete process/ELF runtime.
+- FAT support is read-oriented; there is no general writable filesystem layer.
+- There is no package manager, graphical desktop, security hardening, or stable userspace ABI.
+- The kernel remains experimental and may halt deliberately when an invariant fails.
+
+## Design principles
+
+- Use assembly only where exact machine control is required.
+- Keep the kernel and protocol majority in readable Zig.
+- Never depend silently on hosted operating-system services after firmware handoff.
+- Pin and verify the canonical Zig compiler.
+- Prefer deterministic, assertion-heavy integration tests over optimistic boot messages.
+- Test in QEMU before attempting physical hardware.
+- Treat every interrupt, DMA completion, descriptor transition, and checksum as something to verify.
 
 ## License
 
-MIT
+ZigOs is released under the [MIT License](LICENSE).
