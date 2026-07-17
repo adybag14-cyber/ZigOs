@@ -11,6 +11,7 @@ const breakpoint_vector: usize = 3;
 const timer_vector: usize = 0x40;
 const scheduler_vector: usize = 0x41;
 const ap_work_vector: usize = 0x42;
+const ap_timer_vector: usize = 0x43;
 const syscall_vector: usize = 0x80;
 const spurious_vector: usize = 0xFF;
 const interrupt_stack_pages: usize = 4;
@@ -74,6 +75,7 @@ extern fn zigos_isr_breakpoint() callconv(cc) void;
 extern fn zigos_isr_apic_timer() callconv(cc) void;
 extern fn zigos_isr_scheduler() callconv(cc) void;
 extern fn zigos_isr_ap_work() callconv(cc) void;
+extern fn zigos_isr_ap_timer() callconv(cc) void;
 extern fn zigos_isr_syscall() callconv(cc) void;
 extern fn zigos_isr_spurious() callconv(cc) void;
 extern fn zigos_trigger_breakpoint() callconv(cc) void;
@@ -131,6 +133,7 @@ pub fn install(allocator: *memory.FrameAllocator, kernel_stack_top: usize) ?Inst
     setInterruptGate(&idt[timer_vector], @intFromPtr(&zigos_isr_apic_timer), code_selector, 1);
     setInterruptGate(&idt[scheduler_vector], @intFromPtr(&zigos_isr_scheduler), code_selector, 1);
     setInterruptGate(&idt[ap_work_vector], @intFromPtr(&zigos_isr_ap_work), code_selector, 1);
+    setInterruptGate(&idt[ap_timer_vector], @intFromPtr(&zigos_isr_ap_timer), code_selector, 1);
     setUserInterruptGate(&idt[syscall_vector], @intFromPtr(&zigos_isr_syscall), code_selector, 1);
     setInterruptGate(&idt[spurious_vector], @intFromPtr(&zigos_isr_spurious), code_selector, 0);
 

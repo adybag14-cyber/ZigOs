@@ -223,6 +223,13 @@ if ($ipiWakeMatches.Count -ne 3) {
 if (-not $output.Contains('Targeted AP wakeups complete: vector 0x42, 3/3 APs woke from HLT and acknowledged EOI')) {
     throw 'The targeted AP IPI/HLT/EOI aggregate marker was not observed.'
 }
+$apTimerMatches = [regex]::Matches($output, 'AP local timer: APIC [123], vector 0x43, count [1-9][0-9]*, interrupts 1, epoch 1, halts [3-9][0-9]*')
+if ($apTimerMatches.Count -ne 3) {
+    throw 'All three application processors did not handle their private local-APIC timer interrupt.'
+}
+if (-not [regex]::IsMatch($output, 'Per-AP timers complete: vector 0x43, count [1-9][0-9]*, 3/3 APs woke autonomously from local timer interrupts')) {
+    throw 'The per-AP autonomous local-timer aggregate marker was not observed.'
+}
 if (-not $output.Contains('PCIe ECAM active:')) {
     throw 'The PCIe MCFG/ECAM activation marker was not observed.'
 }

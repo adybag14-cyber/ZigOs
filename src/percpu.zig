@@ -11,6 +11,7 @@ const spurious_vector: usize = 0xFF;
 const state_magic: u64 = 0x5A49_474F_5350_4355;
 pub const run_queue_capacity: usize = 8;
 pub const ap_work_vector: u8 = 0x42;
+pub const ap_timer_vector: u8 = 0x43;
 const run_queue_command: u32 = 2;
 const run_queue_checksum_seed: u64 = 0xCBF2_9CE4_8422_2325;
 const work_stealing_checksum_seed: u64 = 0x5753_5445_414C_494E;
@@ -93,6 +94,12 @@ pub const State = struct {
     steal_checksum: u64,
     ipi_wake_count: u32,
     idle_halt_count: u32,
+    timer_request_epoch: u32,
+    timer_armed_epoch: u32,
+    timer_interrupt_count: u32,
+    timer_error: u32,
+    timer_initial_count: u32,
+    timer_reserved: u32,
 };
 
 pub const Report = struct {
@@ -117,6 +124,11 @@ pub const Report = struct {
     steal_checksum: u64,
     ipi_wake_count: u32,
     idle_halt_count: u32,
+    timer_request_epoch: u32,
+    timer_armed_epoch: u32,
+    timer_interrupt_count: u32,
+    timer_error: u32,
+    timer_initial_count: u32,
 };
 
 extern fn zigos_load_gdt(
@@ -131,6 +143,7 @@ extern fn zigos_read_tr() callconv(cc) u64;
 extern fn zigos_exception_stub_address(vector: u8) callconv(cc) usize;
 extern fn zigos_isr_spurious() callconv(cc) void;
 extern fn zigos_isr_ap_work() callconv(cc) void;
+extern fn zigos_isr_ap_timer() callconv(cc) void;
 extern fn zigos_wait_for_interrupt() callconv(cc) void;
 extern fn zigos_memory_fence() callconv(cc) void;
 extern fn zigos_cpu_relax() callconv(cc) void;
@@ -187,6 +200,12 @@ pub fn prepare(
     state.steal_checksum = work_stealing_checksum_seed;
     state.ipi_wake_count = 0;
     state.idle_halt_count = 0;
+    state.timer_request_epoch = 0;
+    state.timer_armed_epoch = 0;
+    state.timer_interrupt_count = 0;
+    state.timer_error = 0;
+    state.timer_initial_count = 0;
+    state.timer_reserved = 0;
     zigos_memory_fence();
     return state;
 }
@@ -225,6 +244,12 @@ pub fn initialize(state: *State, actual_apic_id: u32) bool {
             1,
         );
     }
+    setInterruptGate(
+        &state.idt[ap_timer_vector],
+        @intFromPtr(&zigos_isr_ap_timer),
+        code_selector,
+        1,
+    );
     setInterruptGate(
         &state.idt[ap_work_vector],
         @intFromPtr(&zigos_isr_ap_work),
@@ -279,6 +304,11 @@ pub fn report(state: *const State) Report {
         .steal_checksum = atomicLoadU64(&state.steal_checksum),
         .ipi_wake_count = atomicLoadU32(&state.ipi_wake_count),
         .idle_halt_count = atomicLoadU32(&state.idle_halt_count),
+        .timer_request_epoch = atomicLoadU32(&state.timer_request_epoch),
+        .timer_armed_epoch = atomicLoadU32(&state.timer_armed_epoch),
+        .timer_interrupt_count = atomicLoadU32(&state.timer_interrupt_count),
+        .timer_error = atomicLoadU32(&state.timer_error),
+        .timer_initial_count = atomicLoadU32(&state.timer_initial_count),
     };
 }
 
@@ -299,6 +329,54 @@ pub fn workCompleted(state: *State, epoch: u32) bool {
 
 pub fn expectedWorkResult(apic_id: u32, input: u64) u64 {
     return calculateMailboxWork(apic_id, input);
+}
+
+pub fn requestOneShotTimer(state: *State, epoch: u32, initial_count: u32) bool {
+    if (epoch == 0 or initial_count == 0 or state.descriptor_ready != 1) return false;
+    atomicStoreU32(&state.timer_interrupt_count, 0);
+    atomicStoreU32(&state.timer_error, 0);
+    atomicStoreU32(&state.timer_initial_count, initial_count);
+    atomicStoreU32(&state.timer_armed_epoch, 0);
+    atomicStoreU32(&state.timer_request_epoch, epoch);
+    return true;
+}
+
+pub fn timerArmed(state: *const State, epoch: u32) bool {
+    return epoch != 0 and atomicLoadU32(&state.timer_armed_epoch) == epoch;
+}
+
+pub fn timerFired(state: *const State, epoch: u32) bool {
+    return timerArmed(state, epoch) and
+        atomicLoadU32(&state.timer_interrupt_count) == 1 and
+        atomicLoadU32(&state.timer_error) == 0;
+}
+
+export fn zigos_ap_timer_interrupt_handler() callconv(cc) void {
+    const current_apic_id = apic.currentId();
+    const count = atomicLoadU32(&interrupt_idle_state_count);
+    var index: usize = 0;
+    while (index < count and index < states.len) : (index += 1) {
+        const state = &states[index];
+        if (state.expected_apic_id == current_apic_id) {
+            _ = atomicFetchAddU32(&state.timer_interrupt_count, 1);
+            apic.stopCurrentProcessorTimer(ap_timer_vector);
+            break;
+        }
+    }
+    apic.acknowledgeInterrupt();
+}
+
+fn serviceTimerRequest(state: *State) bool {
+    const request_epoch = atomicLoadU32(&state.timer_request_epoch);
+    if (request_epoch == 0 or atomicLoadU32(&state.timer_armed_epoch) == request_epoch) return false;
+    const initial_count = atomicLoadU32(&state.timer_initial_count);
+    if (!apic.startCurrentProcessorOneShotTimer(ap_timer_vector, initial_count)) {
+        atomicStoreU32(&state.timer_error, 1);
+        atomicStoreU32(&state.timer_armed_epoch, request_epoch);
+        return true;
+    }
+    atomicStoreU32(&state.timer_armed_epoch, request_epoch);
+    return true;
 }
 
 pub fn enableInterruptIdle(state_count: usize) bool {
@@ -476,6 +554,7 @@ pub fn verifyRunQueue(state: *State, apic_id: u32, expected_jobs: u32) ?u64 {
 pub fn runMailbox(state: *State) noreturn {
     var observed_epoch: u32 = 0;
     while (true) {
+        if (serviceTimerRequest(state)) continue;
         if (atomicLoadU32(&run_queue_gate) != 0) {
             if (atomicLoadU32(&stealing_enabled) != 0) {
                 if (workStealingStep(state)) continue;

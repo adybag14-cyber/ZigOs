@@ -59,6 +59,10 @@ pub const ApReport = struct {
     ipi_wake_count: u32,
     idle_halt_count: u32,
     ipi_job_checksum: u64,
+    timer_initial_count: u32,
+    timer_interrupt_count: u32,
+    timer_armed_epoch: u32,
+    timer_halt_count: u32,
     online: bool,
     state: u32,
     per_cpu_state: u64,
@@ -80,6 +84,10 @@ pub const Report = struct {
     ipi_wake_vector: u8,
     ipi_wake_targets: u32,
     ipi_wake_completed: u32,
+    ap_timer_vector: u8,
+    ap_timer_targets: u32,
+    ap_timer_completed: u32,
+    ap_timer_initial_count: u32,
     processors: [acpi.maximum_processors]ApReport,
 };
 
@@ -93,6 +101,7 @@ pub fn start(
     madt: acpi.MadtInfo,
     local_apic: apic.Information,
     reference: hpet.Device,
+    timer_ticks_per_second: u64,
 ) ?Report {
     if (trampoline_image.len != memory.page_size) return null;
     if (boot_info.ap_trampoline.size != trampoline_image.len) return null;
@@ -124,6 +133,10 @@ pub fn start(
         .ipi_wake_vector = percpu.ap_work_vector,
         .ipi_wake_targets = 0,
         .ipi_wake_completed = 0,
+        .ap_timer_vector = percpu.ap_timer_vector,
+        .ap_timer_targets = 0,
+        .ap_timer_completed = 0,
+        .ap_timer_initial_count = 0,
         .processors = undefined,
     };
 
@@ -227,6 +240,10 @@ pub fn start(
             .ipi_wake_count = 0,
             .idle_halt_count = 0,
             .ipi_job_checksum = 0,
+            .timer_initial_count = 0,
+            .timer_interrupt_count = 0,
+            .timer_armed_epoch = 0,
+            .timer_halt_count = 0,
             .online = online,
             .state = state,
             .per_cpu_state = @intFromPtr(per_cpu_state),
@@ -250,6 +267,10 @@ pub fn start(
     }
     if (!runTargetedIpiRound(&report, reference)) {
         debugWrite("SMP stage failure: targeted IPI\r\n");
+        return null;
+    }
+    if (!runPerApTimerRound(&report, reference, timer_ticks_per_second)) {
+        debugWrite("SMP stage failure: per-AP timer\r\n");
         return null;
     }
     return report;
@@ -487,6 +508,66 @@ fn runTargetedIpiRound(report: *Report, reference: hpet.Device) bool {
     report.ipi_wake_completed = wake_completed;
     percpu.resumeRunQueues();
     return wake_completed == report.target_count;
+}
+
+fn runPerApTimerRound(report: *Report, reference: hpet.Device, ticks_per_second: u64) bool {
+    const epoch: u32 = 1;
+    if (ticks_per_second < 1_000 or ticks_per_second / 20 > std.math.maxInt(u32)) return false;
+    const initial_count: u32 = @intCast(@max(@as(u64, 1), ticks_per_second / 20));
+
+    var baseline_halts = std.mem.zeroes([acpi.maximum_processors]u32);
+    for (report.processors[0..report.target_count], 0..) |processor, index| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        baseline_halts[index] = percpu.report(state).idle_halt_count;
+        if (!percpu.requestOneShotTimer(state, epoch, initial_count)) return false;
+        if (!apic.sendFixedIpi(processor.actual_apic_id, percpu.ap_work_vector)) return false;
+    }
+
+    var iteration: usize = 0;
+    while (iteration < startup_timeout_iterations) : (iteration += 1) {
+        var armed: usize = 0;
+        for (report.processors[0..report.target_count]) |processor| {
+            const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+            if (percpu.timerArmed(state, epoch)) armed += 1;
+        }
+        if (armed == report.target_count) break;
+        if (!reference.waitNanoseconds(startup_poll_nanoseconds)) return false;
+    }
+
+    iteration = 0;
+    while (iteration < startup_timeout_iterations) : (iteration += 1) {
+        var fired: usize = 0;
+        for (report.processors[0..report.target_count]) |processor| {
+            const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+            if (percpu.timerFired(state, epoch)) fired += 1;
+        }
+        if (fired == report.target_count) break;
+        if (!reference.waitNanoseconds(startup_poll_nanoseconds)) return false;
+    }
+
+    var completed: u32 = 0;
+    for (report.processors[0..report.target_count], 0..) |*processor, index| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        const state_report = percpu.report(state);
+        if (state_report.timer_request_epoch != epoch or
+            state_report.timer_armed_epoch != epoch or
+            state_report.timer_interrupt_count != 1 or
+            state_report.timer_error != 0 or
+            state_report.timer_initial_count != initial_count or
+            state_report.idle_halt_count <= baseline_halts[index])
+        {
+            return false;
+        }
+        processor.timer_initial_count = state_report.timer_initial_count;
+        processor.timer_interrupt_count = state_report.timer_interrupt_count;
+        processor.timer_armed_epoch = state_report.timer_armed_epoch;
+        processor.timer_halt_count = state_report.idle_halt_count;
+        completed += 1;
+    }
+    report.ap_timer_targets = @intCast(report.target_count);
+    report.ap_timer_completed = completed;
+    report.ap_timer_initial_count = initial_count;
+    return completed == report.target_count;
 }
 
 fn debugWrite(text: []const u8) void {

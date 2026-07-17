@@ -246,6 +246,19 @@ pub fn setTimerHook(hook: ?TimerHook) void {
     timer_hook = hook;
 }
 
+pub fn startCurrentProcessorOneShotTimer(vector: u8, initial_count: u32) bool {
+    if (vector < 0x20 or vector == spurious_vector or initial_count == 0) return false;
+    writeTimerDivide(divide_by_16_encoding);
+    writeTimerLvt(vector);
+    writeTimerInitial(initial_count);
+    return true;
+}
+
+pub fn stopCurrentProcessorTimer(vector: u8) void {
+    writeTimerInitial(0);
+    writeTimerLvt(@as(u32, vector) | timer_masked);
+}
+
 pub fn startPeriodicTimer(ticks_per_second: u64, frequency_hz: u32) ?u32 {
     if (ticks_per_second == 0 or frequency_hz == 0) return null;
     const count_u64 = @max(@as(u64, 1), ticks_per_second / frequency_hz);

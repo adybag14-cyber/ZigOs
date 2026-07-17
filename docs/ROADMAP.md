@@ -82,3 +82,4 @@
 - [x] FIFO sequence and completion verification across all APs
 - [x] Deterministic multicore work stealing with atomic queue claims
 - [x] Targeted work IPI wakeups from per-CPU HLT idle loops
+- [x] Per-AP local-APIC one-shot timers with autonomous HLT wakeups

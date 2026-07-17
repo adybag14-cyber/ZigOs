@@ -63,7 +63,13 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     const local_apic_info = initializeApic(acpi_info);
     initializeIoApic(acpi_info, local_apic_info);
     const apic_timer_info = testApicTimer(acpi_info);
-    startApplicationProcessors(info, &frame_allocator, acpi_info, local_apic_info);
+    startApplicationProcessors(
+        info,
+        &frame_allocator,
+        acpi_info,
+        local_apic_info,
+        apic_timer_info.ticks_per_second,
+    );
     const pci_inventory = enumeratePci(acpi_info);
     inspectAhci(pci_inventory, &frame_allocator);
     initializeKernelHeap(&frame_allocator);
@@ -485,12 +491,20 @@ fn startApplicationProcessors(
     allocator: *memory.FrameAllocator,
     discovery: acpi.Discovery,
     local_apic: apic.Information,
+    timer_ticks_per_second: u64,
 ) void {
     const madt = discovery.madt orelse smpFailure("validated ACPI did not contain a MADT");
     const hpet_address = discovery.hpet_address orelse smpFailure("ACPI did not expose HPET for SIPI timing");
     const reference = hpet.initialize(hpet_address) orelse
         smpFailure("HPET could not be initialized for INIT/SIPI timing");
-    const report = smp.start(info, allocator, madt, local_apic, reference) orelse
+    const report = smp.start(
+        info,
+        allocator,
+        madt,
+        local_apic,
+        reference,
+        timer_ticks_per_second,
+    ) orelse
         smpFailure("trampoline patching, INIT/SIPI delivery, or AP acknowledgement failed");
 
     debugWrite("SMP startup: BSP APIC ");
@@ -550,6 +564,19 @@ fn startApplicationProcessors(
         debugWrite(", checksum 0x");
         debugWriteHex64(processor.run_queue_checksum);
         debugWrite("\r\n");
+        debugWrite("AP local timer: APIC ");
+        debugWriteU64Decimal(processor.actual_apic_id);
+        debugWrite(", vector 0x");
+        debugWriteHex8(report.ap_timer_vector);
+        debugWrite(", count ");
+        debugWriteU64Decimal(processor.timer_initial_count);
+        debugWrite(", interrupts ");
+        debugWriteU64Decimal(processor.timer_interrupt_count);
+        debugWrite(", epoch ");
+        debugWriteU64Decimal(processor.timer_armed_epoch);
+        debugWrite(", halts ");
+        debugWriteU64Decimal(processor.timer_halt_count);
+        debugWrite("\r\n");
         debugWrite("AP targeted IPI: APIC ");
         debugWriteU64Decimal(processor.actual_apic_id);
         debugWrite(", vector 0x");
@@ -585,6 +612,15 @@ fn startApplicationProcessors(
     if (report.online_count != report.target_count) {
         smpFailure("not every MADT application processor reached long mode");
     }
+    debugWrite("Per-AP timers complete: vector 0x");
+    debugWriteHex8(report.ap_timer_vector);
+    debugWrite(", count ");
+    debugWriteU64Decimal(report.ap_timer_initial_count);
+    debugWrite(", ");
+    debugWriteU64Decimal(report.ap_timer_completed);
+    debugWrite("/");
+    debugWriteU64Decimal(report.ap_timer_targets);
+    debugWrite(" APs woke autonomously from local timer interrupts\r\n");
     debugWrite("Targeted AP wakeups complete: vector 0x");
     debugWriteHex8(report.ipi_wake_vector);
     debugWrite(", ");
