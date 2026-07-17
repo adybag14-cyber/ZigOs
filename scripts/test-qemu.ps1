@@ -230,6 +230,13 @@ if ($apTimerMatches.Count -ne 3) {
 if (-not [regex]::IsMatch($output, 'Per-AP timers complete: vector 0x43, count [1-9][0-9]*, 3/3 APs woke autonomously from local timer interrupts')) {
     throw 'The per-AP autonomous local-timer aggregate marker was not observed.'
 }
+$tickSchedulerMatches = [regex]::Matches($output, 'AP tick scheduler: APIC [123], jobs 3, ticks 3, dispatches 3, halts [6-9][0-9]*, checksum 0x(?!0000000000000000)[0-9A-F]{16}')
+if ($tickSchedulerMatches.Count -ne 3) {
+    throw 'All three per-AP tick schedulers did not dispatch exactly one job per timer quantum.'
+}
+if (-not [regex]::IsMatch($output, 'Per-AP tick schedulers complete: jobs 3/core, quantum count [1-9][0-9]*, 3/3 APs dispatched exactly one job per timer tick')) {
+    throw 'The aggregate per-AP tick-scheduler marker was not observed.'
+}
 if (-not $output.Contains('PCIe ECAM active:')) {
     throw 'The PCIe MCFG/ECAM activation marker was not observed.'
 }

@@ -99,7 +99,13 @@ pub const State = struct {
     timer_interrupt_count: u32,
     timer_error: u32,
     timer_initial_count: u32,
-    timer_reserved: u32,
+    timer_periodic: u32,
+    timer_target_interrupts: u32,
+    scheduler_enabled: u32,
+    scheduler_target_jobs: u32,
+    scheduler_tick_count: u32,
+    scheduler_dispatch_count: u32,
+    scheduler_reserved: u32,
 };
 
 pub const Report = struct {
@@ -129,6 +135,12 @@ pub const Report = struct {
     timer_interrupt_count: u32,
     timer_error: u32,
     timer_initial_count: u32,
+    timer_periodic: u32,
+    timer_target_interrupts: u32,
+    scheduler_enabled: u32,
+    scheduler_target_jobs: u32,
+    scheduler_tick_count: u32,
+    scheduler_dispatch_count: u32,
 };
 
 extern fn zigos_load_gdt(
@@ -205,7 +217,13 @@ pub fn prepare(
     state.timer_interrupt_count = 0;
     state.timer_error = 0;
     state.timer_initial_count = 0;
-    state.timer_reserved = 0;
+    state.timer_periodic = 0;
+    state.timer_target_interrupts = 0;
+    state.scheduler_enabled = 0;
+    state.scheduler_target_jobs = 0;
+    state.scheduler_tick_count = 0;
+    state.scheduler_dispatch_count = 0;
+    state.scheduler_reserved = 0;
     zigos_memory_fence();
     return state;
 }
@@ -309,6 +327,12 @@ pub fn report(state: *const State) Report {
         .timer_interrupt_count = atomicLoadU32(&state.timer_interrupt_count),
         .timer_error = atomicLoadU32(&state.timer_error),
         .timer_initial_count = atomicLoadU32(&state.timer_initial_count),
+        .timer_periodic = atomicLoadU32(&state.timer_periodic),
+        .timer_target_interrupts = atomicLoadU32(&state.timer_target_interrupts),
+        .scheduler_enabled = atomicLoadU32(&state.scheduler_enabled),
+        .scheduler_target_jobs = atomicLoadU32(&state.scheduler_target_jobs),
+        .scheduler_tick_count = atomicLoadU32(&state.scheduler_tick_count),
+        .scheduler_dispatch_count = atomicLoadU32(&state.scheduler_dispatch_count),
     };
 }
 
@@ -336,9 +360,63 @@ pub fn requestOneShotTimer(state: *State, epoch: u32, initial_count: u32) bool {
     atomicStoreU32(&state.timer_interrupt_count, 0);
     atomicStoreU32(&state.timer_error, 0);
     atomicStoreU32(&state.timer_initial_count, initial_count);
+    atomicStoreU32(&state.timer_periodic, 0);
+    atomicStoreU32(&state.timer_target_interrupts, 1);
+    atomicStoreU32(&state.scheduler_enabled, 0);
+    atomicStoreU32(&state.scheduler_target_jobs, 0);
+    atomicStoreU32(&state.scheduler_tick_count, 0);
+    atomicStoreU32(&state.scheduler_dispatch_count, 0);
     atomicStoreU32(&state.timer_armed_epoch, 0);
     atomicStoreU32(&state.timer_request_epoch, epoch);
     return true;
+}
+
+pub fn requestTickScheduler(
+    state: *State,
+    epoch: u32,
+    initial_count: u32,
+    target_jobs: u32,
+) bool {
+    if (epoch == 0 or initial_count == 0 or target_jobs == 0 or
+        target_jobs > run_queue_capacity or state.descriptor_ready != 1)
+    {
+        return false;
+    }
+    if (atomicLoadU32(&state.run_queue_head) != target_jobs or
+        atomicLoadU32(&state.run_queue_tail) != 0 or
+        atomicLoadU32(&state.run_queue_completed) != 0)
+    {
+        return false;
+    }
+    atomicStoreU32(&state.timer_interrupt_count, 0);
+    atomicStoreU32(&state.timer_error, 0);
+    atomicStoreU32(&state.timer_initial_count, initial_count);
+    atomicStoreU32(&state.timer_periodic, 1);
+    atomicStoreU32(&state.timer_target_interrupts, target_jobs);
+    atomicStoreU32(&state.scheduler_target_jobs, target_jobs);
+    atomicStoreU32(&state.scheduler_tick_count, 0);
+    atomicStoreU32(&state.scheduler_dispatch_count, 0);
+    atomicStoreU32(&state.scheduler_enabled, 1);
+    atomicStoreU32(&state.timer_armed_epoch, 0);
+    atomicStoreU32(&state.timer_request_epoch, epoch);
+    return true;
+}
+
+pub fn tickSchedulerComplete(state: *const State, epoch: u32) bool {
+    const target = atomicLoadU32(&state.scheduler_target_jobs);
+    return target != 0 and
+        atomicLoadU32(&state.timer_armed_epoch) == epoch and
+        atomicLoadU32(&state.timer_interrupt_count) == target and
+        atomicLoadU32(&state.scheduler_tick_count) == target and
+        atomicLoadU32(&state.scheduler_dispatch_count) == target and
+        atomicLoadU32(&state.run_queue_completed) == target and
+        atomicLoadU32(&state.timer_error) == 0;
+}
+
+pub fn finishTickScheduler(state: *State) void {
+    atomicStoreU32(&state.scheduler_enabled, 0);
+    atomicStoreU32(&state.timer_periodic, 0);
+    atomicStoreU32(&state.timer_target_interrupts, 0);
 }
 
 pub fn timerArmed(state: *const State, epoch: u32) bool {
@@ -358,8 +436,15 @@ export fn zigos_ap_timer_interrupt_handler() callconv(cc) void {
     while (index < count and index < states.len) : (index += 1) {
         const state = &states[index];
         if (state.expected_apic_id == current_apic_id) {
-            _ = atomicFetchAddU32(&state.timer_interrupt_count, 1);
-            apic.stopCurrentProcessorTimer(ap_timer_vector);
+            const interrupt_count = atomicFetchAddU32(&state.timer_interrupt_count, 1) +% 1;
+            if (atomicLoadU32(&state.scheduler_enabled) != 0) {
+                atomicStoreU32(&state.scheduler_tick_count, interrupt_count);
+                if (interrupt_count >= atomicLoadU32(&state.timer_target_interrupts)) {
+                    apic.stopCurrentProcessorTimer(ap_timer_vector);
+                }
+            } else {
+                apic.stopCurrentProcessorTimer(ap_timer_vector);
+            }
             break;
         }
     }
@@ -370,7 +455,11 @@ fn serviceTimerRequest(state: *State) bool {
     const request_epoch = atomicLoadU32(&state.timer_request_epoch);
     if (request_epoch == 0 or atomicLoadU32(&state.timer_armed_epoch) == request_epoch) return false;
     const initial_count = atomicLoadU32(&state.timer_initial_count);
-    if (!apic.startCurrentProcessorOneShotTimer(ap_timer_vector, initial_count)) {
+    const started = if (atomicLoadU32(&state.timer_periodic) != 0)
+        apic.startCurrentProcessorPeriodicTimer(ap_timer_vector, initial_count)
+    else
+        apic.startCurrentProcessorOneShotTimer(ap_timer_vector, initial_count);
+    if (!started) {
         atomicStoreU32(&state.timer_error, 1);
         atomicStoreU32(&state.timer_armed_epoch, request_epoch);
         return true;
@@ -556,7 +645,9 @@ pub fn runMailbox(state: *State) noreturn {
     while (true) {
         if (serviceTimerRequest(state)) continue;
         if (atomicLoadU32(&run_queue_gate) != 0) {
-            if (atomicLoadU32(&stealing_enabled) != 0) {
+            if (atomicLoadU32(&state.scheduler_enabled) != 0) {
+                if (tickSchedulerStep(state)) continue;
+            } else if (atomicLoadU32(&stealing_enabled) != 0) {
                 if (workStealingStep(state)) continue;
             } else if (runQueueStep(state, state, false)) {
                 continue;
@@ -578,6 +669,16 @@ pub fn runMailbox(state: *State) noreturn {
             zigos_memory_fence();
         }
     }
+}
+
+fn tickSchedulerStep(state: *State) bool {
+    const target = atomicLoadU32(&state.scheduler_target_jobs);
+    const dispatched = atomicLoadU32(&state.scheduler_dispatch_count);
+    const ticks = atomicLoadU32(&state.scheduler_tick_count);
+    if (target == 0 or dispatched >= target or dispatched >= ticks) return false;
+    if (!runQueueStep(state, state, false)) return false;
+    _ = atomicFetchAddU32(&state.scheduler_dispatch_count, 1);
+    return true;
 }
 
 fn workStealingStep(executor: *State) bool {

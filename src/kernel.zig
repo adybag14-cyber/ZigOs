@@ -564,6 +564,19 @@ fn startApplicationProcessors(
         debugWrite(", checksum 0x");
         debugWriteHex64(processor.run_queue_checksum);
         debugWrite("\r\n");
+        debugWrite("AP tick scheduler: APIC ");
+        debugWriteU64Decimal(processor.actual_apic_id);
+        debugWrite(", jobs ");
+        debugWriteU64Decimal(processor.scheduler_jobs);
+        debugWrite(", ticks ");
+        debugWriteU64Decimal(processor.scheduler_ticks);
+        debugWrite(", dispatches ");
+        debugWriteU64Decimal(processor.scheduler_dispatches);
+        debugWrite(", halts ");
+        debugWriteU64Decimal(processor.scheduler_halt_count);
+        debugWrite(", checksum 0x");
+        debugWriteHex64(processor.scheduler_checksum);
+        debugWrite("\r\n");
         debugWrite("AP local timer: APIC ");
         debugWriteU64Decimal(processor.actual_apic_id);
         debugWrite(", vector 0x");
@@ -612,6 +625,15 @@ fn startApplicationProcessors(
     if (report.online_count != report.target_count) {
         smpFailure("not every MADT application processor reached long mode");
     }
+    debugWrite("Per-AP tick schedulers complete: jobs ");
+    debugWriteU64Decimal(report.ap_scheduler_jobs_per_core);
+    debugWrite("/core, quantum count ");
+    debugWriteU64Decimal(report.ap_scheduler_quantum_count);
+    debugWrite(", ");
+    debugWriteU64Decimal(report.ap_scheduler_completed);
+    debugWrite("/");
+    debugWriteU64Decimal(report.ap_scheduler_targets);
+    debugWrite(" APs dispatched exactly one job per timer tick\r\n");
     debugWrite("Per-AP timers complete: vector 0x");
     debugWriteHex8(report.ap_timer_vector);
     debugWrite(", count ");

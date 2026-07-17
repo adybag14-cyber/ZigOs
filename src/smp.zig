@@ -63,6 +63,11 @@ pub const ApReport = struct {
     timer_interrupt_count: u32,
     timer_armed_epoch: u32,
     timer_halt_count: u32,
+    scheduler_jobs: u32,
+    scheduler_ticks: u32,
+    scheduler_dispatches: u32,
+    scheduler_checksum: u64,
+    scheduler_halt_count: u32,
     online: bool,
     state: u32,
     per_cpu_state: u64,
@@ -88,6 +93,10 @@ pub const Report = struct {
     ap_timer_targets: u32,
     ap_timer_completed: u32,
     ap_timer_initial_count: u32,
+    ap_scheduler_targets: u32,
+    ap_scheduler_completed: u32,
+    ap_scheduler_jobs_per_core: u32,
+    ap_scheduler_quantum_count: u32,
     processors: [acpi.maximum_processors]ApReport,
 };
 
@@ -137,6 +146,10 @@ pub fn start(
         .ap_timer_targets = 0,
         .ap_timer_completed = 0,
         .ap_timer_initial_count = 0,
+        .ap_scheduler_targets = 0,
+        .ap_scheduler_completed = 0,
+        .ap_scheduler_jobs_per_core = 0,
+        .ap_scheduler_quantum_count = 0,
         .processors = undefined,
     };
 
@@ -244,6 +257,11 @@ pub fn start(
             .timer_interrupt_count = 0,
             .timer_armed_epoch = 0,
             .timer_halt_count = 0,
+            .scheduler_jobs = 0,
+            .scheduler_ticks = 0,
+            .scheduler_dispatches = 0,
+            .scheduler_checksum = 0,
+            .scheduler_halt_count = 0,
             .online = online,
             .state = state,
             .per_cpu_state = @intFromPtr(per_cpu_state),
@@ -271,6 +289,10 @@ pub fn start(
     }
     if (!runPerApTimerRound(&report, reference, timer_ticks_per_second)) {
         debugWrite("SMP stage failure: per-AP timer\r\n");
+        return null;
+    }
+    if (!runTickSchedulerRound(&report, reference, timer_ticks_per_second)) {
+        debugWrite("SMP stage failure: tick scheduler\r\n");
         return null;
     }
     return report;
@@ -567,6 +589,79 @@ fn runPerApTimerRound(report: *Report, reference: hpet.Device, ticks_per_second:
     report.ap_timer_targets = @intCast(report.target_count);
     report.ap_timer_completed = completed;
     report.ap_timer_initial_count = initial_count;
+    return completed == report.target_count;
+}
+
+fn runTickSchedulerRound(report: *Report, reference: hpet.Device, ticks_per_second: u64) bool {
+    const epoch: u32 = 2;
+    const jobs: u32 = 3;
+    const base_input: u64 = 0x5449_434B_5F51_5541;
+    if (ticks_per_second < 1_000 or ticks_per_second / 50 > std.math.maxInt(u32)) return false;
+    const quantum_count: u32 = @intCast(@max(@as(u64, 1), ticks_per_second / 50));
+
+    percpu.pauseRunQueues();
+    var baseline_halts = std.mem.zeroes([acpi.maximum_processors]u32);
+    for (report.processors[0..report.target_count], 0..) |processor, index| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        if (!percpu.resetRunQueue(state)) return false;
+        baseline_halts[index] = percpu.report(state).idle_halt_count;
+        var sequence: u32 = 1;
+        while (sequence <= jobs) : (sequence += 1) {
+            const input = base_input ^
+                (@as(u64, processor.actual_apic_id) << 40) ^
+                (@as(u64, sequence) *% 0x0101_0101_0101_0101);
+            if (!percpu.enqueueRunQueue(state, sequence, input)) return false;
+        }
+        if (!percpu.requestTickScheduler(state, epoch, quantum_count, jobs)) return false;
+    }
+    percpu.resumeRunQueues();
+    for (report.processors[0..report.target_count]) |processor| {
+        if (!apic.sendFixedIpi(processor.actual_apic_id, percpu.ap_work_vector)) return false;
+    }
+
+    var iteration: usize = 0;
+    while (iteration < startup_timeout_iterations) : (iteration += 1) {
+        var completed: usize = 0;
+        for (report.processors[0..report.target_count]) |processor| {
+            const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+            if (percpu.tickSchedulerComplete(state, epoch)) completed += 1;
+        }
+        if (completed == report.target_count) break;
+        if (!reference.waitNanoseconds(startup_poll_nanoseconds)) return false;
+    }
+
+    percpu.pauseRunQueues();
+    var completed: u32 = 0;
+    for (report.processors[0..report.target_count], 0..) |*processor, index| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        const checksum = percpu.verifyRunQueue(state, processor.actual_apic_id, jobs) orelse return false;
+        const state_report = percpu.report(state);
+        if (state_report.timer_request_epoch != epoch or
+            state_report.timer_armed_epoch != epoch or
+            state_report.timer_periodic != 1 or
+            state_report.timer_target_interrupts != jobs or
+            state_report.scheduler_enabled != 1 or
+            state_report.scheduler_target_jobs != jobs or
+            state_report.scheduler_tick_count != jobs or
+            state_report.scheduler_dispatch_count != jobs or
+            state_report.timer_interrupt_count != jobs or
+            state_report.idle_halt_count < baseline_halts[index] + jobs)
+        {
+            return false;
+        }
+        processor.scheduler_jobs = jobs;
+        processor.scheduler_ticks = state_report.scheduler_tick_count;
+        processor.scheduler_dispatches = state_report.scheduler_dispatch_count;
+        processor.scheduler_checksum = checksum;
+        processor.scheduler_halt_count = state_report.idle_halt_count;
+        percpu.finishTickScheduler(state);
+        completed += 1;
+    }
+    report.ap_scheduler_targets = @intCast(report.target_count);
+    report.ap_scheduler_completed = completed;
+    report.ap_scheduler_jobs_per_core = jobs;
+    report.ap_scheduler_quantum_count = quantum_count;
+    percpu.resumeRunQueues();
     return completed == report.target_count;
 }
 
