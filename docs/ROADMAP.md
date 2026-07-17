@@ -331,3 +331,13 @@
 - IPv4 and ICMP Internet checksums are generated in the kernel and independently revalidated across the complete received headers and payload.
 - TX descriptor 1 and RX descriptor 1 require fresh queue-specific MSI-X counter advances before their writebacks are accepted.
 - The QEMU gateway Echo Reply must preserve the identifier, sequence, payload, source/destination IPv4 addresses, and a nonzero TTL.
+
+
+## 3.1 - DHCP lease acquisition
+
+- ZigOs sends a broadcast DHCP Discover and receives an Offer on RX descriptor 0, then sends a DHCP Request and receives the ACK on descriptor 1.
+- BOOTP transaction ID, client hardware address, DHCP magic cookie, message type, server identifier, and acknowledged address are validated before accepting the lease.
+- Ethernet, IPv4, UDP, and DHCP lengths are bounded against the DMA writeback length; IPv4 and nonzero UDP checksums are independently verified.
+- The ACK supplies the local IPv4 address, subnet mask, server identifier, lease duration, and server MAC address. Router and DNS options remain explicitly tracked as advertised or absent; QEMU user networking omits both, so the validated server identifier becomes the gateway fallback while DNS remains unset.
+- ARP and ICMP move to descriptors 2 and 3 and consume the acknowledged address and router instead of compile-time network constants.
+- Every Discover, Offer, Request, ACK, ARP, and ICMP stage requires fresh queue-specific MSI-X activity and the matching descriptor writeback.

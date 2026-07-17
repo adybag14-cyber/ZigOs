@@ -3,6 +3,7 @@ const pci = @import("pci.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
 const apic = @import("apic.zig");
+const dhcp = @import("dhcp.zig");
 
 const cc = std.os.uefi.cc;
 const pci_command_memory_space: u16 = 1 << 1;
@@ -87,8 +88,6 @@ const icmp_sequence: u16 = 1;
 const icmp_payload = "ZigOs-ICMP-ECHO!";
 const icmp_ipv4_total_bytes: usize = ipv4_header_bytes + icmp_header_bytes + icmp_payload.len;
 const icmp_ethernet_frame_bytes: usize = 14 + icmp_ipv4_total_bytes;
-const guest_ipv4 = [4]u8{ 10, 0, 2, 15 };
-const gateway_ipv4 = [4]u8{ 10, 0, 2, 2 };
 
 const RxDescriptor = extern struct {
     buffer_address: u64,
@@ -143,6 +142,33 @@ pub const NetworkResult = struct {
     msix_vector_count: u16,
     msix_mapping_table_pages: u64,
     interrupt_target_apic_id: u8,
+    dhcp_transaction_id: u32,
+    dhcp_discover_length: u16,
+    dhcp_offer_length: u16,
+    dhcp_request_length: u16,
+    dhcp_ack_length: u16,
+    dhcp_discover_tx_interrupt_count: u64,
+    dhcp_offer_rx_interrupt_count: u64,
+    dhcp_request_tx_interrupt_count: u64,
+    dhcp_ack_rx_interrupt_count: u64,
+    dhcp_discover_tx_interrupt_cause: u32,
+    dhcp_offer_rx_interrupt_cause: u32,
+    dhcp_request_tx_interrupt_cause: u32,
+    dhcp_ack_rx_interrupt_cause: u32,
+    dhcp_offer_address: [4]u8,
+    dhcp_offer_server_identifier: [4]u8,
+    dhcp_offer_lease_seconds: u32,
+    dhcp_address: [4]u8,
+    dhcp_subnet_mask: [4]u8,
+    dhcp_router: [4]u8,
+    dhcp_dns_server: [4]u8,
+    dhcp_router_advertised: bool,
+    dhcp_dns_server_advertised: bool,
+    dhcp_server_identifier: [4]u8,
+    dhcp_server_mac: [6]u8,
+    dhcp_lease_seconds: u32,
+    dhcp_reply_ttl: u8,
+    dhcp_udp_checksum_present: bool,
     tx_interrupt_count: u64,
     rx_interrupt_count: u64,
     tx_interrupt_cause: u32,
@@ -305,35 +331,72 @@ pub fn initializeAndTestNetwork(
     _ = read32(controller.bar0, status_offset);
 
     const tx_buffer = @as([*]u8, @ptrFromInt(tx_buffer_address))[0..memory.page_size];
-    @memset(tx_buffer, 0);
-    buildArpRequest(tx_buffer[0..ethernet_minimum_frame_bytes], controller.mac_address);
-    tx_descriptors[0] = .{
-        .buffer_address = tx_buffer_address,
-        .length = ethernet_minimum_frame_bytes,
-        .checksum_offset = 0,
-        .command = 0x0B,
-        .status = 0,
-        .checksum_start = 0,
-        .special = 0,
-    };
-    zigos_memory_fence();
 
-    const tx_baseline = txInterruptCount();
-    const rx_baseline = rxInterruptCount();
+    @memset(tx_buffer, 0);
+    const discover_length = dhcp.buildDiscover(tx_buffer, controller.mac_address) orelse return null;
+    tx_descriptors[0] = makeTxDescriptor(tx_buffer_address, discover_length);
+    zigos_memory_fence();
+    const discover_tx_baseline = txInterruptCount();
+    const offer_rx_baseline = rxInterruptCount();
     write32(controller.bar0, tdt_offset, 1);
     _ = read32(controller.bar0, status_offset);
-
-    if (!waitForTx(tx_descriptors, 0, tx_baseline, target_apic_id)) return null;
-    if (!waitForRx(rx_descriptors, 0, rx_baseline, target_apic_id)) return null;
+    if (!waitForTx(tx_descriptors, 0, discover_tx_baseline, target_apic_id)) return null;
+    if (!waitForRx(rx_descriptors, 0, offer_rx_baseline, target_apic_id)) return null;
     zigos_memory_fence();
+    const offer_length = validateRxDescriptor(rx_descriptors, 0) orelse return null;
+    const offer_frame = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[0]))[0..offer_length];
+    const offer = dhcp.parseOffer(offer_frame, controller.mac_address) orelse return null;
+    const discover_tx_interrupt_count = txInterruptCount() - discover_tx_baseline;
+    const offer_rx_interrupt_count = rxInterruptCount() - offer_rx_baseline;
+    const discover_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
+    const offer_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
 
-    const received_length = rx_descriptors[0].length;
-    if (received_length < arp_payload_bytes or received_length > memory.page_size) return null;
-    if ((rx_descriptors[0].status & 0x03) != 0x03 or rx_descriptors[0].errors != 0) return null;
-    const received = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[0]))[0..received_length];
-    const parsed = parseArpReply(received, controller.mac_address) orelse return null;
-    const arp_tx_interrupt_count = txInterruptCount() - tx_baseline;
-    const arp_rx_interrupt_count = rxInterruptCount() - rx_baseline;
+    @memset(tx_buffer, 0);
+    const request_length = dhcp.buildRequest(tx_buffer, controller.mac_address, offer.lease) orelse return null;
+    tx_descriptors[1] = makeTxDescriptor(tx_buffer_address, request_length);
+    zigos_memory_fence();
+    const request_tx_baseline = txInterruptCount();
+    const ack_rx_baseline = rxInterruptCount();
+    write32(controller.bar0, tdt_offset, 2);
+    _ = read32(controller.bar0, status_offset);
+    if (!waitForTx(tx_descriptors, 1, request_tx_baseline, target_apic_id)) return null;
+    if (!waitForRx(rx_descriptors, 1, ack_rx_baseline, target_apic_id)) return null;
+    zigos_memory_fence();
+    const ack_length = validateRxDescriptor(rx_descriptors, 1) orelse return null;
+    const ack_frame = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[1]))[0..ack_length];
+    const ack = dhcp.parseAck(ack_frame, controller.mac_address, offer.lease) orelse return null;
+    const request_tx_interrupt_count = txInterruptCount() - request_tx_baseline;
+    const ack_rx_interrupt_count = rxInterruptCount() - ack_rx_baseline;
+    const request_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
+    const ack_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
+
+    @memset(tx_buffer, 0);
+    buildArpRequest(
+        tx_buffer[0..ethernet_minimum_frame_bytes],
+        controller.mac_address,
+        ack.lease.address,
+        ack.lease.router,
+    );
+    tx_descriptors[2] = makeTxDescriptor(tx_buffer_address, ethernet_minimum_frame_bytes);
+    zigos_memory_fence();
+    const arp_tx_baseline = txInterruptCount();
+    const arp_rx_baseline = rxInterruptCount();
+    write32(controller.bar0, tdt_offset, 3);
+    _ = read32(controller.bar0, status_offset);
+    if (!waitForTx(tx_descriptors, 2, arp_tx_baseline, target_apic_id)) return null;
+    if (!waitForRx(rx_descriptors, 2, arp_rx_baseline, target_apic_id)) return null;
+    zigos_memory_fence();
+    const received_length = validateRxDescriptor(rx_descriptors, 2) orelse return null;
+    if (received_length < arp_payload_bytes) return null;
+    const received = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[2]))[0..received_length];
+    const parsed = parseArpReply(
+        received,
+        controller.mac_address,
+        ack.lease.address,
+        ack.lease.router,
+    ) orelse return null;
+    const arp_tx_interrupt_count = txInterruptCount() - arp_tx_baseline;
+    const arp_rx_interrupt_count = rxInterruptCount() - arp_rx_baseline;
     const arp_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
     const arp_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
 
@@ -342,39 +405,27 @@ pub fn initializeAndTestNetwork(
         tx_buffer[0..ethernet_minimum_frame_bytes],
         controller.mac_address,
         parsed.gateway_mac_address,
+        ack.lease.address,
+        ack.lease.router,
     );
-    tx_descriptors[1] = .{
-        .buffer_address = tx_buffer_address,
-        .length = ethernet_minimum_frame_bytes,
-        .checksum_offset = 0,
-        .command = 0x0B,
-        .status = 0,
-        .checksum_start = 0,
-        .special = 0,
-    };
+    tx_descriptors[3] = makeTxDescriptor(tx_buffer_address, ethernet_minimum_frame_bytes);
     zigos_memory_fence();
-
     const icmp_tx_baseline = txInterruptCount();
     const icmp_rx_baseline = rxInterruptCount();
-    write32(controller.bar0, tdt_offset, 2);
+    write32(controller.bar0, tdt_offset, 4);
     _ = read32(controller.bar0, status_offset);
-
-    if (!waitForTx(tx_descriptors, 1, icmp_tx_baseline, target_apic_id)) return null;
-    if (!waitForRx(rx_descriptors, 1, icmp_rx_baseline, target_apic_id)) return null;
+    if (!waitForTx(tx_descriptors, 3, icmp_tx_baseline, target_apic_id)) return null;
+    if (!waitForRx(rx_descriptors, 3, icmp_rx_baseline, target_apic_id)) return null;
     zigos_memory_fence();
-
-    const icmp_received_length = rx_descriptors[1].length;
-    if (icmp_received_length < 14 + ipv4_header_bytes + icmp_header_bytes or
-        icmp_received_length > memory.page_size)
-    {
-        return null;
-    }
-    if ((rx_descriptors[1].status & 0x03) != 0x03 or rx_descriptors[1].errors != 0) return null;
-    const icmp_received = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[1]))[0..icmp_received_length];
+    const icmp_received_length = validateRxDescriptor(rx_descriptors, 3) orelse return null;
+    if (icmp_received_length < 14 + ipv4_header_bytes + icmp_header_bytes) return null;
+    const icmp_received = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[3]))[0..icmp_received_length];
     const icmp = parseIcmpEchoReply(
         icmp_received,
         controller.mac_address,
         parsed.gateway_mac_address,
+        ack.lease.address,
+        ack.lease.router,
     ) orelse return null;
 
     return .{
@@ -389,6 +440,33 @@ pub fn initializeAndTestNetwork(
         .msix_vector_count = msix.vector_count,
         .msix_mapping_table_pages = msix.mapping_table_pages,
         .interrupt_target_apic_id = target_apic_id,
+        .dhcp_transaction_id = dhcp.transaction_id,
+        .dhcp_discover_length = discover_length,
+        .dhcp_offer_length = offer.frame_length,
+        .dhcp_request_length = request_length,
+        .dhcp_ack_length = ack.frame_length,
+        .dhcp_discover_tx_interrupt_count = discover_tx_interrupt_count,
+        .dhcp_offer_rx_interrupt_count = offer_rx_interrupt_count,
+        .dhcp_request_tx_interrupt_count = request_tx_interrupt_count,
+        .dhcp_ack_rx_interrupt_count = ack_rx_interrupt_count,
+        .dhcp_discover_tx_interrupt_cause = discover_tx_interrupt_cause,
+        .dhcp_offer_rx_interrupt_cause = offer_rx_interrupt_cause,
+        .dhcp_request_tx_interrupt_cause = request_tx_interrupt_cause,
+        .dhcp_ack_rx_interrupt_cause = ack_rx_interrupt_cause,
+        .dhcp_offer_address = offer.lease.address,
+        .dhcp_offer_server_identifier = offer.lease.server_identifier,
+        .dhcp_offer_lease_seconds = offer.lease.lease_seconds,
+        .dhcp_address = ack.lease.address,
+        .dhcp_subnet_mask = ack.lease.subnet_mask,
+        .dhcp_router = ack.lease.router,
+        .dhcp_dns_server = ack.lease.dns_server,
+        .dhcp_router_advertised = ack.lease.router_advertised,
+        .dhcp_dns_server_advertised = ack.lease.dns_server_advertised,
+        .dhcp_server_identifier = ack.lease.server_identifier,
+        .dhcp_server_mac = ack.lease.server_mac,
+        .dhcp_lease_seconds = ack.lease.lease_seconds,
+        .dhcp_reply_ttl = ack.lease.reply_ttl,
+        .dhcp_udp_checksum_present = ack.lease.udp_checksum_present,
         .tx_interrupt_count = arp_tx_interrupt_count,
         .rx_interrupt_count = arp_rx_interrupt_count,
         .tx_interrupt_cause = arp_tx_interrupt_cause,
@@ -410,6 +488,28 @@ pub fn initializeAndTestNetwork(
         .icmp_reply_ttl = icmp.ttl,
         .icmp_payload_length = icmp.payload_length,
     };
+}
+
+fn makeTxDescriptor(buffer_address: usize, length: u16) TxDescriptor {
+    return .{
+        .buffer_address = buffer_address,
+        .length = length,
+        .checksum_offset = 0,
+        .command = 0x0B,
+        .status = 0,
+        .checksum_start = 0,
+        .special = 0,
+    };
+}
+
+fn validateRxDescriptor(descriptors: [*]volatile RxDescriptor, descriptor_index: usize) ?u16 {
+    const descriptor = descriptors[descriptor_index];
+    if ((descriptor.status & 0x03) != 0x03 or descriptor.errors != 0 or
+        descriptor.length == 0 or descriptor.length > memory.page_size)
+    {
+        return null;
+    }
+    return descriptor.length;
 }
 
 const MsixSetup = struct {
@@ -537,7 +637,12 @@ const ParsedArp = struct {
     target_ipv4: [4]u8,
 };
 
-fn parseArpReply(frame: []const u8, local_mac: [6]u8) ?ParsedArp {
+fn parseArpReply(
+    frame: []const u8,
+    local_mac: [6]u8,
+    local_ipv4: [4]u8,
+    gateway_ipv4: [4]u8,
+) ?ParsedArp {
     if (frame.len < arp_payload_bytes) return null;
     if (!std.mem.eql(u8, frame[0..6], &local_mac)) return null;
     if (readNetwork16(frame, 12) != ether_type_arp) return null;
@@ -550,7 +655,7 @@ fn parseArpReply(frame: []const u8, local_mac: [6]u8) ?ParsedArp {
     if (opcode != arp_reply) return null;
     if (!std.mem.eql(u8, frame[28..32], &gateway_ipv4) or
         !std.mem.eql(u8, frame[32..38], &local_mac) or
-        !std.mem.eql(u8, frame[38..42], &guest_ipv4))
+        !std.mem.eql(u8, frame[38..42], &local_ipv4))
     {
         return null;
     }
@@ -569,7 +674,12 @@ fn parseArpReply(frame: []const u8, local_mac: [6]u8) ?ParsedArp {
     };
 }
 
-fn buildArpRequest(frame: []u8, local_mac: [6]u8) void {
+fn buildArpRequest(
+    frame: []u8,
+    local_mac: [6]u8,
+    local_ipv4: [4]u8,
+    gateway_ipv4: [4]u8,
+) void {
     @memset(frame, 0);
     @memset(frame[0..6], 0xFF);
     @memcpy(frame[6..12], &local_mac);
@@ -580,7 +690,7 @@ fn buildArpRequest(frame: []u8, local_mac: [6]u8) void {
     frame[19] = 4;
     writeNetwork16(frame, 20, arp_request);
     @memcpy(frame[22..28], &local_mac);
-    @memcpy(frame[28..32], &guest_ipv4);
+    @memcpy(frame[28..32], &local_ipv4);
     @memset(frame[32..38], 0);
     @memcpy(frame[38..42], &gateway_ipv4);
 }
@@ -596,6 +706,8 @@ fn buildIcmpEchoRequest(
     frame: []u8,
     local_mac: [6]u8,
     gateway_mac: [6]u8,
+    local_ipv4: [4]u8,
+    gateway_ipv4: [4]u8,
 ) void {
     @memset(frame, 0);
     @memcpy(frame[0..6], &gateway_mac);
@@ -611,7 +723,7 @@ fn buildIcmpEchoRequest(
     frame[ip_offset + 8] = 64;
     frame[ip_offset + 9] = ipv4_protocol_icmp;
     writeNetwork16(frame, ip_offset + 10, 0);
-    @memcpy(frame[ip_offset + 12 .. ip_offset + 16], &guest_ipv4);
+    @memcpy(frame[ip_offset + 12 .. ip_offset + 16], &local_ipv4);
     @memcpy(frame[ip_offset + 16 .. ip_offset + 20], &gateway_ipv4);
     const ip_checksum = internetChecksum(frame[ip_offset .. ip_offset + ipv4_header_bytes]);
     writeNetwork16(frame, ip_offset + 10, ip_checksum);
@@ -631,6 +743,8 @@ fn parseIcmpEchoReply(
     frame: []const u8,
     local_mac: [6]u8,
     gateway_mac: [6]u8,
+    local_ipv4: [4]u8,
+    gateway_ipv4: [4]u8,
 ) ?ParsedIcmp {
     if (frame.len < 14 + ipv4_header_bytes + icmp_header_bytes) return null;
     if (!std.mem.eql(u8, frame[0..6], &local_mac) or
@@ -649,7 +763,7 @@ fn parseIcmpEchoReply(
     if (frame[ip_offset + 9] != ipv4_protocol_icmp or frame[ip_offset + 8] == 0) return null;
     if ((readNetwork16(frame, ip_offset + 6) & 0x1FFF) != 0) return null;
     if (!std.mem.eql(u8, frame[ip_offset + 12 .. ip_offset + 16], &gateway_ipv4) or
-        !std.mem.eql(u8, frame[ip_offset + 16 .. ip_offset + 20], &guest_ipv4))
+        !std.mem.eql(u8, frame[ip_offset + 16 .. ip_offset + 20], &local_ipv4))
     {
         return null;
     }

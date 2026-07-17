@@ -604,6 +604,18 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, "e1000e MSI-X active: capability \+0xA0, table entry 0 at 0x[0-9A-F]{16}, vectors 5, vector 0x49, target APIC $expectedLegacyIrqTarget, control 0x[0-9A-F]{4}, mapping pages [0-9]+")) {
         throw 'The e1000e MSI-X vector was not programmed for the selected routable CPU.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e DHCP Discover transmitted: xid 0x000000005A49474F, 342 bytes, TX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
+        throw 'The DHCP Discover did not complete through TX DMA and MSI-X.'
+    }
+    if (-not [regex]::IsMatch($output, 'e1000e DHCP Offer received: address 10\.0\.2\.15, server 10\.0\.2\.2, lease [1-9][0-9]* s, [3-9][0-9][0-9] bytes, RX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
+        throw 'The DHCP Offer was not received and validated.'
+    }
+    if (-not [regex]::IsMatch($output, 'e1000e DHCP Request transmitted: address 10\.0\.2\.15, server 10\.0\.2\.2, 342 bytes, TX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
+        throw 'The DHCP Request did not complete through TX DMA and MSI-X.'
+    }
+    if (-not [regex]::IsMatch($output, 'e1000e DHCP ACK received: address 10\.0\.2\.15, subnet 255\.255\.255\.0, router 10\.0\.2\.2 \(server fallback\), DNS absent, server 10\.0\.2\.2, lease [1-9][0-9]* s, TTL [1-9][0-9]*, UDP checksum (present|absent), [3-9][0-9][0-9] bytes, RX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
+        throw 'The DHCP ACK lease fields or UDP/IPv4 validation were not observed.'
+    }
     if (-not [regex]::IsMatch($output, 'e1000e ARP request transmitted: 10\.0\.2\.15 -> 10\.0\.2\.2, 60 bytes, TX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
         throw 'The e1000e ARP request did not complete through TX DMA and MSI-X.'
     }

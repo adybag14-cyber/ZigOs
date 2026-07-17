@@ -1454,7 +1454,7 @@ fn inspectE1000e(
         &controller,
         allocator,
         target_apic_id,
-    ) orelse networkFailure("reset, DMA rings, MSI-X, ARP, or ICMP validation failed");
+    ) orelse networkFailure("reset, DMA rings, MSI-X, DHCP, ARP, or ICMP validation failed");
 
     debugWrite("e1000e rings active: RX 0x");
     debugWriteHex64(network.rx_ring_address);
@@ -1484,7 +1484,76 @@ fn inspectE1000e(
     debugWriteU64Decimal(network.msix_mapping_table_pages);
     debugWrite("\r\n");
 
-    debugWrite("e1000e ARP request transmitted: 10.0.2.15 -> 10.0.2.2, ");
+    debugWrite("e1000e DHCP Discover transmitted: xid 0x");
+    debugWriteHex64(network.dhcp_transaction_id);
+    debugWrite(", ");
+    debugWriteU64Decimal(network.dhcp_discover_length);
+    debugWrite(" bytes, TX interrupts ");
+    debugWriteU64Decimal(network.dhcp_discover_tx_interrupt_count);
+    debugWrite(", cause 0x");
+    debugWriteHex64(network.dhcp_discover_tx_interrupt_cause);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e DHCP Offer received: address ");
+    debugWriteIpv4(network.dhcp_offer_address);
+    debugWrite(", server ");
+    debugWriteIpv4(network.dhcp_offer_server_identifier);
+    debugWrite(", lease ");
+    debugWriteU64Decimal(network.dhcp_offer_lease_seconds);
+    debugWrite(" s, ");
+    debugWriteU64Decimal(network.dhcp_offer_length);
+    debugWrite(" bytes, RX interrupts ");
+    debugWriteU64Decimal(network.dhcp_offer_rx_interrupt_count);
+    debugWrite(", cause 0x");
+    debugWriteHex64(network.dhcp_offer_rx_interrupt_cause);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e DHCP Request transmitted: address ");
+    debugWriteIpv4(network.dhcp_offer_address);
+    debugWrite(", server ");
+    debugWriteIpv4(network.dhcp_offer_server_identifier);
+    debugWrite(", ");
+    debugWriteU64Decimal(network.dhcp_request_length);
+    debugWrite(" bytes, TX interrupts ");
+    debugWriteU64Decimal(network.dhcp_request_tx_interrupt_count);
+    debugWrite(", cause 0x");
+    debugWriteHex64(network.dhcp_request_tx_interrupt_cause);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e DHCP ACK received: address ");
+    debugWriteIpv4(network.dhcp_address);
+    debugWrite(", subnet ");
+    debugWriteIpv4(network.dhcp_subnet_mask);
+    debugWrite(", router ");
+    debugWriteIpv4(network.dhcp_router);
+    debugWrite(if (network.dhcp_router_advertised) " (advertised)" else " (server fallback)");
+    debugWrite(", DNS ");
+    if (network.dhcp_dns_server_advertised) {
+        debugWriteIpv4(network.dhcp_dns_server);
+    } else {
+        debugWrite("absent");
+    }
+    debugWrite(", server ");
+    debugWriteIpv4(network.dhcp_server_identifier);
+    debugWrite(", lease ");
+    debugWriteU64Decimal(network.dhcp_lease_seconds);
+    debugWrite(" s, TTL ");
+    debugWriteU64Decimal(network.dhcp_reply_ttl);
+    debugWrite(", UDP checksum ");
+    debugWrite(if (network.dhcp_udp_checksum_present) "present" else "absent");
+    debugWrite(", ");
+    debugWriteU64Decimal(network.dhcp_ack_length);
+    debugWrite(" bytes, RX interrupts ");
+    debugWriteU64Decimal(network.dhcp_ack_rx_interrupt_count);
+    debugWrite(", cause 0x");
+    debugWriteHex64(network.dhcp_ack_rx_interrupt_cause);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e ARP request transmitted: ");
+    debugWriteIpv4(network.dhcp_address);
+    debugWrite(" -> ");
+    debugWriteIpv4(network.dhcp_router);
+    debugWrite(", ");
     debugWriteU64Decimal(network.transmitted_length);
     debugWrite(" bytes, TX interrupts ");
     debugWriteU64Decimal(network.tx_interrupt_count);
@@ -1511,7 +1580,11 @@ fn inspectE1000e(
     debugWriteHex64(network.rx_interrupt_cause);
     debugWrite("\r\n");
 
-    debugWrite("e1000e ICMP echo request transmitted: 10.0.2.15 -> 10.0.2.2, ");
+    debugWrite("e1000e ICMP echo request transmitted: ");
+    debugWriteIpv4(network.dhcp_address);
+    debugWrite(" -> ");
+    debugWriteIpv4(network.dhcp_router);
+    debugWrite(", ");
     debugWriteU64Decimal(network.icmp_transmitted_length);
     debugWrite(" bytes, identifier 0x");
     debugWriteHex16(network.icmp_identifier);
@@ -1523,7 +1596,11 @@ fn inspectE1000e(
     debugWriteHex64(network.icmp_tx_interrupt_cause);
     debugWrite("\r\n");
 
-    debugWrite("e1000e ICMP echo reply received: 10.0.2.2 -> 10.0.2.15, ");
+    debugWrite("e1000e ICMP echo reply received: ");
+    debugWriteIpv4(network.dhcp_router);
+    debugWrite(" -> ");
+    debugWriteIpv4(network.dhcp_address);
+    debugWrite(", ");
     debugWriteU64Decimal(network.icmp_received_length);
     debugWrite(" bytes, TTL ");
     debugWriteU64Decimal(network.icmp_reply_ttl);
