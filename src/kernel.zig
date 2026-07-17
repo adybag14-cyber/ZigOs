@@ -1239,6 +1239,56 @@ fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWrite(", EP0 ring 0x");
     debugWriteHex64(@intCast(addressed.transfer_ring_address));
     debugWrite("\r\n");
+    var mutable_addressed = addressed;
+    const descriptor = xhci.readDeviceDescriptor(
+        controller,
+        &ownership,
+        &mutable_addressed,
+        allocator,
+    ) orelse xhciFailure("EP0 GET_DESCRIPTOR transfer or device-descriptor validation failed");
+    debugWrite("USB device descriptor read: length ");
+    debugWriteU64Decimal(descriptor.length);
+    debugWrite(", type ");
+    debugWriteU64Decimal(descriptor.descriptor_type);
+    debugWrite(", USB BCD 0x");
+    debugWriteHex16(descriptor.usb_version_bcd);
+    debugWrite(", class 0x");
+    debugWriteHex8(descriptor.device_class);
+    debugWrite(":0x");
+    debugWriteHex8(descriptor.device_subclass);
+    debugWrite(":0x");
+    debugWriteHex8(descriptor.device_protocol);
+    debugWrite(", EP0 packet ");
+    debugWriteU64Decimal(descriptor.endpoint0_max_packet_size);
+    debugWrite("\r\n");
+    debugWrite("USB identity: vendor 0x");
+    debugWriteHex16(descriptor.vendor_id);
+    debugWrite(", product 0x");
+    debugWriteHex16(descriptor.product_id);
+    debugWrite(", device BCD 0x");
+    debugWriteHex16(descriptor.device_version_bcd);
+    debugWrite(", configurations ");
+    debugWriteU64Decimal(descriptor.configuration_count);
+    debugWrite(", string indexes ");
+    debugWriteU64Decimal(descriptor.manufacturer_string_index);
+    debugWrite("/");
+    debugWriteU64Decimal(descriptor.product_string_index);
+    debugWrite("/");
+    debugWriteU64Decimal(descriptor.serial_string_index);
+    debugWrite("\r\n");
+    debugWrite("xHCI EP0 transfer completed: completion ");
+    debugWriteU64Decimal(descriptor.completion_code);
+    debugWrite(", endpoint ");
+    debugWriteU64Decimal(descriptor.endpoint_id);
+    debugWrite(", slot ");
+    debugWriteU64Decimal(descriptor.slot_id);
+    debugWrite(", residual ");
+    debugWriteU64Decimal(descriptor.transfer_residual);
+    debugWrite(", event TRB 0x");
+    debugWriteHex64(descriptor.event_trb_pointer);
+    debugWrite(", buffer 0x");
+    debugWriteHex64(@intCast(descriptor.buffer_address));
+    debugWrite("\r\n");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {

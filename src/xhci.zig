@@ -23,11 +23,23 @@ const trb_toggle_cycle: u32 = 1 << 1;
 const trb_type_shift: u5 = 10;
 const trb_type_link: u32 = 6;
 const trb_type_enable_slot: u32 = 9;
+const trb_type_setup_stage: u32 = 2;
+const trb_type_data_stage: u32 = 3;
+const trb_type_status_stage: u32 = 4;
 const trb_type_address_device: u32 = 11;
+const trb_type_transfer_event: u32 = 32;
 const trb_type_command_completion: u32 = 33;
 const trb_type_port_status_change: u32 = 34;
 const completion_success: u8 = 1;
 const event_handler_busy: u64 = 1 << 3;
+const trb_interrupt_on_short_packet: u32 = 1 << 2;
+const trb_interrupt_on_completion: u32 = 1 << 5;
+const trb_immediate_data: u32 = 1 << 6;
+const trb_direction_in: u32 = 1 << 16;
+const setup_transfer_type_in: u32 = 3 << 16;
+const usb_request_get_descriptor: u8 = 6;
+const usb_descriptor_type_device: u8 = 1;
+const usb_device_descriptor_length: usize = 18;
 const legacy_capability_id: u8 = 1;
 const legacy_bios_owned: u32 = 1 << 16;
 const legacy_os_owned: u32 = 1 << 24;
@@ -156,6 +168,32 @@ pub const AddressedDevice = struct {
     completion_code: u8,
     command_pointer: u64,
     reset_port_status: u32,
+    skipped_port_status_events: u8,
+    transfer_producer_index: u16,
+    transfer_cycle: u1,
+};
+
+pub const DeviceDescriptor = struct {
+    buffer_address: usize,
+    length: u8,
+    descriptor_type: u8,
+    usb_version_bcd: u16,
+    device_class: u8,
+    device_subclass: u8,
+    device_protocol: u8,
+    endpoint0_max_packet_size: u8,
+    vendor_id: u16,
+    product_id: u16,
+    device_version_bcd: u16,
+    manufacturer_string_index: u8,
+    product_string_index: u8,
+    serial_string_index: u8,
+    configuration_count: u8,
+    completion_code: u8,
+    transfer_residual: u32,
+    endpoint_id: u5,
+    slot_id: u8,
+    event_trb_pointer: u64,
     skipped_port_status_events: u8,
 };
 
@@ -530,7 +568,151 @@ pub fn addressConnectedDevice(
         .command_pointer = command_pointer,
         .reset_port_status = reset_port_status,
         .skipped_port_status_events = completion.skipped_port_status_events,
+        .transfer_producer_index = 0,
+        .transfer_cycle = 1,
     };
+}
+
+pub fn readDeviceDescriptor(
+    controller: Controller,
+    ownership: *Ownership,
+    device: *AddressedDevice,
+    allocator: *memory.FrameAllocator,
+) ?DeviceDescriptor {
+    if (device.slot_id != ownership.slot_id or
+        device.transfer_producer_index > trbs_per_page - 4)
+    {
+        return null;
+    }
+    const buffer_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    clearPage(buffer_address);
+    const ring = trbPage(device.transfer_ring_address);
+    const start_index: usize = device.transfer_producer_index;
+    const cycle: u32 = device.transfer_cycle;
+
+    const setup_packet: u64 = @as(u64, 0x80) |
+        (@as(u64, usb_request_get_descriptor) << 8) |
+        (@as(u64, usb_descriptor_type_device) << 24) |
+        (@as(u64, usb_device_descriptor_length) << 48);
+    ring[start_index].parameter = setup_packet;
+    ring[start_index].status = 8;
+    ring[start_index].control = (trb_type_setup_stage << trb_type_shift) |
+        trb_immediate_data | setup_transfer_type_in | cycle;
+
+    ring[start_index + 1].parameter = buffer_address;
+    ring[start_index + 1].status = usb_device_descriptor_length;
+    ring[start_index + 1].control = (trb_type_data_stage << trb_type_shift) |
+        trb_interrupt_on_short_packet | trb_direction_in | cycle;
+
+    ring[start_index + 2].parameter = 0;
+    ring[start_index + 2].status = 0;
+    ring[start_index + 2].control = (trb_type_status_stage << trb_type_shift) |
+        trb_interrupt_on_completion | cycle;
+    zigos_memory_fence();
+
+    const doorbell_base = controller.base_address + controller.doorbell_offset;
+    write32(
+        doorbell_base,
+        @as(usize, device.slot_id) * @sizeOf(u32),
+        1,
+    );
+    const status_trb_address = device.transfer_ring_address +
+        (start_index + 2) * @sizeOf(Trb);
+    const completion = waitForTransferCompletion(
+        controller,
+        ownership,
+        status_trb_address,
+        device.slot_id,
+        1,
+    ) orelse return null;
+    device.transfer_producer_index += 3;
+
+    const descriptor = @as([*]const u8, @ptrFromInt(buffer_address));
+    if (descriptor[0] != usb_device_descriptor_length or
+        descriptor[1] != usb_descriptor_type_device)
+    {
+        return null;
+    }
+    const max_packet = descriptor[7];
+    if (max_packet == 0 or descriptor[17] == 0) return null;
+
+    return .{
+        .buffer_address = buffer_address,
+        .length = descriptor[0],
+        .descriptor_type = descriptor[1],
+        .usb_version_bcd = readLittleEndian16(descriptor + 2),
+        .device_class = descriptor[4],
+        .device_subclass = descriptor[5],
+        .device_protocol = descriptor[6],
+        .endpoint0_max_packet_size = max_packet,
+        .vendor_id = readLittleEndian16(descriptor + 8),
+        .product_id = readLittleEndian16(descriptor + 10),
+        .device_version_bcd = readLittleEndian16(descriptor + 12),
+        .manufacturer_string_index = descriptor[14],
+        .product_string_index = descriptor[15],
+        .serial_string_index = descriptor[16],
+        .configuration_count = descriptor[17],
+        .completion_code = completion.completion_code,
+        .transfer_residual = completion.transfer_residual,
+        .endpoint_id = completion.endpoint_id,
+        .slot_id = completion.slot_id,
+        .event_trb_pointer = completion.event_trb_pointer,
+        .skipped_port_status_events = completion.skipped_port_status_events,
+    };
+}
+
+const TransferCompletion = struct {
+    completion_code: u8,
+    transfer_residual: u32,
+    endpoint_id: u5,
+    slot_id: u8,
+    event_trb_pointer: u64,
+    skipped_port_status_events: u8,
+};
+
+fn waitForTransferCompletion(
+    controller: Controller,
+    ownership: *Ownership,
+    expected_trb_pointer: usize,
+    expected_slot_id: u8,
+    expected_endpoint_id: u5,
+) ?TransferCompletion {
+    var skipped_port_status_events: u8 = 0;
+    var events_seen: usize = 0;
+    while (events_seen < 32) : (events_seen += 1) {
+        const event = consumeEvent(controller, ownership) orelse return null;
+        const event_type = (event.control >> trb_type_shift) & 0x3F;
+        if (event_type == trb_type_port_status_change) {
+            skipped_port_status_events +|= 1;
+            continue;
+        }
+        if (event_type != trb_type_transfer_event) return null;
+        const completion_code: u8 = @truncate(event.status >> 24);
+        const transfer_residual = event.status & 0x00FF_FFFF;
+        const endpoint_id: u5 = @truncate(event.control >> 16);
+        const slot_id: u8 = @truncate(event.control >> 24);
+        const event_trb_pointer = event.parameter & ~@as(u64, 0xF);
+        if (completion_code != completion_success or
+            slot_id != expected_slot_id or
+            endpoint_id != expected_endpoint_id or
+            event_trb_pointer != expected_trb_pointer)
+        {
+            return null;
+        }
+        return .{
+            .completion_code = completion_code,
+            .transfer_residual = transfer_residual,
+            .endpoint_id = endpoint_id,
+            .slot_id = slot_id,
+            .event_trb_pointer = event_trb_pointer,
+            .skipped_port_status_events = skipped_port_status_events,
+        };
+    }
+    return null;
+}
+
+fn readLittleEndian16(bytes: [*]const u8) u16 {
+    return @as(u16, bytes[0]) | (@as(u16, bytes[1]) << 8);
 }
 
 fn firstConnectedPort(controller: Controller) ?Port {

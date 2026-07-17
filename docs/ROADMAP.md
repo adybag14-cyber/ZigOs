@@ -57,7 +57,8 @@
 - [x] xHCI capability and connected USB keyboard port discovery
 - [x] xHCI controller ownership, command/event rings and Enable Slot completion
 - [x] xHCI port reset, slot/EP0 context construction and Address Device completion
-- [ ] USB descriptor requests, HID endpoint configuration and input transfers
+- [x] USB EP0 GET_DESCRIPTOR transfer and device-descriptor parsing
+- [ ] Configuration/HID descriptor parsing, endpoint configuration and input transfers
 
 ## 0.5 - Runtime
 
