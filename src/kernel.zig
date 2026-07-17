@@ -129,7 +129,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWrite(", checksum 0x");
     debugWriteHex64(report.checksum);
     debugWrite("\r\n");
-    debugWrite("Framebuffer transcript: ZigOs | Experimental x86-64 | zigos> help | commands: help cpu mem\r\n");
+    debugWrite("Framebuffer transcript: ZigOs | zigos> help | commands: help cpu mem | zigos> cpu | cpu: x86-64 SMP online | zigos> mem | memory: normalized UEFI layout active\r\n");
     debugWrite("Framebuffer retained and written directly at 0x");
     debugWriteHex64(@intCast(framebuffer.base));
     debugWrite("\r\n");
@@ -1586,20 +1586,23 @@ fn runUsbShell(
     allocator: *memory.FrameAllocator,
     graphical_console: *framebuffer_console.Console,
 ) void {
+    const expected_commands = [_][]const u8{ "help", "cpu", "mem" };
+    const expected_responses = [_]shell.Response{ .help, .cpu, .memory };
     var command_shell = shell.Shell.init();
     var previous_keys = std.mem.zeroes([6]u8);
     var previous_modifiers: u8 = 0;
     var report_count: u32 = 0;
+    var completed_commands: usize = 0;
     var marker_printed = false;
 
-    while (report_count < 64) : (report_count += 1) {
+    while (report_count < 96) : (report_count += 1) {
         const arm = xhci.armNextHidKeyboardInput(
             controller,
             endpoint,
             allocator,
         ) orelse xhciFailure("shell HID input transfer could not be armed");
         if (!marker_printed) {
-            debugWrite("ZigOs shell input armed: commands help cpu mem; waiting for QEMU command\r\n");
+            debugWrite("ZigOs shell input armed: commands help cpu mem; waiting for QEMU session\r\n");
             marker_printed = true;
         }
         const report = xhci.waitHidKeyboardInput(controller, ownership, arm) orelse
@@ -1617,33 +1620,56 @@ fn runUsbShell(
             }
             if (command_shell.feed(event)) |response| {
                 graphical_console.put('\n');
-                if (response == .empty) continue;
+                if (response == .empty) {
+                    graphical_console.write("zigos> ");
+                    continue;
+                }
+                if (completed_commands >= expected_commands.len) {
+                    xhciFailure("native shell executed more commands than expected");
+                }
                 const command = command_shell.executedCommand();
                 const response_text = shell.Shell.responseText(response);
+                const expected_command = expected_commands[completed_commands];
+                const expected_response = expected_responses[completed_commands];
+                if (!std.mem.eql(u8, command, expected_command) or
+                    response != expected_response or
+                    command_shell.command_count != completed_commands + 1 or
+                    command_shell.rejected_characters != 0)
+                {
+                    xhciFailure("persistent native shell command order or dispatch failed");
+                }
+
                 graphical_console.write(response_text);
                 debugWrite("zigos> ");
                 debugWrite(command);
                 debugWrite("\r\n");
                 debugWrite(response_text);
                 debugWrite("\r\n");
-                if (response != .help or !std.mem.eql(u8, command, "help") or
-                    !std.mem.eql(u8, response_text, "commands: help cpu mem") or
-                    command_shell.command_count != 1 or command_shell.rejected_characters != 0)
-                {
-                    xhciFailure("native shell command parsing or dispatch validation failed");
+                completed_commands += 1;
+
+                if (completed_commands == 1) {
+                    debugWrite("Framebuffer line editing verified: helx<BS>p -> help\r\n");
                 }
+                if (completed_commands < expected_commands.len) {
+                    graphical_console.put('\n');
+                    graphical_console.write("zigos> ");
+                    continue;
+                }
+
                 const console_report = graphical_console.report();
-                if (console_report.cursor_row != 4 or console_report.cursor_column != 22 or
-                    console_report.lines != 5 or console_report.glyphs != 58 or
-                    console_report.writes != 58 or console_report.newlines != 4 or
+                if (console_report.cursor_row != 8 or console_report.cursor_column != 37 or
+                    console_report.lines != 9 or console_report.glyphs != 137 or
+                    console_report.writes != 137 or console_report.newlines != 8 or
                     console_report.backspaces != 1 or console_report.scrolls != 0)
                 {
-                    xhciFailure("live framebuffer shell cursor or write accounting failed");
+                    xhciFailure("persistent framebuffer shell cursor or write accounting failed");
                 }
-                debugWrite("Framebuffer live shell: cursor row ");
+                debugWrite("Framebuffer persistent shell: cursor row ");
                 debugWriteUsizeDecimal(console_report.cursor_row);
                 debugWrite(", column ");
                 debugWriteUsizeDecimal(console_report.cursor_column);
+                debugWrite(", lines ");
+                debugWriteUsizeDecimal(console_report.lines);
                 debugWrite(", writes ");
                 debugWriteUsizeDecimal(console_report.writes);
                 debugWrite(", newlines ");
@@ -1655,15 +1681,14 @@ fn runUsbShell(
                 debugWrite(", checksum 0x");
                 debugWriteHex64(console_report.checksum);
                 debugWrite("\r\n");
-                debugWrite("Framebuffer line editing verified: helx<BS>p -> help\r\n");
-                debugWrite("ZigOs shell command complete: help -> commands: help cpu mem; reports ");
+                debugWrite("ZigOs shell session complete: help, cpu, mem; commands 3, reports ");
                 debugWriteU64Decimal(report_count + 1);
                 debugWrite(", rejected 0\r\n");
                 return;
             }
         }
     }
-    xhciFailure("native shell did not receive a complete command within 64 reports");
+    xhciFailure("native shell did not complete three commands within 96 reports");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {

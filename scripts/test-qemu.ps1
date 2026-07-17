@@ -121,7 +121,7 @@ try {
                     $writer.NewLine = "`n"
                     $writer.AutoFlush = $true
                     Start-Sleep -Milliseconds 50
-                    foreach ($key in @('h', 'e', 'l', 'x', 'backspace', 'p', 'ret')) {
+                    foreach ($key in @('h', 'e', 'l', 'x', 'backspace', 'p', 'ret', 'c', 'p', 'u', 'ret', 'm', 'e', 'm', 'ret')) {
                         $writer.WriteLine("sendkey $key 120")
                         Start-Sleep -Milliseconds 180
                     }
@@ -402,24 +402,28 @@ if (-not $output.Contains("Keyboard event queue verified: #1 USB usage 0x04 pres
     throw 'The ordered device-independent keyboard event queue marker was not observed.'
 }
 if (-not $shellInjected) {
-    throw 'The QEMU HMP harness never typed the help command after the shell arm marker.'
+    throw 'The QEMU HMP harness never typed the persistent shell session after the shell arm marker.'
 }
-if (-not $output.Contains('ZigOs shell input armed: commands help cpu mem; waiting for QEMU command')) {
-    throw 'The native ZigOs shell input marker was not observed.'
+if (-not $output.Contains('ZigOs shell input armed: commands help cpu mem; waiting for QEMU session')) {
+    throw 'The persistent native ZigOs shell input marker was not observed.'
 }
-if (-not $output.Contains('zigos> help')) {
-    throw 'The native shell did not echo the injected help command.'
+if (-not $output.Contains('zigos> help') -or -not $output.Contains('commands: help cpu mem')) {
+    throw 'The native shell help command or response was not observed.'
 }
-if (-not $output.Contains('commands: help cpu mem')) {
-    throw 'The native shell help response was not observed.'
+if (-not $output.Contains('zigos> cpu') -or -not $output.Contains('cpu: x86-64 SMP online')) {
+    throw 'The native shell cpu command or response was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer live shell: cursor row 4, column 22, writes 58, newlines 4, backspaces 1, scrolls 0, checksum 0x9108399455DEB815')) {
-    throw 'The live USB-keyboard-to-framebuffer shell update proof was not observed.'
-}if (-not $output.Contains('Framebuffer line editing verified: helx<BS>p -> help')) {
+if (-not $output.Contains('zigos> mem') -or -not $output.Contains('memory: normalized UEFI layout active')) {
+    throw 'The native shell mem command or response was not observed.'
+}
+if (-not $output.Contains('Framebuffer line editing verified: helx<BS>p -> help')) {
     throw 'The USB Backspace command-line editing proof was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'ZigOs shell command complete: help -> commands: help cpu mem; reports [1-9][0-9]*, rejected 0')) {
-    throw 'The native shell command-dispatch verification marker was not observed.'
+if (-not [regex]::IsMatch($output, 'Framebuffer persistent shell: cursor row 8, column 37, lines 9, writes 137, newlines 8, backspaces 1, scrolls 0, checksum 0xD805250E224832A5')) {
+    throw 'The three-command live framebuffer shell state proof was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'ZigOs shell session complete: help, cpu, mem; commands 3, reports [1-9][0-9]*, rejected 0')) {
+    throw 'The persistent native shell session completion marker was not observed.'
 }
 if (-not $output.Contains('AHCI controller active at')) {
     throw 'The AHCI PCI/BAR discovery marker was not observed.'
@@ -517,10 +521,10 @@ if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B
 if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
     throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 5, glyphs 58, lit pixels 3168, checksum 0x9108399455DEB815')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 9, glyphs 137, lit pixels 7312, checksum 0xD805250E224832A5')) {
     throw 'The deterministic GOP bitmap-console report was not observed.'
 }
-if (-not $output.Contains('Framebuffer transcript: ZigOs | Experimental x86-64 | zigos> help | commands: help cpu mem')) {
+if (-not $output.Contains('Framebuffer transcript: ZigOs | zigos> help | commands: help cpu mem | zigos> cpu | cpu: x86-64 SMP online | zigos> mem | memory: normalized UEFI layout active')) {
     throw 'The rendered graphical-console transcript marker was not observed.'
 }
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
