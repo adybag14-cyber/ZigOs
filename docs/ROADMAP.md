@@ -116,3 +116,5 @@
 - [x] Built-in scaled 5x7 bitmap font renderer
 - [x] On-screen ZigOs banner and native-shell transcript
 - [x] Deterministic framebuffer pixel-checksum regression gate
+- [x] Persistent terminal state with live USB keystroke and shell-response rendering
+- [x] Cursor, write, newline, backspace and scroll accounting

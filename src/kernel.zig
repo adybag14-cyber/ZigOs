@@ -83,8 +83,29 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
         local_apic_info,
         apic_timer_info.ticks_per_second,
     );
+    const framebuffer = info.framebuffer orelse
+        framebufferConsoleFailure("no writable GOP framebuffer was retained");
+    var graphical_console = framebuffer_console.Console.init(framebuffer) orelse
+        framebufferConsoleFailure("GOP geometry, pixel format, or terminal initialization failed");
+    const initial_console_report = graphical_console.report();
+    debugWrite("Framebuffer terminal initialized: ");
+    debugWriteUsizeDecimal(initial_console_report.width);
+    debugWrite("x");
+    debugWriteUsizeDecimal(initial_console_report.height);
+    debugWrite(", cells ");
+    debugWriteUsizeDecimal(initial_console_report.columns);
+    debugWrite("x");
+    debugWriteUsizeDecimal(initial_console_report.rows);
+    debugWrite(", cursor row ");
+    debugWriteUsizeDecimal(initial_console_report.cursor_row);
+    debugWrite(", column ");
+    debugWriteUsizeDecimal(initial_console_report.cursor_column);
+    debugWrite(", writes ");
+    debugWriteUsizeDecimal(initial_console_report.writes);
+    debugWrite("\r\n");
+
     const pci_inventory = enumeratePci(acpi_info);
-    inspectXhci(pci_inventory, &frame_allocator);
+    inspectXhci(pci_inventory, &frame_allocator, &graphical_console);
     inspectAhci(pci_inventory, &frame_allocator);
     initializeKernelHeap(&frame_allocator);
     testCooperativeScheduler(&frame_allocator);
@@ -92,31 +113,26 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     testUserMode(&frame_allocator);
     initializeSerial();
 
-    if (info.framebuffer) |framebuffer| {
-        const report = framebuffer_console.render(framebuffer) orelse
-            framebufferConsoleFailure("GOP geometry, pixel format, or bitmap rendering failed");
-        debugWrite("Framebuffer console active: ");
-        debugWriteUsizeDecimal(report.width);
-        debugWrite("x");
-        debugWriteUsizeDecimal(report.height);
-        debugWrite(", stride ");
-        debugWriteUsizeDecimal(report.stride);
-        debugWrite(", lines ");
-        debugWriteUsizeDecimal(report.lines);
-        debugWrite(", glyphs ");
-        debugWriteUsizeDecimal(report.glyphs);
-        debugWrite(", lit pixels ");
-        debugWriteUsizeDecimal(report.lit_pixels);
-        debugWrite(", checksum 0x");
-        debugWriteHex64(report.checksum);
-        debugWrite("\r\n");
-        debugWrite("Framebuffer transcript: ZigOs | Experimental x86-64 | zigos> help | commands: help cpu mem\r\n");
-        debugWrite("Framebuffer retained and written directly at 0x");
-        debugWriteHex64(@intCast(framebuffer.base));
-        debugWrite("\r\n");
-    } else {
-        framebufferConsoleFailure("no writable GOP framebuffer was retained");
-    }
+    const report = graphical_console.report();
+    debugWrite("Framebuffer console active: ");
+    debugWriteUsizeDecimal(report.width);
+    debugWrite("x");
+    debugWriteUsizeDecimal(report.height);
+    debugWrite(", stride ");
+    debugWriteUsizeDecimal(report.stride);
+    debugWrite(", lines ");
+    debugWriteUsizeDecimal(report.lines);
+    debugWrite(", glyphs ");
+    debugWriteUsizeDecimal(report.glyphs);
+    debugWrite(", lit pixels ");
+    debugWriteUsizeDecimal(report.lit_pixels);
+    debugWrite(", checksum 0x");
+    debugWriteHex64(report.checksum);
+    debugWrite("\r\n");
+    debugWrite("Framebuffer transcript: ZigOs | Experimental x86-64 | zigos> help | commands: help cpu mem\r\n");
+    debugWrite("Framebuffer retained and written directly at 0x");
+    debugWriteHex64(@intCast(framebuffer.base));
+    debugWrite("\r\n");
 
     debugWrite("ZigOs boot sequence complete: kernel foundations and hardware probes passed.\r\n");
     zigos_halt_forever();
@@ -1136,7 +1152,11 @@ fn serialFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void {
+fn inspectXhci(
+    inventory: pci.Inventory,
+    allocator: *memory.FrameAllocator,
+    graphical_console: *framebuffer_console.Console,
+) void {
     var controller_function: ?pci.Function = null;
     for (inventory.functions[0..inventory.retained_count]) |function| {
         if (function.class_code == 0x0C and
@@ -1556,7 +1576,7 @@ fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWriteHex64(release_report.event_trb_pointer);
     debugWrite("\r\n");
     debugWrite("Keyboard event queue verified: #1 USB usage 0x04 pressed -> 'a'; #2 USB usage 0x04 released -> 'a'; dropped 0\r\n");
-    runUsbShell(controller, &ownership, &mutable_hid_endpoint, allocator);
+    runUsbShell(controller, &ownership, &mutable_hid_endpoint, allocator, graphical_console);
 }
 
 fn runUsbShell(
@@ -1564,6 +1584,7 @@ fn runUsbShell(
     ownership: *xhci.Ownership,
     endpoint: *xhci.HidEndpoint,
     allocator: *memory.FrameAllocator,
+    graphical_console: *framebuffer_console.Console,
 ) void {
     var command_shell = shell.Shell.init();
     var previous_keys = std.mem.zeroes([6]u8);
@@ -1591,10 +1612,15 @@ fn runUsbShell(
             report.keys,
         );
         while (event_queue.pop()) |event| {
+            if (event.action == .pressed and event.ascii != 0 and event.ascii != '\n') {
+                graphical_console.put(event.ascii);
+            }
             if (command_shell.feed(event)) |response| {
+                graphical_console.put('\n');
                 if (response == .empty) continue;
                 const command = command_shell.executedCommand();
                 const response_text = shell.Shell.responseText(response);
+                graphical_console.write(response_text);
                 debugWrite("zigos> ");
                 debugWrite(command);
                 debugWrite("\r\n");
@@ -1606,6 +1632,29 @@ fn runUsbShell(
                 {
                     xhciFailure("native shell command parsing or dispatch validation failed");
                 }
+                const console_report = graphical_console.report();
+                if (console_report.cursor_row != 4 or console_report.cursor_column != 22 or
+                    console_report.lines != 5 or console_report.glyphs != 57 or
+                    console_report.writes != 57 or console_report.newlines != 4 or
+                    console_report.backspaces != 0 or console_report.scrolls != 0)
+                {
+                    xhciFailure("live framebuffer shell cursor or write accounting failed");
+                }
+                debugWrite("Framebuffer live shell: cursor row ");
+                debugWriteUsizeDecimal(console_report.cursor_row);
+                debugWrite(", column ");
+                debugWriteUsizeDecimal(console_report.cursor_column);
+                debugWrite(", writes ");
+                debugWriteUsizeDecimal(console_report.writes);
+                debugWrite(", newlines ");
+                debugWriteUsizeDecimal(console_report.newlines);
+                debugWrite(", backspaces ");
+                debugWriteUsizeDecimal(console_report.backspaces);
+                debugWrite(", scrolls ");
+                debugWriteUsizeDecimal(console_report.scrolls);
+                debugWrite(", checksum 0x");
+                debugWriteHex64(console_report.checksum);
+                debugWrite("\r\n");
                 debugWrite("ZigOs shell command complete: help -> commands: help cpu mem; reports ");
                 debugWriteU64Decimal(report_count + 1);
                 debugWrite(", rejected 0\r\n");

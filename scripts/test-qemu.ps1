@@ -318,7 +318,9 @@ if ($syncWorkerMatches.Count -ne 3) {
 if (-not [regex]::IsMatch($output, 'SMP synchronization complete: 4 participants, 16384 locked increments, tickets 16384/16384, barrier generation 1, checksum 0x(?!0000000000000000)[0-9A-F]{16}')) {
     throw 'The four-core ticket-lock and barrier verification marker was not observed.'
 }
-if (-not $output.Contains('PCIe ECAM active:')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer terminal initialized: 1280x800, cells 102x37, cursor row 3, column 7, writes 31')) {
+    throw 'The persistent graphical terminal was not initialized before PCI/xHCI discovery.'
+}if (-not $output.Contains('PCIe ECAM active:')) {
     throw 'The PCIe MCFG/ECAM activation marker was not observed.'
 }
 if (-not $output.Contains('PCI inventory:')) {
@@ -411,7 +413,9 @@ if (-not $output.Contains('zigos> help')) {
 if (-not $output.Contains('commands: help cpu mem')) {
     throw 'The native shell help response was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'ZigOs shell command complete: help -> commands: help cpu mem; reports [1-9][0-9]*, rejected 0')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer live shell: cursor row 4, column 22, writes 57, newlines 4, backspaces 0, scrolls 0, checksum 0x9108399455DEB815')) {
+    throw 'The live USB-keyboard-to-framebuffer shell update proof was not observed.'
+}if (-not [regex]::IsMatch($output, 'ZigOs shell command complete: help -> commands: help cpu mem; reports [1-9][0-9]*, rejected 0')) {
     throw 'The native shell command-dispatch verification marker was not observed.'
 }
 if (-not $output.Contains('AHCI controller active at')) {

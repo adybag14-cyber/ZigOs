@@ -15,88 +15,239 @@ pub const Report = struct {
     width: usize,
     height: usize,
     stride: usize,
+    columns: usize,
+    rows: usize,
+    cursor_column: usize,
+    cursor_row: usize,
     lines: usize,
     glyphs: usize,
+    writes: usize,
+    newlines: usize,
+    backspaces: usize,
+    scrolls: usize,
     lit_pixels: usize,
     checksum: u64,
 };
 
-pub fn render(framebuffer: boot.FramebufferInfo) ?Report {
-    if (framebuffer.base == 0 or framebuffer.pixel_format == 3) return null;
+pub const Console = struct {
+    framebuffer: boot.FramebufferInfo,
+    pixels: [*]volatile u32,
+    width: usize,
+    height: usize,
+    stride: usize,
+    pixel_count: usize,
+    columns: usize,
+    rows: usize,
+    background: u32,
+    foreground: u32,
+    accent: u32,
+    cursor_column: usize,
+    cursor_row: usize,
+    lines: usize,
+    glyphs: usize,
+    writes: usize,
+    newlines: usize,
+    backspaces: usize,
+    scrolls: usize,
 
-    const width: usize = @intCast(framebuffer.width);
-    const height: usize = @intCast(framebuffer.height);
-    const stride: usize = @intCast(framebuffer.pixels_per_scan_line);
-    if (width == 0 or height == 0 or stride < width) return null;
-    if (height > std.math.maxInt(usize) / stride) return null;
-    const pixel_count = stride * height;
-    if (pixel_count > std.math.maxInt(usize) / @sizeOf(u32)) return null;
-    if (framebuffer.size < pixel_count * @sizeOf(u32)) return null;
+    pub fn init(framebuffer: boot.FramebufferInfo) ?Console {
+        if (framebuffer.base == 0 or framebuffer.pixel_format == 3) return null;
 
-    const background = encodePixel(framebuffer, 16, 24, 40);
-    const foreground = encodePixel(framebuffer, 232, 238, 247);
-    const accent = encodePixel(framebuffer, 120, 212, 255);
-    const pixels: [*]volatile u32 = @ptrFromInt(framebuffer.base);
+        const width: usize = @intCast(framebuffer.width);
+        const height: usize = @intCast(framebuffer.height);
+        const stride: usize = @intCast(framebuffer.pixels_per_scan_line);
+        if (width == 0 or height == 0 or stride < width) return null;
+        if (height > std.math.maxInt(usize) / stride) return null;
+        const pixel_count = stride * height;
+        if (pixel_count > std.math.maxInt(usize) / @sizeOf(u32)) return null;
+        if (framebuffer.size < pixel_count * @sizeOf(u32)) return null;
+        if (width <= margin_x * 2 or height <= margin_y * 2) return null;
 
-    var clear_index: usize = 0;
-    while (clear_index < pixel_count) : (clear_index += 1) {
-        pixels[clear_index] = background;
+        const cell_width = (glyph_width + glyph_spacing) * scale;
+        const cell_height = (glyph_height + line_spacing) * scale;
+        const columns = (width - margin_x * 2) / cell_width;
+        const rows = (height - margin_y * 2) / cell_height;
+        if (columns == 0 or rows == 0) return null;
+
+        var console = Console{
+            .framebuffer = framebuffer,
+            .pixels = @ptrFromInt(framebuffer.base),
+            .width = width,
+            .height = height,
+            .stride = stride,
+            .pixel_count = pixel_count,
+            .columns = columns,
+            .rows = rows,
+            .background = encodePixel(framebuffer, 16, 24, 40),
+            .foreground = encodePixel(framebuffer, 232, 238, 247),
+            .accent = encodePixel(framebuffer, 120, 212, 255),
+            .cursor_column = 0,
+            .cursor_row = 0,
+            .lines = 1,
+            .glyphs = 0,
+            .writes = 0,
+            .newlines = 0,
+            .backspaces = 0,
+            .scrolls = 0,
+        };
+        console.clear();
+        console.writeAccent("ZigOs");
+        console.put('\n');
+        console.write("Experimental x86-64");
+        console.put('\n');
+        console.put('\n');
+        console.write("zigos> ");
+        return console;
     }
 
-    const lines = [_][]const u8{
-        "ZigOs",
-        "Experimental x86-64",
-        "",
-        "zigos> help",
-        "commands: help cpu mem",
-    };
+    pub fn write(self: *Console, text: []const u8) void {
+        self.writeColor(text, self.foreground);
+    }
 
-    var glyph_count: usize = 0;
-    var lit_pixels: usize = 0;
-    var cursor_y = margin_y;
-    for (lines, 0..) |line, line_index| {
-        var cursor_x = margin_x;
-        for (line) |character| {
-            const color = if (line_index == 0) accent else foreground;
-            lit_pixels += drawGlyph(
-                pixels,
-                width,
-                height,
-                stride,
-                cursor_x,
-                cursor_y,
-                character,
-                color,
-            );
-            glyph_count += 1;
-            cursor_x += (glyph_width + glyph_spacing) * scale;
-            if (cursor_x + glyph_width * scale >= width) break;
+    pub fn writeAccent(self: *Console, text: []const u8) void {
+        self.writeColor(text, self.accent);
+    }
+
+    pub fn put(self: *Console, character: u8) void {
+        switch (character) {
+            '\r' => return,
+            '\n' => {
+                self.newlines += 1;
+                self.advanceLine();
+                return;
+            },
+            0x08, 0x7F => {
+                self.erasePreviousCell();
+                return;
+            },
+            else => {},
         }
-        cursor_y += (glyph_height + line_spacing) * scale;
-        if (cursor_y + glyph_height * scale >= height) break;
+        if (character < 0x20 or character > 0x7E) return;
+        self.putColor(character, self.foreground);
     }
 
-    var checksum = fnv_offset;
-    var y: usize = 0;
-    while (y < height) : (y += 1) {
-        var x: usize = 0;
-        while (x < width) : (x += 1) {
-            checksum ^= pixels[y * stride + x];
-            checksum *%= fnv_prime;
+    pub fn report(self: *const Console) Report {
+        var checksum = fnv_offset;
+        var lit_pixels: usize = 0;
+        var y: usize = 0;
+        while (y < self.height) : (y += 1) {
+            var x: usize = 0;
+            while (x < self.width) : (x += 1) {
+                const value = self.pixels[y * self.stride + x];
+                if (value != self.background) lit_pixels += 1;
+                checksum ^= value;
+                checksum *%= fnv_prime;
+            }
+        }
+        return .{
+            .width = self.width,
+            .height = self.height,
+            .stride = self.stride,
+            .columns = self.columns,
+            .rows = self.rows,
+            .cursor_column = self.cursor_column,
+            .cursor_row = self.cursor_row,
+            .lines = self.lines,
+            .glyphs = self.glyphs,
+            .writes = self.writes,
+            .newlines = self.newlines,
+            .backspaces = self.backspaces,
+            .scrolls = self.scrolls,
+            .lit_pixels = lit_pixels,
+            .checksum = checksum,
+        };
+    }
+
+    fn clear(self: *Console) void {
+        var index: usize = 0;
+        while (index < self.pixel_count) : (index += 1) {
+            self.pixels[index] = self.background;
         }
     }
-    if (glyph_count == 0 or lit_pixels == 0 or checksum == 0) return null;
 
-    return .{
-        .width = width,
-        .height = height,
-        .stride = stride,
-        .lines = lines.len,
-        .glyphs = glyph_count,
-        .lit_pixels = lit_pixels,
-        .checksum = checksum,
-    };
-}
+    fn writeColor(self: *Console, text: []const u8, color: u32) void {
+        for (text) |character| {
+            if (character == '\n') {
+                self.newlines += 1;
+                self.advanceLine();
+            } else if (character >= 0x20 and character <= 0x7E) {
+                self.putColor(character, color);
+            }
+        }
+    }
+
+    fn putColor(self: *Console, character: u8, color: u32) void {
+        if (self.cursor_column >= self.columns) {
+            self.newlines += 1;
+            self.advanceLine();
+        }
+        const origin_x = margin_x + self.cursor_column * (glyph_width + glyph_spacing) * scale;
+        const origin_y = margin_y + self.cursor_row * (glyph_height + line_spacing) * scale;
+        _ = drawGlyph(
+            self.pixels,
+            self.width,
+            self.height,
+            self.stride,
+            origin_x,
+            origin_y,
+            character,
+            color,
+        );
+        self.cursor_column += 1;
+        self.glyphs += 1;
+        self.writes += 1;
+    }
+
+    fn advanceLine(self: *Console) void {
+        self.cursor_column = 0;
+        self.cursor_row += 1;
+        self.lines += 1;
+        if (self.cursor_row >= self.rows) self.scroll();
+    }
+
+    fn erasePreviousCell(self: *Console) void {
+        if (self.cursor_column == 0) return;
+        self.cursor_column -= 1;
+        const cell_width = (glyph_width + glyph_spacing) * scale;
+        const cell_height = (glyph_height + line_spacing) * scale;
+        const origin_x = margin_x + self.cursor_column * cell_width;
+        const origin_y = margin_y + self.cursor_row * cell_height;
+        self.fillRectangle(origin_x, origin_y, cell_width, cell_height, self.background);
+        self.backspaces += 1;
+    }
+
+    fn scroll(self: *Console) void {
+        const cell_height = (glyph_height + line_spacing) * scale;
+        const top = margin_y;
+        const bottom = margin_y + self.rows * cell_height;
+        var y = top;
+        while (y + cell_height < bottom) : (y += 1) {
+            var x = margin_x;
+            while (x < self.width - margin_x) : (x += 1) {
+                self.pixels[y * self.stride + x] = self.pixels[(y + cell_height) * self.stride + x];
+            }
+        }
+        self.fillRectangle(
+            margin_x,
+            bottom - cell_height,
+            self.width - margin_x * 2,
+            cell_height,
+            self.background,
+        );
+        self.cursor_row = self.rows - 1;
+        self.scrolls += 1;
+    }
+
+    fn fillRectangle(self: *Console, origin_x: usize, origin_y: usize, width: usize, height: usize, color: u32) void {
+        var y: usize = 0;
+        while (y < height and origin_y + y < self.height) : (y += 1) {
+            var x: usize = 0;
+            while (x < width and origin_x + x < self.width) : (x += 1) {
+                self.pixels[(origin_y + y) * self.stride + origin_x + x] = color;
+            }
+        }
+    }
+};
 
 fn drawGlyph(
     pixels: [*]volatile u32,
