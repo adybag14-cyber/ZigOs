@@ -121,7 +121,7 @@ try {
                     $writer.NewLine = "`n"
                     $writer.AutoFlush = $true
                     Start-Sleep -Milliseconds 50
-                    foreach ($key in @('h', 'e', 'l', 'p', 'ret')) {
+                    foreach ($key in @('h', 'e', 'l', 'x', 'backspace', 'p', 'ret')) {
                         $writer.WriteLine("sendkey $key 120")
                         Start-Sleep -Milliseconds 180
                     }
@@ -413,9 +413,12 @@ if (-not $output.Contains('zigos> help')) {
 if (-not $output.Contains('commands: help cpu mem')) {
     throw 'The native shell help response was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer live shell: cursor row 4, column 22, writes 57, newlines 4, backspaces 0, scrolls 0, checksum 0x9108399455DEB815')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer live shell: cursor row 4, column 22, writes 58, newlines 4, backspaces 1, scrolls 0, checksum 0x9108399455DEB815')) {
     throw 'The live USB-keyboard-to-framebuffer shell update proof was not observed.'
-}if (-not [regex]::IsMatch($output, 'ZigOs shell command complete: help -> commands: help cpu mem; reports [1-9][0-9]*, rejected 0')) {
+}if (-not $output.Contains('Framebuffer line editing verified: helx<BS>p -> help')) {
+    throw 'The USB Backspace command-line editing proof was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'ZigOs shell command complete: help -> commands: help cpu mem; reports [1-9][0-9]*, rejected 0')) {
     throw 'The native shell command-dispatch verification marker was not observed.'
 }
 if (-not $output.Contains('AHCI controller active at')) {
@@ -514,7 +517,7 @@ if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B
 if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
     throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 5, glyphs 57, lit pixels 3168, checksum 0x9108399455DEB815')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 5, glyphs 58, lit pixels 3168, checksum 0x9108399455DEB815')) {
     throw 'The deterministic GOP bitmap-console report was not observed.'
 }
 if (-not $output.Contains('Framebuffer transcript: ZigOs | Experimental x86-64 | zigos> help | commands: help cpu mem')) {

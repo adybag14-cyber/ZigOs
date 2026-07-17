@@ -1634,9 +1634,9 @@ fn runUsbShell(
                 }
                 const console_report = graphical_console.report();
                 if (console_report.cursor_row != 4 or console_report.cursor_column != 22 or
-                    console_report.lines != 5 or console_report.glyphs != 57 or
-                    console_report.writes != 57 or console_report.newlines != 4 or
-                    console_report.backspaces != 0 or console_report.scrolls != 0)
+                    console_report.lines != 5 or console_report.glyphs != 58 or
+                    console_report.writes != 58 or console_report.newlines != 4 or
+                    console_report.backspaces != 1 or console_report.scrolls != 0)
                 {
                     xhciFailure("live framebuffer shell cursor or write accounting failed");
                 }
@@ -1655,6 +1655,7 @@ fn runUsbShell(
                 debugWrite(", checksum 0x");
                 debugWriteHex64(console_report.checksum);
                 debugWrite("\r\n");
+                debugWrite("Framebuffer line editing verified: helx<BS>p -> help\r\n");
                 debugWrite("ZigOs shell command complete: help -> commands: help cpu mem; reports ");
                 debugWriteU64Decimal(report_count + 1);
                 debugWrite(", rejected 0\r\n");

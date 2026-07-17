@@ -118,3 +118,4 @@
 - [x] Deterministic framebuffer pixel-checksum regression gate
 - [x] Persistent terminal state with live USB keystroke and shell-response rendering
 - [x] Cursor, write, newline, backspace and scroll accounting
+- [x] USB HID Backspace editing with framebuffer cell erasure

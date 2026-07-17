@@ -122,6 +122,7 @@ pub fn usageToAscii(usage: u8, modifiers: u8) u8 {
     if (usage == 0x27) return if (shifted) ')' else '0';
     return switch (usage) {
         0x28 => '\n',
+        0x2A => 0x08,
         0x2B => '\t',
         0x2C => ' ',
         0x2D => if (shifted) '_' else '-',
