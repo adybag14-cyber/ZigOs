@@ -226,8 +226,10 @@ zigos_in8:
     ret
 
 global zigos_isr_apic_timer
+global zigos_isr_ap_work
 global zigos_wait_for_interrupt
 extern zigos_apic_timer_handler
+extern zigos_ap_work_interrupt_handler
 
 ; APIC timer vector 0x40, delivered on IST1. Preserve all general-purpose
 ; registers and call the Zig handler, which acknowledges the local APIC.
@@ -257,6 +259,54 @@ zigos_isr_apic_timer:
     mov rcx, r12
     mov rdx, r13
     call zigos_apic_timer_handler
+    add rsp, 32
+    fxrstor64 [rsp]
+    mov rsp, r12
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
+; Targeted AP work vector 0x42, delivered on the AP-private IST1 stack.
+; Preserve complete integer and x87/SSE state, acknowledge the local APIC in Zig,
+; then return to the instruction following HLT.
+zigos_isr_ap_work:
+    cld
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rsp
+    sub rsp, 512
+    mov r13, rsp
+    fxsave64 [r13]
+    sub rsp, 32
+    call zigos_ap_work_interrupt_handler
     add rsp, 32
     fxrstor64 [rsp]
     mov rsp, r12

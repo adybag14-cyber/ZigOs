@@ -81,3 +81,4 @@
 - [x] Per-CPU scheduler/run-queue state
 - [x] FIFO sequence and completion verification across all APs
 - [x] Deterministic multicore work stealing with atomic queue claims
+- [x] Targeted work IPI wakeups from per-CPU HLT idle loops

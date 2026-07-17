@@ -550,6 +550,17 @@ fn startApplicationProcessors(
         debugWrite(", checksum 0x");
         debugWriteHex64(processor.run_queue_checksum);
         debugWrite("\r\n");
+        debugWrite("AP targeted IPI: APIC ");
+        debugWriteU64Decimal(processor.actual_apic_id);
+        debugWrite(", vector 0x");
+        debugWriteHex8(report.ipi_wake_vector);
+        debugWrite(", wake ");
+        debugWriteU64Decimal(processor.ipi_wake_count);
+        debugWrite(", halts ");
+        debugWriteU64Decimal(processor.idle_halt_count);
+        debugWrite(", checksum 0x");
+        debugWriteHex64(processor.ipi_job_checksum);
+        debugWrite("\r\n");
         if (processor.stolen_jobs_executed != 0) {
             debugWrite("AP work stealing: APIC ");
             debugWriteU64Decimal(processor.actual_apic_id);
@@ -574,6 +585,13 @@ fn startApplicationProcessors(
     if (report.online_count != report.target_count) {
         smpFailure("not every MADT application processor reached long mode");
     }
+    debugWrite("Targeted AP wakeups complete: vector 0x");
+    debugWriteHex8(report.ipi_wake_vector);
+    debugWrite(", ");
+    debugWriteU64Decimal(report.ipi_wake_completed);
+    debugWrite("/");
+    debugWriteU64Decimal(report.ipi_wake_targets);
+    debugWrite(" APs woke from HLT and acknowledged EOI\r\n");
     debugWrite("SMP startup complete: ");
     debugWriteUsizeDecimal(report.online_count);
     debugWrite("/");

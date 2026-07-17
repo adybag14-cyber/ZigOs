@@ -1,4 +1,5 @@
 const std = @import("std");
+const apic = @import("apic.zig");
 const interrupt_context = @import("interrupt_context.zig");
 
 const cc = std.os.uefi.cc;
@@ -9,6 +10,7 @@ const exception_vector_count: usize = 32;
 const spurious_vector: usize = 0xFF;
 const state_magic: u64 = 0x5A49_474F_5350_4355;
 pub const run_queue_capacity: usize = 8;
+pub const ap_work_vector: u8 = 0x42;
 const run_queue_command: u32 = 2;
 const run_queue_checksum_seed: u64 = 0xCBF2_9CE4_8422_2325;
 const work_stealing_checksum_seed: u64 = 0x5753_5445_414C_494E;
@@ -89,6 +91,8 @@ pub const State = struct {
     steal_completed: u32,
     steal_reserved: u32,
     steal_checksum: u64,
+    ipi_wake_count: u32,
+    idle_halt_count: u32,
 };
 
 pub const Report = struct {
@@ -111,6 +115,8 @@ pub const Report = struct {
     run_queue_stolen: u32,
     steal_completed: u32,
     steal_checksum: u64,
+    ipi_wake_count: u32,
+    idle_halt_count: u32,
 };
 
 extern fn zigos_load_gdt(
@@ -124,6 +130,8 @@ extern fn zigos_read_cs() callconv(cc) u64;
 extern fn zigos_read_tr() callconv(cc) u64;
 extern fn zigos_exception_stub_address(vector: u8) callconv(cc) usize;
 extern fn zigos_isr_spurious() callconv(cc) void;
+extern fn zigos_isr_ap_work() callconv(cc) void;
+extern fn zigos_wait_for_interrupt() callconv(cc) void;
 extern fn zigos_memory_fence() callconv(cc) void;
 extern fn zigos_cpu_relax() callconv(cc) void;
 
@@ -134,6 +142,8 @@ var active_state_count: u32 = 0;
 var steal_source_index: u32 = 0;
 var steal_required_total: u32 = 0;
 var stolen_total: u32 = 0;
+var interrupt_idle_enabled: u32 = 0;
+var interrupt_idle_state_count: u32 = 0;
 
 pub fn prepare(
     index: usize,
@@ -175,6 +185,8 @@ pub fn prepare(
     state.steal_completed = 0;
     state.steal_reserved = 0;
     state.steal_checksum = work_stealing_checksum_seed;
+    state.ipi_wake_count = 0;
+    state.idle_halt_count = 0;
     zigos_memory_fence();
     return state;
 }
@@ -214,6 +226,12 @@ pub fn initialize(state: *State, actual_apic_id: u32) bool {
         );
     }
     setInterruptGate(
+        &state.idt[ap_work_vector],
+        @intFromPtr(&zigos_isr_ap_work),
+        code_selector,
+        1,
+    );
+    setInterruptGate(
         &state.idt[spurious_vector],
         @intFromPtr(&zigos_isr_spurious),
         code_selector,
@@ -229,6 +247,7 @@ pub fn initialize(state: *State, actual_apic_id: u32) bool {
     state.active_cs = @truncate(zigos_read_cs());
     state.active_tr = @truncate(zigos_read_tr());
     if (state.active_cs != code_selector or state.active_tr != tss_selector) return false;
+    if (!apic.initializeCurrentProcessor()) return false;
 
     state.work_checksum = calculateWorkChecksum(actual_apic_id, state.index);
     state.descriptor_ready = 1;
@@ -258,6 +277,8 @@ pub fn report(state: *const State) Report {
         .run_queue_stolen = atomicLoadU32(&state.run_queue_stolen),
         .steal_completed = atomicLoadU32(&state.steal_completed),
         .steal_checksum = atomicLoadU64(&state.steal_checksum),
+        .ipi_wake_count = atomicLoadU32(&state.ipi_wake_count),
+        .idle_halt_count = atomicLoadU32(&state.idle_halt_count),
     };
 }
 
@@ -278,6 +299,44 @@ pub fn workCompleted(state: *State, epoch: u32) bool {
 
 pub fn expectedWorkResult(apic_id: u32, input: u64) u64 {
     return calculateMailboxWork(apic_id, input);
+}
+
+pub fn enableInterruptIdle(state_count: usize) bool {
+    if (state_count == 0 or state_count > states.len) return false;
+    atomicStoreU32(&interrupt_idle_state_count, @intCast(state_count));
+    atomicStoreU32(&interrupt_idle_enabled, 1);
+    return true;
+}
+
+pub fn interruptIdleReady(state: *const State, minimum_halts: u32) bool {
+    return minimum_halts != 0 and atomicLoadU32(&state.idle_halt_count) >= minimum_halts;
+}
+
+pub fn interruptWakeObserved(state: *const State, minimum_wakes: u32) bool {
+    return minimum_wakes != 0 and atomicLoadU32(&state.ipi_wake_count) >= minimum_wakes;
+}
+
+export fn zigos_ap_work_interrupt_handler() callconv(cc) void {
+    const current_apic_id = apic.currentId();
+    const count = atomicLoadU32(&interrupt_idle_state_count);
+    var index: usize = 0;
+    while (index < count and index < states.len) : (index += 1) {
+        const state = &states[index];
+        if (state.expected_apic_id == current_apic_id) {
+            _ = atomicFetchAddU32(&state.ipi_wake_count, 1);
+            break;
+        }
+    }
+    apic.acknowledgeInterrupt();
+}
+
+fn idleWait(state: *State) void {
+    if (atomicLoadU32(&interrupt_idle_enabled) != 0) {
+        _ = atomicFetchAddU32(&state.idle_halt_count, 1);
+        zigos_wait_for_interrupt();
+    } else {
+        zigos_cpu_relax();
+    }
 }
 
 pub const WorkStealingReport = struct {
@@ -426,7 +485,7 @@ pub fn runMailbox(state: *State) noreturn {
         }
         const epoch = readVolatileU32(&state.mailbox_epoch);
         if (epoch == 0 or epoch == observed_epoch) {
-            zigos_cpu_relax();
+            idleWait(state);
             continue;
         }
         observed_epoch = epoch;

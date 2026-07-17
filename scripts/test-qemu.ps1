@@ -216,6 +216,13 @@ if ($stealMatches.Count -ne 2) {
 if (-not [regex]::IsMatch($output, 'Work stealing complete: source APIC 1, jobs 8, owner 4, stolen 4, checksum 0x(?!0000000000000000)[0-9A-F]{16}')) {
     throw 'The deterministic multicore work-stealing verification marker was not observed.'
 }
+$ipiWakeMatches = [regex]::Matches($output, 'AP targeted IPI: APIC [123], vector 0x42, wake 1, halts [2-9][0-9]*, checksum 0x(?!0000000000000000)[0-9A-F]{16}')
+if ($ipiWakeMatches.Count -ne 3) {
+    throw 'All three application processors did not wake from HLT through targeted vector 0x42.'
+}
+if (-not $output.Contains('Targeted AP wakeups complete: vector 0x42, 3/3 APs woke from HLT and acknowledged EOI')) {
+    throw 'The targeted AP IPI/HLT/EOI aggregate marker was not observed.'
+}
 if (-not $output.Contains('PCIe ECAM active:')) {
     throw 'The PCIe MCFG/ECAM activation marker was not observed.'
 }

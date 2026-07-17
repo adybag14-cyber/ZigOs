@@ -56,6 +56,9 @@ pub const ApReport = struct {
     run_queue_last_sequence: u32,
     run_queue_checksum: u64,
     stolen_jobs_executed: u32,
+    ipi_wake_count: u32,
+    idle_halt_count: u32,
+    ipi_job_checksum: u64,
     online: bool,
     state: u32,
     per_cpu_state: u64,
@@ -74,6 +77,9 @@ pub const Report = struct {
     work_stealing_owner_jobs: u32,
     work_stealing_stolen_jobs: u32,
     work_stealing_checksum: u64,
+    ipi_wake_vector: u8,
+    ipi_wake_targets: u32,
+    ipi_wake_completed: u32,
     processors: [acpi.maximum_processors]ApReport,
 };
 
@@ -115,6 +121,9 @@ pub fn start(
         .work_stealing_owner_jobs = 0,
         .work_stealing_stolen_jobs = 0,
         .work_stealing_checksum = 0,
+        .ipi_wake_vector = percpu.ap_work_vector,
+        .ipi_wake_targets = 0,
+        .ipi_wake_completed = 0,
         .processors = undefined,
     };
 
@@ -215,6 +224,9 @@ pub fn start(
             .run_queue_last_sequence = 0,
             .run_queue_checksum = 0,
             .stolen_jobs_executed = 0,
+            .ipi_wake_count = 0,
+            .idle_halt_count = 0,
+            .ipi_job_checksum = 0,
             .online = online,
             .state = state,
             .per_cpu_state = @intFromPtr(per_cpu_state),
@@ -224,9 +236,22 @@ pub fn start(
     }
 
     if (report.target_count + 1 != madt.processor_count) return null;
-    if (!runMailboxRound(&report, reference)) return null;
-    if (!runQueueRound(&report, reference)) return null;
-    if (!runWorkStealingRound(&report, reference)) return null;
+    if (!runMailboxRound(&report, reference)) {
+        debugWrite("SMP stage failure: mailbox\r\n");
+        return null;
+    }
+    if (!runQueueRound(&report, reference)) {
+        debugWrite("SMP stage failure: FIFO\r\n");
+        return null;
+    }
+    if (!runWorkStealingRound(&report, reference)) {
+        debugWrite("SMP stage failure: stealing\r\n");
+        return null;
+    }
+    if (!runTargetedIpiRound(&report, reference)) {
+        debugWrite("SMP stage failure: targeted IPI\r\n");
+        return null;
+    }
     return report;
 }
 
@@ -399,6 +424,69 @@ fn runWorkStealingRound(report: *Report, reference: hpet.Device) bool {
     percpu.disableWorkStealing();
     percpu.resumeRunQueues();
     return true;
+}
+
+fn runTargetedIpiRound(report: *Report, reference: hpet.Device) bool {
+    const sequence: u32 = 1;
+    const base_input: u64 = 0x4950_495F_484C_545F;
+    percpu.pauseRunQueues();
+    for (report.processors[0..report.target_count]) |processor| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        if (!percpu.resetRunQueue(state)) return false;
+    }
+    if (!percpu.enableInterruptIdle(report.target_count)) return false;
+    percpu.resumeRunQueues();
+
+    var iteration: usize = 0;
+    while (iteration < startup_timeout_iterations) : (iteration += 1) {
+        var halted: usize = 0;
+        for (report.processors[0..report.target_count]) |processor| {
+            const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+            if (percpu.interruptIdleReady(state, 1)) halted += 1;
+        }
+        if (halted == report.target_count) break;
+        if (!reference.waitNanoseconds(startup_poll_nanoseconds)) return false;
+    }
+
+    for (report.processors[0..report.target_count]) |processor| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        const input = base_input ^ (@as(u64, processor.actual_apic_id) << 32);
+        if (!percpu.enqueueRunQueue(state, sequence, input)) return false;
+        if (!apic.sendFixedIpi(processor.actual_apic_id, percpu.ap_work_vector)) return false;
+    }
+
+    iteration = 0;
+    while (iteration < startup_timeout_iterations) : (iteration += 1) {
+        var completed: usize = 0;
+        for (report.processors[0..report.target_count]) |processor| {
+            const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+            if (percpu.runQueueCompleted(state, 1) and
+                percpu.interruptWakeObserved(state, 1) and
+                percpu.interruptIdleReady(state, 2))
+            {
+                completed += 1;
+            }
+        }
+        if (completed == report.target_count) break;
+        if (!reference.waitNanoseconds(startup_poll_nanoseconds)) return false;
+    }
+
+    percpu.pauseRunQueues();
+    var wake_completed: u32 = 0;
+    for (report.processors[0..report.target_count]) |*processor| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        const checksum = percpu.verifyRunQueue(state, processor.actual_apic_id, 1) orelse return false;
+        const state_report = percpu.report(state);
+        if (state_report.ipi_wake_count != 1 or state_report.idle_halt_count < 2) return false;
+        processor.ipi_wake_count = state_report.ipi_wake_count;
+        processor.idle_halt_count = state_report.idle_halt_count;
+        processor.ipi_job_checksum = checksum;
+        wake_completed += 1;
+    }
+    report.ipi_wake_targets = @intCast(report.target_count);
+    report.ipi_wake_completed = wake_completed;
+    percpu.resumeRunQueues();
+    return wake_completed == report.target_count;
 }
 
 fn debugWrite(text: []const u8) void {

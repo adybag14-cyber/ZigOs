@@ -142,11 +142,39 @@ pub fn initialize(madt: acpi.MadtInfo) ?Information {
     };
 }
 
+pub fn initializeCurrentProcessor() bool {
+    if (active_x2apic) {
+        zigos_write_msr(x2apic_task_priority_msr, 0);
+        const old_spurious: u32 = @truncate(zigos_read_msr(x2apic_spurious_msr));
+        const new_spurious = (old_spurious & ~@as(u32, 0xFF)) | spurious_vector | software_enable;
+        zigos_write_msr(x2apic_spurious_msr, new_spurious);
+        const verified: u32 = @truncate(zigos_read_msr(x2apic_spurious_msr));
+        return (verified & (software_enable | 0xFF)) == (software_enable | spurious_vector);
+    }
+    if (active_base == 0) return false;
+    writeMmio(active_base, xapic_task_priority_offset, 0);
+    const old_spurious = readMmio(active_base, xapic_spurious_offset);
+    const new_spurious = (old_spurious & ~@as(u32, 0xFF)) | spurious_vector | software_enable;
+    writeMmio(active_base, xapic_spurious_offset, new_spurious);
+    const verified = readMmio(active_base, xapic_spurious_offset);
+    return (verified & (software_enable | 0xFF)) == (software_enable | spurious_vector);
+}
+
 pub fn currentId() u32 {
     return if (active_x2apic)
         @truncate(zigos_read_msr(x2apic_id_msr))
     else
         readMmio(active_base, xapic_id_offset) >> 24;
+}
+
+pub fn sendFixedIpi(destination_apic_id: u32, vector: u8) bool {
+    if (vector < 0x20 or vector == spurious_vector) return false;
+    if (!active_x2apic and destination_apic_id > 0xFF) return false;
+    return sendIpi(destination_apic_id, level_assert | vector);
+}
+
+pub fn acknowledgeInterrupt() void {
+    sendEoi();
 }
 
 pub fn sendInitSipi(destination_apic_id: u32, startup_vector: u8, reference: hpet.Device) bool {
