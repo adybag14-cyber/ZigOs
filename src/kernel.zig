@@ -15,6 +15,7 @@ const pci = @import("pci.zig");
 const ahci = @import("ahci.zig");
 const nvme = @import("nvme.zig");
 const partition = @import("partition.zig");
+const gpt = @import("gpt.zig");
 const fat = @import("fat.zig");
 const pe = @import("pe.zig");
 const heap = @import("heap.zig");
@@ -1931,6 +1932,203 @@ fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWriteHex64(block_zero.fnv1a64);
     debugWrite(", trailing signature 0x");
     debugWriteHex16(block_zero.trailing_signature);
+    debugWrite("\r\n");
+
+    const protective_mbr = partition.parseMbr(nvme.readBuffer(block_zero)) orelse
+        nvmeFailure("LBA 0 did not contain a valid protective MBR");
+    var protective_partition: ?partition.Partition = null;
+    for (protective_mbr.partitions) |candidate| {
+        if (candidate.partition_type == 0xEE and candidate.first_lba == 1 and candidate.sector_count != 0) {
+            protective_partition = candidate;
+            break;
+        }
+    }
+    const protective = protective_partition orelse
+        nvmeFailure("protective MBR did not contain a type 0xEE partition from LBA 1");
+    debugWrite("NVMe protective MBR verified: type 0x");
+    debugWriteHex8(protective.partition_type);
+    debugWrite(", first LBA ");
+    debugWriteU64Decimal(protective.first_lba);
+    debugWrite(", sectors ");
+    debugWriteU64Decimal(protective.sector_count);
+    debugWrite("\r\n");
+
+    const header_block = nvme.readOneBlock(&controller, allocator, 1) orelse
+        nvmeFailure("primary GPT header read failed");
+    const header = gpt.parseHeader(nvme.readBuffer(header_block), controller.namespace_size_lbas) orelse
+        nvmeFailure("primary GPT header signature, bounds, or CRC validation failed");
+    if (controller.logical_block_size % header.partition_entry_size != 0) {
+        nvmeFailure("GPT entry size did not divide the NVMe logical block size");
+    }
+
+    const block_size: u64 = controller.logical_block_size;
+    const entry_array_sectors = (header.partition_array_bytes + block_size - 1) / block_size;
+    var crc_state = gpt.crc32Begin();
+    var remaining_bytes = header.partition_array_bytes;
+    var global_entry_index: u32 = 0;
+    var populated_entries: u32 = 0;
+    var efi_partition: ?gpt.PartitionEntry = null;
+    var sector_index: u64 = 0;
+    while (sector_index < entry_array_sectors) : (sector_index += 1) {
+        const entry_block = nvme.readOneBlock(
+            &controller,
+            allocator,
+            header.partition_entry_lba + sector_index,
+        ) orelse nvmeFailure("GPT partition-entry-array read failed");
+        const bytes = nvme.readBuffer(entry_block);
+        const bytes_this_sector: usize = @intCast(@min(remaining_bytes, @as(u64, bytes.len)));
+        crc_state = gpt.crc32Update(crc_state, bytes[0..bytes_this_sector]);
+
+        var offset: usize = 0;
+        const entry_size: usize = @intCast(header.partition_entry_size);
+        while (offset + entry_size <= bytes_this_sector and global_entry_index < header.partition_entry_count) : ({
+            offset += entry_size;
+            global_entry_index += 1;
+        }) {
+            const entry = gpt.parsePartitionEntry(
+                bytes[offset .. offset + entry_size],
+                header.partition_entry_size,
+                global_entry_index,
+            ) orelse nvmeFailure("GPT partition entry was malformed");
+            if (!entry.isUnused()) {
+                if (!gpt.validatePartitionBounds(header, entry)) {
+                    nvmeFailure("GPT partition exceeded the header usable-LBA range");
+                }
+                populated_entries += 1;
+                if (efi_partition == null and entry.isEfiSystemPartition()) efi_partition = entry;
+            }
+        }
+        remaining_bytes -= bytes_this_sector;
+    }
+    if (remaining_bytes != 0 or global_entry_index != header.partition_entry_count) {
+        nvmeFailure("GPT partition array length did not match the header");
+    }
+    const partition_array_crc = gpt.crc32Finish(crc_state);
+    if (partition_array_crc != header.partition_array_crc32) {
+        nvmeFailure("GPT partition-entry-array CRC did not match the header");
+    }
+
+    const backup_header_block = nvme.readOneBlock(&controller, allocator, header.backup_lba) orelse
+        nvmeFailure("backup GPT header read failed");
+    const backup_header = gpt.parseHeader(
+        nvme.readBuffer(backup_header_block),
+        controller.namespace_size_lbas,
+    ) orelse nvmeFailure("backup GPT header signature, bounds, or CRC validation failed");
+    if (backup_header.current_lba != header.backup_lba or
+        backup_header.backup_lba != header.current_lba or
+        backup_header.first_usable_lba != header.first_usable_lba or
+        backup_header.last_usable_lba != header.last_usable_lba or
+        backup_header.partition_entry_count != header.partition_entry_count or
+        backup_header.partition_entry_size != header.partition_entry_size or
+        backup_header.partition_array_crc32 != header.partition_array_crc32 or
+        !std.mem.eql(u8, &backup_header.disk_guid, &header.disk_guid))
+    {
+        nvmeFailure("primary and backup GPT metadata did not cross-validate");
+    }
+
+    var backup_crc_state = gpt.crc32Begin();
+    var backup_remaining_bytes = backup_header.partition_array_bytes;
+    var backup_sector_index: u64 = 0;
+    while (backup_sector_index < entry_array_sectors) : (backup_sector_index += 1) {
+        const backup_entry_block = nvme.readOneBlock(
+            &controller,
+            allocator,
+            backup_header.partition_entry_lba + backup_sector_index,
+        ) orelse nvmeFailure("backup GPT partition-entry-array read failed");
+        const backup_bytes = nvme.readBuffer(backup_entry_block);
+        const backup_bytes_this_sector: usize = @intCast(@min(
+            backup_remaining_bytes,
+            @as(u64, backup_bytes.len),
+        ));
+        backup_crc_state = gpt.crc32Update(
+            backup_crc_state,
+            backup_bytes[0..backup_bytes_this_sector],
+        );
+        backup_remaining_bytes -= backup_bytes_this_sector;
+    }
+    const backup_partition_array_crc = gpt.crc32Finish(backup_crc_state);
+    if (backup_remaining_bytes != 0 or
+        backup_partition_array_crc != backup_header.partition_array_crc32)
+    {
+        nvmeFailure("backup GPT partition-entry-array CRC did not match its header");
+    }
+
+    debugWrite("NVMe GPT header verified: revision ");
+    debugWriteU64Decimal(header.revision >> 16);
+    debugWrite(".");
+    debugWriteU64Decimal((header.revision >> 8) & 0xFF);
+    debugWrite(", current LBA ");
+    debugWriteU64Decimal(header.current_lba);
+    debugWrite(", backup LBA ");
+    debugWriteU64Decimal(header.backup_lba);
+    debugWrite(", usable ");
+    debugWriteU64Decimal(header.first_usable_lba);
+    debugWrite("-");
+    debugWriteU64Decimal(header.last_usable_lba);
+    debugWrite(", header CRC 0x");
+    debugWriteHex64(header.header_crc32);
+    debugWrite("\r\n");
+    debugWrite("NVMe GPT partition array verified: ");
+    debugWriteU64Decimal(header.partition_entry_count);
+    debugWrite(" entries x ");
+    debugWriteU64Decimal(header.partition_entry_size);
+    debugWrite(" bytes at LBA ");
+    debugWriteU64Decimal(header.partition_entry_lba);
+    debugWrite(", sectors ");
+    debugWriteU64Decimal(entry_array_sectors);
+    debugWrite(", populated ");
+    debugWriteU64Decimal(populated_entries);
+    debugWrite(", CRC 0x");
+    debugWriteHex64(partition_array_crc);
+    debugWrite("\r\n");
+    debugWrite("NVMe backup GPT verified: current LBA ");
+    debugWriteU64Decimal(backup_header.current_lba);
+    debugWrite(", primary LBA ");
+    debugWriteU64Decimal(backup_header.backup_lba);
+    debugWrite(", entries LBA ");
+    debugWriteU64Decimal(backup_header.partition_entry_lba);
+    debugWrite(", header CRC 0x");
+    debugWriteHex64(backup_header.header_crc32);
+    debugWrite(", array CRC 0x");
+    debugWriteHex64(backup_partition_array_crc);
+    debugWrite("\r\n");
+
+    const efi = efi_partition orelse nvmeFailure("GPT did not contain an EFI System Partition");
+    const efi_sector_count = efi.sectorCount() orelse
+        nvmeFailure("EFI System Partition LBA range overflowed");
+    debugWrite("NVMe EFI System Partition: index ");
+    debugWriteU64Decimal(efi.index);
+    debugWrite(", LBA ");
+    debugWriteU64Decimal(efi.first_lba);
+    debugWrite(" + ");
+    debugWriteU64Decimal(efi_sector_count);
+    debugWrite(" sectors, name \"");
+    debugWrite(efi.nameSlice());
+    debugWrite("\"\r\n");
+
+    const volume_block = nvme.readOneBlock(&controller, allocator, efi.first_lba) orelse
+        nvmeFailure("EFI System Partition boot-sector read failed");
+    const volume = fat.parseBootSector(nvme.readBuffer(volume_block), efi.first_lba) orelse
+        nvmeFailure("EFI System Partition did not contain a valid FAT BPB");
+    if (@as(u64, volume.total_sectors) > efi_sector_count) {
+        nvmeFailure("FAT volume geometry exceeded the GPT partition bounds");
+    }
+    debugWrite("NVMe FAT volume verified: ");
+    debugWrite(switch (volume.kind) {
+        .fat12 => "FAT12",
+        .fat16 => "FAT16",
+        .fat32 => "FAT32",
+    });
+    debugWrite(", label \"");
+    debugWrite(fat.terminatedSlice(&volume.volume_label));
+    debugWrite("\", filesystem \"");
+    debugWrite(fat.terminatedSlice(&volume.filesystem_label));
+    debugWrite("\", ");
+    debugWriteU64Decimal(volume.total_sectors);
+    debugWrite(" sectors, first FAT LBA ");
+    debugWriteU64Decimal(volume.first_fat_lba);
+    debugWrite(", root LBA ");
+    debugWriteU64Decimal(volume.root_directory_lba);
     debugWrite("\r\n");
 }
 

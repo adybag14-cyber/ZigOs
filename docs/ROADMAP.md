@@ -142,3 +142,14 @@
 - [x] Identify Namespace geometry and logical-block-size validation
 - [x] ZigOs-owned I/O submission/completion queues
 - [x] Read-only NVM Read command for LBA 0 with deterministic QEMU payload verification
+
+
+## 1.1 - NVMe GPT and FAT discovery
+
+- [x] Protective MBR type 0xEE validation
+- [x] Primary GPT signature, revision, bounds, and header-CRC validation
+- [x] Full primary and backup partition-entry-array streaming CRC validation
+- [x] Primary/backup GPT header cross-validation and disk-GUID consistency
+- [x] EFI System Partition GUID and LBA-bound discovery
+- [x] FAT12/16/32 BPB parsing from the NVMe EFI System Partition
+- [x] Deterministic primary and backup GPT test namespace generation

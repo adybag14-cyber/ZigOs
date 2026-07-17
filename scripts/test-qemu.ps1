@@ -51,16 +51,135 @@ Copy-Item $varsSource $varsImage -Force
 
 Remove-Item $debugLog, $serialLog, $qemuStdout, $qemuStderr -Force -ErrorAction SilentlyContinue
 $fatPath = $efiRoot.Replace('\', '/')
-$nvmeSector = [byte[]]::new(512)
-$nvmeMarker = [System.Text.Encoding]::ASCII.GetBytes('ZIGOS-NVME-LBA0!')
-[Array]::Copy($nvmeMarker, 0, $nvmeSector, 0, $nvmeMarker.Length)
-$nvmeSector[510] = 0x55
-$nvmeSector[511] = 0xAA
-$nvmeStream = [System.IO.File]::Open($nvmeImage, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+Add-Type -TypeDefinition @'
+namespace ZigOs {
+    public static class Crc32 {
+        public static uint Compute(byte[] data, int offset, int count) {
+            uint crc = 0xFFFFFFFFu;
+            for (int index = 0; index < count; index++) {
+                crc ^= data[offset + index];
+                for (int bit = 0; bit < 8; bit++) {
+                    uint mask = (uint)-(int)(crc & 1u);
+                    crc = (crc >> 1) ^ (0xEDB88320u & mask);
+                }
+            }
+            return ~crc;
+        }
+    }
+}
+'@
+
+function Set-Le16([byte[]]$Buffer, [int]$Offset, [UInt16]$Value) {
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Buffer, $Offset, 2)
+}
+function Set-Le32([byte[]]$Buffer, [int]$Offset, [UInt32]$Value) {
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Buffer, $Offset, 4)
+}
+function Set-Le64([byte[]]$Buffer, [int]$Offset, [UInt64]$Value) {
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Buffer, $Offset, 8)
+}
+function New-GptHeader(
+    [UInt64]$CurrentLba,
+    [UInt64]$BackupLba,
+    [UInt64]$EntryLba,
+    [UInt32]$EntryArrayCrc,
+    [byte[]]$DiskGuid
+) {
+    [byte[]]$header = [byte[]]::new(512)
+    [Array]::Copy([Text.Encoding]::ASCII.GetBytes('EFI PART'), 0, $header, 0, 8)
+    Set-Le32 $header 8 0x00010000
+    Set-Le32 $header 12 92
+    Set-Le64 $header 24 $CurrentLba
+    Set-Le64 $header 32 $BackupLba
+    Set-Le64 $header 40 34
+    Set-Le64 $header 48 32734
+    [Array]::Copy($DiskGuid, 0, $header, 56, 16)
+    Set-Le64 $header 72 $EntryLba
+    Set-Le32 $header 80 128
+    Set-Le32 $header 84 128
+    Set-Le32 $header 88 $EntryArrayCrc
+    Set-Le32 $header 16 ([ZigOs.Crc32]::Compute($header, 0, 92))
+    return $header
+}
+
+[UInt64]$nvmeTotalSectors = 32768
+[UInt64]$nvmeLastLba = $nvmeTotalSectors - 1
+[UInt64]$primaryEntriesLba = 2
+[UInt64]$backupEntriesLba = 32735
+[UInt64]$partitionFirstLba = 2048
+[UInt64]$partitionLastLba = 32734
+[UInt32]$partitionSectors = [UInt32]($partitionLastLba - $partitionFirstLba + 1)
+
+[byte[]]$protectiveMbr = [byte[]]::new(512)
+[byte[]]$nvmeMarker = [Text.Encoding]::ASCII.GetBytes('ZIGOS-NVME-LBA0!')
+[Array]::Copy($nvmeMarker, 0, $protectiveMbr, 0, $nvmeMarker.Length)
+$protectiveMbr[446] = 0x00
+$protectiveMbr[447] = 0x00
+$protectiveMbr[448] = 0x02
+$protectiveMbr[449] = 0x00
+$protectiveMbr[450] = 0xEE
+$protectiveMbr[451] = 0xFF
+$protectiveMbr[452] = 0xFF
+$protectiveMbr[453] = 0xFF
+Set-Le32 $protectiveMbr 454 1
+Set-Le32 $protectiveMbr 458 ([UInt32]($nvmeTotalSectors - 1))
+$protectiveMbr[510] = 0x55
+$protectiveMbr[511] = 0xAA
+
+[byte[]]$partitionEntries = [byte[]]::new(128 * 128)
+[byte[]]$efiSystemGuid = 0x28,0x73,0x2A,0xC1,0x1F,0xF8,0xD2,0x11,0xBA,0x4B,0x00,0xA0,0xC9,0x3E,0xC9,0x3B
+[byte[]]$partitionGuid = 0x44,0x33,0x22,0x11,0x66,0x55,0x88,0x77,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xF0,0x01
+[Array]::Copy($efiSystemGuid, 0, $partitionEntries, 0, 16)
+[Array]::Copy($partitionGuid, 0, $partitionEntries, 16, 16)
+Set-Le64 $partitionEntries 32 $partitionFirstLba
+Set-Le64 $partitionEntries 40 $partitionLastLba
+[byte[]]$partitionName = [Text.Encoding]::Unicode.GetBytes('ZigOs NVMe FAT')
+[Array]::Copy($partitionName, 0, $partitionEntries, 56, $partitionName.Length)
+[UInt32]$partitionArrayCrc = [ZigOs.Crc32]::Compute($partitionEntries, 0, $partitionEntries.Length)
+
+[byte[]]$diskGuid = 0x78,0x56,0x34,0x12,0xBC,0x9A,0xF0,0xDE,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88
+[byte[]]$primaryHeader = New-GptHeader 1 $nvmeLastLba $primaryEntriesLba $partitionArrayCrc $diskGuid
+[byte[]]$backupHeader = New-GptHeader $nvmeLastLba 1 $backupEntriesLba $partitionArrayCrc $diskGuid
+
+[byte[]]$fatBootSector = [byte[]]::new(512)
+$fatBootSector[0] = 0xEB
+$fatBootSector[1] = 0x3C
+$fatBootSector[2] = 0x90
+[Array]::Copy([Text.Encoding]::ASCII.GetBytes('ZIGOS   '), 0, $fatBootSector, 3, 8)
+Set-Le16 $fatBootSector 11 512
+$fatBootSector[13] = 1
+Set-Le16 $fatBootSector 14 1
+$fatBootSector[16] = 2
+Set-Le16 $fatBootSector 17 512
+Set-Le16 $fatBootSector 19 ([UInt16]$partitionSectors)
+$fatBootSector[21] = 0xF8
+Set-Le16 $fatBootSector 22 120
+Set-Le16 $fatBootSector 24 63
+Set-Le16 $fatBootSector 26 255
+Set-Le32 $fatBootSector 28 ([UInt32]$partitionFirstLba)
+$fatBootSector[36] = 0x80
+$fatBootSector[38] = 0x29
+Set-Le32 $fatBootSector 39 0x5A49474F
+[Array]::Copy([Text.Encoding]::ASCII.GetBytes('ZIGOSNVME  '), 0, $fatBootSector, 43, 11)
+[Array]::Copy([Text.Encoding]::ASCII.GetBytes('FAT16   '), 0, $fatBootSector, 54, 8)
+$fatBootSector[510] = 0x55
+$fatBootSector[511] = 0xAA
+
+$nvmeStream = [IO.File]::Open($nvmeImage, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
 try {
     $nvmeStream.SetLength(16MB)
     $nvmeStream.Position = 0
-    $nvmeStream.Write($nvmeSector, 0, $nvmeSector.Length)
+    $nvmeStream.Write($protectiveMbr, 0, $protectiveMbr.Length)
+    $nvmeStream.Position = 512
+    $nvmeStream.Write($primaryHeader, 0, $primaryHeader.Length)
+    $nvmeStream.Position = $primaryEntriesLba * 512
+    $nvmeStream.Write($partitionEntries, 0, $partitionEntries.Length)
+    $nvmeStream.Position = $backupEntriesLba * 512
+    $nvmeStream.Write($partitionEntries, 0, $partitionEntries.Length)
+    $nvmeStream.Position = $nvmeLastLba * 512
+    $nvmeStream.Write($backupHeader, 0, $backupHeader.Length)
+    $nvmeStream.Position = $partitionFirstLba * 512
+    $nvmeStream.Write($fatBootSector, 0, $fatBootSector.Length)
     $nvmeStream.Flush()
 }
 finally {
@@ -489,8 +608,26 @@ if (-not [regex]::IsMatch($output, 'NVMe READ completed: namespace [1-9][0-9]*, 
 if (-not $output.Contains('NVMe LBA 0 first 16 bytes: 5A 49 47 4F 53 2D 4E 56 4D 45 2D 4C 42 41 30 21')) {
     throw 'The deterministic NVMe LBA 0 payload was not read correctly.'
 }
-if (-not [regex]::IsMatch($output, 'NVMe LBA 0 FNV-1a64: 0x2E2FDEB78EF436CC, trailing signature 0xAA55')) {
+if (-not [regex]::IsMatch($output, 'NVMe LBA 0 FNV-1a64: 0xA3BA5289D74BDD3C, trailing signature 0xAA55')) {
     throw 'The NVMe LBA 0 fingerprint and trailing signature were not observed.'
+}
+if (-not $output.Contains('NVMe protective MBR verified: type 0xEE, first LBA 1, sectors 32767')) {
+    throw 'The NVMe protective MBR verification marker was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'NVMe GPT header verified: revision 1\.0, current LBA 1, backup LBA 32767, usable 34-32734, header CRC 0x[0-9A-F]{16}')) {
+    throw 'The checksum-valid primary GPT header marker was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'NVMe GPT partition array verified: 128 entries x 128 bytes at LBA 2, sectors 32, populated 1, CRC 0x[0-9A-F]{16}')) {
+    throw 'The checksum-valid GPT partition-entry-array marker was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'NVMe backup GPT verified: current LBA 32767, primary LBA 1, entries LBA 32735, header CRC 0x[0-9A-F]{16}, array CRC 0x[0-9A-F]{16}')) {
+    throw 'The cross-validated backup GPT header and partition array were not observed.'
+}
+if (-not $output.Contains('NVMe EFI System Partition: index 0, LBA 2048 + 30687 sectors, name "ZigOs NVMe FAT"')) {
+    throw 'The NVMe EFI System Partition discovery marker was not observed.'
+}
+if (-not $output.Contains('NVMe FAT volume verified: FAT16, label "ZIGOSNVME", filesystem "FAT16", 30687 sectors, first FAT LBA 2049, root LBA 2289')) {
+    throw 'The FAT16 volume inside the NVMe GPT partition was not observed.'
 }
 
 if (-not $output.Contains('AHCI controller active at')) {
