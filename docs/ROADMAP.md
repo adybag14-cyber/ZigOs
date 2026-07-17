@@ -276,3 +276,4 @@
 - INIT/SIPI and fixed IPIs retain full 32-bit destination IDs in x2APIC mode.
 - Work-stealing participant masks use stable per-CPU state slots rather than hardware APIC IDs, so sparse or greater-than-63 identifiers cannot overflow a 64-bit mask.
 - `scripts/test-qemu.ps1 -SparseApicIds` uses a six-slot topology with four online processors. QEMU retains MADT IDs `0,1,2,4`; ZigOs starts IDs `1,2,4` and completes the full multicore validation suite without assuming contiguous hardware identifiers.
+- `scripts/test-qemu.ps1 -HighApicId` explicitly installs APIC IDs `1`, `2`, and `256`, requiring a mixed MADT with an x2APIC record for ID 256 and proving full-width INIT/SIPI, fixed-IPI, local-timer, and work-stealing paths.

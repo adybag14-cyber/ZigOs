@@ -12,7 +12,8 @@ param(
     [switch]$NoPs2,
     [switch]$NoHpet,
     [switch]$SparseApicIds,
-    [switch]$NoX2Apic
+    [switch]$NoX2Apic,
+    [switch]$HighApicId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -88,6 +89,12 @@ if ($SparseApicIds) {
     if ($LegacyPci) { throw '-SparseApicIds is currently supported only with the q35 test machine.' }
     if ($CpuCount -ne 4) { throw '-SparseApicIds requires -CpuCount 4.' }
 }
+if ($HighApicId) {
+    if ($LegacyPci) { throw '-HighApicId is currently supported only with the q35 test machine.' }
+    if ($CpuCount -ne 4) { throw '-HighApicId requires -CpuCount 4.' }
+    if ($SparseApicIds) { throw '-HighApicId and -SparseApicIds are separate topology matrices.' }
+    if ($NoX2Apic) { throw '-HighApicId requires x2APIC support.' }
+}
 $machineOptions = @()
 if ($NoPs2) {
     if ($LegacyPci) { throw '-NoPs2 is currently supported only with the q35 test machine.' }
@@ -102,7 +109,9 @@ $machineArgument = if ($machineOptions.Count -eq 0) {
 } else {
     "$machineType,$($machineOptions -join ',')"
 }
-$smpArgument = if ($SparseApicIds) {
+$smpArgument = if ($HighApicId) {
+    'cpus=1,maxcpus=257,sockets=257,cores=1,threads=1'
+} elseif ($SparseApicIds) {
     'cpus=4,maxcpus=6,sockets=2,cores=3,threads=1'
 } else {
     [string]$CpuCount
@@ -112,7 +121,16 @@ $arguments = @(
     '-machine', $machineArgument,
     '-m', '256M',
     '-cpu', $cpuArgument,
-    '-smp', $smpArgument,
+    '-smp', $smpArgument
+)
+if ($HighApicId) {
+    $arguments += @(
+        '-device', 'max-x86_64-cpu,apic-id=1,socket-id=1,core-id=0,thread-id=0',
+        '-device', 'max-x86_64-cpu,apic-id=2,socket-id=2,core-id=0,thread-id=0',
+        '-device', 'max-x86_64-cpu,apic-id=256,socket-id=256,core-id=0,thread-id=0'
+    )
+}
+$arguments += @(
     '-device', 'qemu-xhci,id=xhci',
     '-drive', "file=$nvmePath,if=none,id=nvme0,format=raw,cache=unsafe",
     '-device', "nvme,drive=nvme0,serial=ZIGOSNVME,logical_block_size=$nvmeBlockSize,physical_block_size=$nvmeBlockSize",
@@ -138,7 +156,7 @@ if ($NoGraphics) {
     $arguments += @('-vga', 'none')
 }
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPU: $cpuArgument, CPUs: $CpuCount, SMP: $smpArgument, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2, no HPET: $NoHpet, sparse APIC IDs: $SparseApicIds, no x2APIC: $NoX2Apic)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPU: $cpuArgument, CPUs: $CpuCount, SMP: $smpArgument, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2, no HPET: $NoHpet, sparse APIC IDs: $SparseApicIds, no x2APIC: $NoX2Apic, high APIC ID: $HighApicId)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -287,16 +305,22 @@ if (-not $output.Contains('MADT topology:')) {
     throw 'The validated MADT topology marker was not observed.'
 }
 $expectedMadtProcessorCount = $CpuCount
-$expectedApicIds = if ($SparseApicIds) { @(0, 1, 2, 4) } else { @(0..($CpuCount - 1)) }
+$expectedProcessorRecords = if ($HighApicId) {
+    @('0(xAPIC)', '1(xAPIC)', '2(xAPIC)', '256(x2)')
+} elseif ($SparseApicIds) {
+    @('0(xAPIC)', '1(xAPIC)', '2(xAPIC)', '4(xAPIC)')
+} else {
+    @(0..($CpuCount - 1) | ForEach-Object { "$_(xAPIC)" })
+}
 if (-not $output.Contains("MADT topology: $expectedMadtProcessorCount processors")) {
     throw "The expected $expectedMadtProcessorCount-processor MADT topology marker was not observed."
 }
 $expectedProcessorIds = 'MADT processor IDs:'
-foreach ($processorId in $expectedApicIds) {
-    $expectedProcessorIds += " $processorId(xAPIC)"
+foreach ($processorRecord in $expectedProcessorRecords) {
+    $expectedProcessorIds += " $processorRecord"
 }
 if (-not $output.Contains($expectedProcessorIds)) {
-    throw "The expected retained MADT APIC-ID set was not observed: $($expectedApicIds -join ',')."
+    throw "The expected retained MADT processor records were not observed: $($expectedProcessorRecords -join ',')."
 }
 $expectedActiveAps = [Math]::Min(3, [Math]::Max(0, $CpuCount - 1))
 $expectedParkedAps = [Math]::Max(0, $expectedMadtProcessorCount - 1 - $expectedActiveAps)
@@ -329,6 +353,19 @@ if ($SparseApicIds) {
     }
     if ($output.Contains('AP online: expected APIC 3,')) {
         throw 'The sparse topology unexpectedly collapsed APIC ID 4 into contiguous ID 3.'
+    }
+}
+if ($HighApicId) {
+    foreach ($activeApicId in @(1, 2, 256)) {
+        if (-not $output.Contains("AP online: expected APIC $activeApicId, actual APIC $activeApicId, state 2")) {
+            throw "High-width APIC ID $activeApicId did not start and validate."
+        }
+        if (-not $output.Contains("AP targeted IPI: APIC $activeApicId, vector 0x42")) {
+            throw "High-width APIC ID $activeApicId did not receive a targeted fixed IPI."
+        }
+    }
+    if (-not $output.Contains('AP work stealing: APIC 256 executed 2 stolen jobs')) {
+        throw 'APIC ID 256 did not participate in slot-indexed work stealing.'
     }
 }
 if (-not $output.Contains('APIC SVR verified at 0x')) {
