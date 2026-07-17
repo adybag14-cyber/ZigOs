@@ -193,3 +193,9 @@
 - [x] Connected boot mouse rejected as an interactive keyboard without a fatal error
 - [x] No keyboard endpoint configuration or shell startup for mouse-only systems
 - [x] Combined NVMe-only and USB-mouse-only full-system QEMU regression
+
+
+## 1.6 - Serial diagnostic integrity
+
+- [x] Zero-valued decimal counters mirrored through the shared debug/COM1 path
+- [x] Headless framebuffer reset counter verified as `0` in COM1 output

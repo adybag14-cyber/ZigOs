@@ -3177,7 +3177,7 @@ fn debugWriteUsizeDecimal(value: usize) void {
 
 fn debugWriteU64Decimal(initial_value: u64) void {
     if (initial_value == 0) {
-        zigos_debug_putc('0');
+        debugWrite("0");
         return;
     }
 

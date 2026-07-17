@@ -845,6 +845,9 @@ if (-not (Test-Path $serialLog)) {
 $serialOutput = Get-Content $serialLog -Raw
 Write-Host '=== ZigOs COM1 serial output ==='
 Write-Host $serialOutput
+if (($NoUsbKeyboard -or $UsbMouseOnly) -and -not $serialOutput.Contains('resets 0, lit pixels 1744')) {
+    throw 'COM1 decimal formatting dropped the zero-valued framebuffer reset counter.'
+}
 if (-not $serialOutput.Contains('BdsDxe: starting Boot0001 "UEFI QEMU NVMe Ctrl ZIGOSNVME 1"')) {
     throw 'OVMF did not boot ZigOs from the GPT/FAT NVMe namespace.'
 }
