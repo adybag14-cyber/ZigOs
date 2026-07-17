@@ -15,6 +15,12 @@ pub const ap_timer_vector: u8 = 0x43;
 const run_queue_command: u32 = 2;
 const run_queue_checksum_seed: u64 = 0xCBF2_9CE4_8422_2325;
 const work_stealing_checksum_seed: u64 = 0x5753_5445_414C_494E;
+const local_task_count: usize = 2;
+const local_task_trace_length: usize = 12;
+const saved_integer_bytes: usize = 8 * @sizeOf(usize);
+const saved_xmm_bytes: usize = 10 * 16;
+const task_bootstrap_frame_bytes: usize = saved_integer_bytes + saved_xmm_bytes;
+const task_stack_canary: u64 = 0x4150_5441_534B_434E;
 
 const DescriptorTablePointer = extern struct {
     limit: u16,
@@ -58,6 +64,22 @@ const RunQueueEntry = struct {
     executor_apic_id: u32,
     stolen: u32,
     reserved: u32,
+};
+
+const LocalTaskStatus = enum(u32) {
+    unused,
+    runnable,
+    running,
+    finished,
+};
+
+const LocalTask = struct {
+    saved_rsp: usize,
+    stack_base: usize,
+    stack_size: usize,
+    status: LocalTaskStatus,
+    yields: u32,
+    iterations: u32,
 };
 
 pub const State = struct {
@@ -106,6 +128,16 @@ pub const State = struct {
     scheduler_tick_count: u32,
     scheduler_dispatch_count: u32,
     scheduler_reserved: u32,
+    task_request_epoch: u32,
+    task_completion_epoch: u32,
+    task_running: u32,
+    task_current: u32,
+    task_scheduler_rsp: usize,
+    task_context_switches: u64,
+    local_tasks: [local_task_count]LocalTask,
+    task_trace: [local_task_trace_length]u8,
+    task_trace_length: u32,
+    task_error: u32,
 };
 
 pub const Report = struct {
@@ -141,6 +173,24 @@ pub const Report = struct {
     scheduler_target_jobs: u32,
     scheduler_tick_count: u32,
     scheduler_dispatch_count: u32,
+    task_request_epoch: u32,
+    task_completion_epoch: u32,
+    task_context_switches: u64,
+    task_first_stack_base: usize,
+    task_first_stack_size: usize,
+    task_first_yields: u32,
+    task_first_iterations: u32,
+    task_first_finished: bool,
+    task_first_canary_intact: bool,
+    task_second_stack_base: usize,
+    task_second_stack_size: usize,
+    task_second_yields: u32,
+    task_second_iterations: u32,
+    task_second_finished: bool,
+    task_second_canary_intact: bool,
+    task_trace: [local_task_trace_length]u8,
+    task_trace_length: u32,
+    task_error: u32,
 };
 
 extern fn zigos_load_gdt(
@@ -159,6 +209,8 @@ extern fn zigos_isr_ap_timer() callconv(cc) void;
 extern fn zigos_wait_for_interrupt() callconv(cc) void;
 extern fn zigos_memory_fence() callconv(cc) void;
 extern fn zigos_cpu_relax() callconv(cc) void;
+extern fn zigos_context_switch(old_rsp: *usize, new_rsp: usize) callconv(cc) void;
+extern fn zigos_halt_forever() callconv(cc) noreturn;
 
 var states: [64]State align(4096) = undefined;
 var run_queue_gate: u32 = 1;
@@ -224,6 +276,23 @@ pub fn prepare(
     state.scheduler_tick_count = 0;
     state.scheduler_dispatch_count = 0;
     state.scheduler_reserved = 0;
+    state.task_request_epoch = 0;
+    state.task_completion_epoch = 0;
+    state.task_running = 0;
+    state.task_current = 0;
+    state.task_scheduler_rsp = 0;
+    state.task_context_switches = 0;
+    for (&state.local_tasks) |*task| task.* = .{
+        .saved_rsp = 0,
+        .stack_base = 0,
+        .stack_size = 0,
+        .status = .unused,
+        .yields = 0,
+        .iterations = 0,
+    };
+    @memset(&state.task_trace, 0);
+    state.task_trace_length = 0;
+    state.task_error = 0;
     zigos_memory_fence();
     return state;
 }
@@ -333,6 +402,24 @@ pub fn report(state: *const State) Report {
         .scheduler_target_jobs = atomicLoadU32(&state.scheduler_target_jobs),
         .scheduler_tick_count = atomicLoadU32(&state.scheduler_tick_count),
         .scheduler_dispatch_count = atomicLoadU32(&state.scheduler_dispatch_count),
+        .task_request_epoch = atomicLoadU32(&state.task_request_epoch),
+        .task_completion_epoch = atomicLoadU32(&state.task_completion_epoch),
+        .task_context_switches = state.task_context_switches,
+        .task_first_stack_base = state.local_tasks[0].stack_base,
+        .task_first_stack_size = state.local_tasks[0].stack_size,
+        .task_first_yields = state.local_tasks[0].yields,
+        .task_first_iterations = state.local_tasks[0].iterations,
+        .task_first_finished = state.local_tasks[0].status == .finished,
+        .task_first_canary_intact = taskCanaryIntact(&state.local_tasks[0]),
+        .task_second_stack_base = state.local_tasks[1].stack_base,
+        .task_second_stack_size = state.local_tasks[1].stack_size,
+        .task_second_yields = state.local_tasks[1].yields,
+        .task_second_iterations = state.local_tasks[1].iterations,
+        .task_second_finished = state.local_tasks[1].status == .finished,
+        .task_second_canary_intact = taskCanaryIntact(&state.local_tasks[1]),
+        .task_trace = state.task_trace,
+        .task_trace_length = state.task_trace_length,
+        .task_error = state.task_error,
     };
 }
 
@@ -353,6 +440,188 @@ pub fn workCompleted(state: *State, epoch: u32) bool {
 
 pub fn expectedWorkResult(apic_id: u32, input: u64) u64 {
     return calculateMailboxWork(apic_id, input);
+}
+
+pub fn prepareLocalTaskExperiment(
+    state: *State,
+    epoch: u32,
+    first_stack_base: usize,
+    first_stack_size: usize,
+    second_stack_base: usize,
+    second_stack_size: usize,
+) bool {
+    if (epoch == 0 or state.descriptor_ready != 1 or
+        first_stack_size == 0 or second_stack_size == 0)
+    {
+        return false;
+    }
+    if (!prepareLocalTask(&state.local_tasks[0], first_stack_base, first_stack_size)) return false;
+    if (!prepareLocalTask(&state.local_tasks[1], second_stack_base, second_stack_size)) return false;
+    state.task_current = 0;
+    state.task_scheduler_rsp = 0;
+    state.task_context_switches = 0;
+    state.task_running = 0;
+    state.task_error = 0;
+    state.task_trace_length = 0;
+    @memset(&state.task_trace, 0);
+    atomicStoreU32(&state.task_completion_epoch, 0);
+    atomicStoreU32(&state.task_request_epoch, epoch);
+    return true;
+}
+
+pub fn localTaskExperimentComplete(state: *const State, epoch: u32) bool {
+    return epoch != 0 and
+        atomicLoadU32(&state.task_completion_epoch) == epoch and
+        atomicLoadU32(&state.task_running) == 0 and
+        state.task_error == 0;
+}
+
+fn prepareLocalTask(task: *LocalTask, stack_base: usize, stack_size: usize) bool {
+    if (stack_base > std.math.maxInt(usize) - stack_size) return false;
+    const stack = @as([*]u8, @ptrFromInt(stack_base))[0..stack_size];
+    @memset(stack, 0);
+    @as(*u64, @ptrFromInt(stack_base)).* = task_stack_canary;
+    const stack_top = stack_base + stack_size;
+    const return_slot = (stack_top - 16) & ~@as(usize, 0xF);
+    if (return_slot < stack_base + task_bootstrap_frame_bytes + @sizeOf(usize)) return false;
+    const saved_rsp = return_slot - task_bootstrap_frame_bytes;
+    @as(*usize, @ptrFromInt(return_slot)).* = @intFromPtr(&localTaskBootstrap);
+    task.* = .{
+        .saved_rsp = saved_rsp,
+        .stack_base = stack_base,
+        .stack_size = stack_size,
+        .status = .runnable,
+        .yields = 0,
+        .iterations = 0,
+    };
+    return true;
+}
+
+fn serviceLocalTaskRequest(state: *State) bool {
+    const epoch = atomicLoadU32(&state.task_request_epoch);
+    if (epoch == 0 or atomicLoadU32(&state.task_completion_epoch) == epoch) return false;
+    if (state.task_running != 0) return false;
+    if (!runLocalTasks(state)) {
+        state.task_error = 1;
+    }
+    zigos_memory_fence();
+    atomicStoreU32(&state.task_completion_epoch, epoch);
+    return true;
+}
+
+fn runLocalTasks(state: *State) bool {
+    if (state.local_tasks[0].status != .runnable or state.local_tasks[1].status != .runnable) return false;
+    state.task_current = 0;
+    state.local_tasks[0].status = .running;
+    state.task_running = 1;
+    state.task_context_switches = 1;
+    zigos_context_switch(&state.task_scheduler_rsp, state.local_tasks[0].saved_rsp);
+    state.task_running = 0;
+    return state.local_tasks[0].status == .finished and
+        state.local_tasks[1].status == .finished and
+        state.task_context_switches == 13 and
+        state.task_trace_length == local_task_trace_length and
+        taskCanaryIntact(&state.local_tasks[0]) and
+        taskCanaryIntact(&state.local_tasks[1]);
+}
+
+fn localTaskBootstrap() callconv(cc) noreturn {
+    const state = currentState() orelse zigos_halt_forever();
+    const index: usize = state.task_current;
+    if (index >= local_task_count) zigos_halt_forever();
+    if (index == 0) {
+        runLocalTaskA(state);
+    } else {
+        runLocalTaskB(state);
+    }
+    finishLocalTask(state);
+}
+
+fn runLocalTaskA(state: *State) void {
+    var iteration: u32 = 0;
+    while (iteration < 5) : (iteration += 1) {
+        appendTaskTrace(state, 'A');
+        state.local_tasks[0].iterations +%= 1;
+        yieldLocalTask(state);
+    }
+}
+
+fn runLocalTaskB(state: *State) void {
+    var iteration: u32 = 0;
+    while (iteration < 7) : (iteration += 1) {
+        appendTaskTrace(state, 'B');
+        state.local_tasks[1].iterations +%= 1;
+        yieldLocalTask(state);
+    }
+}
+
+fn appendTaskTrace(state: *State, marker: u8) void {
+    const index: usize = state.task_trace_length;
+    if (index >= state.task_trace.len) {
+        state.task_error = 2;
+        return;
+    }
+    state.task_trace[index] = marker;
+    state.task_trace_length +%= 1;
+}
+
+fn yieldLocalTask(state: *State) void {
+    if (state.task_running == 0) return;
+    const old_index: usize = state.task_current;
+    if (old_index >= local_task_count) return;
+    state.local_tasks[old_index].yields +%= 1;
+    const next_index = findNextLocalTask(state, old_index) orelse return;
+    state.local_tasks[old_index].status = .runnable;
+    state.local_tasks[next_index].status = .running;
+    state.task_current = @intCast(next_index);
+    state.task_context_switches +%= 1;
+    zigos_context_switch(
+        &state.local_tasks[old_index].saved_rsp,
+        state.local_tasks[next_index].saved_rsp,
+    );
+}
+
+fn finishLocalTask(state: *State) noreturn {
+    const old_index: usize = state.task_current;
+    if (old_index >= local_task_count) zigos_halt_forever();
+    state.local_tasks[old_index].status = .finished;
+    if (findNextLocalTask(state, old_index)) |next_index| {
+        state.local_tasks[next_index].status = .running;
+        state.task_current = @intCast(next_index);
+        state.task_context_switches +%= 1;
+        zigos_context_switch(
+            &state.local_tasks[old_index].saved_rsp,
+            state.local_tasks[next_index].saved_rsp,
+        );
+        zigos_halt_forever();
+    }
+    state.task_context_switches +%= 1;
+    zigos_context_switch(&state.local_tasks[old_index].saved_rsp, state.task_scheduler_rsp);
+    zigos_halt_forever();
+}
+
+fn findNextLocalTask(state: *State, old_index: usize) ?usize {
+    var offset: usize = 1;
+    while (offset < local_task_count) : (offset += 1) {
+        const candidate = (old_index + offset) % local_task_count;
+        if (state.local_tasks[candidate].status == .runnable) return candidate;
+    }
+    return null;
+}
+
+fn currentState() ?*State {
+    const current_apic_id = apic.currentId();
+    const count = atomicLoadU32(&interrupt_idle_state_count);
+    var index: usize = 0;
+    while (index < count and index < states.len) : (index += 1) {
+        if (states[index].expected_apic_id == current_apic_id) return &states[index];
+    }
+    return null;
+}
+
+fn taskCanaryIntact(task: *const LocalTask) bool {
+    return task.stack_base != 0 and
+        @as(*const u64, @ptrFromInt(task.stack_base)).* == task_stack_canary;
 }
 
 pub fn requestOneShotTimer(state: *State, epoch: u32, initial_count: u32) bool {
@@ -643,6 +912,7 @@ pub fn verifyRunQueue(state: *State, apic_id: u32, expected_jobs: u32) ?u64 {
 pub fn runMailbox(state: *State) noreturn {
     var observed_epoch: u32 = 0;
     while (true) {
+        if (serviceLocalTaskRequest(state)) continue;
         if (serviceTimerRequest(state)) continue;
         if (atomicLoadU32(&run_queue_gate) != 0) {
             if (atomicLoadU32(&state.scheduler_enabled) != 0) {
@@ -924,5 +1194,8 @@ comptime {
     if (@sizeOf(DescriptorTablePointer) != 10) @compileError("descriptor-table pointer must be 10 bytes");
     if (@sizeOf(TaskStateSegment) != 104) @compileError("x86-64 TSS must be 104 bytes");
     if (@sizeOf(IdtEntry) != 16) @compileError("x86-64 IDT entry must be 16 bytes");
+    if (task_bootstrap_frame_bytes != 224) {
+        @compileError("local task bootstrap frame must match zigos_context_switch");
+    }
     _ = interrupt_context;
 }

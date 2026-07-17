@@ -237,6 +237,13 @@ if ($tickSchedulerMatches.Count -ne 3) {
 if (-not [regex]::IsMatch($output, 'Per-AP tick schedulers complete: jobs 3/core, quantum count [1-9][0-9]*, 3/3 APs dispatched exactly one job per timer tick')) {
     throw 'The aggregate per-AP tick-scheduler marker was not observed.'
 }
+$apTaskMatches = [regex]::Matches($output, 'AP local tasks: APIC [123], stacks 0x[0-9A-F]+/0x[0-9A-F]+, switches 13, yields 5/7, trace ABABABABABBB, canaries intact')
+if ($apTaskMatches.Count -ne 3) {
+    throw 'All three application processors did not complete their independent two-stack cooperative task experiment.'
+}
+if (-not $output.Contains('Per-AP task contexts complete: 3/3 APs, total context switches 39, trace ABABABABABBB on every core')) {
+    throw 'The aggregate per-AP task-context verification marker was not observed.'
+}
 if (-not $output.Contains('PCIe ECAM active:')) {
     throw 'The PCIe MCFG/ECAM activation marker was not observed.'
 }

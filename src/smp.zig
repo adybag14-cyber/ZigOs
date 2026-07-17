@@ -17,6 +17,7 @@ const long_mode_pointer_offset: usize = 0x54;
 const gdt_offset: usize = 0x300;
 const code32_descriptor_offset: usize = gdt_offset + 8;
 const stack_pages: usize = 4;
+const local_task_stack_pages: usize = 4;
 const boot_signature: u64 = 0x5A49_474F_5341_5031;
 const initial_actual_apic_id: u32 = 0xFFFF_FFFF;
 const startup_timeout_iterations: usize = 2000;
@@ -68,6 +69,15 @@ pub const ApReport = struct {
     scheduler_dispatches: u32,
     scheduler_checksum: u64,
     scheduler_halt_count: u32,
+    local_task_first_stack: usize,
+    local_task_second_stack: usize,
+    local_task_stack_size: usize,
+    local_task_first_yields: u32,
+    local_task_second_yields: u32,
+    local_task_context_switches: u64,
+    local_task_trace: [12]u8,
+    local_task_trace_length: u32,
+    local_task_canaries_intact: bool,
     online: bool,
     state: u32,
     per_cpu_state: u64,
@@ -97,6 +107,9 @@ pub const Report = struct {
     ap_scheduler_completed: u32,
     ap_scheduler_jobs_per_core: u32,
     ap_scheduler_quantum_count: u32,
+    ap_task_targets: u32,
+    ap_task_completed: u32,
+    ap_task_context_switches: u64,
     processors: [acpi.maximum_processors]ApReport,
 };
 
@@ -150,6 +163,9 @@ pub fn start(
         .ap_scheduler_completed = 0,
         .ap_scheduler_jobs_per_core = 0,
         .ap_scheduler_quantum_count = 0,
+        .ap_task_targets = 0,
+        .ap_task_completed = 0,
+        .ap_task_context_switches = 0,
         .processors = undefined,
     };
 
@@ -262,6 +278,15 @@ pub fn start(
             .scheduler_dispatches = 0,
             .scheduler_checksum = 0,
             .scheduler_halt_count = 0,
+            .local_task_first_stack = 0,
+            .local_task_second_stack = 0,
+            .local_task_stack_size = 0,
+            .local_task_first_yields = 0,
+            .local_task_second_yields = 0,
+            .local_task_context_switches = 0,
+            .local_task_trace = std.mem.zeroes([12]u8),
+            .local_task_trace_length = 0,
+            .local_task_canaries_intact = false,
             .online = online,
             .state = state,
             .per_cpu_state = @intFromPtr(per_cpu_state),
@@ -293,6 +318,10 @@ pub fn start(
     }
     if (!runTickSchedulerRound(&report, reference, timer_ticks_per_second)) {
         debugWrite("SMP stage failure: tick scheduler\r\n");
+        return null;
+    }
+    if (!runLocalTaskRound(&report, allocator, reference)) {
+        debugWrite("SMP stage failure: local task contexts\r\n");
         return null;
     }
     return report;
@@ -662,6 +691,82 @@ fn runTickSchedulerRound(report: *Report, reference: hpet.Device, ticks_per_seco
     report.ap_scheduler_jobs_per_core = jobs;
     report.ap_scheduler_quantum_count = quantum_count;
     percpu.resumeRunQueues();
+    return completed == report.target_count;
+}
+
+fn runLocalTaskRound(
+    report: *Report,
+    allocator: *memory.FrameAllocator,
+    reference: hpet.Device,
+) bool {
+    const epoch: u32 = 1;
+    const stack_size = local_task_stack_pages * @as(usize, @intCast(memory.page_size));
+    for (report.processors[0..report.target_count]) |processor| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        const first_stack = allocator.allocateContiguousBelow(local_task_stack_pages, memory.four_gib) orelse return false;
+        const second_stack = allocator.allocateContiguousBelow(local_task_stack_pages, memory.four_gib) orelse return false;
+        if (!percpu.prepareLocalTaskExperiment(
+            state,
+            epoch,
+            first_stack,
+            stack_size,
+            second_stack,
+            stack_size,
+        )) return false;
+    }
+    for (report.processors[0..report.target_count]) |processor| {
+        if (!apic.sendFixedIpi(processor.actual_apic_id, percpu.ap_work_vector)) return false;
+    }
+
+    var iteration: usize = 0;
+    while (iteration < startup_timeout_iterations) : (iteration += 1) {
+        var completed: usize = 0;
+        for (report.processors[0..report.target_count]) |processor| {
+            const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+            if (percpu.localTaskExperimentComplete(state, epoch)) completed += 1;
+        }
+        if (completed == report.target_count) break;
+        if (!reference.waitNanoseconds(startup_poll_nanoseconds)) return false;
+    }
+
+    const expected_trace = "ABABABABABBB";
+    var completed: u32 = 0;
+    var total_switches: u64 = 0;
+    for (report.processors[0..report.target_count]) |*processor| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        const state_report = percpu.report(state);
+        if (state_report.task_request_epoch != epoch or
+            state_report.task_completion_epoch != epoch or
+            state_report.task_error != 0 or
+            state_report.task_context_switches != 13 or
+            !state_report.task_first_finished or
+            !state_report.task_second_finished or
+            !state_report.task_first_canary_intact or
+            !state_report.task_second_canary_intact or
+            state_report.task_first_yields != 5 or
+            state_report.task_second_yields != 7 or
+            state_report.task_first_iterations != 5 or
+            state_report.task_second_iterations != 7 or
+            state_report.task_trace_length != expected_trace.len or
+            !std.mem.eql(u8, state_report.task_trace[0..expected_trace.len], expected_trace))
+        {
+            return false;
+        }
+        processor.local_task_first_stack = state_report.task_first_stack_base;
+        processor.local_task_second_stack = state_report.task_second_stack_base;
+        processor.local_task_stack_size = state_report.task_first_stack_size;
+        processor.local_task_first_yields = state_report.task_first_yields;
+        processor.local_task_second_yields = state_report.task_second_yields;
+        processor.local_task_context_switches = state_report.task_context_switches;
+        processor.local_task_trace = state_report.task_trace;
+        processor.local_task_trace_length = state_report.task_trace_length;
+        processor.local_task_canaries_intact = true;
+        total_switches += state_report.task_context_switches;
+        completed += 1;
+    }
+    report.ap_task_targets = @intCast(report.target_count);
+    report.ap_task_completed = completed;
+    report.ap_task_context_switches = total_switches;
     return completed == report.target_count;
 }
 

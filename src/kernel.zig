@@ -564,6 +564,21 @@ fn startApplicationProcessors(
         debugWrite(", checksum 0x");
         debugWriteHex64(processor.run_queue_checksum);
         debugWrite("\r\n");
+        debugWrite("AP local tasks: APIC ");
+        debugWriteU64Decimal(processor.actual_apic_id);
+        debugWrite(", stacks 0x");
+        debugWriteHex64(@intCast(processor.local_task_first_stack));
+        debugWrite("/0x");
+        debugWriteHex64(@intCast(processor.local_task_second_stack));
+        debugWrite(", switches ");
+        debugWriteU64Decimal(processor.local_task_context_switches);
+        debugWrite(", yields ");
+        debugWriteU64Decimal(processor.local_task_first_yields);
+        debugWrite("/");
+        debugWriteU64Decimal(processor.local_task_second_yields);
+        debugWrite(", trace ");
+        debugWrite(processor.local_task_trace[0..processor.local_task_trace_length]);
+        debugWrite(if (processor.local_task_canaries_intact) ", canaries intact\r\n" else ", canary failure\r\n");
         debugWrite("AP tick scheduler: APIC ");
         debugWriteU64Decimal(processor.actual_apic_id);
         debugWrite(", jobs ");
@@ -625,6 +640,13 @@ fn startApplicationProcessors(
     if (report.online_count != report.target_count) {
         smpFailure("not every MADT application processor reached long mode");
     }
+    debugWrite("Per-AP task contexts complete: ");
+    debugWriteU64Decimal(report.ap_task_completed);
+    debugWrite("/");
+    debugWriteU64Decimal(report.ap_task_targets);
+    debugWrite(" APs, total context switches ");
+    debugWriteU64Decimal(report.ap_task_context_switches);
+    debugWrite(", trace ABABABABABBB on every core\r\n");
     debugWrite("Per-AP tick schedulers complete: jobs ");
     debugWriteU64Decimal(report.ap_scheduler_jobs_per_core);
     debugWrite("/core, quantum count ");
