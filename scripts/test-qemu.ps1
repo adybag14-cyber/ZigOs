@@ -205,6 +205,10 @@ $mailboxMatches = [regex]::Matches($output, 'AP mailbox complete: APIC [123], ep
 if ($mailboxMatches.Count -ne 3) {
     throw 'All three AP mailbox completion records were not observed.'
 }
+$runQueueMatches = [regex]::Matches($output, 'AP run queue complete: APIC [123], queued 4, completed 4, last sequence 4, checksum 0x(?!0000000000000000)[0-9A-F]{16}')
+if ($runQueueMatches.Count -ne 3) {
+    throw 'All three per-CPU FIFO run-queue completion records were not observed.'
+}
 if (-not $output.Contains('PCIe ECAM active:')) {
     throw 'The PCIe MCFG/ECAM activation marker was not observed.'
 }

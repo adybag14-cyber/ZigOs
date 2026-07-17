@@ -78,4 +78,5 @@
 - [x] INIT/SIPI application-processor startup
 - [x] Per-CPU GDT, TSS, IST and IDT installation
 - [x] Lock-free BSP-to-AP work mailbox and parallel completion proof
-- [ ] Per-CPU scheduler/run-queue state
+- [x] Per-CPU scheduler/run-queue state
+- [x] FIFO sequence and completion verification across all APs

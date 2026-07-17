@@ -8,6 +8,9 @@ const tss_selector: u16 = 0x18;
 const exception_vector_count: usize = 32;
 const spurious_vector: usize = 0xFF;
 const state_magic: u64 = 0x5A49_474F_5350_4355;
+pub const run_queue_capacity: usize = 8;
+const run_queue_command: u32 = 2;
+const run_queue_checksum_seed: u64 = 0xCBF2_9CE4_8422_2325;
 
 const DescriptorTablePointer = extern struct {
     limit: u16,
@@ -42,6 +45,15 @@ const IdtEntry = extern struct {
     reserved: u32,
 };
 
+const RunQueueEntry = struct {
+    sequence: u32,
+    command: u32,
+    input: u64,
+    result: u64,
+    completed: u32,
+    reserved: u32,
+};
+
 pub const State = struct {
     magic: u64,
     index: u32,
@@ -63,6 +75,12 @@ pub const State = struct {
     mailbox_reserved: u32,
     work_input: u64,
     work_result: u64,
+    run_queue: [run_queue_capacity]RunQueueEntry,
+    run_queue_head: u32,
+    run_queue_tail: u32,
+    run_queue_completed: u32,
+    run_queue_last_sequence: u32,
+    run_queue_checksum: u64,
 };
 
 pub const Report = struct {
@@ -77,6 +95,11 @@ pub const Report = struct {
     completion_epoch: u32,
     work_input: u64,
     work_result: u64,
+    run_queue_head: u32,
+    run_queue_tail: u32,
+    run_queue_completed: u32,
+    run_queue_last_sequence: u32,
+    run_queue_checksum: u64,
 };
 
 extern fn zigos_load_gdt(
@@ -124,6 +147,12 @@ pub fn prepare(
     state.mailbox_reserved = 0;
     state.work_input = 0;
     state.work_result = 0;
+    for (&state.run_queue) |*entry| entry.* = std.mem.zeroes(RunQueueEntry);
+    state.run_queue_head = 0;
+    state.run_queue_tail = 0;
+    state.run_queue_completed = 0;
+    state.run_queue_last_sequence = 0;
+    state.run_queue_checksum = run_queue_checksum_seed;
     zigos_memory_fence();
     return state;
 }
@@ -199,6 +228,11 @@ pub fn report(state: *const State) Report {
         .completion_epoch = readVolatileU32(&state.completion_epoch),
         .work_input = readVolatileU64(&state.work_input),
         .work_result = readVolatileU64(&state.work_result),
+        .run_queue_head = readVolatileU32(&state.run_queue_head),
+        .run_queue_tail = readVolatileU32(&state.run_queue_tail),
+        .run_queue_completed = readVolatileU32(&state.run_queue_completed),
+        .run_queue_last_sequence = readVolatileU32(&state.run_queue_last_sequence),
+        .run_queue_checksum = readVolatileU64(&state.run_queue_checksum),
     };
 }
 
@@ -221,9 +255,69 @@ pub fn expectedWorkResult(apic_id: u32, input: u64) u64 {
     return calculateMailboxWork(apic_id, input);
 }
 
+pub fn enqueueRunQueue(state: *State, sequence: u32, input: u64) bool {
+    if (sequence == 0 or state.descriptor_ready != 1) return false;
+    const head = readVolatileU32(&state.run_queue_head);
+    const tail = readVolatileU32(&state.run_queue_tail);
+    if (head -% tail >= @as(u32, @intCast(run_queue_capacity))) return false;
+
+    const entry = &state.run_queue[queueIndex(head)];
+    writeVolatileU32(&entry.completed, 0);
+    writeVolatileU64(&entry.result, 0);
+    entry.sequence = sequence;
+    entry.command = run_queue_command;
+    entry.input = input;
+    entry.reserved = 0;
+    zigos_memory_fence();
+    writeVolatileU32(&state.run_queue_head, head +% 1);
+    zigos_memory_fence();
+    return true;
+}
+
+pub fn runQueueCompleted(state: *State, expected_jobs: u32) bool {
+    zigos_memory_fence();
+    return readVolatileU32(&state.run_queue_completed) == expected_jobs;
+}
+
+pub fn expectedRunQueueResult(apic_id: u32, sequence: u32, input: u64) u64 {
+    return calculateRunQueueWork(apic_id, sequence, input);
+}
+
+pub fn verifyRunQueue(state: *State, apic_id: u32, expected_jobs: u32) ?u64 {
+    if (expected_jobs == 0 or expected_jobs > run_queue_capacity) return null;
+    zigos_memory_fence();
+    if (readVolatileU32(&state.run_queue_head) != expected_jobs or
+        readVolatileU32(&state.run_queue_tail) != expected_jobs or
+        readVolatileU32(&state.run_queue_completed) != expected_jobs or
+        readVolatileU32(&state.run_queue_last_sequence) != expected_jobs)
+    {
+        return null;
+    }
+
+    var checksum = run_queue_checksum_seed;
+    var index: u32 = 0;
+    while (index < expected_jobs) : (index += 1) {
+        const entry = &state.run_queue[queueIndex(index)];
+        const sequence = index + 1;
+        if (readVolatileU32(&entry.completed) != 1 or
+            entry.sequence != sequence or
+            entry.command != run_queue_command)
+        {
+            return null;
+        }
+        const expected = calculateRunQueueWork(apic_id, sequence, entry.input);
+        const result = readVolatileU64(&entry.result);
+        if (result != expected) return null;
+        checksum = accumulateRunQueueChecksum(checksum, sequence, result);
+    }
+    if (readVolatileU64(&state.run_queue_checksum) != checksum) return null;
+    return checksum;
+}
+
 pub fn runMailbox(state: *State) noreturn {
     var observed_epoch: u32 = 0;
     while (true) {
+        if (runQueueStep(state)) continue;
         const epoch = readVolatileU32(&state.mailbox_epoch);
         if (epoch == 0 or epoch == observed_epoch) {
             zigos_cpu_relax();
@@ -242,6 +336,59 @@ pub fn runMailbox(state: *State) noreturn {
     }
 }
 
+fn runQueueStep(state: *State) bool {
+    const tail = readVolatileU32(&state.run_queue_tail);
+    const head = readVolatileU32(&state.run_queue_head);
+    if (tail == head) return false;
+
+    const entry = &state.run_queue[queueIndex(tail)];
+    const sequence = entry.sequence;
+    if (sequence == 0 or entry.command != run_queue_command) return false;
+    const result = calculateRunQueueWork(state.expected_apic_id, sequence, entry.input);
+    writeVolatileU64(&entry.result, result);
+    const checksum = accumulateRunQueueChecksum(
+        readVolatileU64(&state.run_queue_checksum),
+        sequence,
+        result,
+    );
+    writeVolatileU64(&state.run_queue_checksum, checksum);
+    writeVolatileU32(&state.run_queue_last_sequence, sequence);
+    writeVolatileU32(&entry.completed, 1);
+    writeVolatileU32(
+        &state.run_queue_completed,
+        readVolatileU32(&state.run_queue_completed) +% 1,
+    );
+    zigos_memory_fence();
+    writeVolatileU32(&state.run_queue_tail, tail +% 1);
+    zigos_memory_fence();
+    return true;
+}
+
+fn calculateRunQueueWork(apic_id: u32, sequence: u32, input: u64) u64 {
+    var value = input ^
+        (@as(u64, apic_id) *% 0xD6E8_FEB8_6659_FD93) ^
+        (@as(u64, sequence) *% 0x9E37_79B9_7F4A_7C15);
+    var iteration: u64 = 0;
+    while (iteration < 250_000) : (iteration += 1) {
+        value +%= iteration ^ 0xA076_1D64_78BD_642F;
+        value = std.math.rotl(u64, value, 19);
+        value *%= 0xE703_7ED1_A0B4_28DB;
+        value ^= value >> 29;
+    }
+    return value;
+}
+
+fn accumulateRunQueueChecksum(current: u64, sequence: u32, result: u64) u64 {
+    var value = current ^ result ^ (@as(u64, sequence) *% 0x1000_0000_01B3);
+    value = std.math.rotl(u64, value, 11);
+    value *%= 0x9E37_79B1_85EB_CA87;
+    return value;
+}
+
+fn queueIndex(counter: u32) usize {
+    return @intCast(counter % @as(u32, @intCast(run_queue_capacity)));
+}
+
 fn calculateMailboxWork(apic_id: u32, input: u64) u64 {
     var value = input ^ (@as(u64, apic_id) *% 0x9E37_79B9_7F4A_7C15);
     var iteration: u64 = 0;
@@ -254,7 +401,7 @@ fn calculateMailboxWork(apic_id: u32, input: u64) u64 {
 }
 
 fn readVolatileU32(value: *const u32) u32 {
-    const pointer: *volatile const u32 = @ptrCast(value);
+    const pointer: *const volatile u32 = @ptrCast(value);
     return pointer.*;
 }
 
@@ -264,7 +411,7 @@ fn writeVolatileU32(value: *u32, data: u32) void {
 }
 
 fn readVolatileU64(value: *const u64) u64 {
-    const pointer: *volatile const u64 = @ptrCast(value);
+    const pointer: *const volatile u64 = @ptrCast(value);
     return pointer.*;
 }
 

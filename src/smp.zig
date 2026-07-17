@@ -51,6 +51,10 @@ pub const ApReport = struct {
     completion_epoch: u32,
     work_input: u64,
     work_result: u64,
+    run_queue_jobs: u32,
+    run_queue_completed: u32,
+    run_queue_last_sequence: u32,
+    run_queue_checksum: u64,
     online: bool,
     state: u32,
     per_cpu_state: u64,
@@ -195,6 +199,10 @@ pub fn start(
             .completion_epoch = 0,
             .work_input = 0,
             .work_result = 0,
+            .run_queue_jobs = 0,
+            .run_queue_completed = 0,
+            .run_queue_last_sequence = 0,
+            .run_queue_checksum = 0,
             .online = online,
             .state = state,
             .per_cpu_state = @intFromPtr(per_cpu_state),
@@ -205,6 +213,7 @@ pub fn start(
 
     if (report.target_count + 1 != madt.processor_count) return null;
     if (!runMailboxRound(&report, reference)) return null;
+    if (!runQueueRound(&report, reference)) return null;
     return report;
 }
 
@@ -263,6 +272,51 @@ fn runMailboxRound(report: *Report, reference: hpet.Device) bool {
         distinct_result = state_report.work_result;
         processor.completion_epoch = state_report.completion_epoch;
         processor.work_result = state_report.work_result;
+    }
+    return true;
+}
+
+fn runQueueRound(report: *Report, reference: hpet.Device) bool {
+    const jobs_per_ap: u32 = 4;
+    const base_input: u64 = 0x5155_4555_455F_4A4F;
+
+    for (report.processors[0..report.target_count]) |*processor| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        var sequence: u32 = 1;
+        while (sequence <= jobs_per_ap) : (sequence += 1) {
+            const input = base_input ^
+                (@as(u64, processor.actual_apic_id) << 40) ^
+                (@as(u64, sequence) *% 0x0101_0101_0101_0101);
+            if (!percpu.enqueueRunQueue(state, sequence, input)) return false;
+        }
+        processor.run_queue_jobs = jobs_per_ap;
+    }
+
+    var iteration: usize = 0;
+    while (iteration < startup_timeout_iterations) : (iteration += 1) {
+        var completed: usize = 0;
+        for (report.processors[0..report.target_count]) |processor| {
+            const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+            if (percpu.runQueueCompleted(state, jobs_per_ap)) completed += 1;
+        }
+        if (completed == report.target_count) break;
+        if (!reference.waitNanoseconds(startup_poll_nanoseconds)) return false;
+    }
+
+    var prior_checksum: u64 = 0;
+    for (report.processors[0..report.target_count], 0..) |*processor, index| {
+        const state: *percpu.State = @ptrFromInt(processor.per_cpu_state);
+        const checksum = percpu.verifyRunQueue(
+            state,
+            processor.actual_apic_id,
+            jobs_per_ap,
+        ) orelse return false;
+        if (index != 0 and checksum == prior_checksum) return false;
+        prior_checksum = checksum;
+        const state_report = percpu.report(state);
+        processor.run_queue_completed = state_report.run_queue_completed;
+        processor.run_queue_last_sequence = state_report.run_queue_last_sequence;
+        processor.run_queue_checksum = checksum;
     }
     return true;
 }

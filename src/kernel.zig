@@ -539,6 +539,17 @@ fn startApplicationProcessors(
         debugWrite(", result 0x");
         debugWriteHex64(processor.work_result);
         debugWrite("\r\n");
+        debugWrite("AP run queue complete: APIC ");
+        debugWriteU64Decimal(processor.actual_apic_id);
+        debugWrite(", queued ");
+        debugWriteU64Decimal(processor.run_queue_jobs);
+        debugWrite(", completed ");
+        debugWriteU64Decimal(processor.run_queue_completed);
+        debugWrite(", last sequence ");
+        debugWriteU64Decimal(processor.run_queue_last_sequence);
+        debugWrite(", checksum 0x");
+        debugWriteHex64(processor.run_queue_checksum);
+        debugWrite("\r\n");
     }
 
     if (report.online_count != report.target_count) {
