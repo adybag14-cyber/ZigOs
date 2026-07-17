@@ -8,6 +8,7 @@ const stack_trace = @import("stack_trace.zig");
 const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
 const ioapic = @import("ioapic.zig");
+const keyboard_input = @import("input.zig");
 const pit = @import("pit.zig");
 const ps2 = @import("ps2.zig");
 const pci = @import("pci.zig");
@@ -1403,8 +1404,11 @@ fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWrite("; waiting for QEMU key injection\r\n");
 
     const keyboard_report = xhci.waitHidKeyboardInput(controller, &ownership, input_arm) orelse
-        xhciFailure("HID interrupt-IN transfer did not return the injected A-key report");
-    debugWrite("HID keyboard report received: completion ");
+        xhciFailure("HID interrupt-IN transfer did not return the injected key-press report");
+    if (keyboard_report.first_key != 0x04) {
+        xhciFailure("first HID report was not the injected A-key press");
+    }
+    debugWrite("HID keyboard press report received: completion ");
     debugWriteU64Decimal(keyboard_report.completion_code);
     debugWrite(", residual ");
     debugWriteU64Decimal(keyboard_report.transfer_residual);
@@ -1418,15 +1422,90 @@ fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
         debugWriteHex8(key);
     }
     debugWrite("\r\n");
+
+    var event_queue = keyboard_input.Queue.init();
+    var previous_keys = std.mem.zeroes([6]u8);
+    var previous_modifiers: u8 = 0;
+    if (event_queue.applyHidReport(
+        &previous_keys,
+        &previous_modifiers,
+        keyboard_report.modifier,
+        keyboard_report.keys,
+    ) != 1) {
+        xhciFailure("A-key press did not produce exactly one input event");
+    }
+
+    const release_arm = xhci.armNextHidKeyboardInput(
+        controller,
+        &mutable_hid_endpoint,
+        allocator,
+    ) orelse xhciFailure("second HID interrupt-IN transfer could not be armed");
+    debugWrite("HID release transfer armed: slot ");
+    debugWriteU64Decimal(release_arm.slot_id);
+    debugWrite(", endpoint ");
+    debugWriteU64Decimal(release_arm.endpoint_id);
+    debugWrite(", length ");
+    debugWriteU64Decimal(release_arm.requested_length);
+    debugWrite(", TRB 0x");
+    debugWriteHex64(@intCast(release_arm.expected_event_trb_pointer));
+    debugWrite(", buffer 0x");
+    debugWriteHex64(@intCast(release_arm.buffer_address));
+    debugWrite("; waiting for key release\r\n");
+
+    const release_report = xhci.waitHidKeyboardInput(controller, &ownership, release_arm) orelse
+        xhciFailure("HID interrupt-IN transfer did not return the key-release report");
+    if (release_report.first_key != 0) {
+        xhciFailure("second HID report was not an all-keys-released report");
+    }
+    for (release_report.keys) |key| {
+        if (key != 0) xhciFailure("release report retained a pressed key usage");
+    }
+    debugWrite("HID keyboard release report received: completion ");
+    debugWriteU64Decimal(release_report.completion_code);
+    debugWrite(", residual ");
+    debugWriteU64Decimal(release_report.transfer_residual);
+    debugWrite(", length ");
+    debugWriteU64Decimal(release_report.report_length);
+    debugWrite(", modifier 0x");
+    debugWriteHex8(release_report.modifier);
+    debugWrite(", keys");
+    for (release_report.keys) |key| {
+        debugWrite(" 0x");
+        debugWriteHex8(key);
+    }
+    debugWrite("\r\n");
+
+    if (event_queue.applyHidReport(
+        &previous_keys,
+        &previous_modifiers,
+        release_report.modifier,
+        release_report.keys,
+    ) != 1 or event_queue.count() != 2 or event_queue.dropped != 0) {
+        xhciFailure("press/release reports did not produce two ordered input events");
+    }
+    const press_event = event_queue.pop() orelse xhciFailure("keyboard press event was missing");
+    const release_event = event_queue.pop() orelse xhciFailure("keyboard release event was missing");
+    if (press_event.sequence != 1 or press_event.source != .usb_hid or
+        press_event.action != .pressed or press_event.usage != 0x04 or press_event.ascii != 'a' or
+        release_event.sequence != 2 or release_event.source != .usb_hid or
+        release_event.action != .released or release_event.usage != 0x04 or release_event.ascii != 'a' or
+        event_queue.pop() != null)
+    {
+        xhciFailure("device-independent keyboard event ordering or translation failed");
+    }
+
     debugWrite("USB keyboard input verified: HID usage 0x");
-    debugWriteHex8(keyboard_report.first_key);
+    debugWriteHex8(press_event.usage);
     debugWrite(" (A), slot ");
     debugWriteU64Decimal(keyboard_report.slot_id);
     debugWrite(", endpoint ");
     debugWriteU64Decimal(keyboard_report.endpoint_id);
-    debugWrite(", event TRB 0x");
+    debugWrite(", press TRB 0x");
     debugWriteHex64(keyboard_report.event_trb_pointer);
+    debugWrite(", release TRB 0x");
+    debugWriteHex64(release_report.event_trb_pointer);
     debugWrite("\r\n");
+    debugWrite("Keyboard event queue verified: #1 USB usage 0x04 pressed -> 'a'; #2 USB usage 0x04 released -> 'a'; dropped 0\r\n");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {

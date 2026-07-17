@@ -94,3 +94,10 @@
 - [x] Tick-gated per-AP run-queue dispatch with one job per quantum
 - [x] Independent cooperative task stacks and ABI-complete context switching on every AP
 - [x] Fair ticket spinlock and reusable four-core barrier synchronization
+
+## 0.7 - Input subsystem
+
+- [x] Reusable xHCI interrupt-IN report rearming
+- [x] HID key press and release transition detection
+- [x] Device-independent ordered keyboard event queue
+- [x] HID usage-to-ASCII translation proof

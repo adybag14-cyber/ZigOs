@@ -102,7 +102,7 @@ try {
                     $writer.NewLine = "`n"
                     $writer.AutoFlush = $true
                     Start-Sleep -Milliseconds 50
-                    $writer.WriteLine('sendkey a 200')
+                    $writer.WriteLine('sendkey a 500')
                     $keyInjected = $true
                     $writer.Dispose()
                 }
@@ -359,11 +359,20 @@ if (-not [regex]::IsMatch($output, 'HID boot protocol ready: SET_PROTOCOL comple
 if (-not [regex]::IsMatch($output, 'HID input transfer armed: slot [1-9][0-9]*, endpoint 3, length 8, TRB 0x[0-9A-F]{16}, buffer 0x[0-9A-F]{16}; waiting for QEMU key injection')) {
     throw 'The xHCI interrupt-IN keyboard transfer was not armed.'
 }
-if (-not [regex]::IsMatch($output, 'HID keyboard report received: completion (1|13), residual 0, length 8, modifier 0x00, keys 0x04 0x00 0x00 0x00 0x00 0x00')) {
+if (-not [regex]::IsMatch($output, 'HID keyboard press report received: completion (1|13), residual 0, length 8, modifier 0x00, keys 0x04 0x00 0x00 0x00 0x00 0x00')) {
     throw 'The expected eight-byte A-key HID boot report was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'USB keyboard input verified: HID usage 0x04 \(A\), slot [1-9][0-9]*, endpoint 3, event TRB 0x[0-9A-F]{16}')) {
+if (-not [regex]::IsMatch($output, 'HID release transfer armed: slot [1-9][0-9]*, endpoint 3, length 8, TRB 0x[0-9A-F]{16}, buffer 0x[0-9A-F]{16}; waiting for key release')) {
+    throw 'The reusable second HID interrupt-IN transfer was not armed.'
+}
+if (-not [regex]::IsMatch($output, 'HID keyboard release report received: completion (1|13), residual 0, length 8, modifier 0x00, keys 0x00 0x00 0x00 0x00 0x00 0x00')) {
+    throw 'The expected all-keys-released HID boot report was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'USB keyboard input verified: HID usage 0x04 \(A\), slot [1-9][0-9]*, endpoint 3, press TRB 0x[0-9A-F]{16}, release TRB 0x[0-9A-F]{16}')) {
     throw 'The final USB keyboard usage verification marker was not observed.'
+}
+if (-not $output.Contains("Keyboard event queue verified: #1 USB usage 0x04 pressed -> 'a'; #2 USB usage 0x04 released -> 'a'; dropped 0")) {
+    throw 'The ordered device-independent keyboard event queue marker was not observed.'
 }
 if (-not $output.Contains('AHCI controller active at')) {
     throw 'The AHCI PCI/BAR discovery marker was not observed.'

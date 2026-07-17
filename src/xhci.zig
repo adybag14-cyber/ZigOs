@@ -1232,6 +1232,48 @@ pub fn armHidKeyboardInput(
     };
 }
 
+pub fn armNextHidKeyboardInput(
+    controller: Controller,
+    endpoint: *HidEndpoint,
+    allocator: *memory.FrameAllocator,
+) ?HidInputArm {
+    if (endpoint.transfer_producer_index >= trbs_per_page - 1 or
+        endpoint.max_packet_size == 0 or endpoint.max_packet_size > page_bytes)
+    {
+        return null;
+    }
+    const buffer_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    clearPage(buffer_address);
+    const ring = trbPage(endpoint.transfer_ring_address);
+    const producer_index: usize = endpoint.transfer_producer_index;
+    const normal = &ring[producer_index];
+    normal.parameter = buffer_address;
+    normal.status = endpoint.max_packet_size;
+    normal.control = (trb_type_normal << trb_type_shift) |
+        trb_interrupt_on_short_packet |
+        trb_interrupt_on_completion |
+        endpoint.transfer_cycle;
+    zigos_memory_fence();
+
+    const doorbell_base = controller.base_address + controller.doorbell_offset;
+    write32(
+        doorbell_base,
+        @as(usize, endpoint.slot_id) * @sizeOf(u32),
+        endpoint.endpoint_id,
+    );
+    endpoint.transfer_producer_index += 1;
+    return .{
+        .buffer_address = buffer_address,
+        .expected_event_trb_pointer = endpoint.transfer_ring_address +
+            producer_index * @sizeOf(Trb),
+        .protocol_completion = 0,
+        .idle_completion = 0,
+        .endpoint_id = endpoint.endpoint_id,
+        .slot_id = endpoint.slot_id,
+        .requested_length = endpoint.max_packet_size,
+    };
+}
+
 pub fn waitHidKeyboardInput(
     controller: Controller,
     ownership: *Ownership,
@@ -1257,7 +1299,6 @@ pub fn waitHidKeyboardInput(
             break;
         }
     }
-    if (first_key != usb_hid_usage_a) return null;
     return .{
         .buffer_address = arm.buffer_address,
         .completion_code = completion.completion_code,
