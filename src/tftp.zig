@@ -11,10 +11,10 @@ pub const server_port: u16 = 69;
 pub const client_port: u16 = 40_000;
 pub const file_name = "zigos.bin";
 pub const mode = "octet";
-pub const expected_file_bytes: usize = 1280;
-pub const expected_block_count: u16 = 3;
+pub const expected_file_bytes: usize = 2304;
+pub const expected_block_count: u16 = 5;
 pub const initial_fnv1a64: u64 = 0xCBF2_9CE4_8422_2325;
-pub const expected_payload_fnv1a64: u64 = 0x3CE1_8B39_91BE_5925;
+pub const expected_payload_fnv1a64: u64 = 0x6175_986C_BBAB_5125;
 
 pub const Data = struct {
     block: u16,
@@ -83,8 +83,8 @@ fn readNetwork16(bytes: []const u8, offset: usize) u16 {
 }
 
 comptime {
-    if (expected_file_bytes != 1280) @compileError("TFTP fixture length changed unexpectedly");
-    if (expected_block_count != 3) @compileError("TFTP block count changed unexpectedly");
+    if (expected_file_bytes != 2304) @compileError("TFTP fixture length changed unexpectedly");
+    if (expected_block_count != 5) @compileError("TFTP block count changed unexpectedly");
     if (file_name.len != 9) @compileError("TFTP fixture filename changed unexpectedly");
     if (mode.len != 5) @compileError("TFTP transfer mode changed unexpectedly");
 }

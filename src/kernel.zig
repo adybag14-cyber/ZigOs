@@ -1667,10 +1667,22 @@ fn inspectE1000e(
     debugWriteU64Decimal(network.tftp_server_port);
     debugWrite(", TX interrupts ");
     debugWriteU64Decimal(network.tftp_ack_tx_interrupt_count);
+    debugWrite(", wraps ");
+    debugWriteU64Decimal(network.tftp_tx_wrap_count);
     debugWrite(", tail ");
     debugWriteU64Decimal(network.tftp_tx_tail_after_ack);
     debugWrite(", cause 0x");
     debugWriteHex64(network.tftp_ack_tx_interrupt_cause);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e RX ring recycled: descriptors ");
+    debugWriteU64Decimal(network.rx_recycled_descriptors);
+    debugWrite(", wraps ");
+    debugWriteU64Decimal(network.rx_descriptor_wrap_count);
+    debugWrite(", head ");
+    debugWriteU64Decimal(network.rx_head_after_stream);
+    debugWrite(", tail ");
+    debugWriteU64Decimal(network.rx_tail_after_stream);
     debugWrite("\r\n");
     return true;
 }

@@ -202,6 +202,11 @@ pub const NetworkResult = struct {
     tftp_udp_checksum_present: bool,
     tftp_final_block: bool,
     tftp_tx_tail_after_ack: u16,
+    tftp_tx_wrap_count: u16,
+    rx_recycled_descriptors: u16,
+    rx_descriptor_wrap_count: u16,
+    rx_head_after_stream: u16,
+    rx_tail_after_stream: u16,
     tftp_rrq_tx_interrupt_count: u64,
     tftp_data_rx_interrupt_count: u64,
     tftp_ack_tx_interrupt_count: u64,
@@ -350,6 +355,9 @@ pub fn initializeAndTestNetwork(
     _ = read32(controller.bar0, status_offset);
 
     const tx_buffer = @as([*]u8, @ptrFromInt(tx_buffer_address))[0..memory.page_size];
+    var rx_recycled_descriptors: u16 = 0;
+    var rx_descriptor_wrap_count: u16 = 0;
+    var previous_recycled_rx_descriptor: ?usize = null;
 
     @memset(tx_buffer, 0);
     const discover_length = dhcp.buildDiscover(tx_buffer, controller.mac_address) orelse return null;
@@ -369,6 +377,14 @@ pub fn initializeAndTestNetwork(
     const offer_rx_interrupt_count = rxInterruptCount() - offer_rx_baseline;
     const discover_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
     const offer_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
+    if (!recycleRxDescriptor(
+        controller.bar0,
+        rx_descriptors,
+        0,
+        &rx_recycled_descriptors,
+        &rx_descriptor_wrap_count,
+        &previous_recycled_rx_descriptor,
+    )) return null;
 
     @memset(tx_buffer, 0);
     const request_length = dhcp.buildRequest(tx_buffer, controller.mac_address, offer.lease) orelse return null;
@@ -388,6 +404,14 @@ pub fn initializeAndTestNetwork(
     const ack_rx_interrupt_count = rxInterruptCount() - ack_rx_baseline;
     const request_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
     const ack_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
+    if (!recycleRxDescriptor(
+        controller.bar0,
+        rx_descriptors,
+        1,
+        &rx_recycled_descriptors,
+        &rx_descriptor_wrap_count,
+        &previous_recycled_rx_descriptor,
+    )) return null;
 
     @memset(tx_buffer, 0);
     buildArpRequest(
@@ -418,6 +442,14 @@ pub fn initializeAndTestNetwork(
     const arp_rx_interrupt_count = rxInterruptCount() - arp_rx_baseline;
     const arp_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
     const arp_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
+    if (!recycleRxDescriptor(
+        controller.bar0,
+        rx_descriptors,
+        2,
+        &rx_recycled_descriptors,
+        &rx_descriptor_wrap_count,
+        &previous_recycled_rx_descriptor,
+    )) return null;
 
     @memset(tx_buffer, 0);
     buildIcmpEchoRequest(
@@ -450,6 +482,14 @@ pub fn initializeAndTestNetwork(
     const icmp_rx_interrupt_count = rxInterruptCount() - icmp_rx_baseline;
     const icmp_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
     const icmp_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
+    if (!recycleRxDescriptor(
+        controller.bar0,
+        rx_descriptors,
+        3,
+        &rx_recycled_descriptors,
+        &rx_descriptor_wrap_count,
+        &previous_recycled_rx_descriptor,
+    )) return null;
 
     var tftp_payload_buffer: [128]u8 = undefined;
     const read_request = tftp.buildReadRequest(&tftp_payload_buffer) orelse return null;
@@ -486,10 +526,11 @@ pub fn initializeAndTestNetwork(
     var tftp_ack_tx_interrupt_count: u64 = 0;
     var tftp_data_rx_interrupt_cause: u32 = 0;
     var tftp_ack_tx_interrupt_cause: u32 = 0;
+    var tftp_tx_wrap_count: u16 = 0;
 
     while (tftp_block_count < tftp.expected_block_count) {
         const sequence_index: usize = tftp_block_count;
-        const rx_descriptor_index = 4 + sequence_index;
+        const rx_descriptor_index = (4 + sequence_index) % ring_descriptor_count;
         if (!waitForRx(
             rx_descriptors,
             rx_descriptor_index,
@@ -536,6 +577,14 @@ pub fn initializeAndTestNetwork(
         if (data_interrupt_observed == next_data_rx_baseline) return null;
         tftp_data_rx_interrupt_count += data_interrupt_observed - next_data_rx_baseline;
         tftp_data_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
+        if (!recycleRxDescriptor(
+            controller.bar0,
+            rx_descriptors,
+            rx_descriptor_index,
+            &rx_recycled_descriptors,
+            &rx_descriptor_wrap_count,
+            &previous_recycled_rx_descriptor,
+        )) return null;
 
         if (tftp_final_block != (tftp_block_count == tftp.expected_block_count)) return null;
         const next_block_rx_baseline = if (!tftp_final_block) rxInterruptCount() else 0;
@@ -554,7 +603,7 @@ pub fn initializeAndTestNetwork(
             .payload = acknowledgement,
         }) orelse return null;
         tftp_ack_lengths[sequence_index] = acknowledgement_length;
-        const tx_descriptor_index = 5 + sequence_index;
+        const tx_descriptor_index = (5 + sequence_index) % ring_descriptor_count;
         tx_descriptors[tx_descriptor_index] = makeTxDescriptor(
             tx_buffer_address,
             acknowledgement_length,
@@ -562,6 +611,7 @@ pub fn initializeAndTestNetwork(
         zigos_memory_fence();
         const acknowledgement_tx_baseline = txInterruptCount();
         const next_tx_tail: u16 = @intCast((tx_descriptor_index + 1) % ring_descriptor_count);
+        if (next_tx_tail == 0) tftp_tx_wrap_count +|= 1;
         write32(controller.bar0, tdt_offset, next_tx_tail);
         _ = read32(controller.bar0, status_offset);
         if (!waitForTx(
@@ -577,16 +627,23 @@ pub fn initializeAndTestNetwork(
         if (!tftp_final_block) next_data_rx_baseline = next_block_rx_baseline;
     }
 
+    const tftp_tx_tail_after_ack: u16 = @truncate(read32(controller.bar0, tdt_offset));
+    const rx_head_after_stream: u16 = @truncate(read32(controller.bar0, rdh_offset));
+    const rx_tail_after_stream: u16 = @truncate(read32(controller.bar0, rdt_offset));
     if (!tftp_final_block or
         tftp_block_count != tftp.expected_block_count or
         tftp_payload_length != tftp.expected_file_bytes or
         tftp_payload_fnv1a64 != tftp.expected_payload_fnv1a64 or
         tftp_server_port == 0 or
-        read32(controller.bar0, tdt_offset) != 0)
+        tftp_tx_tail_after_ack != 2 or
+        tftp_tx_wrap_count != 1 or
+        rx_recycled_descriptors != 4 + tftp.expected_block_count or
+        rx_descriptor_wrap_count != 1 or
+        rx_head_after_stream != 1 or
+        rx_tail_after_stream != 0)
     {
         return null;
     }
-    const tftp_tx_tail_after_ack: u16 = @truncate(read32(controller.bar0, tdt_offset));
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -658,6 +715,11 @@ pub fn initializeAndTestNetwork(
         .tftp_udp_checksum_present = tftp_udp_checksum_present,
         .tftp_final_block = tftp_final_block,
         .tftp_tx_tail_after_ack = tftp_tx_tail_after_ack,
+        .tftp_tx_wrap_count = tftp_tx_wrap_count,
+        .rx_recycled_descriptors = rx_recycled_descriptors,
+        .rx_descriptor_wrap_count = rx_descriptor_wrap_count,
+        .rx_head_after_stream = rx_head_after_stream,
+        .rx_tail_after_stream = rx_tail_after_stream,
         .tftp_rrq_tx_interrupt_count = tftp_rrq_tx_interrupt_count,
         .tftp_data_rx_interrupt_count = tftp_data_rx_interrupt_count,
         .tftp_ack_tx_interrupt_count = tftp_ack_tx_interrupt_count,
@@ -687,6 +749,37 @@ fn validateRxDescriptor(descriptors: [*]volatile RxDescriptor, descriptor_index:
         return null;
     }
     return descriptor.length;
+}
+
+fn recycleRxDescriptor(
+    bar0: usize,
+    descriptors: [*]volatile RxDescriptor,
+    descriptor_index: usize,
+    recycle_count: *u16,
+    wrap_count: *u16,
+    previous_descriptor_index: *?usize,
+) bool {
+    if (descriptor_index >= ring_descriptor_count) return false;
+    const buffer_address = descriptors[descriptor_index].buffer_address;
+    if (buffer_address == 0) return false;
+    descriptors[descriptor_index] = .{
+        .buffer_address = buffer_address,
+        .length = 0,
+        .checksum = 0,
+        .status = 0,
+        .errors = 0,
+        .special = 0,
+    };
+    zigos_memory_fence();
+    write32(bar0, rdt_offset, descriptor_index);
+    _ = read32(bar0, status_offset);
+    if (read32(bar0, rdt_offset) != descriptor_index) return false;
+    if (previous_descriptor_index.*) |previous| {
+        if (descriptor_index < previous) wrap_count.* +|= 1;
+    }
+    previous_descriptor_index.* = descriptor_index;
+    recycle_count.* +|= 1;
+    return true;
 }
 
 const MsixSetup = struct {

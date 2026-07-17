@@ -65,13 +65,13 @@ $tftpRoot = Join-Path $buildDir 'tftp-root'
 $tftpFile = Join-Path $tftpRoot 'zigos.bin'
 if ($Network) {
     New-Item -ItemType Directory -Force -Path $tftpRoot | Out-Null
-    $tftpBytes = [byte[]]::new(1280)
+    $tftpBytes = [byte[]]::new(2304)
     for ($index = 0; $index -lt $tftpBytes.Length; $index++) {
         $tftpBytes[$index] = [byte](($index * 37 + 11) -band 0xFF)
     }
     [System.IO.File]::WriteAllBytes($tftpFile, $tftpBytes)
     $tftpHash = (Get-FileHash -Path $tftpFile -Algorithm SHA256).Hash
-    if ($tftpBytes.Length -ne 1280 -or $tftpHash -ne '9E56C920BB08B3E00A4E0034224F877C21945DCB09ECCD6CEAF2D843E8CFDE39') {
+    if ($tftpBytes.Length -ne 2304 -or $tftpHash -ne '03652909284ACDFA888C1815EFC062536C671574EB7761413F6E2F2385F5F822') {
         throw "The deterministic multi-block TFTP fixture was invalid: $($tftpBytes.Length) bytes, SHA-256 $tftpHash."
     }
 }
@@ -646,11 +646,14 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e TFTP RRQ transmitted: zigos\.bin mode octet, 60 bytes, UDP 40000 -> 69, TX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
         throw 'The TFTP read request did not complete through the reusable UDP builder and TX MSI-X.'
     }
-    if (-not [regex]::IsMatch($output, 'e1000e TFTP stream received: blocks 3, payload 1280 bytes, FNV-1a64 0x3CE18B3991BE5925, frames 558/558/302, server port [1-9][0-9]*, TTL [1-9][0-9]*, UDP checksum (present|absent), final yes, RX interrupts [3-9][0-9]*, cause 0x[0-9A-F]{16}')) {
+    if (-not [regex]::IsMatch($output, 'e1000e TFTP stream received: blocks 5, payload 2304 bytes, FNV-1a64 0x6175986CBBAB5125, frames 558/558/558/558/302, server port [1-9][0-9]*, TTL [1-9][0-9]*, UDP checksum (present|absent), final yes, RX interrupts [5-9][0-9]*, cause 0x[0-9A-F]{16}')) {
         throw 'The three-block TFTP DATA stream or cumulative fixture hash was not validated.'
     }
-    if (-not [regex]::IsMatch($output, 'e1000e TFTP ACK stream transmitted: blocks 1-3, frames 60/60/60, UDP 40000 -> [1-9][0-9]*, TX interrupts [3-9][0-9]*, tail 0, cause 0x[0-9A-F]{16}')) {
-        throw 'The TFTP acknowledgement stream did not wrap the TX descriptor tail to zero.'
+    if (-not [regex]::IsMatch($output, 'e1000e TFTP ACK stream transmitted: blocks 1-5, frames 60/60/60/60/60, UDP 40000 -> [1-9][0-9]*, TX interrupts [5-9][0-9]*, wraps 1, tail 2, cause 0x[0-9A-F]{16}')) {
+        throw 'The TFTP acknowledgement stream did not wrap and reuse TX descriptors 0-1.'
+    }
+    if (-not $output.Contains('e1000e RX ring recycled: descriptors 9, wraps 1, head 1, tail 0')) {
+        throw 'The RX descriptor ring was not recycled through descriptor 7 and wrapped to descriptor 0.'
     }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {

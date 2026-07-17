@@ -361,3 +361,13 @@
 - RX descriptors 4-6 receive the three DATA frames, while TX descriptors 5-7 emit ACK blocks 1-3.
 - The final ACK advances the eight-entry TX tail from descriptor 7 back to index 0, proving hardware ring wrap and writeback across the boundary.
 - Fresh RXQ0/TXQ0 MSI-X progress is required for every DATA and ACK rather than only the first block.
+
+
+## 3.4 - RX descriptor recycling and wrap
+
+- The deterministic TFTP stream expands to 2,304 bytes across five DATA blocks (`512/512/512/512/256`) with cumulative FNV-1a64 `6175986CBBAB5125`.
+- Every DHCP, ARP, ICMP, and TFTP receive descriptor is cleared and returned to hardware through RDT only after its packet has been fully parsed and copied into stable state.
+- The nine received packets consume descriptors `0,1,2,3,4,5,6,7,0`; the final block therefore proves hardware receive-head wrap and reuse of descriptor 0.
+- End-of-stream register validation requires RDH `1`, RDT `0`, nine recycled descriptors, and one receive-index wrap.
+- TFTP ACKs use TX descriptors `5,6,7,0,1`, proving descriptor reuse after the transmit tail wraps once; final TDT is `2`.
+- Every recycled DATA descriptor and every reused ACK descriptor still requires fresh RXQ0/TXQ0 MSI-X progress before acceptance.
