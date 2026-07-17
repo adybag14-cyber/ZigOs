@@ -2130,6 +2130,219 @@ fn inspectNvme(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWrite(", root LBA ");
     debugWriteU64Decimal(volume.root_directory_lba);
     debugWrite("\r\n");
+    walkNvmeFatBootPath(&controller, allocator, volume);
+}
+
+fn walkNvmeFatBootPath(
+    controller: *nvme.Controller,
+    allocator: *memory.FrameAllocator,
+    volume: fat.Volume,
+) void {
+    if (volume.bytes_per_sector != controller.logical_block_size) {
+        nvmeFailure("FAT sector size did not match the NVMe logical block size");
+    }
+    const efi_entry = findNvmeRootDirectoryEntry(controller, allocator, volume, "EFI") orelse
+        nvmeFailure("NVMe FAT root directory did not contain EFI");
+    if (!efi_entry.isDirectory() or efi_entry.first_cluster < 2) {
+        nvmeFailure("NVMe FAT EFI entry was not a valid directory");
+    }
+    const boot_entry = findNvmeClusterDirectoryEntry(
+        controller,
+        allocator,
+        volume,
+        efi_entry.first_cluster,
+        "BOOT",
+    ) orelse nvmeFailure("NVMe FAT EFI directory did not contain BOOT");
+    if (!boot_entry.isDirectory() or boot_entry.first_cluster < 2) {
+        nvmeFailure("NVMe FAT EFI/BOOT entry was not a valid directory");
+    }
+    const loader_entry = findNvmeClusterDirectoryEntry(
+        controller,
+        allocator,
+        volume,
+        boot_entry.first_cluster,
+        "BOOTX64.EFI",
+    ) orelse nvmeFailure("NVMe FAT EFI/BOOT did not contain BOOTX64.EFI");
+    if (loader_entry.isDirectory() or loader_entry.first_cluster < 2 or loader_entry.file_size == 0) {
+        nvmeFailure("NVMe FAT BOOTX64.EFI entry was invalid");
+    }
+
+    debugWrite("NVMe FAT path resolved: EFI cluster ");
+    debugWriteU64Decimal(efi_entry.first_cluster);
+    debugWrite(" -> BOOT cluster ");
+    debugWriteU64Decimal(boot_entry.first_cluster);
+    debugWrite(" -> BOOTX64.EFI cluster ");
+    debugWriteU64Decimal(loader_entry.first_cluster);
+    debugWrite("\r\nNVMe FAT boot file found: EFI/BOOT/BOOTX64.EFI, size ");
+    debugWriteU64Decimal(loader_entry.file_size);
+    debugWrite(" bytes\r\n");
+
+    const stream = streamNvmeFatFile(controller, allocator, volume, loader_entry);
+    const image = pe.parse(&stream.first_sector) orelse
+        nvmeFailure("NVMe FAT BOOTX64.EFI did not contain valid DOS/PE headers");
+    if (!image.amd64 or !image.pe32_plus or !image.efi_application or
+        image.size_of_headers > stream.byte_count or image.size_of_image == 0)
+    {
+        nvmeFailure("NVMe FAT BOOTX64.EFI was not a valid AMD64 EFI application");
+    }
+
+    debugWrite("NVMe FAT file streamed: ");
+    debugWriteU64Decimal(stream.byte_count);
+    debugWrite(" bytes across ");
+    debugWriteU64Decimal(stream.cluster_count);
+    debugWrite(" cluster(s), last cluster ");
+    debugWriteU64Decimal(stream.last_cluster);
+    debugWrite(", FNV-1a64 0x");
+    debugWriteHex64(stream.fnv1a64);
+    debugWrite("\r\nNVMe on-disk PE verified: AMD64 PE32+, EFI subsystem ");
+    debugWriteU64Decimal(image.subsystem);
+    debugWrite(", sections ");
+    debugWriteU64Decimal(image.section_count);
+    debugWrite(", entry RVA 0x");
+    debugWriteHex64(image.entry_point_rva);
+    debugWrite(", image size ");
+    debugWriteU64Decimal(image.size_of_image);
+    debugWrite("\r\n");
+}
+
+fn findNvmeRootDirectoryEntry(
+    controller: *nvme.Controller,
+    allocator: *memory.FrameAllocator,
+    volume: fat.Volume,
+    expected_name: []const u8,
+) ?fat.DirectoryEntry {
+    if (volume.kind == .fat32) {
+        return findNvmeClusterDirectoryEntry(
+            controller,
+            allocator,
+            volume,
+            volume.root_cluster,
+            expected_name,
+        );
+    }
+    var sector_index: u32 = 0;
+    while (sector_index < volume.root_directory_sectors) : (sector_index += 1) {
+        const sector = nvme.readOneBlock(
+            controller,
+            allocator,
+            volume.root_directory_lba + sector_index,
+        ) orelse nvmeFailure("NVMe FAT root-directory sector read failed");
+        const directory = fat.parseDirectorySector(nvme.readBuffer(sector)) orelse
+            nvmeFailure("NVMe FAT root-directory decoding failed");
+        if (findNamedEntry(directory, expected_name)) |entry| return entry;
+        if (directory.end_of_directory) return null;
+    }
+    return null;
+}
+
+fn findNvmeClusterDirectoryEntry(
+    controller: *nvme.Controller,
+    allocator: *memory.FrameAllocator,
+    volume: fat.Volume,
+    initial_cluster: u32,
+    expected_name: []const u8,
+) ?fat.DirectoryEntry {
+    var cluster = initial_cluster;
+    var traversed_clusters: usize = 0;
+    while (traversed_clusters < 4096) : (traversed_clusters += 1) {
+        const first_lba = fat.clusterFirstLba(volume, cluster) orelse
+            nvmeFailure("NVMe FAT directory cluster was outside the data range");
+        var sector_index: u8 = 0;
+        while (sector_index < volume.sectors_per_cluster) : (sector_index += 1) {
+            const sector = nvme.readOneBlock(
+                controller,
+                allocator,
+                first_lba + sector_index,
+            ) orelse nvmeFailure("NVMe FAT directory-cluster sector read failed");
+            const directory = fat.parseDirectorySector(nvme.readBuffer(sector)) orelse
+                nvmeFailure("NVMe FAT directory-cluster decoding failed");
+            if (findNamedEntry(directory, expected_name)) |entry| return entry;
+            if (directory.end_of_directory) return null;
+        }
+        switch (readNvmeFatClusterLink(controller, allocator, volume, cluster)) {
+            .next => |next_cluster| cluster = next_cluster,
+            .end => return null,
+            .free => nvmeFailure("NVMe FAT directory chain reached a free entry"),
+            .bad => nvmeFailure("NVMe FAT directory chain reached a bad entry"),
+        }
+    }
+    nvmeFailure("NVMe FAT directory chain exceeded the traversal limit");
+}
+
+fn streamNvmeFatFile(
+    controller: *nvme.Controller,
+    allocator: *memory.FrameAllocator,
+    volume: fat.Volume,
+    entry: fat.DirectoryEntry,
+) FatFileStream {
+    var result = FatFileStream{
+        .byte_count = 0,
+        .cluster_count = 0,
+        .last_cluster = 0,
+        .fnv1a64 = 0xCBF2_9CE4_8422_2325,
+        .first_sector = undefined,
+    };
+    var remaining: u64 = entry.file_size;
+    var cluster = entry.first_cluster;
+    var first_sector_copied = false;
+    while (remaining != 0 and result.cluster_count < 1_000_000) {
+        const first_lba = fat.clusterFirstLba(volume, cluster) orelse
+            nvmeFailure("NVMe FAT file cluster was outside the data range");
+        result.cluster_count += 1;
+        result.last_cluster = cluster;
+        var sector_index: u8 = 0;
+        while (sector_index < volume.sectors_per_cluster and remaining != 0) : (sector_index += 1) {
+            const sector = nvme.readOneBlock(
+                controller,
+                allocator,
+                first_lba + sector_index,
+            ) orelse nvmeFailure("NVMe FAT file sector read failed");
+            const bytes = nvme.readBuffer(sector);
+            const take: usize = @intCast(@min(remaining, @as(u64, bytes.len)));
+            if (!first_sector_copied) {
+                if (bytes.len < result.first_sector.len) {
+                    nvmeFailure("NVMe FAT first file sector was smaller than 512 bytes");
+                }
+                @memcpy(&result.first_sector, bytes[0..result.first_sector.len]);
+                first_sector_copied = true;
+            }
+            result.fnv1a64 = fnv1aUpdate(result.fnv1a64, bytes[0..take]);
+            result.byte_count += take;
+            remaining -= take;
+        }
+        const link = readNvmeFatClusterLink(controller, allocator, volume, cluster);
+        if (remaining == 0) {
+            switch (link) {
+                .end => {},
+                else => nvmeFailure("NVMe FAT file data ended before its cluster chain"),
+            }
+            break;
+        }
+        switch (link) {
+            .next => |next_cluster| cluster = next_cluster,
+            .end => nvmeFailure("NVMe FAT cluster chain ended before the declared file size"),
+            .free => nvmeFailure("NVMe FAT file chain reached a free entry"),
+            .bad => nvmeFailure("NVMe FAT file chain reached a bad entry"),
+        }
+    }
+    if (remaining != 0 or result.byte_count != entry.file_size or !first_sector_copied) {
+        nvmeFailure("NVMe FAT file stream did not consume the declared size");
+    }
+    return result;
+}
+
+fn readNvmeFatClusterLink(
+    controller: *nvme.Controller,
+    allocator: *memory.FrameAllocator,
+    volume: fat.Volume,
+    cluster: u32,
+) fat.ClusterLink {
+    const location = fat.fatEntryLocation(volume, cluster) orelse
+        nvmeFailure("NVMe FAT cluster-entry location was invalid");
+    const sector = nvme.readOneBlock(controller, allocator, location.lba) orelse
+        nvmeFailure("NVMe FAT cluster-link sector read failed");
+    return fat.decodeClusterLink(volume, cluster, nvme.readBuffer(sector)) orelse
+        nvmeFailure("NVMe FAT cluster-link value was invalid");
 }
 
 fn nvmeFailureStageName(stage: nvme.FailureStage) []const u8 {

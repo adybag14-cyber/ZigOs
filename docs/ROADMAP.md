@@ -153,3 +153,15 @@
 - [x] EFI System Partition GUID and LBA-bound discovery
 - [x] FAT12/16/32 BPB parsing from the NVMe EFI System Partition
 - [x] Deterministic primary and backup GPT test namespace generation
+
+
+## 1.2 - NVMe FAT file traversal
+
+- [x] FAT16 root-directory and subdirectory traversal over NVMe NVM Read
+- [x] EFI/BOOT/BOOTX64.EFI short-name resolution
+- [x] FAT16 cluster-chain validation and complete file streaming
+- [x] FNV-1a fingerprinting of the NVMe-resident EFI image
+- [x] Independent DOS/PE32+ AMD64 EFI-application validation from NVMe
+- [x] QEMU namespace populated with the current ZigOs BOOTX64.EFI
+- [x] OVMF fallback boot directly from the GPT/FAT NVMe namespace
+- [x] NVMe and AHCI streams cross-checked for identical EFI size and FNV-1a hash

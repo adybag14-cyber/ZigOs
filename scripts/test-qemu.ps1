@@ -78,6 +78,24 @@ function Set-Le32([byte[]]$Buffer, [int]$Offset, [UInt32]$Value) {
 function Set-Le64([byte[]]$Buffer, [int]$Offset, [UInt64]$Value) {
     [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Buffer, $Offset, 8)
 }
+function Set-Fat16Entry([byte[]]$Fat, [UInt16]$Cluster, [UInt16]$Value) {
+    Set-Le16 $Fat ([int]$Cluster * 2) $Value
+}
+function Set-FatDirectoryEntry(
+    [byte[]]$Buffer,
+    [int]$Offset,
+    [string]$ShortName,
+    [byte]$Attributes,
+    [UInt16]$FirstCluster,
+    [UInt32]$FileSize
+) {
+    if ($ShortName.Length -ne 11) { throw "FAT short names must contain exactly 11 characters." }
+    [Array]::Copy([Text.Encoding]::ASCII.GetBytes($ShortName), 0, $Buffer, $Offset, 11)
+    $Buffer[$Offset + 11] = $Attributes
+    Set-Le16 $Buffer ($Offset + 20) 0
+    Set-Le16 $Buffer ($Offset + 26) $FirstCluster
+    Set-Le32 $Buffer ($Offset + 28) $FileSize
+}
 function New-GptHeader(
     [UInt64]$CurrentLba,
     [UInt64]$BackupLba,
@@ -165,6 +183,33 @@ Set-Le32 $fatBootSector 39 0x5A49474F
 $fatBootSector[510] = 0x55
 $fatBootSector[511] = 0xAA
 
+[byte[]]$nvmeEfiBytes = [IO.File]::ReadAllBytes($efiImage)
+[UInt32]$nvmeFileClusterCount = [UInt32][Math]::Ceiling($nvmeEfiBytes.Length / 512.0)
+if ($nvmeFileClusterCount -eq 0 -or $nvmeFileClusterCount -gt 30000) {
+    throw 'The current BOOTX64.EFI did not fit the deterministic NVMe FAT16 volume.'
+}
+[UInt16]$nvmeFileFirstCluster = 4
+[UInt16]$nvmeFileLastCluster = [UInt16]($nvmeFileFirstCluster + $nvmeFileClusterCount - 1)
+[byte[]]$nvmeFat = [byte[]]::new(120 * 512)
+Set-Fat16Entry $nvmeFat 0 0xFFF8
+Set-Fat16Entry $nvmeFat 1 0xFFFF
+Set-Fat16Entry $nvmeFat 2 0xFFFF
+Set-Fat16Entry $nvmeFat 3 0xFFFF
+for ([UInt32]$cluster = $nvmeFileFirstCluster; $cluster -lt $nvmeFileLastCluster; $cluster++) {
+    Set-Fat16Entry $nvmeFat ([UInt16]$cluster) ([UInt16]($cluster + 1))
+}
+Set-Fat16Entry $nvmeFat $nvmeFileLastCluster 0xFFFF
+
+[byte[]]$nvmeRootDirectory = [byte[]]::new(32 * 512)
+Set-FatDirectoryEntry $nvmeRootDirectory 0 'EFI        ' 0x10 2 0
+$nvmeRootDirectory[32] = 0
+[byte[]]$nvmeEfiDirectory = [byte[]]::new(512)
+Set-FatDirectoryEntry $nvmeEfiDirectory 0 'BOOT       ' 0x10 3 0
+$nvmeEfiDirectory[32] = 0
+[byte[]]$nvmeBootDirectory = [byte[]]::new(512)
+Set-FatDirectoryEntry $nvmeBootDirectory 0 'BOOTX64 EFI' 0x20 $nvmeFileFirstCluster ([UInt32]$nvmeEfiBytes.Length)
+$nvmeBootDirectory[32] = 0
+
 $nvmeStream = [IO.File]::Open($nvmeImage, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
 try {
     $nvmeStream.SetLength(16MB)
@@ -180,6 +225,18 @@ try {
     $nvmeStream.Write($backupHeader, 0, $backupHeader.Length)
     $nvmeStream.Position = $partitionFirstLba * 512
     $nvmeStream.Write($fatBootSector, 0, $fatBootSector.Length)
+    $nvmeStream.Position = ($partitionFirstLba + 1) * 512
+    $nvmeStream.Write($nvmeFat, 0, $nvmeFat.Length)
+    $nvmeStream.Position = ($partitionFirstLba + 121) * 512
+    $nvmeStream.Write($nvmeFat, 0, $nvmeFat.Length)
+    $nvmeStream.Position = ($partitionFirstLba + 241) * 512
+    $nvmeStream.Write($nvmeRootDirectory, 0, $nvmeRootDirectory.Length)
+    $nvmeStream.Position = ($partitionFirstLba + 273) * 512
+    $nvmeStream.Write($nvmeEfiDirectory, 0, $nvmeEfiDirectory.Length)
+    $nvmeStream.Position = ($partitionFirstLba + 274) * 512
+    $nvmeStream.Write($nvmeBootDirectory, 0, $nvmeBootDirectory.Length)
+    $nvmeStream.Position = ($partitionFirstLba + 275) * 512
+    $nvmeStream.Write($nvmeEfiBytes, 0, $nvmeEfiBytes.Length)
     $nvmeStream.Flush()
 }
 finally {
@@ -629,6 +686,24 @@ if (-not $output.Contains('NVMe EFI System Partition: index 0, LBA 2048 + 30687 
 if (-not $output.Contains('NVMe FAT volume verified: FAT16, label "ZIGOSNVME", filesystem "FAT16", 30687 sectors, first FAT LBA 2049, root LBA 2289')) {
     throw 'The FAT16 volume inside the NVMe GPT partition was not observed.'
 }
+if (-not [regex]::IsMatch($output, 'NVMe FAT path resolved: EFI cluster 2 -> BOOT cluster 3 -> BOOTX64.EFI cluster 4')) {
+    throw 'The NVMe FAT EFI/BOOT directory traversal was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'NVMe FAT boot file found: EFI/BOOT/BOOTX64.EFI, size [1-9][0-9]* bytes')) {
+    throw 'The NVMe FAT BOOTX64.EFI directory entry was not observed.'
+}
+$nvmeFileMatch = [regex]::Match($output, 'NVMe FAT file streamed: ([1-9][0-9]*) bytes across ([1-9][0-9]*) cluster\(s\), last cluster ([1-9][0-9]*), FNV-1a64 0x([0-9A-F]{16})')
+if (-not $nvmeFileMatch.Success) {
+    throw 'The complete NVMe FAT file stream was not observed.'
+}
+$nvmePeMatch = [regex]::Match($output, 'NVMe on-disk PE verified: AMD64 PE32\+, EFI subsystem 10, sections ([1-9][0-9]*), entry RVA 0x([0-9A-F]{16}), image size ([1-9][0-9]*)')
+if (-not $nvmePeMatch.Success) {
+    throw 'The NVMe-resident BOOTX64.EFI PE validation was not observed.'
+}
+$builtEfiSize = (Get-Item $efiImage).Length
+if ([Int64]$nvmeFileMatch.Groups[1].Value -ne $builtEfiSize) {
+    throw "The NVMe FAT file size did not match the built EFI image: NVMe=$($nvmeFileMatch.Groups[1].Value), built=$builtEfiSize."
+}
 
 if (-not $output.Contains('AHCI controller active at')) {
     throw 'The AHCI PCI/BAR discovery marker was not observed.'
@@ -678,8 +753,13 @@ if (-not $output.Contains('FAT path resolved: EFI cluster')) {
 if (-not $output.Contains('FAT boot file found: EFI/BOOT/BOOTX64.EFI')) {
     throw 'The FAT boot-file lookup marker was not observed.'
 }
-if (-not $output.Contains('FAT file streamed:')) {
-    throw 'The complete FAT file-stream marker was not observed.'
+$ahciFileMatch = [regex]::Match($output, '(?m)^FAT file streamed: ([1-9][0-9]*) bytes across ([1-9][0-9]*) cluster\(s\), last cluster ([1-9][0-9]*), FNV-1a64 0x([0-9A-F]{16})\r?$')
+if (-not $ahciFileMatch.Success) {
+    throw 'The complete AHCI FAT file-stream marker was not observed.'
+}
+if ($nvmeFileMatch.Groups[1].Value -ne $ahciFileMatch.Groups[1].Value -or
+    $nvmeFileMatch.Groups[4].Value -ne $ahciFileMatch.Groups[4].Value) {
+    throw "NVMe and AHCI streamed different BOOTX64.EFI content: NVMe size/hash $($nvmeFileMatch.Groups[1].Value)/$($nvmeFileMatch.Groups[4].Value), AHCI size/hash $($ahciFileMatch.Groups[1].Value)/$($ahciFileMatch.Groups[4].Value)."
 }
 if (-not $output.Contains('On-disk PE verified: AMD64 PE32+, EFI subsystem 10')) {
     throw 'The on-disk AMD64 PE32+ EFI validation marker was not observed.'
@@ -696,6 +776,9 @@ if (-not (Test-Path $serialLog)) {
 $serialOutput = Get-Content $serialLog -Raw
 Write-Host '=== ZigOs COM1 serial output ==='
 Write-Host $serialOutput
+if (-not $serialOutput.Contains('BdsDxe: starting Boot0001 "UEFI QEMU NVMe Ctrl ZIGOSNVME 1"')) {
+    throw 'OVMF did not boot ZigOs from the GPT/FAT NVMe namespace.'
+}
 if (-not $serialOutput.Contains('ZigOs COM1 serial diagnostics online')) {
     throw 'The COM1 loopback-tested online marker was not captured.'
 }
