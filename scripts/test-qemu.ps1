@@ -8,7 +8,8 @@ param(
     [switch]$UsbMouseOnly,
     [switch]$NoGraphics,
     [switch]$LegacyPci,
-    [switch]$Nvme4k
+    [switch]$Nvme4k,
+    [switch]$NoPs2
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,8 +81,14 @@ $monitorListener.Stop()
 $monitorEndpoint = "tcp:127.0.0.1:$monitorPort,server=on,wait=off"
 
 $machineType = if ($LegacyPci) { 'pc' } else { 'q35' }
+$machineArgument = if ($NoPs2) {
+    if ($LegacyPci) { throw '-NoPs2 is currently supported only with the q35 test machine.' }
+    'q35,i8042=off'
+} else {
+    $machineType
+}
 $arguments = @(
-    '-machine', $machineType,
+    '-machine', $machineArgument,
     '-m', '256M',
     '-cpu', 'max',
     '-smp', $CpuCount,
@@ -110,7 +117,7 @@ if ($NoGraphics) {
     $arguments += @('-vga', 'none')
 }
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPUs: $CpuCount, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, NVMe block size: $nvmeBlockSize)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPUs: $CpuCount, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -288,11 +295,26 @@ if (-not $output.Contains('IOAPIC redirection table fully masked:')) {
 if (-not [regex]::IsMatch($output, 'External IRQ routed: ISA IRQ 0 -> GSI 2 -> vector 0x44, BSP APIC 0, PIT divisor [1-9][0-9]*, count 1, active-high, edge, remasked after EOI')) {
     throw 'The MADT/IOAPIC/PIT external IRQ0 round trip was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'PS/2 keyboard IRQ verified: ISA IRQ 1 -> GSI 1 -> vector 0x45, make 0x1E, break 0x9E, count 2, command byte 0x[0-9A-F]{2}, remasked and restored after EOI')) {
-    throw 'The i8042/IOAPIC PS/2 keyboard IRQ and scan-code capture were not observed.'
-}
-if (-not $output.Contains("PS/2 event queue verified: #1 usage 0x04 pressed -> 'a'; #2 usage 0x04 released -> 'a'; dropped 0")) {
-    throw 'The PS/2 make/break translation through the common keyboard queue was not observed.'
+if ($NoPs2) {
+    if (-not $output.Contains('i8042/PS2 controller unavailable; continuing without legacy keyboard input')) {
+        throw 'The missing-i8042 fallback marker was not observed.'
+    }
+    if (-not $output.Contains('Legacy input ready: PS/2 keyboard no')) {
+        throw 'The PS/2-unavailable readiness marker was not observed.'
+    }
+    if ($output.Contains('PS/2 keyboard IRQ verified:') -or $output.Contains('PS/2 event queue verified:')) {
+        throw 'The PS/2 validation path unexpectedly ran with i8042 disabled.'
+    }
+} else {
+    if (-not [regex]::IsMatch($output, 'PS/2 keyboard IRQ verified: ISA IRQ 1 -> GSI 1 -> vector 0x45, make 0x1E, break 0x9E, count 2, command byte 0x[0-9A-F]{2}, remasked and restored after EOI')) {
+        throw 'The i8042/IOAPIC PS/2 keyboard IRQ and scan-code capture were not observed.'
+    }
+    if (-not $output.Contains("PS/2 event queue verified: #1 usage 0x04 pressed -> 'a'; #2 usage 0x04 released -> 'a'; dropped 0")) {
+        throw 'The PS/2 make/break translation through the common keyboard queue was not observed.'
+    }
+    if (-not $output.Contains('Legacy input ready: PS/2 keyboard yes')) {
+        throw 'The PS/2-available readiness marker was not observed.'
+    }
 }
 if (-not $output.Contains('HPET active:')) {
     throw 'The HPET initialization marker was not observed.'

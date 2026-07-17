@@ -248,3 +248,12 @@
 - [x] Primary and backup GPT validation on a 4 KiB namespace
 - [x] FAT16 directory and complete EFI file streaming with 4 KiB clusters
 - [x] OVMF direct boot from the 4 KiB NVMe GPT/FAT namespace
+
+
+## 2.2 - Optional PS/2 controller
+
+- [x] i8042 discovery treated as an optional legacy-input capability
+- [x] No IOAPIC IRQ1 route installed when i8042 is absent
+- [x] Boot continuation with USB-only or headless input hardware
+- [x] Explicit PS/2 input readiness reporting
+- [x] q35 `i8042=off` full-system QEMU regression

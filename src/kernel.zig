@@ -78,7 +78,10 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     const local_apic_info = initializeApic(acpi_info);
     const io_apic_info = initializeIoApic(acpi_info, local_apic_info);
     testExternalIrq(acpi_info, local_apic_info, io_apic_info);
-    testPs2KeyboardIrq(acpi_info, local_apic_info, io_apic_info);
+    const ps2_keyboard_ready = testPs2KeyboardIrq(acpi_info, local_apic_info, io_apic_info);
+    debugWrite("Legacy input ready: PS/2 keyboard ");
+    debugWrite(if (ps2_keyboard_ready) "yes" else "no");
+    debugWrite("\r\n");
     const apic_timer_info = testApicTimer(acpi_info);
     startApplicationProcessors(
         info,
@@ -743,7 +746,7 @@ fn testPs2KeyboardIrq(
     discovery: acpi.Discovery,
     local_apic: apic.Information,
     information: ioapic.Information,
-) void {
+) bool {
     const vector: u8 = 0x45;
     const isa_irq: u8 = 1;
     const injected_scan_code: u8 = 0x1E;
@@ -758,8 +761,10 @@ fn testPs2KeyboardIrq(
         }
     }
 
-    const configuration = ps2.prepareKeyboardIrq() orelse
-        ioApicFailure("i8042 keyboard IRQ configuration failed");
+    const configuration = ps2.prepareKeyboardIrq() orelse {
+        debugWrite("i8042/PS2 controller unavailable; continuing without legacy keyboard input\r\n");
+        return false;
+    };
     const route = ioapic.route(
         information,
         global_system_interrupt,
@@ -825,6 +830,7 @@ fn testPs2KeyboardIrq(
     debugWriteHex8(configuration.active);
     debugWrite(", remasked and restored after EOI\r\n");
     debugWrite("PS/2 event queue verified: #1 usage 0x04 pressed -> 'a'; #2 usage 0x04 released -> 'a'; dropped 0\r\n");
+    return true;
 }
 
 fn ioApicFailure(reason: []const u8) noreturn {
