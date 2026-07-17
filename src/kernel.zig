@@ -1289,6 +1289,55 @@ fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWrite(", buffer 0x");
     debugWriteHex64(@intCast(descriptor.buffer_address));
     debugWrite("\r\n");
+    const configuration = xhci.readHidConfiguration(
+        controller,
+        &ownership,
+        &mutable_addressed,
+        allocator,
+    ) orelse xhciFailure("configuration/HID descriptor transfer or parser failed");
+    debugWrite("USB configuration descriptor: total ");
+    debugWriteU64Decimal(configuration.total_length);
+    debugWrite(" bytes, value ");
+    debugWriteU64Decimal(configuration.configuration_value);
+    debugWrite(", interfaces ");
+    debugWriteU64Decimal(configuration.interface_count);
+    debugWrite(", attributes 0x");
+    debugWriteHex8(configuration.attributes);
+    debugWrite(", max power ");
+    debugWriteU64Decimal(configuration.maximum_power_ma);
+    debugWrite(" mA\r\n");
+    debugWrite("HID boot keyboard interface: number ");
+    debugWriteU64Decimal(configuration.interface_number);
+    debugWrite(", alternate ");
+    debugWriteU64Decimal(configuration.alternate_setting);
+    debugWrite(", endpoints ");
+    debugWriteU64Decimal(configuration.endpoint_count);
+    debugWrite(", class ");
+    debugWriteU64Decimal(configuration.interface_class);
+    debugWrite("/");
+    debugWriteU64Decimal(configuration.interface_subclass);
+    debugWrite("/");
+    debugWriteU64Decimal(configuration.interface_protocol);
+    debugWrite(", HID BCD 0x");
+    debugWriteHex16(configuration.hid_version_bcd);
+    debugWrite(", report type 0x");
+    debugWriteHex8(configuration.report_descriptor_type);
+    debugWrite(", report length ");
+    debugWriteU64Decimal(configuration.report_descriptor_length);
+    debugWrite("\r\n");
+    debugWrite("HID interrupt endpoint: address 0x");
+    debugWriteHex8(configuration.endpoint_address);
+    debugWrite(", attributes 0x");
+    debugWriteHex8(configuration.endpoint_attributes);
+    debugWrite(", max packet ");
+    debugWriteU64Decimal(configuration.endpoint_max_packet_size);
+    debugWrite(", interval ");
+    debugWriteU64Decimal(configuration.endpoint_interval);
+    debugWrite(", completion ");
+    debugWriteU64Decimal(configuration.completion_code);
+    debugWrite(", residual ");
+    debugWriteU64Decimal(configuration.transfer_residual);
+    debugWrite("\r\n");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {

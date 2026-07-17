@@ -39,6 +39,15 @@ const trb_direction_in: u32 = 1 << 16;
 const setup_transfer_type_in: u32 = 3 << 16;
 const usb_request_get_descriptor: u8 = 6;
 const usb_descriptor_type_device: u8 = 1;
+const usb_descriptor_type_configuration: u8 = 2;
+const usb_descriptor_type_interface: u8 = 4;
+const usb_descriptor_type_endpoint: u8 = 5;
+const usb_descriptor_type_hid: u8 = 0x21;
+const usb_class_hid: u8 = 3;
+const usb_hid_subclass_boot: u8 = 1;
+const usb_hid_protocol_keyboard: u8 = 1;
+const usb_endpoint_direction_in: u8 = 0x80;
+const usb_endpoint_transfer_interrupt: u8 = 3;
 const usb_device_descriptor_length: usize = 18;
 const legacy_capability_id: u8 = 1;
 const legacy_bios_owned: u32 = 1 << 16;
@@ -194,6 +203,33 @@ pub const DeviceDescriptor = struct {
     endpoint_id: u5,
     slot_id: u8,
     event_trb_pointer: u64,
+    skipped_port_status_events: u8,
+};
+
+pub const HidConfiguration = struct {
+    buffer_address: usize,
+    total_length: u16,
+    interface_count: u8,
+    configuration_value: u8,
+    attributes: u8,
+    maximum_power_ma: u16,
+    interface_number: u8,
+    alternate_setting: u8,
+    endpoint_count: u8,
+    interface_class: u8,
+    interface_subclass: u8,
+    interface_protocol: u8,
+    hid_version_bcd: u16,
+    hid_country_code: u8,
+    report_descriptor_type: u8,
+    report_descriptor_length: u16,
+    endpoint_address: u8,
+    endpoint_attributes: u8,
+    endpoint_max_packet_size: u16,
+    endpoint_interval: u8,
+    completion_code: u8,
+    transfer_residual: u32,
+    slot_id: u8,
     skipped_port_status_events: u8,
 };
 
@@ -713,6 +749,195 @@ fn waitForTransferCompletion(
 
 fn readLittleEndian16(bytes: [*]const u8) u16 {
     return @as(u16, bytes[0]) | (@as(u16, bytes[1]) << 8);
+}
+
+pub fn readHidConfiguration(
+    controller: Controller,
+    ownership: *Ownership,
+    device: *AddressedDevice,
+    allocator: *memory.FrameAllocator,
+) ?HidConfiguration {
+    const buffer_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    clearPage(buffer_address);
+    _ = controlInDescriptor(
+        controller,
+        ownership,
+        device,
+        buffer_address,
+        usb_descriptor_type_configuration,
+        0,
+        9,
+    ) orelse return null;
+    const bytes = @as([*]u8, @ptrFromInt(buffer_address));
+    if (bytes[0] != 9 or bytes[1] != usb_descriptor_type_configuration) return null;
+    const total_length = readLittleEndian16(bytes + 2);
+    if (total_length < 9 or total_length > page_bytes) return null;
+
+    clearPage(buffer_address);
+    const completion = controlInDescriptor(
+        controller,
+        ownership,
+        device,
+        buffer_address,
+        usb_descriptor_type_configuration,
+        0,
+        total_length,
+    ) orelse return null;
+    if (bytes[0] != 9 or bytes[1] != usb_descriptor_type_configuration or
+        readLittleEndian16(bytes + 2) != total_length)
+    {
+        return null;
+    }
+
+    var interface_found = false;
+    var hid_found = false;
+    var endpoint_found = false;
+    var interface_number: u8 = 0;
+    var alternate_setting: u8 = 0;
+    var endpoint_count: u8 = 0;
+    var interface_class: u8 = 0;
+    var interface_subclass: u8 = 0;
+    var interface_protocol: u8 = 0;
+    var hid_version_bcd: u16 = 0;
+    var hid_country_code: u8 = 0;
+    var report_descriptor_type: u8 = 0;
+    var report_descriptor_length: u16 = 0;
+    var endpoint_address: u8 = 0;
+    var endpoint_attributes: u8 = 0;
+    var endpoint_max_packet_size: u16 = 0;
+    var endpoint_interval: u8 = 0;
+
+    var offset: usize = 9;
+    while (offset + 2 <= total_length) {
+        const descriptor_length = bytes[offset];
+        const descriptor_type = bytes[offset + 1];
+        if (descriptor_length < 2 or offset + descriptor_length > total_length) return null;
+        switch (descriptor_type) {
+            usb_descriptor_type_interface => {
+                if (descriptor_length >= 9 and
+                    bytes[offset + 5] == usb_class_hid and
+                    bytes[offset + 6] == usb_hid_subclass_boot and
+                    bytes[offset + 7] == usb_hid_protocol_keyboard)
+                {
+                    interface_found = true;
+                    interface_number = bytes[offset + 2];
+                    alternate_setting = bytes[offset + 3];
+                    endpoint_count = bytes[offset + 4];
+                    interface_class = bytes[offset + 5];
+                    interface_subclass = bytes[offset + 6];
+                    interface_protocol = bytes[offset + 7];
+                }
+            },
+            usb_descriptor_type_hid => {
+                if (interface_found and descriptor_length >= 9) {
+                    hid_found = true;
+                    hid_version_bcd = readLittleEndian16(bytes + offset + 2);
+                    hid_country_code = bytes[offset + 4];
+                    report_descriptor_type = bytes[offset + 6];
+                    report_descriptor_length = readLittleEndian16(bytes + offset + 7);
+                }
+            },
+            usb_descriptor_type_endpoint => {
+                if (interface_found and descriptor_length >= 7) {
+                    const address = bytes[offset + 2];
+                    const attributes = bytes[offset + 3];
+                    if ((address & usb_endpoint_direction_in) != 0 and
+                        (attributes & 0x3) == usb_endpoint_transfer_interrupt)
+                    {
+                        endpoint_found = true;
+                        endpoint_address = address;
+                        endpoint_attributes = attributes;
+                        endpoint_max_packet_size = readLittleEndian16(bytes + offset + 4);
+                        endpoint_interval = bytes[offset + 6];
+                    }
+                }
+            },
+            else => {},
+        }
+        offset += descriptor_length;
+    }
+
+    if (!interface_found or !hid_found or !endpoint_found or
+        endpoint_count == 0 or report_descriptor_length == 0 or
+        endpoint_max_packet_size == 0 or endpoint_interval == 0)
+    {
+        return null;
+    }
+
+    return .{
+        .buffer_address = buffer_address,
+        .total_length = total_length,
+        .interface_count = bytes[4],
+        .configuration_value = bytes[5],
+        .attributes = bytes[7],
+        .maximum_power_ma = @as(u16, bytes[8]) * 2,
+        .interface_number = interface_number,
+        .alternate_setting = alternate_setting,
+        .endpoint_count = endpoint_count,
+        .interface_class = interface_class,
+        .interface_subclass = interface_subclass,
+        .interface_protocol = interface_protocol,
+        .hid_version_bcd = hid_version_bcd,
+        .hid_country_code = hid_country_code,
+        .report_descriptor_type = report_descriptor_type,
+        .report_descriptor_length = report_descriptor_length,
+        .endpoint_address = endpoint_address,
+        .endpoint_attributes = endpoint_attributes,
+        .endpoint_max_packet_size = endpoint_max_packet_size,
+        .endpoint_interval = endpoint_interval,
+        .completion_code = completion.completion_code,
+        .transfer_residual = completion.transfer_residual,
+        .slot_id = completion.slot_id,
+        .skipped_port_status_events = completion.skipped_port_status_events,
+    };
+}
+
+fn controlInDescriptor(
+    controller: Controller,
+    ownership: *Ownership,
+    device: *AddressedDevice,
+    buffer_address: usize,
+    descriptor_type: u8,
+    descriptor_index: u8,
+    requested_length: u16,
+) ?TransferCompletion {
+    if (requested_length == 0 or device.transfer_producer_index > trbs_per_page - 4) return null;
+    const ring = trbPage(device.transfer_ring_address);
+    const start_index: usize = device.transfer_producer_index;
+    const cycle: u32 = device.transfer_cycle;
+    const setup_packet: u64 = @as(u64, 0x80) |
+        (@as(u64, usb_request_get_descriptor) << 8) |
+        (@as(u64, descriptor_index) << 16) |
+        (@as(u64, descriptor_type) << 24) |
+        (@as(u64, requested_length) << 48);
+
+    ring[start_index].parameter = setup_packet;
+    ring[start_index].status = 8;
+    ring[start_index].control = (trb_type_setup_stage << trb_type_shift) |
+        trb_immediate_data | setup_transfer_type_in | cycle;
+    ring[start_index + 1].parameter = buffer_address;
+    ring[start_index + 1].status = requested_length;
+    ring[start_index + 1].control = (trb_type_data_stage << trb_type_shift) |
+        trb_interrupt_on_short_packet | trb_direction_in | cycle;
+    ring[start_index + 2].parameter = 0;
+    ring[start_index + 2].status = 0;
+    ring[start_index + 2].control = (trb_type_status_stage << trb_type_shift) |
+        trb_interrupt_on_completion | cycle;
+    zigos_memory_fence();
+
+    const doorbell_base = controller.base_address + controller.doorbell_offset;
+    write32(doorbell_base, @as(usize, device.slot_id) * @sizeOf(u32), 1);
+    const status_trb_address = device.transfer_ring_address +
+        (start_index + 2) * @sizeOf(Trb);
+    const completion = waitForTransferCompletion(
+        controller,
+        ownership,
+        status_trb_address,
+        device.slot_id,
+        1,
+    ) orelse return null;
+    device.transfer_producer_index += 3;
+    return completion;
 }
 
 fn firstConnectedPort(controller: Controller) ?Port {
