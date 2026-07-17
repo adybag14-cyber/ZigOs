@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [int]$TimeoutSeconds = 20
+    [int]$TimeoutSeconds = 30
 )
 
 $ErrorActionPreference = 'Stop'
@@ -121,7 +121,7 @@ try {
                     $writer.NewLine = "`n"
                     $writer.AutoFlush = $true
                     Start-Sleep -Milliseconds 50
-                    foreach ($key in @('h', 'e', 'l', 'x', 'backspace', 'p', 'ret', 'c', 'p', 'u', 'ret', 'm', 'e', 'm', 'ret', 's', 'c', 'r', 'o', 'l', 'l', 'ret', 'c', 'l', 'e', 'a', 'r', 'ret', 'h', 'e', 'l', 'p', 'ret')) {
+                    foreach ($key in @('h', 'e', 'l', 'x', 'backspace', 'p', 'ret', 'c', 'p', 'u', 'ret', 'm', 'e', 'm', 'ret', 's', 'c', 'r', 'o', 'l', 'l', 'ret', 'c', 'l', 'e', 'a', 'r', 'ret', 'h', 'e', 'l', 'p', 'ret', 'n', 'o', 'p', 'e', 'ret', 'ret', 'h', 'e', 'l', 'p', 'ret')) {
                         $writer.WriteLine("sendkey $key 120")
                         Start-Sleep -Milliseconds 180
                     }
@@ -431,11 +431,17 @@ if (-not $output.Contains('Framebuffer line editing verified: helx<BS>p -> help'
 if (-not [regex]::IsMatch($output, 'Framebuffer clear verified: cursor row 0, column 7, writes 7, resets 1, checksum 0x5E875379DEFF239D')) {
     throw 'The full framebuffer clear-and-reset proof was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer post-clear shell: cursor row 1, column 35, lines 2, writes 46, newlines 1, resets 1, checksum 0x8E5C0D15279B25C5')) {
-    throw 'The post-clear live help-command framebuffer state was not observed.'
+if (-not $output.Contains('Framebuffer unknown command verified: nope -> error: unknown command')) {
+    throw 'The unknown-command error rendering proof was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'ZigOs shell session complete: help, cpu, mem, scroll, clear, help; commands 6, reports [1-9][0-9]*, rejected 0')) {
-    throw 'The persistent native shell session completion marker was not observed.'
+if (-not $output.Contains('Framebuffer empty command verified: prompt continued without an error response')) {
+    throw 'The empty-command prompt-continuation proof was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'Framebuffer error recovery shell: cursor row 6, column 35, lines 7, writes 132, newlines 6, resets 1, checksum 0xFE1CD6284B13B031')) {
+    throw 'The post-error-recovery framebuffer state was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'ZigOs shell session complete: valid, clear, unknown, empty, recovery; commands 9, reports [1-9][0-9]*, rejected 0')) {
+    throw 'The persistent native shell error-recovery marker was not observed.'
 }
 if (-not $output.Contains('AHCI controller active at')) {
     throw 'The AHCI PCI/BAR discovery marker was not observed.'
@@ -533,10 +539,10 @@ if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B
 if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
     throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 2, glyphs 46, resets 1, lit pixels 2416, checksum 0x8E5C0D15279B25C5')) {
+if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 7, glyphs 132, resets 1, lit pixels 7076, checksum 0xFE1CD6284B13B031')) {
     throw 'The deterministic GOP bitmap-console report was not observed.'
 }
-if (-not $output.Contains('Framebuffer transcript: clear reset followed by a live help command')) {
+if (-not $output.Contains('Framebuffer transcript: clear, unknown, empty, and recovered help commands')) {
     throw 'The rendered graphical-console transcript marker was not observed.'
 }
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {

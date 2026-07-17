@@ -131,7 +131,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWrite(", checksum 0x");
     debugWriteHex64(report.checksum);
     debugWrite("\r\n");
-    debugWrite("Framebuffer transcript: clear reset followed by a live help command\r\n");
+    debugWrite("Framebuffer transcript: clear, unknown, empty, and recovered help commands\r\n");
     debugWrite("Framebuffer retained and written directly at 0x");
     debugWriteHex64(@intCast(framebuffer.base));
     debugWrite("\r\n");
@@ -1588,8 +1588,8 @@ fn runUsbShell(
     allocator: *memory.FrameAllocator,
     graphical_console: *framebuffer_console.Console,
 ) void {
-    const expected_commands = [_][]const u8{ "help", "cpu", "mem", "scroll", "clear", "help" };
-    const expected_responses = [_]shell.Response{ .help, .cpu, .memory, .scroll, .clear_screen, .help };
+    const expected_commands = [_][]const u8{ "help", "cpu", "mem", "scroll", "clear", "help", "nope", "", "help" };
+    const expected_responses = [_]shell.Response{ .help, .cpu, .memory, .scroll, .clear_screen, .help, .unknown, .empty, .help };
     var command_shell = shell.Shell.init();
     var previous_keys = std.mem.zeroes([6]u8);
     var previous_modifiers: u8 = 0;
@@ -1597,7 +1597,7 @@ fn runUsbShell(
     var completed_commands: usize = 0;
     var marker_printed = false;
 
-    while (report_count < 128) : (report_count += 1) {
+    while (report_count < 160) : (report_count += 1) {
         const arm = xhci.armNextHidKeyboardInput(
             controller,
             endpoint,
@@ -1622,10 +1622,6 @@ fn runUsbShell(
             }
             if (command_shell.feed(event)) |response| {
                 graphical_console.put('\n');
-                if (response == .empty) {
-                    graphical_console.write("zigos> ");
-                    continue;
-                }
                 if (completed_commands >= expected_commands.len) {
                     xhciFailure("native shell executed more commands than expected");
                 }
@@ -1644,8 +1640,10 @@ fn runUsbShell(
                 debugWrite("zigos> ");
                 debugWrite(command);
                 debugWrite("\r\n");
-                debugWrite(response_text);
-                debugWrite("\r\n");
+                if (response != .empty) {
+                    debugWrite(response_text);
+                    debugWrite("\r\n");
+                }
                 completed_commands += 1;
 
                 if (completed_commands == 1) {
@@ -1687,8 +1685,15 @@ fn runUsbShell(
                     debugWriteHex64(clear_report.checksum);
                     debugWrite("\r\n");
                     continue;
+                } else if (response == .empty) {
+                    graphical_console.write("zigos> ");
+                    debugWrite("Framebuffer empty command verified: prompt continued without an error response\r\n");
+                    continue;
                 } else {
                     graphical_console.write(response_text);
+                    if (response == .unknown) {
+                        debugWrite("Framebuffer unknown command verified: nope -> error: unknown command\r\n");
+                    }
                 }
 
                 if (completed_commands < expected_commands.len) {
@@ -1698,17 +1703,17 @@ fn runUsbShell(
                 }
 
                 const console_report = graphical_console.report();
-                if (console_report.cursor_row != 1 or console_report.cursor_column != 35 or
-                    console_report.lines != 2 or console_report.glyphs != 46 or
-                    console_report.writes != 46 or console_report.newlines != 1 or
+                if (console_report.cursor_row != 6 or console_report.cursor_column != 35 or
+                    console_report.lines != 7 or console_report.glyphs != 132 or
+                    console_report.writes != 132 or console_report.newlines != 6 or
                     console_report.backspaces != 0 or console_report.scrolls != 0 or
                     console_report.resets != 1 or
-                    console_report.lit_pixels != 2416 or
-                    console_report.checksum != 0x8E5C_0D15_279B_25C5)
+                    console_report.lit_pixels != 7076 or
+                    console_report.checksum != 0xFE1C_D628_4B13_B031)
                 {
-                    xhciFailure("post-clear framebuffer shell state was not deterministic");
+                    xhciFailure("post-error-recovery framebuffer shell state was not deterministic");
                 }
-                debugWrite("Framebuffer post-clear shell: cursor row ");
+                debugWrite("Framebuffer error recovery shell: cursor row ");
                 debugWriteUsizeDecimal(console_report.cursor_row);
                 debugWrite(", column ");
                 debugWriteUsizeDecimal(console_report.cursor_column);
@@ -1723,14 +1728,14 @@ fn runUsbShell(
                 debugWrite(", checksum 0x");
                 debugWriteHex64(console_report.checksum);
                 debugWrite("\r\n");
-                debugWrite("ZigOs shell session complete: help, cpu, mem, scroll, clear, help; commands 6, reports ");
+                debugWrite("ZigOs shell session complete: valid, clear, unknown, empty, recovery; commands 9, reports ");
                 debugWriteU64Decimal(report_count + 1);
                 debugWrite(", rejected 0\r\n");
                 return;
             }
         }
     }
-    xhciFailure("native shell did not complete six commands within 128 reports");
+    xhciFailure("native shell did not complete nine commands within 160 reports");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {

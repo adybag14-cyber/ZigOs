@@ -125,3 +125,5 @@
 - [x] Overlapping pixel-row copy and bottom-line clearing verification
 - [x] Native `clear` command with full pixel, cursor, and terminal-accounting reset
 - [x] Continued USB input and `help` dispatch after framebuffer reset
+- [x] Unknown-command error rendering with continued prompt operation
+- [x] Empty-command handling and valid-command recovery in the same USB session
