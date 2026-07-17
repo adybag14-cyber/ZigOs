@@ -55,7 +55,8 @@
 - [x] Maskable APIC timer interrupt with EOI and HLT wake-up
 - [x] PS/2 keyboard IRQ and scan-code injection experiment
 - [x] xHCI capability and connected USB keyboard port discovery
-- [ ] xHCI command/event rings and USB HID input transfers
+- [x] xHCI controller ownership, command/event rings and Enable Slot completion
+- [ ] xHCI port reset, Address Device and USB HID input transfers
 
 ## 0.5 - Runtime
 

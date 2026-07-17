@@ -283,8 +283,14 @@ if (-not [regex]::IsMatch($output, 'xHCI controller discovered at [0-9A-F]{4}:[0
 if (-not [regex]::IsMatch($output, 'xHCI capabilities: version [0-9]+\.[0-9A-F]{2}, [1-9][0-9]* slots, [1-9][0-9]* interrupters, [1-9][0-9]* ports, (32|64)-bit addressing, (32|64)-byte contexts, doorbells \+0x[0-9A-F]{16}, runtime \+0x[0-9A-F]{16}')) {
     throw 'The xHCI capability-register report was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'USB keyboard attachment visible: [1-9][0-9]* connected xHCI port\(s\); controller remains read-only')) {
+if (-not [regex]::IsMatch($output, 'USB keyboard attachment visible: [1-9][0-9]* connected xHCI port\(s\); read-only discovery complete')) {
     throw 'The attached USB keyboard was not visible in any xHCI PORTSC register.'
+}
+if (-not [regex]::IsMatch($output, 'xHCI ownership active: DCBAA 0x[0-9A-F]{16}, command ring 0x[0-9A-F]{16}, event ring 0x[0-9A-F]{16}, ERST 0x[0-9A-F]{16}, page size 4096, scratchpads 0, slots [1-9][0-9]*')) {
+    throw 'The ZigOs-owned xHCI DCBAA/command/event ring installation marker was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'xHCI command completed: Enable Slot, completion 1, slot [1-9][0-9]*, command pointer 0x[0-9A-F]{16}, event cycle 1, controller running, (legacy handoff claimed|no legacy handoff required)')) {
+    throw 'The xHCI Enable Slot command-completion event was not observed.'
 }
 if (-not $output.Contains('AHCI controller active at')) {
     throw 'The AHCI PCI/BAR discovery marker was not observed.'

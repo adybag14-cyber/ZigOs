@@ -1155,7 +1155,35 @@ fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     }
     debugWrite("USB keyboard attachment visible: ");
     debugWriteU64Decimal(controller.connected_port_count);
-    debugWrite(" connected xHCI port(s); controller remains read-only\r\n");
+    debugWrite(" connected xHCI port(s); read-only discovery complete\r\n");
+
+    const ownership = xhci.takeOwnership(controller, allocator) orelse
+        xhciFailure("controller reset, ring installation, or Enable Slot completion failed");
+    debugWrite("xHCI ownership active: DCBAA 0x");
+    debugWriteHex64(@intCast(ownership.dcbaa_address));
+    debugWrite(", command ring 0x");
+    debugWriteHex64(@intCast(ownership.command_ring_address));
+    debugWrite(", event ring 0x");
+    debugWriteHex64(@intCast(ownership.event_ring_address));
+    debugWrite(", ERST 0x");
+    debugWriteHex64(@intCast(ownership.erst_address));
+    debugWrite(", page size ");
+    debugWriteU64Decimal(ownership.page_size);
+    debugWrite(", scratchpads ");
+    debugWriteU64Decimal(ownership.scratchpad_count);
+    debugWrite(", slots ");
+    debugWriteU64Decimal(ownership.enabled_slots);
+    debugWrite("\r\n");
+    debugWrite("xHCI command completed: Enable Slot, completion ");
+    debugWriteU64Decimal(ownership.completion_code);
+    debugWrite(", slot ");
+    debugWriteU64Decimal(ownership.slot_id);
+    debugWrite(", command pointer 0x");
+    debugWriteHex64(ownership.command_pointer);
+    debugWrite(", event cycle ");
+    debugWriteU64Decimal(ownership.event_cycle);
+    debugWrite(if (ownership.controller_running) ", controller running" else ", controller halted");
+    debugWrite(if (ownership.legacy_handoff_performed) ", legacy handoff claimed\r\n" else ", no legacy handoff required\r\n");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {
