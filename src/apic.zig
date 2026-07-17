@@ -1,6 +1,6 @@
 const std = @import("std");
 const acpi = @import("acpi.zig");
-const hpet = @import("hpet.zig");
+const time_reference = @import("time_reference.zig");
 const memory = @import("memory.zig");
 const interrupt_context = @import("interrupt_context.zig");
 
@@ -70,8 +70,9 @@ pub const TimerResult = struct {
     ticks_per_second: u64,
     initial_count: u32,
     interrupt_count: u64,
-    hpet_period_femtoseconds: u32,
-    hpet_counter_64_bit: bool,
+    reference_kind: time_reference.Kind,
+    reference_period_femtoseconds: u32,
+    reference_counter_64_bit: bool,
 };
 
 var active_x2apic: bool = false;
@@ -177,7 +178,7 @@ pub fn acknowledgeInterrupt() void {
     sendEoi();
 }
 
-pub fn sendInitSipi(destination_apic_id: u32, startup_vector: u8, reference: hpet.Device) bool {
+pub fn sendInitSipi(destination_apic_id: u32, startup_vector: u8, reference: time_reference.Reference) bool {
     if (startup_vector == 0) return false;
     if (!active_x2apic and destination_apic_id > 0xFF) return false;
 
@@ -190,11 +191,8 @@ pub fn sendInitSipi(destination_apic_id: u32, startup_vector: u8, reference: hpe
     return reference.waitNanoseconds(200_000);
 }
 
-pub fn calibrateAndTestTimer(reference: hpet.Device) ?TimerResult {
-    const counter_before = reference.readCounter();
+pub fn calibrateAndTestTimer(reference: time_reference.Reference) ?TimerResult {
     if (!reference.waitNanoseconds(1_000_000)) return null;
-    const counter_after = reference.readCounter();
-    if (counter_after == counter_before) return null;
 
     writeTimerDivide(divide_by_16_encoding);
     writeTimerLvt(timer_vector | timer_masked);
@@ -228,8 +226,9 @@ pub fn calibrateAndTestTimer(reference: hpet.Device) ?TimerResult {
         .ticks_per_second = ticks_per_second,
         .initial_count = desired_count,
         .interrupt_count = timer_interrupt_count,
-        .hpet_period_femtoseconds = reference.period_femtoseconds,
-        .hpet_counter_64_bit = reference.counter_64_bit,
+        .reference_kind = reference.kind,
+        .reference_period_femtoseconds = reference.periodFemtoseconds(),
+        .reference_counter_64_bit = reference.counter64Bit(),
     };
 }
 

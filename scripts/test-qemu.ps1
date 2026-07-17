@@ -9,7 +9,8 @@ param(
     [switch]$NoGraphics,
     [switch]$LegacyPci,
     [switch]$Nvme4k,
-    [switch]$NoPs2
+    [switch]$NoPs2,
+    [switch]$NoHpet
 )
 
 $ErrorActionPreference = 'Stop'
@@ -81,11 +82,19 @@ $monitorListener.Stop()
 $monitorEndpoint = "tcp:127.0.0.1:$monitorPort,server=on,wait=off"
 
 $machineType = if ($LegacyPci) { 'pc' } else { 'q35' }
-$machineArgument = if ($NoPs2) {
+$machineOptions = @()
+if ($NoPs2) {
     if ($LegacyPci) { throw '-NoPs2 is currently supported only with the q35 test machine.' }
-    'q35,i8042=off'
-} else {
+    $machineOptions += 'i8042=off'
+}
+if ($NoHpet) {
+    if ($LegacyPci) { throw '-NoHpet is currently supported only with the q35 test machine.' }
+    $machineOptions += 'hpet=off'
+}
+$machineArgument = if ($machineOptions.Count -eq 0) {
     $machineType
+} else {
+    "$machineType,$($machineOptions -join ',')"
 }
 $arguments = @(
     '-machine', $machineArgument,
@@ -117,7 +126,7 @@ if ($NoGraphics) {
     $arguments += @('-vga', 'none')
 }
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPUs: $CpuCount, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPUs: $CpuCount, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2, no HPET: $NoHpet)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -316,11 +325,29 @@ if ($NoPs2) {
         throw 'The PS/2-available readiness marker was not observed.'
     }
 }
-if (-not $output.Contains('HPET active:')) {
-    throw 'The HPET initialization marker was not observed.'
-}
-if (-not $output.Contains('APIC timer calibrated:')) {
-    throw 'The APIC timer calibration marker was not observed.'
+if ($NoHpet) {
+    if (-not $output.Contains('HPET not present')) {
+        throw 'The no-HPET ACPI topology marker was not observed.'
+    }
+    if (-not $output.Contains('PIT channel 2 reference active: 1193182 Hz polled one-shot, no IRQ route')) {
+        throw 'The PIT channel 2 reference-clock fallback marker was not observed.'
+    }
+    if ($output.Contains('HPET active:')) {
+        throw 'HPET unexpectedly initialized while disabled.'
+    }
+    if (-not [regex]::IsMatch($output, 'APIC timer calibrated with PIT channel 2: [1-9][0-9]* ticks/s, one-shot count [1-9][0-9]*')) {
+        throw 'The PIT-calibrated APIC timer rate was not observed.'
+    }
+} else {
+    if (-not $output.Contains('HPET at 0x')) {
+        throw 'The validated HPET table was not retained.'
+    }
+    if (-not [regex]::IsMatch($output, 'HPET active: base 0x[0-9A-F]{16}, period [1-9][0-9]* fs, timers [1-9][0-9]*, (32|64)-bit counter')) {
+        throw 'The HPET capability and counter marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'APIC timer calibrated with HPET: [1-9][0-9]* ticks/s, one-shot count [1-9][0-9]*')) {
+        throw 'The HPET-calibrated APIC timer rate was not observed.'
+    }
 }
 if (-not $output.Contains('Maskable interrupt vector 0x0040 handled')) {
     throw 'The APIC timer interrupt round trip was not observed.'

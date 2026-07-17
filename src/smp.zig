@@ -2,7 +2,7 @@ const std = @import("std");
 const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
 const boot = @import("boot_info.zig");
-const hpet = @import("hpet.zig");
+const time_reference = @import("time_reference.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
 const percpu = @import("percpu.zig");
@@ -137,7 +137,7 @@ pub fn start(
     allocator: *memory.FrameAllocator,
     madt: acpi.MadtInfo,
     local_apic: apic.Information,
-    reference: hpet.Device,
+    reference: time_reference.Reference,
     timer_ticks_per_second: u64,
 ) ?Report {
     if (trampoline_image.len != memory.page_size) return null;
@@ -383,7 +383,7 @@ export fn zigos_ap_entry(data: *volatile ApBootData, per_cpu_state: *percpu.Stat
     percpu.runMailbox(per_cpu_state);
 }
 
-fn runMailboxRound(report: *Report, reference: hpet.Device) bool {
+fn runMailboxRound(report: *Report, reference: time_reference.Reference) bool {
     const epoch: u32 = 1;
     const base_input: u64 = 0xC001_D00D_5A49_474F;
 
@@ -428,7 +428,7 @@ fn runMailboxRound(report: *Report, reference: hpet.Device) bool {
     return true;
 }
 
-fn runQueueRound(report: *Report, reference: hpet.Device) bool {
+fn runQueueRound(report: *Report, reference: time_reference.Reference) bool {
     const jobs_per_ap: u32 = 4;
     const base_input: u64 = 0x5155_4555_455F_4A4F;
 
@@ -473,7 +473,7 @@ fn runQueueRound(report: *Report, reference: hpet.Device) bool {
     return true;
 }
 
-fn runWorkStealingRound(report: *Report, reference: hpet.Device) bool {
+fn runWorkStealingRound(report: *Report, reference: time_reference.Reference) bool {
     const source_index: usize = 0;
     const jobs: u32 = 8;
     const thief_quota: u32 = 2;
@@ -540,7 +540,7 @@ fn runWorkStealingRound(report: *Report, reference: hpet.Device) bool {
     return true;
 }
 
-fn runTargetedIpiRound(report: *Report, reference: hpet.Device) bool {
+fn runTargetedIpiRound(report: *Report, reference: time_reference.Reference) bool {
     const sequence: u32 = 1;
     const base_input: u64 = 0x4950_495F_484C_545F;
     percpu.pauseRunQueues();
@@ -603,7 +603,7 @@ fn runTargetedIpiRound(report: *Report, reference: hpet.Device) bool {
     return wake_completed == report.target_count;
 }
 
-fn runPerApTimerRound(report: *Report, reference: hpet.Device, ticks_per_second: u64) bool {
+fn runPerApTimerRound(report: *Report, reference: time_reference.Reference, ticks_per_second: u64) bool {
     const epoch: u32 = 1;
     if (ticks_per_second < 1_000 or ticks_per_second / 20 > std.math.maxInt(u32)) return false;
     const initial_count: u32 = @intCast(@max(@as(u64, 1), ticks_per_second / 20));
@@ -663,7 +663,7 @@ fn runPerApTimerRound(report: *Report, reference: hpet.Device, ticks_per_second:
     return completed == report.target_count;
 }
 
-fn runTickSchedulerRound(report: *Report, reference: hpet.Device, ticks_per_second: u64) bool {
+fn runTickSchedulerRound(report: *Report, reference: time_reference.Reference, ticks_per_second: u64) bool {
     const epoch: u32 = 2;
     const jobs: u32 = 3;
     const base_input: u64 = 0x5449_434B_5F51_5541;
@@ -739,7 +739,7 @@ fn runTickSchedulerRound(report: *Report, reference: hpet.Device, ticks_per_seco
 fn runLocalTaskRound(
     report: *Report,
     allocator: *memory.FrameAllocator,
-    reference: hpet.Device,
+    reference: time_reference.Reference,
 ) bool {
     const epoch: u32 = 1;
     const stack_size = local_task_stack_pages * @as(usize, @intCast(memory.page_size));
@@ -812,7 +812,7 @@ fn runLocalTaskRound(
     return completed == report.target_count;
 }
 
-fn runSynchronizationRound(report: *Report, reference: hpet.Device) bool {
+fn runSynchronizationRound(report: *Report, reference: time_reference.Reference) bool {
     const epoch: u32 = 1;
     const participants: u32 = @intCast(report.target_count + 1);
     const iterations: u32 = 4096;

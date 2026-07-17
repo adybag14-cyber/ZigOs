@@ -257,3 +257,13 @@
 - [x] Boot continuation with USB-only or headless input hardware
 - [x] Explicit PS/2 input readiness reporting
 - [x] q35 `i8042=off` full-system QEMU regression
+
+
+## 2.3 - HPET-independent timing
+
+- [x] Shared reference-clock abstraction for APIC calibration and INIT/SIPI delays
+- [x] HPET selected when ACPI and MMIO validation succeed
+- [x] PIT channel 2 polled one-shot fallback without an IRQ route
+- [x] APIC timer calibration and interrupt wake-up using PIT timing
+- [x] SMP INIT/SIPI startup and validation rounds using PIT delays
+- [x] q35 `hpet=off` full-system QEMU regression

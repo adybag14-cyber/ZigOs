@@ -27,10 +27,15 @@ const smp = @import("smp.zig");
 const serial = @import("serial.zig");
 const shell = @import("shell.zig");
 const framebuffer_console = @import("framebuffer_console.zig");
-const hpet = @import("hpet.zig");
+const time_reference = @import("time_reference.zig");
 
 const cc = std.os.uefi.cc;
 const cursor_pixel_count: usize = 20;
+
+const TimerSetup = struct {
+    result: apic.TimerResult,
+    reference: time_reference.Reference,
+};
 
 var normalized_memory_layout: memory.Layout = undefined;
 var kernel_heap: heap.Heap = undefined;
@@ -82,13 +87,14 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWrite("Legacy input ready: PS/2 keyboard ");
     debugWrite(if (ps2_keyboard_ready) "yes" else "no");
     debugWrite("\r\n");
-    const apic_timer_info = testApicTimer(acpi_info);
+    const timer_setup = testApicTimer(acpi_info);
     startApplicationProcessors(
         info,
         &frame_allocator,
         acpi_info,
         local_apic_info,
-        apic_timer_info.ticks_per_second,
+        timer_setup.reference,
+        timer_setup.result.ticks_per_second,
     );
     var graphical_console_storage: ?framebuffer_console.Console = null;
     if (info.framebuffer) |framebuffer| {
@@ -154,7 +160,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWrite("\r\n");
     initializeKernelHeap(&frame_allocator);
     testCooperativeScheduler(&frame_allocator);
-    testPreemptiveScheduler(&frame_allocator, apic_timer_info.ticks_per_second);
+    testPreemptiveScheduler(&frame_allocator, timer_setup.result.ticks_per_second);
     testUserMode(&frame_allocator);
 
     if (graphical_console) |console| {
@@ -559,22 +565,30 @@ fn apicFailure(reason: []const u8) noreturn {
     zigos_halt_forever();
 }
 
-fn testApicTimer(discovery: acpi.Discovery) apic.TimerResult {
-    const table_address = discovery.hpet_address orelse timerFailure("ACPI did not expose an HPET table");
-    const device = hpet.initialize(table_address) orelse
-        timerFailure("HPET table or MMIO capability validation failed");
+fn testApicTimer(discovery: acpi.Discovery) TimerSetup {
+    const reference = time_reference.Reference.initialize(discovery.hpet_address) orelse
+        timerFailure("neither HPET nor PIT channel 2 could provide a reference clock");
 
-    debugWrite("HPET active: base 0x");
-    debugWriteHex64(@intCast(device.base_address));
-    debugWrite(", period ");
-    debugWriteU64Decimal(device.period_femtoseconds);
-    debugWrite(" fs, timers ");
-    debugWriteU64Decimal(device.timer_count);
-    debugWrite(if (device.counter_64_bit) ", 64-bit counter\r\n" else ", 32-bit counter\r\n");
+    switch (reference.kind) {
+        .hpet => {
+            debugWrite("HPET active: base 0x");
+            debugWriteHex64(@intCast(reference.baseAddress()));
+            debugWrite(", period ");
+            debugWriteU64Decimal(reference.periodFemtoseconds());
+            debugWrite(" fs, timers ");
+            debugWriteU64Decimal(reference.timerCount());
+            debugWrite(if (reference.counter64Bit()) ", 64-bit counter\r\n" else ", 32-bit counter\r\n");
+        },
+        .pit_channel2 => {
+            debugWrite("PIT channel 2 reference active: 1193182 Hz polled one-shot, no IRQ route\r\n");
+        },
+    }
 
-    const result = apic.calibrateAndTestTimer(device) orelse
+    const result = apic.calibrateAndTestTimer(reference) orelse
         timerFailure("APIC timer calibration or interrupt wake-up failed");
-    debugWrite("APIC timer calibrated: ");
+    debugWrite("APIC timer calibrated with ");
+    debugWrite(reference.sourceName());
+    debugWrite(": ");
     debugWriteU64Decimal(result.ticks_per_second);
     debugWrite(" ticks/s, one-shot count ");
     debugWriteU64Decimal(result.initial_count);
@@ -582,7 +596,10 @@ fn testApicTimer(discovery: acpi.Discovery) apic.TimerResult {
     debugWrite("Maskable interrupt vector 0x0040 handled ");
     debugWriteU64Decimal(result.interrupt_count);
     debugWrite(" time(s), EOI acknowledged\r\n");
-    return result;
+    return .{
+        .result = result,
+        .reference = reference,
+    };
 }
 
 fn timerFailure(reason: []const u8) noreturn {
@@ -845,12 +862,10 @@ fn startApplicationProcessors(
     allocator: *memory.FrameAllocator,
     discovery: acpi.Discovery,
     local_apic: apic.Information,
+    reference: time_reference.Reference,
     timer_ticks_per_second: u64,
 ) void {
     const madt = discovery.madt orelse smpFailure("validated ACPI did not contain a MADT");
-    const hpet_address = discovery.hpet_address orelse smpFailure("ACPI did not expose HPET for SIPI timing");
-    const reference = hpet.initialize(hpet_address) orelse
-        smpFailure("HPET could not be initialized for INIT/SIPI timing");
     const report = smp.start(
         info,
         allocator,
