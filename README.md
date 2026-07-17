@@ -8,9 +8,9 @@ The project deliberately uses the canonical Zig builds published by [`adybag14-c
 
 > ZigOs is a research and learning operating system. It is not ready for production use or general physical-hardware support.
 
-## Current milestone: 3.4
+## Current milestone: 3.5
 
-The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling and both transmit and receive ring wrap.
+The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, and interrupt-to-kernel completion queues.
 
 The deterministic networking sequence is:
 
@@ -35,7 +35,7 @@ UDP / TFTP read of zigos.bin
         +--> final RDH/RDT: 1 / 0
 ```
 
-Every DHCP, ARP, ICMP, TFTP DATA, and TFTP ACK stage requires a fresh queue-specific MSI-X interrupt and the expected descriptor writeback. Receive descriptors are returned to hardware only after their packet has been parsed and its required state preserved.
+Every DHCP, ARP, ICMP, TFTP DATA, and TFTP ACK stage requires a fresh queue-specific MSI-X interrupt and the expected descriptor writeback. The ISR scans completed descriptors and publishes their indices through bounded TX/RX completion queues; kernel code consumes those records before recycling or reusing entries. Receive descriptors are returned to hardware only after their packet has been parsed and its required state preserved.
 
 ## Architecture
 
@@ -121,6 +121,8 @@ Assembly is used where exact instruction, register, descriptor, interrupt-entry,
 
 - Intel 82574L/e1000e discovery and ownership.
 - DMA RX/TX rings with eight descriptors, writeback checks, recycling, and wrap.
+- Independent 32-entry ISR-to-kernel TX/RX completion queues with atomic pending masks, coalesced-completion ready masks, high-water tracking, and overflow detection.
+- The deterministic network flow produces exactly ten TX and nine RX completion records, each dequeued once with zero overflow.
 - MSI-X vector `0x49` routed to a valid BSP or application-processor destination.
 - DHCP Discover/Offer/Request/ACK with BOOTP identity and option validation.
 - Runtime lease fields for local address, subnet mask, server, lease duration, and optional router/DNS data.
@@ -182,9 +184,9 @@ Output:
 
 ```text
 zig-out/
-└── EFI/
-    └── BOOT/
-        └── BOOTX64.EFI
+â””â”€â”€ EFI/
+    â””â”€â”€ BOOT/
+        â””â”€â”€ BOOTX64.EFI
 ```
 
 Latest verified kernel image before this README-only update:

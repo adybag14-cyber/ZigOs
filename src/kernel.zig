@@ -1684,6 +1684,26 @@ fn inspectE1000e(
     debugWrite(", tail ");
     debugWriteU64Decimal(network.rx_tail_after_stream);
     debugWrite("\r\n");
+
+    debugWrite("e1000e completion queues active: TX ");
+    debugWriteU64Decimal(network.tx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.tx_completion_dequeues);
+    debugWrite(", RX ");
+    debugWriteU64Decimal(network.rx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.rx_completion_dequeues);
+    debugWrite(", high-water ");
+    debugWriteU64Decimal(network.tx_completion_high_water);
+    debugWrite("/");
+    debugWriteU64Decimal(network.rx_completion_high_water);
+    debugWrite(", overflow ");
+    debugWriteU64Decimal(network.completion_queue_overflows);
+    debugWrite(", pending TX 0x");
+    debugWriteHex64(network.tx_pending_mask_after_stream);
+    debugWrite(", RX 0x");
+    debugWriteHex64(network.rx_pending_mask_after_stream);
+    debugWrite("\r\n");
     return true;
 }
 

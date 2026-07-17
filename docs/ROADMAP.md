@@ -371,3 +371,13 @@
 - End-of-stream register validation requires RDH `1`, RDT `0`, nine recycled descriptors, and one receive-index wrap.
 - TFTP ACKs use TX descriptors `5,6,7,0,1`, proving descriptor reuse after the transmit tail wraps once; final TDT is `2`.
 - Every recycled DATA descriptor and every reused ACK descriptor still requires fresh RXQ0/TXQ0 MSI-X progress before acceptance.
+
+
+## 3.5 - Interrupt completion queues
+
+- The e1000e ISR scans TXQ0/RXQ0 descriptor writebacks and enqueues completed descriptor indices into independent 32-entry single-producer/single-consumer queues.
+- Per-descriptor atomic pending masks prevent stale writebacks from being emitted twice when ring entries are recycled and reused.
+- Kernel-side waits consume completion records rather than treating a global interrupt counter as proof that a particular descriptor completed.
+- Coalesced or out-of-order records are retained in consumer-side ready masks until the matching descriptor is requested.
+- The complete DHCP, ARP, ICMP, and five-block TFTP sequence must produce exactly ten TX and nine RX queue records, with matching dequeue totals, no overflow, no pending TX descriptor, and all eight RX descriptors returned to hardware.
+- The same queue path is exercised for BSP-local MSI-X delivery, remote APIC delivery, legacy PCI configuration, x2APIC ID 256, and PIT-only timing.

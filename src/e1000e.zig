@@ -71,6 +71,8 @@ pub const msix_table_index: u16 = 0;
 
 const ring_descriptor_count: usize = 8;
 const ring_bytes: u32 = ring_descriptor_count * @sizeOf(RxDescriptor);
+const completion_queue_capacity: usize = 32;
+const all_rx_descriptors_pending: u32 = (1 << ring_descriptor_count) - 1;
 const ethernet_minimum_frame_bytes: usize = 60;
 const arp_payload_bytes: usize = 42;
 const ether_type_arp: u16 = 0x0806;
@@ -115,6 +117,16 @@ const MsixTableEntry = extern struct {
     message_address_high: u32,
     message_data: u32,
     vector_control: u32,
+};
+
+const CompletionQueue = struct {
+    entries: [completion_queue_capacity]u8,
+    head: u32,
+    tail: u32,
+    enqueued: u64,
+    dequeued: u64,
+    high_water: u32,
+    overflow: u64,
 };
 
 pub const Controller = struct {
@@ -213,15 +225,32 @@ pub const NetworkResult = struct {
     tftp_rrq_tx_interrupt_cause: u32,
     tftp_data_rx_interrupt_cause: u32,
     tftp_ack_tx_interrupt_cause: u32,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    rx_completion_dequeues: u64,
+    tx_completion_high_water: u32,
+    rx_completion_high_water: u32,
+    completion_queue_overflows: u64,
+    tx_pending_mask_after_stream: u32,
+    rx_pending_mask_after_stream: u32,
 };
 
 var active_bar0: usize = 0;
+var active_rx_descriptors: usize = 0;
+var active_tx_descriptors: usize = 0;
 var interrupts_enabled: bool = false;
 var total_interrupt_count: u64 = 0;
 var tx_interrupt_count: u64 = 0;
 var rx_interrupt_count: u64 = 0;
 var last_tx_cause: u32 = 0;
 var last_rx_cause: u32 = 0;
+var tx_pending_mask: u32 = 0;
+var rx_pending_mask: u32 = 0;
+var tx_ready_mask: u32 = 0;
+var rx_ready_mask: u32 = 0;
+var tx_completion_queue: CompletionQueue = undefined;
+var rx_completion_queue: CompletionQueue = undefined;
 
 extern fn zigos_memory_fence() callconv(cc) void;
 extern fn zigos_cpu_relax() callconv(cc) void;
@@ -331,6 +360,14 @@ pub fn initializeAndTestNetwork(
     const msix = configureMsix(controller, allocator, target_apic_id) orelse return null;
 
     active_bar0 = controller.bar0;
+    active_rx_descriptors = rx_ring_address;
+    active_tx_descriptors = tx_ring_address;
+    resetCompletionQueue(&tx_completion_queue);
+    resetCompletionQueue(&rx_completion_queue);
+    @atomicStore(u32, &tx_pending_mask, 0, .release);
+    @atomicStore(u32, &rx_pending_mask, all_rx_descriptors_pending, .release);
+    tx_ready_mask = 0;
+    rx_ready_mask = 0;
     @atomicStore(u64, &total_interrupt_count, 0, .release);
     @atomicStore(u64, &tx_interrupt_count, 0, .release);
     @atomicStore(u64, &rx_interrupt_count, 0, .release);
@@ -362,6 +399,7 @@ pub fn initializeAndTestNetwork(
     @memset(tx_buffer, 0);
     const discover_length = dhcp.buildDiscover(tx_buffer, controller.mac_address) orelse return null;
     tx_descriptors[0] = makeTxDescriptor(tx_buffer_address, discover_length);
+    if (!armTxDescriptor(0)) return null;
     zigos_memory_fence();
     const discover_tx_baseline = txInterruptCount();
     const offer_rx_baseline = rxInterruptCount();
@@ -389,6 +427,7 @@ pub fn initializeAndTestNetwork(
     @memset(tx_buffer, 0);
     const request_length = dhcp.buildRequest(tx_buffer, controller.mac_address, offer.lease) orelse return null;
     tx_descriptors[1] = makeTxDescriptor(tx_buffer_address, request_length);
+    if (!armTxDescriptor(1)) return null;
     zigos_memory_fence();
     const request_tx_baseline = txInterruptCount();
     const ack_rx_baseline = rxInterruptCount();
@@ -421,6 +460,7 @@ pub fn initializeAndTestNetwork(
         ack.lease.router,
     );
     tx_descriptors[2] = makeTxDescriptor(tx_buffer_address, ethernet_minimum_frame_bytes);
+    if (!armTxDescriptor(2)) return null;
     zigos_memory_fence();
     const arp_tx_baseline = txInterruptCount();
     const arp_rx_baseline = rxInterruptCount();
@@ -460,6 +500,7 @@ pub fn initializeAndTestNetwork(
         ack.lease.router,
     );
     tx_descriptors[3] = makeTxDescriptor(tx_buffer_address, ethernet_minimum_frame_bytes);
+    if (!armTxDescriptor(3)) return null;
     zigos_memory_fence();
     const icmp_tx_baseline = txInterruptCount();
     const icmp_rx_baseline = rxInterruptCount();
@@ -504,6 +545,7 @@ pub fn initializeAndTestNetwork(
         .payload = read_request,
     }) orelse return null;
     tx_descriptors[4] = makeTxDescriptor(tx_buffer_address, rrq_length);
+    if (!armTxDescriptor(4)) return null;
     zigos_memory_fence();
     const tftp_rrq_tx_baseline = txInterruptCount();
     var next_data_rx_baseline = rxInterruptCount();
@@ -608,6 +650,7 @@ pub fn initializeAndTestNetwork(
             tx_buffer_address,
             acknowledgement_length,
         );
+        if (!armTxDescriptor(tx_descriptor_index)) return null;
         zigos_memory_fence();
         const acknowledgement_tx_baseline = txInterruptCount();
         const next_tx_tail: u16 = @intCast((tx_descriptor_index + 1) % ring_descriptor_count);
@@ -630,6 +673,18 @@ pub fn initializeAndTestNetwork(
     const tftp_tx_tail_after_ack: u16 = @truncate(read32(controller.bar0, tdt_offset));
     const rx_head_after_stream: u16 = @truncate(read32(controller.bar0, rdh_offset));
     const rx_tail_after_stream: u16 = @truncate(read32(controller.bar0, rdt_offset));
+    const tx_completion_enqueues = completionQueueEnqueued(&tx_completion_queue);
+    const tx_completion_dequeues = completionQueueDequeued(&tx_completion_queue);
+    const rx_completion_enqueues = completionQueueEnqueued(&rx_completion_queue);
+    const rx_completion_dequeues = completionQueueDequeued(&rx_completion_queue);
+    const tx_completion_high_water = completionQueueHighWater(&tx_completion_queue);
+    const rx_completion_high_water = completionQueueHighWater(&rx_completion_queue);
+    const completion_queue_overflows = completionQueueOverflow(&tx_completion_queue) +
+        completionQueueOverflow(&rx_completion_queue);
+    const tx_pending_mask_after_stream = @atomicLoad(u32, &tx_pending_mask, .acquire);
+    const rx_pending_mask_after_stream = @atomicLoad(u32, &rx_pending_mask, .acquire);
+    const expected_tx_completions: u64 = 5 + tftp.expected_block_count;
+    const expected_rx_completions: u64 = 4 + tftp.expected_block_count;
     if (!tftp_final_block or
         tftp_block_count != tftp.expected_block_count or
         tftp_payload_length != tftp.expected_file_bytes or
@@ -640,7 +695,18 @@ pub fn initializeAndTestNetwork(
         rx_recycled_descriptors != 4 + tftp.expected_block_count or
         rx_descriptor_wrap_count != 1 or
         rx_head_after_stream != 1 or
-        rx_tail_after_stream != 0)
+        rx_tail_after_stream != 0 or
+        tx_completion_enqueues != expected_tx_completions or
+        tx_completion_dequeues != expected_tx_completions or
+        rx_completion_enqueues != expected_rx_completions or
+        rx_completion_dequeues != expected_rx_completions or
+        tx_completion_high_water == 0 or
+        rx_completion_high_water == 0 or
+        completion_queue_overflows != 0 or
+        tx_pending_mask_after_stream != 0 or
+        rx_pending_mask_after_stream != all_rx_descriptors_pending or
+        tx_ready_mask != 0 or
+        rx_ready_mask != 0)
     {
         return null;
     }
@@ -726,6 +792,15 @@ pub fn initializeAndTestNetwork(
         .tftp_rrq_tx_interrupt_cause = tftp_rrq_tx_interrupt_cause,
         .tftp_data_rx_interrupt_cause = tftp_data_rx_interrupt_cause,
         .tftp_ack_tx_interrupt_cause = tftp_ack_tx_interrupt_cause,
+        .tx_completion_enqueues = tx_completion_enqueues,
+        .tx_completion_dequeues = tx_completion_dequeues,
+        .rx_completion_enqueues = rx_completion_enqueues,
+        .rx_completion_dequeues = rx_completion_dequeues,
+        .tx_completion_high_water = tx_completion_high_water,
+        .rx_completion_high_water = rx_completion_high_water,
+        .completion_queue_overflows = completion_queue_overflows,
+        .tx_pending_mask_after_stream = tx_pending_mask_after_stream,
+        .rx_pending_mask_after_stream = rx_pending_mask_after_stream,
     };
 }
 
@@ -770,6 +845,7 @@ fn recycleRxDescriptor(
         .errors = 0,
         .special = 0,
     };
+    if (!armRxDescriptor(descriptor_index)) return false;
     zigos_memory_fence();
     write32(bar0, rdt_offset, descriptor_index);
     _ = read32(bar0, status_offset);
@@ -876,28 +952,40 @@ fn programTransmitRing(bar0: usize, ring_address: usize) void {
     _ = read32(bar0, status_offset);
 }
 
-fn waitForTx(descriptors: [*]volatile TxDescriptor, descriptor_index: usize, baseline: u64, target_apic_id: u8) bool {
+fn waitForTx(descriptors: [*]volatile TxDescriptor, descriptor_index: usize, _: u64, target_apic_id: u8) bool {
     const local_target = apic.currentId() == target_apic_id;
     if (local_target) zigos_enable_interrupts();
+    var completed = false;
     var iteration: usize = 0;
     while (iteration < maximum_poll_iterations) : (iteration += 1) {
-        if (txInterruptCount() != baseline and (descriptors[descriptor_index].status & 1) != 0) break;
+        if (consumeCompletion(&tx_completion_queue, &tx_ready_mask, descriptor_index) and
+            (descriptors[descriptor_index].status & 1) != 0)
+        {
+            completed = true;
+            break;
+        }
         zigos_cpu_relax();
     }
     if (local_target) zigos_disable_interrupts();
-    return txInterruptCount() != baseline and (descriptors[descriptor_index].status & 1) != 0;
+    return completed;
 }
 
-fn waitForRx(descriptors: [*]volatile RxDescriptor, descriptor_index: usize, baseline: u64, target_apic_id: u8) bool {
+fn waitForRx(descriptors: [*]volatile RxDescriptor, descriptor_index: usize, _: u64, target_apic_id: u8) bool {
     const local_target = apic.currentId() == target_apic_id;
     if (local_target) zigos_enable_interrupts();
+    var completed = false;
     var iteration: usize = 0;
     while (iteration < maximum_poll_iterations) : (iteration += 1) {
-        if (rxInterruptCount() != baseline and (descriptors[descriptor_index].status & 1) != 0) break;
+        if (consumeCompletion(&rx_completion_queue, &rx_ready_mask, descriptor_index) and
+            (descriptors[descriptor_index].status & 1) != 0)
+        {
+            completed = true;
+            break;
+        }
         zigos_cpu_relax();
     }
     if (local_target) zigos_disable_interrupts();
-    return rxInterruptCount() != baseline and (descriptors[descriptor_index].status & 1) != 0;
+    return completed;
 }
 
 const ParsedArp = struct {
@@ -1138,14 +1226,137 @@ export fn zigos_e1000e_interrupt_handler() callconv(cc) void {
     const cause = read32(bar0, icr_offset);
     if ((cause & interrupt_txq0) != 0) {
         @atomicStore(u32, &last_tx_cause, cause, .release);
+        scanTxCompletions();
         _ = @atomicRmw(u64, &tx_interrupt_count, .Add, 1, .acq_rel);
     }
     if ((cause & interrupt_rxq0) != 0) {
         @atomicStore(u32, &last_rx_cause, cause, .release);
+        scanRxCompletions();
         _ = @atomicRmw(u64, &rx_interrupt_count, .Add, 1, .acq_rel);
     }
     if (cause != 0) _ = @atomicRmw(u64, &total_interrupt_count, .Add, 1, .acq_rel);
     apic.acknowledgeInterrupt();
+}
+
+fn resetCompletionQueue(queue: *CompletionQueue) void {
+    @memset(queue.entries[0..], 0);
+    @atomicStore(u32, &queue.head, 0, .release);
+    @atomicStore(u32, &queue.tail, 0, .release);
+    @atomicStore(u64, &queue.enqueued, 0, .release);
+    @atomicStore(u64, &queue.dequeued, 0, .release);
+    @atomicStore(u32, &queue.high_water, 0, .release);
+    @atomicStore(u64, &queue.overflow, 0, .release);
+}
+
+fn enqueueCompletion(queue: *CompletionQueue, descriptor_index: usize) void {
+    if (descriptor_index >= ring_descriptor_count) {
+        _ = @atomicRmw(u64, &queue.overflow, .Add, 1, .acq_rel);
+        return;
+    }
+    const head = @atomicLoad(u32, &queue.head, .acquire);
+    const tail = @atomicLoad(u32, &queue.tail, .acquire);
+    const next: u32 = @intCast((head + 1) % completion_queue_capacity);
+    if (next == tail) {
+        _ = @atomicRmw(u64, &queue.overflow, .Add, 1, .acq_rel);
+        return;
+    }
+    queue.entries[head] = @intCast(descriptor_index);
+    @atomicStore(u32, &queue.head, next, .release);
+    _ = @atomicRmw(u64, &queue.enqueued, .Add, 1, .acq_rel);
+    const depth: u32 = @intCast((next + completion_queue_capacity - tail) % completion_queue_capacity);
+    const high_water = @atomicLoad(u32, &queue.high_water, .acquire);
+    if (depth > high_water) @atomicStore(u32, &queue.high_water, depth, .release);
+}
+
+fn popCompletion(queue: *CompletionQueue) ?u8 {
+    const tail = @atomicLoad(u32, &queue.tail, .acquire);
+    const head = @atomicLoad(u32, &queue.head, .acquire);
+    if (tail == head) return null;
+    const descriptor_index = queue.entries[tail];
+    const next: u32 = @intCast((tail + 1) % completion_queue_capacity);
+    @atomicStore(u32, &queue.tail, next, .release);
+    _ = @atomicRmw(u64, &queue.dequeued, .Add, 1, .acq_rel);
+    return descriptor_index;
+}
+
+fn consumeCompletion(queue: *CompletionQueue, ready_mask: *u32, descriptor_index: usize) bool {
+    if (descriptor_index >= ring_descriptor_count) return false;
+    const bit = descriptorBit(descriptor_index);
+    if ((ready_mask.* & bit) != 0) {
+        ready_mask.* &= ~bit;
+        return true;
+    }
+    while (popCompletion(queue)) |completed_index| {
+        const completed_bit = descriptorBit(completed_index);
+        if (completed_bit == bit) return true;
+        ready_mask.* |= completed_bit;
+    }
+    return false;
+}
+
+fn armTxDescriptor(descriptor_index: usize) bool {
+    return armDescriptor(&tx_pending_mask, descriptor_index);
+}
+
+fn armRxDescriptor(descriptor_index: usize) bool {
+    return armDescriptor(&rx_pending_mask, descriptor_index);
+}
+
+fn armDescriptor(pending_mask: *u32, descriptor_index: usize) bool {
+    if (descriptor_index >= ring_descriptor_count) return false;
+    const bit = descriptorBit(descriptor_index);
+    const previous = @atomicRmw(u32, pending_mask, .Or, bit, .acq_rel);
+    return (previous & bit) == 0;
+}
+
+fn scanTxCompletions() void {
+    const address = active_tx_descriptors;
+    if (address == 0) return;
+    const descriptors: [*]volatile TxDescriptor = @ptrFromInt(address);
+    for (0..ring_descriptor_count) |descriptor_index| {
+        if ((descriptors[descriptor_index].status & 1) == 0) continue;
+        completePendingDescriptor(&tx_pending_mask, &tx_completion_queue, descriptor_index);
+    }
+}
+
+fn scanRxCompletions() void {
+    const address = active_rx_descriptors;
+    if (address == 0) return;
+    const descriptors: [*]volatile RxDescriptor = @ptrFromInt(address);
+    for (0..ring_descriptor_count) |descriptor_index| {
+        if ((descriptors[descriptor_index].status & 1) == 0) continue;
+        completePendingDescriptor(&rx_pending_mask, &rx_completion_queue, descriptor_index);
+    }
+}
+
+fn completePendingDescriptor(
+    pending_mask: *u32,
+    queue: *CompletionQueue,
+    descriptor_index: usize,
+) void {
+    const bit = descriptorBit(descriptor_index);
+    const previous = @atomicRmw(u32, pending_mask, .And, ~bit, .acq_rel);
+    if ((previous & bit) != 0) enqueueCompletion(queue, descriptor_index);
+}
+
+fn descriptorBit(descriptor_index: usize) u32 {
+    return @as(u32, 1) << @intCast(descriptor_index);
+}
+
+fn completionQueueEnqueued(queue: *CompletionQueue) u64 {
+    return @atomicLoad(u64, &queue.enqueued, .acquire);
+}
+
+fn completionQueueDequeued(queue: *CompletionQueue) u64 {
+    return @atomicLoad(u64, &queue.dequeued, .acquire);
+}
+
+fn completionQueueHighWater(queue: *CompletionQueue) u32 {
+    return @atomicLoad(u32, &queue.high_water, .acquire);
+}
+
+fn completionQueueOverflow(queue: *CompletionQueue) u64 {
+    return @atomicLoad(u64, &queue.overflow, .acquire);
 }
 
 fn waitRegisterBits(base: usize, offset: usize, mask: u32, set: bool) bool {
@@ -1186,6 +1397,8 @@ comptime {
     if (@sizeOf(TxDescriptor) != 16) @compileError("e1000e TX descriptors must be 16 bytes");
     if (@sizeOf(MsixTableEntry) != 16) @compileError("MSI-X table entries must be 16 bytes");
     if (ring_bytes != 128) @compileError("e1000e test rings must be exactly 128 bytes");
+    if (completion_queue_capacity < ring_descriptor_count * 2) @compileError("e1000e completion queues are too small");
+    if (completion_queue_capacity > std.math.maxInt(u8)) @compileError("e1000e completion queue indices must fit in u8");
     if (icmp_payload.len != 16) @compileError("ICMP payload must remain deterministic");
     if (icmp_ipv4_total_bytes != 44) @compileError("ICMP IPv4 packet must remain 44 bytes");
     if (icmp_ethernet_frame_bytes != 58) @compileError("ICMP Ethernet payload must fit one padded frame");

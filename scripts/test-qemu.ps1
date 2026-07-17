@@ -655,6 +655,9 @@ if ($Network) {
     if (-not $output.Contains('e1000e RX ring recycled: descriptors 9, wraps 1, head 1, tail 0')) {
         throw 'The RX descriptor ring was not recycled through descriptor 7 and wrapped to descriptor 0.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e completion queues active: TX 10/10, RX 9/9, high-water [1-9][0-9]*/[1-9][0-9]*, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
+        throw 'The e1000e ISR-to-kernel completion queues did not deliver every TX/RX descriptor exactly once.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
