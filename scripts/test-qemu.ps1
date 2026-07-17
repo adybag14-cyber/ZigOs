@@ -131,6 +131,12 @@ if (([regex]::Matches($output, 'Kernel stack: 0x')).Count -lt 2) {
 if (-not $output.Contains('AP trampoline reservation: 0x')) {
     throw 'The low-memory AP trampoline reservation marker was not observed.'
 }
+if (-not [regex]::IsMatch($output, 'Memory layout normalized: [1-9][0-9]* descriptors -> [1-9][0-9]* regions; usable [1-9][0-9]* bytes in [1-9][0-9]* descriptors, reclaimable [0-9]+, runtime [0-9]+, ACPI NVS [0-9]+, MMIO [0-9]+, reserved [0-9]+ bytes')) {
+    throw 'The normalized UEFI memory-layout report was not observed.'
+}
+if (-not $output.Contains('Protected memory verified: kernel code, kernel stack, UEFI memory map, AP trampoline, ACPI RSDP and framebuffer excluded from allocator')) {
+    throw 'The protected-range exclusion report was not observed.'
+}
 if (-not $output.Contains('Physical frame allocator verified:')) {
     throw 'The physical frame allocator verification marker was not observed.'
 }

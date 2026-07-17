@@ -24,7 +24,7 @@
 
 ## 0.3 - Kernel foundations
 
-- [ ] Parse retained memory descriptors into usable and reserved regions
+- [x] Parse retained memory descriptors into usable and reserved regions
 - [x] Physical frame allocator
 - [x] ZigOs-owned x86-64 page tables
 - [x] Identity map required bootstrap firmware, ACPI, stack, and framebuffer regions

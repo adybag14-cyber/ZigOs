@@ -24,6 +24,7 @@ const hpet = @import("hpet.zig");
 
 const cc = std.os.uefi.cc;
 
+var normalized_memory_layout: memory.Layout = undefined;
 var kernel_heap: heap.Heap = undefined;
 var kernel_heap_ready: bool = false;
 
@@ -55,7 +56,10 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWriteHex64(info.memory_map.highest_physical_address);
     debugWrite("\r\n");
 
-    var frame_allocator = memory.FrameAllocator.init(info.memory_map);
+    normalized_memory_layout = memory.parseLayout(info.memory_map) orelse
+        memoryLayoutFailure("retained UEFI descriptors could not be normalized");
+    verifyMemoryLayout(info, &normalized_memory_layout);
+    var frame_allocator = memory.FrameAllocator.init(&normalized_memory_layout);
     verifyFrameAllocator(&frame_allocator);
     installPaging(info, &frame_allocator);
     installDescriptorTables(info, &frame_allocator);
@@ -92,6 +96,73 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     }
 
     debugWrite("ZigOs boot sequence complete: kernel foundations and hardware probes passed.\r\n");
+    zigos_halt_forever();
+}
+
+fn verifyMemoryLayout(info: *const boot.BootInfo, layout: *const memory.Layout) void {
+    const expected_usable_bytes = info.memory_map.conventional_pages *| memory.page_size;
+    if (layout.descriptor_count != info.memory_map.descriptor_count or
+        layout.usable_bytes != expected_usable_bytes or
+        layout.highest_address != info.memory_map.highest_physical_address or
+        layout.region_count == 0 or
+        layout.region_count > layout.descriptor_count)
+    {
+        memoryLayoutFailure("normalized totals do not match the retained UEFI map");
+    }
+
+    requireNotUsable(layout, "kernel code", @intFromPtr(&enter), 1);
+    requireNotUsable(layout, "kernel stack", info.kernel_stack.base, info.kernel_stack.size);
+    requireNotUsable(
+        layout,
+        "UEFI memory map",
+        info.memory_map.address,
+        info.memory_map.descriptor_count * info.memory_map.descriptor_size,
+    );
+    requireNotUsable(layout, "AP trampoline", info.ap_trampoline.base, info.ap_trampoline.size);
+    if (info.acpi_rsdp) |address| requireNotUsable(layout, "ACPI RSDP", address, 36);
+    if (info.framebuffer) |framebuffer| {
+        requireNotUsable(layout, "framebuffer", framebuffer.base, framebuffer.size);
+    }
+
+    debugWrite("Memory layout normalized: ");
+    debugWriteUsizeDecimal(layout.descriptor_count);
+    debugWrite(" descriptors -> ");
+    debugWriteUsizeDecimal(layout.region_count);
+    debugWrite(" regions; usable ");
+    debugWriteU64Decimal(layout.usable_bytes);
+    debugWrite(" bytes in ");
+    debugWriteUsizeDecimal(layout.usable_region_count);
+    debugWrite(" descriptors, reclaimable ");
+    debugWriteU64Decimal(layout.reclaimable_bytes);
+    debugWrite(", runtime ");
+    debugWriteU64Decimal(layout.runtime_bytes);
+    debugWrite(", ACPI NVS ");
+    debugWriteU64Decimal(layout.acpi_nvs_bytes);
+    debugWrite(", MMIO ");
+    debugWriteU64Decimal(layout.mmio_bytes);
+    debugWrite(", reserved ");
+    debugWriteU64Decimal(layout.reserved_bytes);
+    debugWrite(" bytes\r\n");
+    debugWrite("Protected memory verified: kernel code, kernel stack, UEFI memory map, AP trampoline, ACPI RSDP and framebuffer excluded from allocator\r\n");
+}
+
+fn requireNotUsable(layout: *const memory.Layout, label: []const u8, base: usize, size: usize) void {
+    if (size == 0 or layout.overlapsUsable(base, size)) {
+        debugWrite("Memory-layout protection failure for ");
+        debugWrite(label);
+        debugWrite(" at 0x");
+        debugWriteHex64(@intCast(base));
+        debugWrite(" + ");
+        debugWriteUsizeDecimal(size);
+        debugWrite(" bytes\r\n");
+        zigos_halt_forever();
+    }
+}
+
+fn memoryLayoutFailure(reason: []const u8) noreturn {
+    debugWrite("Memory-layout normalization failure: ");
+    debugWrite(reason);
+    debugWrite("\r\n");
     zigos_halt_forever();
 }
 
