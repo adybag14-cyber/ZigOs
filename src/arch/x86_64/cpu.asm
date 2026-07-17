@@ -189,6 +189,8 @@ global zigos_read_msr
 global zigos_write_msr
 global zigos_out8
 global zigos_in8
+global zigos_out32
+global zigos_in32
 
 ; Local-APIC spurious vector. Intel specifies that a spurious interrupt does
 ; not require an EOI; return directly to the interrupted context.
@@ -223,6 +225,19 @@ zigos_in8:
     mov dx, cx
     in al, dx
     movzx eax, al
+    ret
+
+; void zigos_out32(u16 port, u32 value)
+zigos_out32:
+    mov eax, edx
+    mov dx, cx
+    out dx, eax
+    ret
+
+; u32 zigos_in32(u16 port)
+zigos_in32:
+    mov dx, cx
+    in eax, dx
     ret
 
 global zigos_isr_apic_timer

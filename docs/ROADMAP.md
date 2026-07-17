@@ -209,3 +209,14 @@
 - [x] USB interactive ownership suppressed when no framebuffer console exists
 - [x] Final boot diagnostics emitted entirely through debugcon and COM1
 - [x] NVMe-only, keyboard-connected, no-VGA full-system QEMU regression
+
+
+## 1.8 - Legacy PCI configuration fallback
+
+- [x] PCI configuration mechanism #1 access through ports `0xCF8` and `0xCFC`
+- [x] 32-bit x86 port-I/O assembly primitives
+- [x] Unified ECAM and legacy configuration access for AHCI, NVMe, and xHCI drivers
+- [x] Automatic fallback when ACPI MCFG is absent or invalid
+- [x] Full 256-bus legacy PCI scan with multifunction-device support
+- [x] i440FX/PIIX machine boot with ACPI MCFG absent
+- [x] NVMe, xHCI, SMP, scheduling, and userspace over legacy PCI configuration

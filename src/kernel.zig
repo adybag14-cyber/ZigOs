@@ -1057,17 +1057,29 @@ fn smpFailure(reason: []const u8) noreturn {
 }
 
 fn enumeratePci(discovery: acpi.Discovery) pci.Inventory {
-    const mcfg_address = discovery.mcfg_address orelse pciFailure("ACPI did not expose an MCFG table");
-    const inventory = pci.enumerate(mcfg_address) orelse
-        pciFailure("MCFG validation or ECAM enumeration failed");
+    const inventory = if (discovery.mcfg_address) |mcfg_address|
+        pci.enumerate(mcfg_address) orelse pci.enumerateLegacy() orelse
+            pciFailure("MCFG/ECAM and legacy PCI configuration both failed")
+    else
+        pci.enumerateLegacy() orelse
+            pciFailure("ACPI omitted MCFG and legacy PCI configuration mechanism #1 was unavailable");
 
-    debugWrite("PCIe ECAM active: MCFG 0x");
-    debugWriteHex64(@intCast(inventory.mcfg_address));
-    debugWrite(", allocations ");
-    debugWriteUsizeDecimal(inventory.allocation_count);
-    debugWrite(", buses scanned ");
-    debugWriteUsizeDecimal(inventory.scanned_bus_count);
-    debugWrite("\r\n");
+    switch (inventory.access_method) {
+        .ecam => {
+            debugWrite("PCIe ECAM active: MCFG 0x");
+            debugWriteHex64(@intCast(inventory.mcfg_address.?));
+            debugWrite(", allocations ");
+            debugWriteUsizeDecimal(inventory.allocation_count);
+            debugWrite(", buses scanned ");
+            debugWriteUsizeDecimal(inventory.scanned_bus_count);
+            debugWrite("\r\n");
+        },
+        .legacy_io => {
+            debugWrite("Legacy PCI configuration active: mechanism #1 ports 0x0CF8/0x0CFC, buses scanned ");
+            debugWriteUsizeDecimal(inventory.scanned_bus_count);
+            debugWrite("\r\n");
+        },
+    }
     debugWrite("PCI inventory: ");
     debugWriteUsizeDecimal(inventory.function_count);
     debugWrite(" functions, ");
@@ -1106,7 +1118,7 @@ fn enumeratePci(discovery: acpi.Discovery) pci.Inventory {
 }
 
 fn pciFailure(reason: []const u8) noreturn {
-    debugWrite("PCIe discovery failure: ");
+    debugWrite("PCI discovery failure: ");
     debugWrite(reason);
     debugWrite("\r\n");
     zigos_halt_forever();

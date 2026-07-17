@@ -4,7 +4,8 @@ param(
     [switch]$NvmeOnly,
     [switch]$NoUsbKeyboard,
     [switch]$UsbMouseOnly,
-    [switch]$NoGraphics
+    [switch]$NoGraphics,
+    [switch]$LegacyPci
 )
 
 $ErrorActionPreference = 'Stop'
@@ -258,8 +259,9 @@ $monitorPort = ([System.Net.IPEndPoint]$monitorListener.LocalEndpoint).Port
 $monitorListener.Stop()
 $monitorEndpoint = "tcp:127.0.0.1:$monitorPort,server=on,wait=off"
 
+$machineType = if ($LegacyPci) { 'pc' } else { 'q35' }
 $arguments = @(
-    '-machine', 'q35',
+    '-machine', $machineType,
     '-m', '256M',
     '-cpu', 'max',
     '-smp', '4',
@@ -288,7 +290,7 @@ if ($NoGraphics) {
     $arguments += @('-vga', 'none')
 }
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -541,8 +543,20 @@ if ($NoGraphics) {
         throw 'The persistent graphical terminal was not initialized before PCI/xHCI discovery.'
     }
 }
-if (-not $output.Contains('PCIe ECAM active:')) {
-    throw 'The PCIe MCFG/ECAM activation marker was not observed.'
+if ($LegacyPci) {
+    if (-not $output.Contains('MCFG not present')) {
+        throw 'The legacy machine unexpectedly exposed an ACPI MCFG table.'
+    }
+    if (-not $output.Contains('Legacy PCI configuration active: mechanism #1 ports 0x0CF8/0x0CFC, buses scanned 256')) {
+        throw 'The legacy PCI configuration-mechanism #1 marker was not observed.'
+    }
+    if ($output.Contains('PCIe ECAM active:')) {
+        throw 'ECAM was unexpectedly selected in legacy PCI mode.'
+    }
+} else {
+    if (-not $output.Contains('PCIe ECAM active:')) {
+        throw 'The PCIe MCFG/ECAM activation marker was not observed.'
+    }
 }
 if (-not $output.Contains('PCI inventory:')) {
     throw 'The PCI function inventory marker was not observed.'
@@ -550,8 +564,14 @@ if (-not $output.Contains('PCI inventory:')) {
 if (-not $output.Contains('PCI function ')) {
     throw 'No enumerated PCI function was printed.'
 }
-if (-not [regex]::IsMatch($output, 'xHCI controller discovered at [0-9A-F]{4}:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], vendor 0x[0-9A-F]{4}, device 0x[0-9A-F]{4}, MMIO 0x[0-9A-F]{16}, sparse identity map 0x[0-9A-F]{16} \+ 2097152 bytes using [12] new table page\(s\)')) {
-    throw 'The PCI xHCI controller and BAR discovery marker was not observed.'
+if ($LegacyPci) {
+    if (-not [regex]::IsMatch($output, 'xHCI controller discovered at 0000:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], vendor 0x[0-9A-F]{4}, device 0x[0-9A-F]{4}, MMIO 0x(?!0000000000000000)[0-9A-F]{16}, sparse identity map 0x[0-9A-F]{16} \+ [1-9][0-9]* bytes using [0-9]+ new table page\(s\)')) {
+        throw 'The legacy-PCI xHCI function and BAR discovery marker was not observed.'
+    }
+} else {
+    if (-not [regex]::IsMatch($output, 'xHCI controller discovered at [0-9A-F]{4}:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], vendor 0x[0-9A-F]{4}, device 0x[0-9A-F]{4}, MMIO 0x[0-9A-F]{16}, sparse identity map 0x[0-9A-F]{16} \+ 2097152 bytes using [12] new table page\(s\)')) {
+        throw 'The PCI xHCI controller and BAR discovery marker was not observed.'
+    }
 }
 if (-not [regex]::IsMatch($output, 'xHCI capabilities: version [0-9]+\.[0-9A-F]{2}, [1-9][0-9]* slots, [1-9][0-9]* interrupters, [1-9][0-9]* ports, (32|64)-bit addressing, (32|64)-byte contexts, doorbells \+0x[0-9A-F]{16}, runtime \+0x[0-9A-F]{16}')) {
     throw 'The xHCI capability-register report was not observed.'
@@ -728,8 +748,14 @@ if (-not [regex]::IsMatch($output, 'NVMe controller active at [0-9A-F]{4}:[0-9A-
 if (-not [regex]::IsMatch($output, 'NVMe capabilities: version [0-9]+\.[0-9]+\.[0-9]+, CAP 0x[0-9A-F]{16}, max queue entries [2-9][0-9]*, doorbell stride [1-9][0-9]*, timeout units [0-9]+')) {
     throw 'The NVMe controller capability-register marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'NVMe MMIO mapping: 0x000000C000000000 \+ 2097152 bytes using 0 new table page\(s\)')) {
-    throw 'The NVMe sparse MMIO mapping marker was not observed.'
+if ($LegacyPci) {
+    if (-not [regex]::IsMatch($output, 'NVMe MMIO mapping: 0x(?!0000000000000000)[0-9A-F]{16} \+ [1-9][0-9]* bytes using [0-9]+ new table page\(s\)')) {
+        throw 'The legacy-PCI NVMe MMIO mapping marker was not observed.'
+    }
+} else {
+    if (-not [regex]::IsMatch($output, 'NVMe MMIO mapping: 0x000000C000000000 \+ 2097152 bytes using 0 new table page\(s\)')) {
+        throw 'The NVMe sparse MMIO mapping marker was not observed.'
+    }
 }
 if (-not [regex]::IsMatch($output, 'NVMe identity: model "[^"]+", serial "ZIGOSNVME", firmware "[^"]+", namespaces [1-9][0-9]*')) {
     throw 'The NVMe Identify Controller result was not observed.'
@@ -787,11 +813,20 @@ if ([Int64]$nvmeFileMatch.Groups[1].Value -ne $builtEfiSize) {
 }
 
 if ($NvmeOnly) {
-    if (-not $output.Contains('AHCI controller active at')) {
-        throw 'The q35 AHCI controller was not enumerated in NVMe-only mode.'
-    }
-    if (-not $output.Contains('AHCI controller has no active SATA devices; continuing with NVMe storage')) {
-        throw 'The empty AHCI controller was not skipped in NVMe-only mode.'
+    if ($LegacyPci) {
+        if (-not $output.Contains('AHCI controller not present; continuing with another storage backend')) {
+            throw 'The legacy machine did not report the expected absence of an AHCI controller.'
+        }
+        if ($output.Contains('AHCI controller active at')) {
+            throw 'An AHCI controller was unexpectedly active on the legacy i440FX machine.'
+        }
+    } else {
+        if (-not $output.Contains('AHCI controller active at')) {
+            throw 'The q35 AHCI controller was not enumerated in NVMe-only mode.'
+        }
+        if (-not $output.Contains('AHCI controller has no active SATA devices; continuing with NVMe storage')) {
+            throw 'The empty AHCI controller was not skipped in NVMe-only mode.'
+        }
     }
     if ($output.Contains('ATA IDENTIFY completed on port')) {
         throw 'ATA IDENTIFY unexpectedly ran without a SATA disk in NVMe-only mode.'

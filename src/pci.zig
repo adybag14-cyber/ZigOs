@@ -1,6 +1,11 @@
 const std = @import("std");
 const memory = @import("memory.zig");
 
+const cc = std.os.uefi.cc;
+const configuration_address_port: u16 = 0x0CF8;
+const configuration_data_port: u16 = 0x0CFC;
+const configuration_enable: u32 = 1 << 31;
+
 const SdtHeader = extern struct {
     signature: [4]u8,
     length: u32 align(1),
@@ -26,8 +31,14 @@ const McfgAllocation = extern struct {
     reserved: u32 align(1),
 };
 
+pub const AccessMethod = enum {
+    ecam,
+    legacy_io,
+};
+
 pub const Function = struct {
     configuration_address: usize,
+    access_method: AccessMethod,
     segment: u16,
     bus: u8,
     device: u8,
@@ -44,7 +55,8 @@ pub const Function = struct {
 pub const maximum_retained_functions: usize = 64;
 
 pub const Inventory = struct {
-    mcfg_address: usize,
+    access_method: AccessMethod,
+    mcfg_address: ?usize,
     allocation_count: usize,
     scanned_bus_count: usize,
     function_count: usize,
@@ -52,6 +64,9 @@ pub const Inventory = struct {
     bridge_count: usize,
     functions: [maximum_retained_functions]Function,
 };
+
+extern fn zigos_out32(port: u16, value: u32) callconv(cc) void;
+extern fn zigos_in32(port: u16) callconv(cc) u32;
 
 pub fn enumerate(mcfg_address: usize) ?Inventory {
     if (!rangeMapped(mcfg_address, @sizeOf(McfgHeader))) return null;
@@ -67,16 +82,7 @@ pub fn enumerate(mcfg_address: usize) ?Inventory {
     const allocation_count = allocation_bytes / @sizeOf(McfgAllocation);
     if (allocation_count == 0) return null;
 
-    var inventory = Inventory{
-        .mcfg_address = mcfg_address,
-        .allocation_count = allocation_count,
-        .scanned_bus_count = 0,
-        .function_count = 0,
-        .retained_count = 0,
-        .bridge_count = 0,
-        .functions = undefined,
-    };
-
+    var inventory = emptyInventory(.ecam, mcfg_address, allocation_count);
     const allocations_address = mcfg_address + @sizeOf(McfgHeader);
     var allocation_index: usize = 0;
     while (allocation_index < allocation_count) : (allocation_index += 1) {
@@ -87,35 +93,76 @@ pub fn enumerate(mcfg_address: usize) ?Inventory {
         var bus_value: u16 = allocation.start_bus;
         while (bus_value <= allocation.end_bus) : (bus_value += 1) {
             inventory.scanned_bus_count += 1;
-            const bus: u8 = @intCast(bus_value);
-            enumerateBus(&inventory, allocation.*, bus);
+            enumerateEcamBus(&inventory, allocation.*, @intCast(bus_value));
         }
     }
-
     return inventory;
 }
 
-fn enumerateBus(inventory: *Inventory, allocation: McfgAllocation, bus: u8) void {
+pub fn enumerateLegacy() ?Inventory {
+    if (!legacyMechanismAvailable()) return null;
+    var inventory = emptyInventory(.legacy_io, null, 0);
+    var bus_value: u16 = 0;
+    while (bus_value <= std.math.maxInt(u8)) : (bus_value += 1) {
+        inventory.scanned_bus_count += 1;
+        enumerateLegacyBus(&inventory, @intCast(bus_value));
+    }
+    return inventory;
+}
+
+fn emptyInventory(method: AccessMethod, mcfg_address: ?usize, allocation_count: usize) Inventory {
+    return .{
+        .access_method = method,
+        .mcfg_address = mcfg_address,
+        .allocation_count = allocation_count,
+        .scanned_bus_count = 0,
+        .function_count = 0,
+        .retained_count = 0,
+        .bridge_count = 0,
+        .functions = undefined,
+    };
+}
+
+fn enumerateEcamBus(inventory: *Inventory, allocation: McfgAllocation, bus: u8) void {
     var device: u8 = 0;
     while (device < 32) : (device += 1) {
-        const function_zero_address = functionAddress(allocation, bus, device, 0);
-        const vendor_zero = read16(function_zero_address, 0x00);
-        if (vendor_zero == 0xFFFF) continue;
-
-        retainFunction(inventory, allocation.segment_group, bus, device, 0, function_zero_address);
-        const header_type = read8(function_zero_address, 0x0E);
-        if ((header_type & 0x80) == 0) continue;
+        const address = functionAddress(allocation, bus, device, 0);
+        if (mmioRead16(address, 0x00) == 0xFFFF) continue;
+        retainEcamFunction(inventory, allocation.segment_group, bus, device, 0, address);
+        if ((mmioRead8(address, 0x0E) & 0x80) == 0) continue;
 
         var function: u8 = 1;
         while (function < 8) : (function += 1) {
-            const address = functionAddress(allocation, bus, device, function);
-            if (read16(address, 0x00) == 0xFFFF) continue;
-            retainFunction(inventory, allocation.segment_group, bus, device, function, address);
+            const function_address = functionAddress(allocation, bus, device, function);
+            if (mmioRead16(function_address, 0x00) == 0xFFFF) continue;
+            retainEcamFunction(
+                inventory,
+                allocation.segment_group,
+                bus,
+                device,
+                function,
+                function_address,
+            );
         }
     }
 }
 
-fn retainFunction(
+fn enumerateLegacyBus(inventory: *Inventory, bus: u8) void {
+    var device: u8 = 0;
+    while (device < 32) : (device += 1) {
+        if (legacyRead16(bus, device, 0, 0x00) == 0xFFFF) continue;
+        retainLegacyFunction(inventory, bus, device, 0);
+        if ((legacyRead8(bus, device, 0, 0x0E) & 0x80) == 0) continue;
+
+        var function: u8 = 1;
+        while (function < 8) : (function += 1) {
+            if (legacyRead16(bus, device, function, 0x00) == 0xFFFF) continue;
+            retainLegacyFunction(inventory, bus, device, function);
+        }
+    }
+}
+
+fn retainEcamFunction(
     inventory: *Inventory,
     segment: u16,
     bus: u8,
@@ -123,25 +170,47 @@ fn retainFunction(
     function: u8,
     address: usize,
 ) void {
-    const class_code = read8(address, 0x0B);
-    const subclass = read8(address, 0x0A);
-    if (class_code == 0x06 and subclass == 0x04) inventory.bridge_count += 1;
+    const retained = Function{
+        .configuration_address = address,
+        .access_method = .ecam,
+        .segment = segment,
+        .bus = bus,
+        .device = device,
+        .function = function,
+        .vendor_id = mmioRead16(address, 0x00),
+        .device_id = mmioRead16(address, 0x02),
+        .class_code = mmioRead8(address, 0x0B),
+        .subclass = mmioRead8(address, 0x0A),
+        .programming_interface = mmioRead8(address, 0x09),
+        .revision = mmioRead8(address, 0x08),
+        .header_type = mmioRead8(address, 0x0E),
+    };
+    retainFunction(inventory, retained);
+}
 
+fn retainLegacyFunction(inventory: *Inventory, bus: u8, device: u8, function: u8) void {
+    const retained = Function{
+        .configuration_address = 0,
+        .access_method = .legacy_io,
+        .segment = 0,
+        .bus = bus,
+        .device = device,
+        .function = function,
+        .vendor_id = legacyRead16(bus, device, function, 0x00),
+        .device_id = legacyRead16(bus, device, function, 0x02),
+        .class_code = legacyRead8(bus, device, function, 0x0B),
+        .subclass = legacyRead8(bus, device, function, 0x0A),
+        .programming_interface = legacyRead8(bus, device, function, 0x09),
+        .revision = legacyRead8(bus, device, function, 0x08),
+        .header_type = legacyRead8(bus, device, function, 0x0E),
+    };
+    retainFunction(inventory, retained);
+}
+
+fn retainFunction(inventory: *Inventory, retained: Function) void {
+    if (retained.class_code == 0x06 and retained.subclass == 0x04) inventory.bridge_count += 1;
     if (inventory.retained_count < inventory.functions.len) {
-        inventory.functions[inventory.retained_count] = .{
-            .configuration_address = address,
-            .segment = segment,
-            .bus = bus,
-            .device = device,
-            .function = function,
-            .vendor_id = read16(address, 0x00),
-            .device_id = read16(address, 0x02),
-            .class_code = class_code,
-            .subclass = subclass,
-            .programming_interface = read8(address, 0x09),
-            .revision = read8(address, 0x08),
-            .header_type = read8(address, 0x0E),
-        };
+        inventory.functions[inventory.retained_count] = retained;
         inventory.retained_count += 1;
     }
     inventory.function_count += 1;
@@ -151,7 +220,6 @@ fn validateAllocation(allocation: McfgAllocation) bool {
     if (allocation.start_bus > allocation.end_bus) return false;
     if ((allocation.base_address & 0xFFFFF) != 0) return false;
     if (allocation.base_address >= memory.four_gib) return false;
-
     const bus_count = @as(u64, allocation.end_bus) - allocation.start_bus + 1;
     const byte_count = bus_count << 20;
     return byte_count <= memory.four_gib - allocation.base_address;
@@ -164,14 +232,58 @@ fn functionAddress(allocation: McfgAllocation, bus: u8, device: u8, function: u8
     return @intCast(allocation.base_address + bus_offset + device_offset + function_offset);
 }
 
-fn read8(base: usize, offset: usize) u8 {
+fn legacyMechanismAvailable() bool {
+    const original = zigos_in32(configuration_address_port);
+    zigos_out32(configuration_address_port, configuration_enable);
+    const verified = zigos_in32(configuration_address_port);
+    zigos_out32(configuration_address_port, original);
+    return verified == configuration_enable;
+}
+
+fn legacyAddress(bus: u8, device: u8, function: u8, offset: usize) u32 {
+    return configuration_enable |
+        (@as(u32, bus) << 16) |
+        (@as(u32, device) << 11) |
+        (@as(u32, function) << 8) |
+        @as(u32, @intCast(offset & 0xFC));
+}
+
+fn legacyRead32(bus: u8, device: u8, function: u8, offset: usize) u32 {
+    zigos_out32(configuration_address_port, legacyAddress(bus, device, function, offset));
+    return zigos_in32(configuration_data_port);
+}
+
+fn legacyRead16(bus: u8, device: u8, function: u8, offset: usize) u16 {
+    const shift: u5 = @intCast((offset & 0x2) * 8);
+    return @truncate(legacyRead32(bus, device, function, offset) >> shift);
+}
+
+fn legacyRead8(bus: u8, device: u8, function: u8, offset: usize) u8 {
+    const shift: u5 = @intCast((offset & 0x3) * 8);
+    return @truncate(legacyRead32(bus, device, function, offset) >> shift);
+}
+
+fn legacyWrite16(function: Function, offset: usize, value: u16) void {
+    if ((offset & 0x3) == 0x3) return;
+    const shift: u5 = @intCast((offset & 0x2) * 8);
+    const mask = @as(u32, 0xFFFF) << shift;
+    const current = legacyRead32(function.bus, function.device, function.function, offset);
+    const updated = (current & ~mask) | (@as(u32, value) << shift);
+    zigos_out32(
+        configuration_address_port,
+        legacyAddress(function.bus, function.device, function.function, offset),
+    );
+    zigos_out32(configuration_data_port, updated);
+}
+
+fn mmioRead8(base: usize, offset: usize) u8 {
     const register: *volatile u8 = @ptrFromInt(base + offset);
     return register.*;
 }
 
-fn read16(base: usize, offset: usize) u16 {
-    const low = @as(u16, read8(base, offset));
-    const high = @as(u16, read8(base, offset + 1));
+fn mmioRead16(base: usize, offset: usize) u16 {
+    const low = @as(u16, mmioRead8(base, offset));
+    const high = @as(u16, mmioRead8(base, offset + 1));
     return low | (high << 8);
 }
 
@@ -187,28 +299,41 @@ fn checksumValid(address: usize, length: usize) bool {
     return sum == 0;
 }
 
-comptime {
-    if (@sizeOf(McfgHeader) != 44) @compileError("ACPI MCFG header must be 44 bytes");
-    if (@sizeOf(McfgAllocation) != 16) @compileError("ACPI MCFG allocation must be 16 bytes");
-}
-
 pub fn readConfiguration8(function: Function, offset: usize) u8 {
-    return read8(function.configuration_address, offset);
+    return switch (function.access_method) {
+        .ecam => mmioRead8(function.configuration_address, offset),
+        .legacy_io => legacyRead8(function.bus, function.device, function.function, offset),
+    };
 }
 
 pub fn readConfiguration16(function: Function, offset: usize) u16 {
-    return read16(function.configuration_address, offset);
+    return switch (function.access_method) {
+        .ecam => mmioRead16(function.configuration_address, offset),
+        .legacy_io => legacyRead16(function.bus, function.device, function.function, offset),
+    };
 }
 
 pub fn readConfiguration32(function: Function, offset: usize) u32 {
-    const low = @as(u32, read16(function.configuration_address, offset));
-    const high = @as(u32, read16(function.configuration_address, offset + 2));
-    return low | (high << 16);
+    return switch (function.access_method) {
+        .ecam => @as(u32, mmioRead16(function.configuration_address, offset)) |
+            (@as(u32, mmioRead16(function.configuration_address, offset + 2)) << 16),
+        .legacy_io => legacyRead32(function.bus, function.device, function.function, offset),
+    };
 }
 
 pub fn writeConfiguration16(function: Function, offset: usize, value: u16) void {
-    const low: *volatile u8 = @ptrFromInt(function.configuration_address + offset);
-    const high: *volatile u8 = @ptrFromInt(function.configuration_address + offset + 1);
-    low.* = @truncate(value);
-    high.* = @truncate(value >> 8);
+    switch (function.access_method) {
+        .ecam => {
+            const low: *volatile u8 = @ptrFromInt(function.configuration_address + offset);
+            const high: *volatile u8 = @ptrFromInt(function.configuration_address + offset + 1);
+            low.* = @truncate(value);
+            high.* = @truncate(value >> 8);
+        },
+        .legacy_io => legacyWrite16(function, offset, value),
+    }
+}
+
+comptime {
+    if (@sizeOf(McfgHeader) != 44) @compileError("ACPI MCFG header must be 44 bytes");
+    if (@sizeOf(McfgAllocation) != 16) @compileError("ACPI MCFG allocation must be 16 bytes");
 }
