@@ -1450,65 +1450,89 @@ fn inspectE1000e(
 
     const target_apic_id = interrupt_target orelse
         networkFailure("no routable online CPU was available for MSI-X");
-    const arp = e1000e.initializeAndExchangeArp(
+    const network = e1000e.initializeAndTestNetwork(
         &controller,
         allocator,
         target_apic_id,
-    ) orelse networkFailure("reset, DMA rings, MSI-X, transmit, or ARP receive validation failed");
+    ) orelse networkFailure("reset, DMA rings, MSI-X, ARP, or ICMP validation failed");
 
     debugWrite("e1000e rings active: RX 0x");
-    debugWriteHex64(arp.rx_ring_address);
+    debugWriteHex64(network.rx_ring_address);
     debugWrite(", TX 0x");
-    debugWriteHex64(arp.tx_ring_address);
+    debugWriteHex64(network.tx_ring_address);
     debugWrite(", descriptors ");
-    debugWriteU64Decimal(arp.descriptor_count);
+    debugWriteU64Decimal(network.descriptor_count);
     debugWrite(", TX buffer 0x");
-    debugWriteHex64(arp.tx_buffer_address);
+    debugWriteHex64(network.tx_buffer_address);
     debugWrite(", RX buffer 0x");
-    debugWriteHex64(arp.rx_buffer_address);
+    debugWriteHex64(network.rx_buffer_address);
     debugWrite("\r\n");
 
     debugWrite("e1000e MSI-X active: capability +0x");
-    debugWriteHex8(arp.msix_capability_offset);
+    debugWriteHex8(network.msix_capability_offset);
     debugWrite(", table entry 0 at 0x");
-    debugWriteHex64(arp.msix_table_address);
+    debugWriteHex64(network.msix_table_address);
     debugWrite(", vectors ");
-    debugWriteU64Decimal(arp.msix_vector_count);
+    debugWriteU64Decimal(network.msix_vector_count);
     debugWrite(", vector 0x");
     debugWriteHex8(e1000e.interrupt_vector);
     debugWrite(", target APIC ");
-    debugWriteU64Decimal(arp.interrupt_target_apic_id);
+    debugWriteU64Decimal(network.interrupt_target_apic_id);
     debugWrite(", control 0x");
-    debugWriteHex16(arp.msix_control);
+    debugWriteHex16(network.msix_control);
     debugWrite(", mapping pages ");
-    debugWriteU64Decimal(arp.msix_mapping_table_pages);
+    debugWriteU64Decimal(network.msix_mapping_table_pages);
     debugWrite("\r\n");
 
     debugWrite("e1000e ARP request transmitted: 10.0.2.15 -> 10.0.2.2, ");
-    debugWriteU64Decimal(arp.transmitted_length);
+    debugWriteU64Decimal(network.transmitted_length);
     debugWrite(" bytes, TX interrupts ");
-    debugWriteU64Decimal(arp.tx_interrupt_count);
+    debugWriteU64Decimal(network.tx_interrupt_count);
     debugWrite(", cause 0x");
-    debugWriteHex64(arp.tx_interrupt_cause);
+    debugWriteHex64(network.tx_interrupt_cause);
     debugWrite("\r\n");
 
     debugWrite("e1000e ARP reply received: gateway MAC ");
-    for (arp.gateway_mac_address, 0..) |octet, index| {
+    for (network.gateway_mac_address, 0..) |octet, index| {
         if (index != 0) debugWrite(":");
         debugWriteHex8(octet);
     }
     debugWrite(", opcode ");
-    debugWriteU64Decimal(arp.arp_opcode);
+    debugWriteU64Decimal(network.arp_opcode);
     debugWrite(", sender ");
-    debugWriteIpv4(arp.sender_ipv4);
+    debugWriteIpv4(network.sender_ipv4);
     debugWrite(", target ");
-    debugWriteIpv4(arp.target_ipv4);
+    debugWriteIpv4(network.target_ipv4);
     debugWrite(", ");
-    debugWriteU64Decimal(arp.received_length);
+    debugWriteU64Decimal(network.received_length);
     debugWrite(" bytes, RX interrupts ");
-    debugWriteU64Decimal(arp.rx_interrupt_count);
+    debugWriteU64Decimal(network.rx_interrupt_count);
     debugWrite(", cause 0x");
-    debugWriteHex64(arp.rx_interrupt_cause);
+    debugWriteHex64(network.rx_interrupt_cause);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e ICMP echo request transmitted: 10.0.2.15 -> 10.0.2.2, ");
+    debugWriteU64Decimal(network.icmp_transmitted_length);
+    debugWrite(" bytes, identifier 0x");
+    debugWriteHex16(network.icmp_identifier);
+    debugWrite(", sequence ");
+    debugWriteU64Decimal(network.icmp_sequence);
+    debugWrite(", TX interrupts ");
+    debugWriteU64Decimal(network.icmp_tx_interrupt_count);
+    debugWrite(", cause 0x");
+    debugWriteHex64(network.icmp_tx_interrupt_cause);
+    debugWrite("\r\n");
+
+    debugWrite("e1000e ICMP echo reply received: 10.0.2.2 -> 10.0.2.15, ");
+    debugWriteU64Decimal(network.icmp_received_length);
+    debugWrite(" bytes, TTL ");
+    debugWriteU64Decimal(network.icmp_reply_ttl);
+    debugWrite(", payload ");
+    debugWriteU64Decimal(network.icmp_payload_length);
+    debugWrite(" bytes, RX interrupts ");
+    debugWriteU64Decimal(network.icmp_rx_interrupt_count);
+    debugWrite(", cause 0x");
+    debugWriteHex64(network.icmp_rx_interrupt_cause);
     debugWrite("\r\n");
     return true;
 }

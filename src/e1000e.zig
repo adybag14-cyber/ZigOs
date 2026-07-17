@@ -71,10 +71,22 @@ const ring_bytes: u32 = ring_descriptor_count * @sizeOf(RxDescriptor);
 const ethernet_minimum_frame_bytes: usize = 60;
 const arp_payload_bytes: usize = 42;
 const ether_type_arp: u16 = 0x0806;
+const ether_type_ipv4: u16 = 0x0800;
 const arp_hardware_ethernet: u16 = 1;
-const arp_protocol_ipv4: u16 = 0x0800;
+const arp_protocol_ipv4: u16 = ether_type_ipv4;
 const arp_request: u16 = 1;
 const arp_reply: u16 = 2;
+const ipv4_header_bytes: usize = 20;
+const ipv4_protocol_icmp: u8 = 1;
+const ipv4_dont_fragment: u16 = 1 << 14;
+const icmp_echo_reply: u8 = 0;
+const icmp_echo_request: u8 = 8;
+const icmp_header_bytes: usize = 8;
+const icmp_identifier: u16 = 0x5A49;
+const icmp_sequence: u16 = 1;
+const icmp_payload = "ZigOs-ICMP-ECHO!";
+const icmp_ipv4_total_bytes: usize = ipv4_header_bytes + icmp_header_bytes + icmp_payload.len;
+const icmp_ethernet_frame_bytes: usize = 14 + icmp_ipv4_total_bytes;
 const guest_ipv4 = [4]u8{ 10, 0, 2, 15 };
 const gateway_ipv4 = [4]u8{ 10, 0, 2, 2 };
 
@@ -119,7 +131,7 @@ pub const Controller = struct {
     link_speed_mbps: u16,
 };
 
-pub const ArpResult = struct {
+pub const NetworkResult = struct {
     rx_ring_address: usize,
     tx_ring_address: usize,
     tx_buffer_address: usize,
@@ -141,6 +153,16 @@ pub const ArpResult = struct {
     arp_opcode: u16,
     sender_ipv4: [4]u8,
     target_ipv4: [4]u8,
+    icmp_transmitted_length: u16,
+    icmp_received_length: u16,
+    icmp_tx_interrupt_count: u64,
+    icmp_rx_interrupt_count: u64,
+    icmp_tx_interrupt_cause: u32,
+    icmp_rx_interrupt_cause: u32,
+    icmp_identifier: u16,
+    icmp_sequence: u16,
+    icmp_reply_ttl: u8,
+    icmp_payload_length: u16,
 };
 
 var active_bar0: usize = 0;
@@ -206,11 +228,11 @@ pub fn inspect(function: pci.Function, allocator: *memory.FrameAllocator) ?Contr
     };
 }
 
-pub fn initializeAndExchangeArp(
+pub fn initializeAndTestNetwork(
     controller: *Controller,
     allocator: *memory.FrameAllocator,
     target_apic_id: u8,
-) ?ArpResult {
+) ?NetworkResult {
     const saved_mac = controller.mac_address;
     disableInterrupts(controller.bar0);
     write32(controller.bar0, rctl_offset, 0);
@@ -301,8 +323,8 @@ pub fn initializeAndExchangeArp(
     write32(controller.bar0, tdt_offset, 1);
     _ = read32(controller.bar0, status_offset);
 
-    if (!waitForTx(tx_descriptors, tx_baseline, target_apic_id)) return null;
-    if (!waitForRx(rx_descriptors, rx_baseline, target_apic_id)) return null;
+    if (!waitForTx(tx_descriptors, 0, tx_baseline, target_apic_id)) return null;
+    if (!waitForRx(rx_descriptors, 0, rx_baseline, target_apic_id)) return null;
     zigos_memory_fence();
 
     const received_length = rx_descriptors[0].length;
@@ -310,6 +332,50 @@ pub fn initializeAndExchangeArp(
     if ((rx_descriptors[0].status & 0x03) != 0x03 or rx_descriptors[0].errors != 0) return null;
     const received = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[0]))[0..received_length];
     const parsed = parseArpReply(received, controller.mac_address) orelse return null;
+    const arp_tx_interrupt_count = txInterruptCount() - tx_baseline;
+    const arp_rx_interrupt_count = rxInterruptCount() - rx_baseline;
+    const arp_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire);
+    const arp_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire);
+
+    @memset(tx_buffer, 0);
+    buildIcmpEchoRequest(
+        tx_buffer[0..ethernet_minimum_frame_bytes],
+        controller.mac_address,
+        parsed.gateway_mac_address,
+    );
+    tx_descriptors[1] = .{
+        .buffer_address = tx_buffer_address,
+        .length = ethernet_minimum_frame_bytes,
+        .checksum_offset = 0,
+        .command = 0x0B,
+        .status = 0,
+        .checksum_start = 0,
+        .special = 0,
+    };
+    zigos_memory_fence();
+
+    const icmp_tx_baseline = txInterruptCount();
+    const icmp_rx_baseline = rxInterruptCount();
+    write32(controller.bar0, tdt_offset, 2);
+    _ = read32(controller.bar0, status_offset);
+
+    if (!waitForTx(tx_descriptors, 1, icmp_tx_baseline, target_apic_id)) return null;
+    if (!waitForRx(rx_descriptors, 1, icmp_rx_baseline, target_apic_id)) return null;
+    zigos_memory_fence();
+
+    const icmp_received_length = rx_descriptors[1].length;
+    if (icmp_received_length < 14 + ipv4_header_bytes + icmp_header_bytes or
+        icmp_received_length > memory.page_size)
+    {
+        return null;
+    }
+    if ((rx_descriptors[1].status & 0x03) != 0x03 or rx_descriptors[1].errors != 0) return null;
+    const icmp_received = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[1]))[0..icmp_received_length];
+    const icmp = parseIcmpEchoReply(
+        icmp_received,
+        controller.mac_address,
+        parsed.gateway_mac_address,
+    ) orelse return null;
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -323,16 +389,26 @@ pub fn initializeAndExchangeArp(
         .msix_vector_count = msix.vector_count,
         .msix_mapping_table_pages = msix.mapping_table_pages,
         .interrupt_target_apic_id = target_apic_id,
-        .tx_interrupt_count = txInterruptCount() - tx_baseline,
-        .rx_interrupt_count = rxInterruptCount() - rx_baseline,
-        .tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire),
-        .rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire),
+        .tx_interrupt_count = arp_tx_interrupt_count,
+        .rx_interrupt_count = arp_rx_interrupt_count,
+        .tx_interrupt_cause = arp_tx_interrupt_cause,
+        .rx_interrupt_cause = arp_rx_interrupt_cause,
         .transmitted_length = ethernet_minimum_frame_bytes,
         .received_length = received_length,
         .gateway_mac_address = parsed.gateway_mac_address,
         .arp_opcode = parsed.opcode,
         .sender_ipv4 = parsed.sender_ipv4,
         .target_ipv4 = parsed.target_ipv4,
+        .icmp_transmitted_length = ethernet_minimum_frame_bytes,
+        .icmp_received_length = icmp_received_length,
+        .icmp_tx_interrupt_count = txInterruptCount() - icmp_tx_baseline,
+        .icmp_rx_interrupt_count = rxInterruptCount() - icmp_rx_baseline,
+        .icmp_tx_interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire),
+        .icmp_rx_interrupt_cause = @atomicLoad(u32, &last_rx_cause, .acquire),
+        .icmp_identifier = icmp.identifier,
+        .icmp_sequence = icmp.sequence,
+        .icmp_reply_ttl = icmp.ttl,
+        .icmp_payload_length = icmp.payload_length,
     };
 }
 
@@ -430,28 +506,28 @@ fn programTransmitRing(bar0: usize, ring_address: usize) void {
     _ = read32(bar0, status_offset);
 }
 
-fn waitForTx(descriptors: [*]volatile TxDescriptor, baseline: u64, target_apic_id: u8) bool {
+fn waitForTx(descriptors: [*]volatile TxDescriptor, descriptor_index: usize, baseline: u64, target_apic_id: u8) bool {
     const local_target = apic.currentId() == target_apic_id;
     if (local_target) zigos_enable_interrupts();
     var iteration: usize = 0;
     while (iteration < maximum_poll_iterations) : (iteration += 1) {
-        if (txInterruptCount() != baseline and (descriptors[0].status & 1) != 0) break;
+        if (txInterruptCount() != baseline and (descriptors[descriptor_index].status & 1) != 0) break;
         zigos_cpu_relax();
     }
     if (local_target) zigos_disable_interrupts();
-    return txInterruptCount() != baseline and (descriptors[0].status & 1) != 0;
+    return txInterruptCount() != baseline and (descriptors[descriptor_index].status & 1) != 0;
 }
 
-fn waitForRx(descriptors: [*]volatile RxDescriptor, baseline: u64, target_apic_id: u8) bool {
+fn waitForRx(descriptors: [*]volatile RxDescriptor, descriptor_index: usize, baseline: u64, target_apic_id: u8) bool {
     const local_target = apic.currentId() == target_apic_id;
     if (local_target) zigos_enable_interrupts();
     var iteration: usize = 0;
     while (iteration < maximum_poll_iterations) : (iteration += 1) {
-        if (rxInterruptCount() != baseline and (descriptors[0].status & 1) != 0) break;
+        if (rxInterruptCount() != baseline and (descriptors[descriptor_index].status & 1) != 0) break;
         zigos_cpu_relax();
     }
     if (local_target) zigos_disable_interrupts();
-    return rxInterruptCount() != baseline and (descriptors[0].status & 1) != 0;
+    return rxInterruptCount() != baseline and (descriptors[descriptor_index].status & 1) != 0;
 }
 
 const ParsedArp = struct {
@@ -507,6 +583,108 @@ fn buildArpRequest(frame: []u8, local_mac: [6]u8) void {
     @memcpy(frame[28..32], &guest_ipv4);
     @memset(frame[32..38], 0);
     @memcpy(frame[38..42], &gateway_ipv4);
+}
+
+const ParsedIcmp = struct {
+    identifier: u16,
+    sequence: u16,
+    ttl: u8,
+    payload_length: u16,
+};
+
+fn buildIcmpEchoRequest(
+    frame: []u8,
+    local_mac: [6]u8,
+    gateway_mac: [6]u8,
+) void {
+    @memset(frame, 0);
+    @memcpy(frame[0..6], &gateway_mac);
+    @memcpy(frame[6..12], &local_mac);
+    writeNetwork16(frame, 12, ether_type_ipv4);
+
+    const ip_offset: usize = 14;
+    frame[ip_offset] = 0x45;
+    frame[ip_offset + 1] = 0;
+    writeNetwork16(frame, ip_offset + 2, icmp_ipv4_total_bytes);
+    writeNetwork16(frame, ip_offset + 4, icmp_identifier);
+    writeNetwork16(frame, ip_offset + 6, ipv4_dont_fragment);
+    frame[ip_offset + 8] = 64;
+    frame[ip_offset + 9] = ipv4_protocol_icmp;
+    writeNetwork16(frame, ip_offset + 10, 0);
+    @memcpy(frame[ip_offset + 12 .. ip_offset + 16], &guest_ipv4);
+    @memcpy(frame[ip_offset + 16 .. ip_offset + 20], &gateway_ipv4);
+    const ip_checksum = internetChecksum(frame[ip_offset .. ip_offset + ipv4_header_bytes]);
+    writeNetwork16(frame, ip_offset + 10, ip_checksum);
+
+    const icmp_offset = ip_offset + ipv4_header_bytes;
+    frame[icmp_offset] = icmp_echo_request;
+    frame[icmp_offset + 1] = 0;
+    writeNetwork16(frame, icmp_offset + 2, 0);
+    writeNetwork16(frame, icmp_offset + 4, icmp_identifier);
+    writeNetwork16(frame, icmp_offset + 6, icmp_sequence);
+    @memcpy(frame[icmp_offset + icmp_header_bytes .. icmp_offset + icmp_header_bytes + icmp_payload.len], icmp_payload);
+    const icmp_checksum = internetChecksum(frame[icmp_offset .. icmp_offset + icmp_header_bytes + icmp_payload.len]);
+    writeNetwork16(frame, icmp_offset + 2, icmp_checksum);
+}
+
+fn parseIcmpEchoReply(
+    frame: []const u8,
+    local_mac: [6]u8,
+    gateway_mac: [6]u8,
+) ?ParsedIcmp {
+    if (frame.len < 14 + ipv4_header_bytes + icmp_header_bytes) return null;
+    if (!std.mem.eql(u8, frame[0..6], &local_mac) or
+        !std.mem.eql(u8, frame[6..12], &gateway_mac) or
+        readNetwork16(frame, 12) != ether_type_ipv4)
+    {
+        return null;
+    }
+
+    const ip_offset: usize = 14;
+    if ((frame[ip_offset] >> 4) != 4) return null;
+    const ihl_bytes: usize = @as(usize, frame[ip_offset] & 0x0F) * 4;
+    if (ihl_bytes < ipv4_header_bytes or ip_offset + ihl_bytes > frame.len) return null;
+    const total_length: usize = readNetwork16(frame, ip_offset + 2);
+    if (total_length < ihl_bytes + icmp_header_bytes or ip_offset + total_length > frame.len) return null;
+    if (frame[ip_offset + 9] != ipv4_protocol_icmp or frame[ip_offset + 8] == 0) return null;
+    if ((readNetwork16(frame, ip_offset + 6) & 0x1FFF) != 0) return null;
+    if (!std.mem.eql(u8, frame[ip_offset + 12 .. ip_offset + 16], &gateway_ipv4) or
+        !std.mem.eql(u8, frame[ip_offset + 16 .. ip_offset + 20], &guest_ipv4))
+    {
+        return null;
+    }
+    if (internetChecksum(frame[ip_offset .. ip_offset + ihl_bytes]) != 0) return null;
+
+    const icmp_offset = ip_offset + ihl_bytes;
+    const icmp_length = total_length - ihl_bytes;
+    if (frame[icmp_offset] != icmp_echo_reply or frame[icmp_offset + 1] != 0) return null;
+    if (internetChecksum(frame[icmp_offset .. icmp_offset + icmp_length]) != 0) return null;
+    const identifier = readNetwork16(frame, icmp_offset + 4);
+    const sequence = readNetwork16(frame, icmp_offset + 6);
+    if (identifier != icmp_identifier or sequence != icmp_sequence) return null;
+    const payload = frame[icmp_offset + icmp_header_bytes .. icmp_offset + icmp_length];
+    if (!std.mem.eql(u8, payload, icmp_payload)) return null;
+
+    return .{
+        .identifier = identifier,
+        .sequence = sequence,
+        .ttl = frame[ip_offset + 8],
+        .payload_length = @intCast(payload.len),
+    };
+}
+
+fn internetChecksum(bytes: []const u8) u16 {
+    var sum: u32 = 0;
+    var index: usize = 0;
+    while (index + 1 < bytes.len) : (index += 2) {
+        sum += (@as(u32, bytes[index]) << 8) | bytes[index + 1];
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    if (index < bytes.len) {
+        sum += @as(u32, bytes[index]) << 8;
+    }
+    while ((sum >> 16) != 0) sum = (sum & 0xFFFF) + (sum >> 16);
+    return @truncate(~sum);
 }
 
 fn readMacAddress(bar0: usize) ?[6]u8 {
@@ -624,4 +802,7 @@ comptime {
     if (@sizeOf(TxDescriptor) != 16) @compileError("e1000e TX descriptors must be 16 bytes");
     if (@sizeOf(MsixTableEntry) != 16) @compileError("MSI-X table entries must be 16 bytes");
     if (ring_bytes != 128) @compileError("e1000e test rings must be exactly 128 bytes");
+    if (icmp_payload.len != 16) @compileError("ICMP payload must remain deterministic");
+    if (icmp_ipv4_total_bytes != 44) @compileError("ICMP IPv4 packet must remain 44 bytes");
+    if (icmp_ethernet_frame_bytes != 58) @compileError("ICMP Ethernet payload must fit one padded frame");
 }

@@ -610,6 +610,12 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e ARP reply received: gateway MAC ([0-9A-F]{2}:){5}[0-9A-F]{2}, opcode 2, sender 10\.0\.2\.2, target 10\.0\.2\.15, [4-9][0-9] bytes, RX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
         throw 'The e1000e RX ring did not receive and validate the QEMU gateway ARP reply.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e ICMP echo request transmitted: 10\.0\.2\.15 -> 10\.0\.2\.2, 60 bytes, identifier 0x5A49, sequence 1, TX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
+        throw 'The e1000e IPv4/ICMP echo request did not complete through TX DMA and MSI-X.'
+    }
+    if (-not [regex]::IsMatch($output, 'e1000e ICMP echo reply received: 10\.0\.2\.2 -> 10\.0\.2\.15, [4-9][0-9] bytes, TTL [1-9][0-9]*, payload 16 bytes, RX interrupts [1-9][0-9]*, cause 0x[0-9A-F]{16}')) {
+        throw 'The e1000e RX ring did not validate the IPv4 and ICMP checksums, echo identity, and payload.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

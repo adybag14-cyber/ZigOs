@@ -322,3 +322,12 @@
 - MSI-X table entry 0 targets vector `0x49` on the selected routable CPU; IVAR maps both RXQ0 and TXQ0 to that vector and the ISR records queue-specific causes.
 - A padded Ethernet ARP request advertises `10.0.2.15` and resolves QEMU user networking's `10.0.2.2` gateway.
 - The reply must match the local MAC, ARP opcode 2, sender IPv4 `10.0.2.2`, and target IPv4 `10.0.2.15` after both DMA descriptor writeback and MSI-X delivery.
+
+
+## 3.0 - IPv4 and ICMP echo
+
+- The live e1000e descriptor rings carry a second unicast transaction after ARP resolution without resetting the controller.
+- ZigOs constructs Ethernet II, a 20-byte IPv4 header, and an ICMP Echo Request with deterministic identifier `0x5A49`, sequence `1`, and a 16-byte payload.
+- IPv4 and ICMP Internet checksums are generated in the kernel and independently revalidated across the complete received headers and payload.
+- TX descriptor 1 and RX descriptor 1 require fresh queue-specific MSI-X counter advances before their writebacks are accepted.
+- The QEMU gateway Echo Reply must preserve the identifier, sequence, payload, source/destination IPv4 addresses, and a nonzero TTL.
