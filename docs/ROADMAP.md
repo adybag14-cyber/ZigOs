@@ -174,3 +174,13 @@
 - [x] Fatal storage gate only when neither NVMe nor AHCI is usable
 - [x] NVMe-only QEMU mode with no SATA disk attached
 - [x] Full kernel, USB shell, SMP, scheduler, and userspace regression while NVMe-only
+
+
+## 1.4 - Optional USB input
+
+- [x] Boot continuation when no xHCI controller is present or usable
+- [x] Read-only xHCI port discovery before controller ownership
+- [x] Boot continuation when xHCI has no connected USB keyboard
+- [x] Interactive shell started only when a keyboard is available
+- [x] Keyboard-less startup prompt retained on the framebuffer
+- [x] Combined NVMe-only and keyboard-less full-system QEMU regression

@@ -415,7 +415,6 @@ pub fn inspect(function: pci.Function, allocator: *memory.FrameAllocator) ?Contr
         };
         controller.retained_port_count += 1;
     }
-    if (controller.connected_port_count == 0) return null;
     return controller;
 }
 

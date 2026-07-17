@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [int]$TimeoutSeconds = 30,
-    [switch]$NvmeOnly
+    [switch]$NvmeOnly,
+    [switch]$NoUsbKeyboard
 )
 
 $ErrorActionPreference = 'Stop'
@@ -261,7 +262,6 @@ $arguments = @(
     '-cpu', 'max',
     '-smp', '4',
     '-device', 'qemu-xhci,id=xhci',
-    '-device', 'usb-kbd,bus=xhci.0,port=1',
     '-drive', "file=$nvmePath,if=none,id=nvme0,format=raw,cache=unsafe",
     '-device', 'nvme,drive=nvme0,serial=ZIGOSNVME',
     '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$codePath",
@@ -277,8 +277,11 @@ $arguments = @(
 if (-not $NvmeOnly) {
     $arguments += @('-drive', "format=raw,file=fat:rw:$fatPath")
 }
+if (-not $NoUsbKeyboard) {
+    $arguments += @('-device', 'usb-kbd,bus=xhci.0,port=1')
+}
 
-Write-Host "Booting ZigOs in QEMU with $codeSource (NVMe-only: $NvmeOnly)"
+Write-Host "Booting ZigOs in QEMU with $codeSource (NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
@@ -293,7 +296,7 @@ try {
         Start-Sleep -Milliseconds 25
         if (Test-Path $debugLog) {
             $text = Get-Content $debugLog -Raw -ErrorAction SilentlyContinue
-            if ($text -and -not $keyInjected -and $text.Contains($inputMarker)) {
+            if (-not $NoUsbKeyboard -and $text -and -not $keyInjected -and $text.Contains($inputMarker)) {
                 $client = [System.Net.Sockets.TcpClient]::new()
                 try {
                     $client.Connect('127.0.0.1', $monitorPort)
@@ -310,7 +313,7 @@ try {
                     $client.Dispose()
                 }
             }
-            if ($text -and $keyInjected -and -not $shellInjected -and $text.Contains($shellMarker)) {
+            if (-not $NoUsbKeyboard -and $text -and $keyInjected -and -not $shellInjected -and $text.Contains($shellMarker)) {
                 $client = [System.Net.Sockets.TcpClient]::new()
                 try {
                     $client.Connect('127.0.0.1', $monitorPort)
@@ -533,116 +536,134 @@ if (-not [regex]::IsMatch($output, 'xHCI controller discovered at [0-9A-F]{4}:[0
 if (-not [regex]::IsMatch($output, 'xHCI capabilities: version [0-9]+\.[0-9A-F]{2}, [1-9][0-9]* slots, [1-9][0-9]* interrupters, [1-9][0-9]* ports, (32|64)-bit addressing, (32|64)-byte contexts, doorbells \+0x[0-9A-F]{16}, runtime \+0x[0-9A-F]{16}')) {
     throw 'The xHCI capability-register report was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'USB keyboard attachment visible: [1-9][0-9]* connected xHCI port\(s\); read-only discovery complete')) {
-    throw 'The attached USB keyboard was not visible in any xHCI PORTSC register.'
-}
-if (-not [regex]::IsMatch($output, 'xHCI ownership active: DCBAA 0x[0-9A-F]{16}, command ring 0x[0-9A-F]{16}, event ring 0x[0-9A-F]{16}, ERST 0x[0-9A-F]{16}, page size 4096, scratchpads 0, slots [1-9][0-9]*')) {
-    throw 'The ZigOs-owned xHCI DCBAA/command/event ring installation marker was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'xHCI command completed: Enable Slot, completion 1, slot [1-9][0-9]*, command pointer 0x[0-9A-F]{16}, event cycle 1, controller running, (legacy handoff claimed|no legacy handoff required)')) {
-    throw 'The xHCI Enable Slot command-completion event was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'xHCI port reset complete: port [1-9][0-9]*, speed ID [1-4], PORTSC 0x[0-9A-F]{16}, EP0 max packet (8|64|512), skipped [1-9][0-9]* port-status event\(s\)')) {
-    throw 'The connected xHCI root-hub port reset and EP0 packet-size marker was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'xHCI Address Device completed: slot [1-9][0-9]*, USB address [1-9][0-9]*, slot state [2-9][0-9]*, EP0 state [1-7], completion 1, context size (32|64), device context 0x[0-9A-F]{16}, input context 0x[0-9A-F]{16}, EP0 ring 0x[0-9A-F]{16}')) {
-    throw 'The xHCI Address Device command and device-context verification marker was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'USB device descriptor read: length 18, type 1, USB BCD 0x[0-9A-F]{4}, class 0x[0-9A-F]{2}:0x[0-9A-F]{2}:0x[0-9A-F]{2}, EP0 packet (8|64)')) {
-    throw 'The USB device descriptor control-transfer marker was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'USB identity: vendor 0x(?!0000)[0-9A-F]{4}, product 0x(?!0000)[0-9A-F]{4}, device BCD 0x[0-9A-F]{4}, configurations [1-9][0-9]*, string indexes [0-9]+/[0-9]+/[0-9]+')) {
-    throw 'The USB vendor/product/configuration identity marker was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'xHCI EP0 transfer completed: completion 1, endpoint 1, slot [1-9][0-9]*, residual 0, event TRB 0x[0-9A-F]{16}, buffer 0x[0-9A-F]{16}')) {
-    throw 'The xHCI EP0 Setup/Data/Status transfer-event marker was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'USB configuration descriptor: total [1-9][0-9]* bytes, value [1-9][0-9]*, interfaces [1-9][0-9]*, attributes 0x[0-9A-F]{2}, max power [0-9]+ mA')) {
-    throw 'The complete USB configuration descriptor marker was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'HID boot keyboard interface: number [0-9]+, alternate 0, endpoints [1-9][0-9]*, class 3/1/1, HID BCD 0x[0-9A-F]{4}, report type 0x22, report length [1-9][0-9]*')) {
-    throw 'The boot-keyboard interface and HID descriptor marker was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'HID interrupt endpoint: address 0x8[1-9A-F], attributes 0x[0-9A-F]{2}, max packet [1-9][0-9]*, interval [1-9][0-9]*, completion 1, residual 0')) {
-    throw 'The HID interrupt-IN endpoint descriptor marker was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'USB SET_CONFIGURATION completed: value [1-9][0-9]*, completion 1')) {
-    throw 'The USB SET_CONFIGURATION control transfer was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'xHCI HID endpoint configured: address 0x81, DCI 3, type 7, interval [1-9][0-9]*, max packet 8, max burst 0, max ESIT 8')) {
-    throw 'The boot-keyboard interrupt-IN endpoint context marker was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'xHCI Configure Endpoint completed: completion 1, endpoint state 1, slot context entries 3, input context 0x[0-9A-F]{16}, interrupt ring 0x[0-9A-F]{16}')) {
-    throw 'The xHCI Configure Endpoint command-completion marker was not observed.'
-}
-if (-not $keyInjected) {
-    throw 'The QEMU HMP harness never injected the A key after the HID arm marker.'
-}
-if (-not [regex]::IsMatch($output, 'HID boot protocol ready: SET_PROTOCOL completion 1, SET_IDLE completion 1')) {
-    throw 'The HID boot-protocol and idle-rate control transfers were not observed.'
-}
-if (-not [regex]::IsMatch($output, 'HID input transfer armed: slot [1-9][0-9]*, endpoint 3, length 8, TRB 0x[0-9A-F]{16}, buffer 0x[0-9A-F]{16}; waiting for QEMU key injection')) {
-    throw 'The xHCI interrupt-IN keyboard transfer was not armed.'
-}
-if (-not [regex]::IsMatch($output, 'HID keyboard press report received: completion (1|13), residual 0, length 8, modifier 0x00, keys 0x04 0x00 0x00 0x00 0x00 0x00')) {
-    throw 'The expected eight-byte A-key HID boot report was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'HID release transfer armed: slot [1-9][0-9]*, endpoint 3, length 8, TRB 0x[0-9A-F]{16}, buffer 0x[0-9A-F]{16}; waiting for key release')) {
-    throw 'The reusable second HID interrupt-IN transfer was not armed.'
-}
-if (-not [regex]::IsMatch($output, 'HID keyboard release report received: completion (1|13), residual 0, length 8, modifier 0x00, keys 0x00 0x00 0x00 0x00 0x00 0x00')) {
-    throw 'The expected all-keys-released HID boot report was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'USB keyboard input verified: HID usage 0x04 \(A\), slot [1-9][0-9]*, endpoint 3, press TRB 0x[0-9A-F]{16}, release TRB 0x[0-9A-F]{16}')) {
-    throw 'The final USB keyboard usage verification marker was not observed.'
-}
-if (-not $output.Contains("Keyboard event queue verified: #1 USB usage 0x04 pressed -> 'a'; #2 USB usage 0x04 released -> 'a'; dropped 0")) {
-    throw 'The ordered device-independent keyboard event queue marker was not observed.'
-}
-if (-not $shellInjected) {
-    throw 'The QEMU HMP harness never typed the persistent shell session after the shell arm marker.'
-}
-if (-not $output.Contains('ZigOs shell input armed: commands help cpu mem scroll clear; waiting for QEMU session')) {
-    throw 'The persistent native ZigOs shell input marker was not observed.'
-}
-if (-not $output.Contains('zigos> help') -or -not $output.Contains('commands: help cpu mem')) {
-    throw 'The native shell help command or response was not observed.'
-}
-if (-not $output.Contains('zigos> cpu') -or -not $output.Contains('cpu: x86-64 SMP online')) {
-    throw 'The native shell cpu command or response was not observed.'
-}
-if (-not $output.Contains('zigos> mem') -or -not $output.Contains('memory: normalized UEFI layout active')) {
-    throw 'The native shell mem command or response was not observed.'
-}
-if (-not $output.Contains('zigos> scroll') -or -not $output.Contains('scroll: 32 lines')) {
-    throw 'The native shell scroll command or response was not observed.'
-}
-if (-not $output.Contains('zigos> clear') -or -not $output.Contains('clear: screen reset')) {
-    throw 'The native shell clear command or response was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'Framebuffer scrolling verified before clear: 32 lines, 37 rows, 6 scrolls, checksum 0x9F06BA73625AD44D')) {
-    throw 'The framebuffer scrolling memory-move proof before clear was not observed.'
-}
-if (-not $output.Contains('Framebuffer line editing verified: helx<BS>p -> help')) {
-    throw 'The USB Backspace command-line editing proof was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'Framebuffer clear verified: cursor row 0, column 7, writes 7, resets 1, checksum 0x5E875379DEFF239D')) {
-    throw 'The full framebuffer clear-and-reset proof was not observed.'
-}
-if (-not $output.Contains('Framebuffer unknown command verified: nope -> error: unknown command')) {
-    throw 'The unknown-command error rendering proof was not observed.'
-}
-if (-not $output.Contains('Framebuffer empty command verified: prompt continued without an error response')) {
-    throw 'The empty-command prompt-continuation proof was not observed.'
-}
-if (-not $output.Contains('Framebuffer history recall verified: Up -> help')) {
-    throw 'The USB Up-arrow command-history recall marker was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'Framebuffer history shell: cursor row 8, column 35, lines 9, writes 178, newlines 8, resets 1, recalls 1, checksum 0x4721B2F0411D5331, cursor visible, draws 31, erases 30, display checksum 0x030FBD6154A5D1BD')) {
-    throw 'The history-recalled framebuffer state was not observed.'
-}
-if (-not [regex]::IsMatch($output, 'ZigOs shell session complete: valid, clear, unknown, empty, recovery, history; commands 10, reports [1-9][0-9]*, rejected 0')) {
-    throw 'The persistent native shell history-recovery marker was not observed.'
+if ($NoUsbKeyboard) {
+    if (-not $output.Contains('USB keyboard attachment visible: 0 connected xHCI port(s); read-only discovery complete')) {
+        throw 'The zero-device xHCI port inventory was not observed.'
+    }
+    if (-not $output.Contains('USB keyboard unavailable; continuing without interactive shell')) {
+        throw 'The optional USB-input fallback marker was not observed.'
+    }
+    if (-not $output.Contains('Interactive input ready: USB keyboard no')) {
+        throw 'The no-USB-keyboard readiness marker was not observed.'
+    }
+    if ($output.Contains('xHCI ownership active:') -or $output.Contains('ZigOs shell input armed:')) {
+        throw 'xHCI ownership or the interactive shell unexpectedly started without a USB keyboard.'
+    }
+} else {
+    if (-not [regex]::IsMatch($output, 'USB keyboard attachment visible: [1-9][0-9]* connected xHCI port\(s\); read-only discovery complete')) {
+        throw 'The attached USB keyboard was not visible in any xHCI PORTSC register.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI ownership active: DCBAA 0x[0-9A-F]{16}, command ring 0x[0-9A-F]{16}, event ring 0x[0-9A-F]{16}, ERST 0x[0-9A-F]{16}, page size 4096, scratchpads 0, slots [1-9][0-9]*')) {
+        throw 'The ZigOs-owned xHCI DCBAA/command/event ring installation marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI command completed: Enable Slot, completion 1, slot [1-9][0-9]*, command pointer 0x[0-9A-F]{16}, event cycle 1, controller running, (legacy handoff claimed|no legacy handoff required)')) {
+        throw 'The xHCI Enable Slot command-completion event was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI port reset complete: port [1-9][0-9]*, speed ID [1-4], PORTSC 0x[0-9A-F]{16}, EP0 max packet (8|64|512), skipped [1-9][0-9]* port-status event\(s\)')) {
+        throw 'The connected xHCI root-hub port reset and EP0 packet-size marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI Address Device completed: slot [1-9][0-9]*, USB address [1-9][0-9]*, slot state [2-9][0-9]*, EP0 state [1-7], completion 1, context size (32|64), device context 0x[0-9A-F]{16}, input context 0x[0-9A-F]{16}, EP0 ring 0x[0-9A-F]{16}')) {
+        throw 'The xHCI Address Device command and device-context verification marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'USB device descriptor read: length 18, type 1, USB BCD 0x[0-9A-F]{4}, class 0x[0-9A-F]{2}:0x[0-9A-F]{2}:0x[0-9A-F]{2}, EP0 packet (8|64)')) {
+        throw 'The USB device descriptor control-transfer marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'USB identity: vendor 0x(?!0000)[0-9A-F]{4}, product 0x(?!0000)[0-9A-F]{4}, device BCD 0x[0-9A-F]{4}, configurations [1-9][0-9]*, string indexes [0-9]+/[0-9]+/[0-9]+')) {
+        throw 'The USB vendor/product/configuration identity marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI EP0 transfer completed: completion 1, endpoint 1, slot [1-9][0-9]*, residual 0, event TRB 0x[0-9A-F]{16}, buffer 0x[0-9A-F]{16}')) {
+        throw 'The xHCI EP0 Setup/Data/Status transfer-event marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'USB configuration descriptor: total [1-9][0-9]* bytes, value [1-9][0-9]*, interfaces [1-9][0-9]*, attributes 0x[0-9A-F]{2}, max power [0-9]+ mA')) {
+        throw 'The complete USB configuration descriptor marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'HID boot keyboard interface: number [0-9]+, alternate 0, endpoints [1-9][0-9]*, class 3/1/1, HID BCD 0x[0-9A-F]{4}, report type 0x22, report length [1-9][0-9]*')) {
+        throw 'The boot-keyboard interface and HID descriptor marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'HID interrupt endpoint: address 0x8[1-9A-F], attributes 0x[0-9A-F]{2}, max packet [1-9][0-9]*, interval [1-9][0-9]*, completion 1, residual 0')) {
+        throw 'The HID interrupt-IN endpoint descriptor marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'USB SET_CONFIGURATION completed: value [1-9][0-9]*, completion 1')) {
+        throw 'The USB SET_CONFIGURATION control transfer was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI HID endpoint configured: address 0x81, DCI 3, type 7, interval [1-9][0-9]*, max packet 8, max burst 0, max ESIT 8')) {
+        throw 'The boot-keyboard interrupt-IN endpoint context marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'xHCI Configure Endpoint completed: completion 1, endpoint state 1, slot context entries 3, input context 0x[0-9A-F]{16}, interrupt ring 0x[0-9A-F]{16}')) {
+        throw 'The xHCI Configure Endpoint command-completion marker was not observed.'
+    }
+    if (-not $keyInjected) {
+        throw 'The QEMU HMP harness never injected the A key after the HID arm marker.'
+    }
+    if (-not [regex]::IsMatch($output, 'HID boot protocol ready: SET_PROTOCOL completion 1, SET_IDLE completion 1')) {
+        throw 'The HID boot-protocol and idle-rate control transfers were not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'HID input transfer armed: slot [1-9][0-9]*, endpoint 3, length 8, TRB 0x[0-9A-F]{16}, buffer 0x[0-9A-F]{16}; waiting for QEMU key injection')) {
+        throw 'The xHCI interrupt-IN keyboard transfer was not armed.'
+    }
+    if (-not [regex]::IsMatch($output, 'HID keyboard press report received: completion (1|13), residual 0, length 8, modifier 0x00, keys 0x04 0x00 0x00 0x00 0x00 0x00')) {
+        throw 'The expected eight-byte A-key HID boot report was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'HID release transfer armed: slot [1-9][0-9]*, endpoint 3, length 8, TRB 0x[0-9A-F]{16}, buffer 0x[0-9A-F]{16}; waiting for key release')) {
+        throw 'The reusable second HID interrupt-IN transfer was not armed.'
+    }
+    if (-not [regex]::IsMatch($output, 'HID keyboard release report received: completion (1|13), residual 0, length 8, modifier 0x00, keys 0x00 0x00 0x00 0x00 0x00 0x00')) {
+        throw 'The expected all-keys-released HID boot report was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'USB keyboard input verified: HID usage 0x04 \(A\), slot [1-9][0-9]*, endpoint 3, press TRB 0x[0-9A-F]{16}, release TRB 0x[0-9A-F]{16}')) {
+        throw 'The final USB keyboard usage verification marker was not observed.'
+    }
+    if (-not $output.Contains("Keyboard event queue verified: #1 USB usage 0x04 pressed -> 'a'; #2 USB usage 0x04 released -> 'a'; dropped 0")) {
+        throw 'The ordered device-independent keyboard event queue marker was not observed.'
+    }
+    if (-not $shellInjected) {
+        throw 'The QEMU HMP harness never typed the persistent shell session after the shell arm marker.'
+    }
+    if (-not $output.Contains('ZigOs shell input armed: commands help cpu mem scroll clear; waiting for QEMU session')) {
+        throw 'The persistent native ZigOs shell input marker was not observed.'
+    }
+    if (-not $output.Contains('zigos> help') -or -not $output.Contains('commands: help cpu mem')) {
+        throw 'The native shell help command or response was not observed.'
+    }
+    if (-not $output.Contains('zigos> cpu') -or -not $output.Contains('cpu: x86-64 SMP online')) {
+        throw 'The native shell cpu command or response was not observed.'
+    }
+    if (-not $output.Contains('zigos> mem') -or -not $output.Contains('memory: normalized UEFI layout active')) {
+        throw 'The native shell mem command or response was not observed.'
+    }
+    if (-not $output.Contains('zigos> scroll') -or -not $output.Contains('scroll: 32 lines')) {
+        throw 'The native shell scroll command or response was not observed.'
+    }
+    if (-not $output.Contains('zigos> clear') -or -not $output.Contains('clear: screen reset')) {
+        throw 'The native shell clear command or response was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'Framebuffer scrolling verified before clear: 32 lines, 37 rows, 6 scrolls, checksum 0x9F06BA73625AD44D')) {
+        throw 'The framebuffer scrolling memory-move proof before clear was not observed.'
+    }
+    if (-not $output.Contains('Framebuffer line editing verified: helx<BS>p -> help')) {
+        throw 'The USB Backspace command-line editing proof was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'Framebuffer clear verified: cursor row 0, column 7, writes 7, resets 1, checksum 0x5E875379DEFF239D')) {
+        throw 'The full framebuffer clear-and-reset proof was not observed.'
+    }
+    if (-not $output.Contains('Framebuffer unknown command verified: nope -> error: unknown command')) {
+        throw 'The unknown-command error rendering proof was not observed.'
+    }
+    if (-not $output.Contains('Framebuffer empty command verified: prompt continued without an error response')) {
+        throw 'The empty-command prompt-continuation proof was not observed.'
+    }
+    if (-not $output.Contains('Framebuffer history recall verified: Up -> help')) {
+        throw 'The USB Up-arrow command-history recall marker was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'Framebuffer history shell: cursor row 8, column 35, lines 9, writes 178, newlines 8, resets 1, recalls 1, checksum 0x4721B2F0411D5331, cursor visible, draws 31, erases 30, display checksum 0x030FBD6154A5D1BD')) {
+        throw 'The history-recalled framebuffer state was not observed.'
+    }
+    if (-not [regex]::IsMatch($output, 'ZigOs shell session complete: valid, clear, unknown, empty, recovery, history; commands 10, reports [1-9][0-9]*, rejected 0')) {
+        throw 'The persistent native shell history-recovery marker was not observed.'
+    }
+    if (-not $output.Contains('Interactive input ready: USB keyboard yes')) {
+        throw 'The USB-keyboard readiness marker was not observed.'
+    }
 }
 if (-not [regex]::IsMatch($output, 'NVMe controller active at [0-9A-F]{4}:[0-9A-F]{2}:[0-9A-F]{2}\.[0-7], vendor 0x[0-9A-F]{4}, device 0x[0-9A-F]{4}, BAR 0x[0-9A-F]{16}')) {
     throw 'The NVMe PCI function and BAR marker was not observed.'
@@ -830,11 +851,20 @@ if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B
 if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
     throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
 }
-if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 9, glyphs 178, resets 1, lit pixels 9492, checksum 0x4721B2F0411D5331, cursor visible, draws 31, erases 30, display lit pixels 9512, display checksum 0x030FBD6154A5D1BD')) {
-    throw 'The deterministic GOP bitmap-console report was not observed.'
-}
-if (-not $output.Contains('Framebuffer transcript: clear, error recovery, and Up-arrow history recall')) {
-    throw 'The rendered graphical-console transcript marker was not observed.'
+if ($NoUsbKeyboard) {
+    if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 4, glyphs 31, resets 0, lit pixels 1744, checksum 0x866AA691AB18DEB5, cursor visible, draws 6, erases 5, display lit pixels 1764, display checksum 0x7CF72F9AF061C761')) {
+        throw 'The unchanged startup-prompt framebuffer state was not observed without a USB keyboard.'
+    }
+    if (-not $output.Contains('Framebuffer transcript: startup prompt; USB keyboard unavailable')) {
+        throw 'The keyboard-less framebuffer transcript marker was not observed.'
+    }
+} else {
+    if (-not [regex]::IsMatch($output, 'Framebuffer console active: 1280x800, stride 1280, lines 9, glyphs 178, resets 1, lit pixels 9492, checksum 0x4721B2F0411D5331, cursor visible, draws 31, erases 30, display lit pixels 9512, display checksum 0x030FBD6154A5D1BD')) {
+        throw 'The deterministic GOP bitmap-console report was not observed.'
+    }
+    if (-not $output.Contains('Framebuffer transcript: clear, error recovery, and Up-arrow history recall')) {
+        throw 'The rendered graphical-console transcript marker was not observed.'
+    }
 }
 if (-not $output.Contains('Framebuffer retained and written directly at 0x')) {
     throw 'The framebuffer was not retained and accessed after the handoff.'

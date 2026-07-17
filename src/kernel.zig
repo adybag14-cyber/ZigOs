@@ -124,12 +124,15 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWrite("\r\n");
 
     const pci_inventory = enumeratePci(acpi_info);
-    inspectXhci(pci_inventory, &frame_allocator, &graphical_console);
+    const usb_keyboard_ready = inspectXhci(pci_inventory, &frame_allocator, &graphical_console);
     const nvme_storage_ready = inspectNvme(pci_inventory, &frame_allocator);
     const ahci_storage_ready = inspectAhci(pci_inventory, &frame_allocator);
     if (!nvme_storage_ready and !ahci_storage_ready) {
         storageFailure("no supported NVMe namespace or SATA device was usable");
     }
+    debugWrite("Interactive input ready: USB keyboard ");
+    debugWrite(if (usb_keyboard_ready) "yes" else "no");
+    debugWrite("\r\n");
     debugWrite("Storage backends ready: NVMe ");
     debugWrite(if (nvme_storage_ready) "yes" else "no");
     debugWrite(", AHCI ");
@@ -169,7 +172,11 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWrite(", display checksum 0x");
     debugWriteHex64(report.display_checksum);
     debugWrite("\r\n");
-    debugWrite("Framebuffer transcript: clear, error recovery, and Up-arrow history recall\r\n");
+    if (usb_keyboard_ready) {
+        debugWrite("Framebuffer transcript: clear, error recovery, and Up-arrow history recall\r\n");
+    } else {
+        debugWrite("Framebuffer transcript: startup prompt; USB keyboard unavailable\r\n");
+    }
     debugWrite("Framebuffer retained and written directly at 0x");
     debugWriteHex64(@intCast(framebuffer.base));
     debugWrite("\r\n");
@@ -1196,7 +1203,7 @@ fn inspectXhci(
     inventory: pci.Inventory,
     allocator: *memory.FrameAllocator,
     graphical_console: *framebuffer_console.Console,
-) void {
+) bool {
     var controller_function: ?pci.Function = null;
     for (inventory.functions[0..inventory.retained_count]) |function| {
         if (function.class_code == 0x0C and
@@ -1207,9 +1214,14 @@ fn inspectXhci(
             break;
         }
     }
-    const function = controller_function orelse xhciFailure("no xHCI-class PCI function was enumerated");
-    const controller = xhci.inspect(function, allocator) orelse
-        xhciFailure("xHCI BAR or capability-register validation failed");
+    const function = controller_function orelse {
+        debugWrite("xHCI controller not present; continuing without USB input\r\n");
+        return false;
+    };
+    const controller = xhci.inspect(function, allocator) orelse {
+        debugWrite("xHCI controller registers were unusable; continuing without USB input\r\n");
+        return false;
+    };
 
     debugWrite("xHCI controller discovered at ");
     debugWriteHex16(function.segment);
@@ -1267,6 +1279,10 @@ fn inspectXhci(
     debugWrite("USB keyboard attachment visible: ");
     debugWriteU64Decimal(controller.connected_port_count);
     debugWrite(" connected xHCI port(s); read-only discovery complete\r\n");
+    if (controller.connected_port_count == 0) {
+        debugWrite("USB keyboard unavailable; continuing without interactive shell\r\n");
+        return false;
+    }
 
     var ownership = xhci.takeOwnership(controller, allocator) orelse
         xhciFailure("controller reset, ring installation, or Enable Slot completion failed");
@@ -1617,6 +1633,7 @@ fn inspectXhci(
     debugWrite("\r\n");
     debugWrite("Keyboard event queue verified: #1 USB usage 0x04 pressed -> 'a'; #2 USB usage 0x04 released -> 'a'; dropped 0\r\n");
     runUsbShell(controller, &ownership, &mutable_hid_endpoint, allocator, graphical_console);
+    return true;
 }
 
 fn runUsbShell(
