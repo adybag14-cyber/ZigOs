@@ -59,7 +59,8 @@
 - [x] xHCI port reset, slot/EP0 context construction and Address Device completion
 - [x] USB EP0 GET_DESCRIPTOR transfer and device-descriptor parsing
 - [x] Configuration, interface, HID and interrupt-endpoint descriptor parsing
-- [ ] SET_CONFIGURATION, Configure Endpoint and HID input transfers
+- [x] SET_CONFIGURATION and xHCI interrupt-IN endpoint configuration
+- [ ] HID boot protocol/idle setup and keyboard input transfers
 
 ## 0.5 - Runtime
 

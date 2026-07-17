@@ -1338,6 +1338,44 @@ fn inspectXhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator) void
     debugWrite(", residual ");
     debugWriteU64Decimal(configuration.transfer_residual);
     debugWrite("\r\n");
+    const hid_endpoint = xhci.configureHidEndpoint(
+        controller,
+        &ownership,
+        &mutable_addressed,
+        configuration,
+        allocator,
+    ) orelse xhciFailure("SET_CONFIGURATION or Configure Endpoint failed");
+    debugWrite("USB SET_CONFIGURATION completed: value ");
+    debugWriteU64Decimal(hid_endpoint.configuration_value);
+    debugWrite(", completion ");
+    debugWriteU64Decimal(hid_endpoint.set_configuration_completion);
+    debugWrite("\r\n");
+    debugWrite("xHCI HID endpoint configured: address 0x");
+    debugWriteHex8(hid_endpoint.endpoint_address);
+    debugWrite(", DCI ");
+    debugWriteU64Decimal(hid_endpoint.endpoint_id);
+    debugWrite(", type ");
+    debugWriteU64Decimal(hid_endpoint.endpoint_type);
+    debugWrite(", interval ");
+    debugWriteU64Decimal(hid_endpoint.interval);
+    debugWrite(", max packet ");
+    debugWriteU64Decimal(hid_endpoint.max_packet_size);
+    debugWrite(", max burst ");
+    debugWriteU64Decimal(hid_endpoint.max_burst_size);
+    debugWrite(", max ESIT ");
+    debugWriteU64Decimal(hid_endpoint.max_esit_payload);
+    debugWrite("\r\n");
+    debugWrite("xHCI Configure Endpoint completed: completion ");
+    debugWriteU64Decimal(hid_endpoint.configure_completion);
+    debugWrite(", endpoint state ");
+    debugWriteU64Decimal(hid_endpoint.endpoint_state);
+    debugWrite(", slot context entries ");
+    debugWriteU64Decimal(hid_endpoint.slot_context_entries);
+    debugWrite(", input context 0x");
+    debugWriteHex64(@intCast(hid_endpoint.input_context_address));
+    debugWrite(", interrupt ring 0x");
+    debugWriteHex64(@intCast(hid_endpoint.transfer_ring_address));
+    debugWrite("\r\n");
 }
 
 fn xhciFailure(reason: []const u8) noreturn {

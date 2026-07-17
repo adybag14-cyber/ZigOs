@@ -27,6 +27,7 @@ const trb_type_setup_stage: u32 = 2;
 const trb_type_data_stage: u32 = 3;
 const trb_type_status_stage: u32 = 4;
 const trb_type_address_device: u32 = 11;
+const trb_type_configure_endpoint: u32 = 12;
 const trb_type_transfer_event: u32 = 32;
 const trb_type_command_completion: u32 = 33;
 const trb_type_port_status_change: u32 = 34;
@@ -38,6 +39,7 @@ const trb_immediate_data: u32 = 1 << 6;
 const trb_direction_in: u32 = 1 << 16;
 const setup_transfer_type_in: u32 = 3 << 16;
 const usb_request_get_descriptor: u8 = 6;
+const usb_request_set_configuration: u8 = 9;
 const usb_descriptor_type_device: u8 = 1;
 const usb_descriptor_type_configuration: u8 = 2;
 const usb_descriptor_type_interface: u8 = 4;
@@ -69,6 +71,7 @@ const portsc_indicator_mask: u32 = 0x3 << 14;
 const portsc_change_mask: u32 = 0x7F << 17;
 const portsc_wake_mask: u32 = 0x7 << 25;
 const endpoint_type_control: u32 = 4;
+const endpoint_type_interrupt_in: u32 = 7;
 const endpoint_error_count: u32 = 3;
 const address_device_command_type: u32 = 11;
 const interrupter0_offset: usize = 0x20;
@@ -231,6 +234,24 @@ pub const HidConfiguration = struct {
     transfer_residual: u32,
     slot_id: u8,
     skipped_port_status_events: u8,
+};
+
+pub const HidEndpoint = struct {
+    configuration_value: u8,
+    set_configuration_completion: u8,
+    endpoint_address: u8,
+    endpoint_id: u5,
+    endpoint_type: u3,
+    interval: u8,
+    max_packet_size: u16,
+    max_burst_size: u8,
+    max_esit_payload: u32,
+    input_context_address: usize,
+    transfer_ring_address: usize,
+    configure_completion: u8,
+    command_pointer: u64,
+    endpoint_state: u3,
+    slot_context_entries: u5,
 };
 
 pub const Port = struct {
@@ -938,6 +959,175 @@ fn controlInDescriptor(
     ) orelse return null;
     device.transfer_producer_index += 3;
     return completion;
+}
+
+pub fn configureHidEndpoint(
+    controller: Controller,
+    ownership: *Ownership,
+    device: *AddressedDevice,
+    configuration: HidConfiguration,
+    allocator: *memory.FrameAllocator,
+) ?HidEndpoint {
+    if (configuration.configuration_value == 0 or
+        (configuration.endpoint_address & usb_endpoint_direction_in) == 0 or
+        (configuration.endpoint_attributes & 0x3) != usb_endpoint_transfer_interrupt)
+    {
+        return null;
+    }
+    const set_configuration = controlNoData(
+        controller,
+        ownership,
+        device,
+        0x00,
+        usb_request_set_configuration,
+        configuration.configuration_value,
+        0,
+    ) orelse return null;
+
+    const endpoint_number: u5 = @truncate(configuration.endpoint_address & 0x0F);
+    if (endpoint_number == 0) return null;
+    const endpoint_id: u5 = endpoint_number * 2 + 1;
+    const context_size: usize = device.context_size;
+    const input_context_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    const transfer_ring_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    clearPage(input_context_address);
+    clearPage(transfer_ring_address);
+
+    const transfer_ring = trbPage(transfer_ring_address);
+    const link = &transfer_ring[trbs_per_page - 1];
+    link.parameter = transfer_ring_address;
+    link.status = 0;
+    link.control = (trb_type_link << trb_type_shift) | trb_toggle_cycle | trb_cycle;
+
+    const input_control = contextDwords(input_context_address);
+    input_control[0] = 0;
+    input_control[1] = (@as(u32, 1) << 0) | (@as(u32, 1) << endpoint_id);
+
+    const source_slot = @as([*]const u8, @ptrFromInt(device.device_context_address))[0..context_size];
+    const destination_slot = @as([*]u8, @ptrFromInt(input_context_address + context_size))[0..context_size];
+    @memcpy(destination_slot, source_slot);
+    const slot = contextDwords(input_context_address + context_size);
+    slot[0] = (slot[0] & ~(@as(u32, 0x1F) << 27)) |
+        (@as(u32, endpoint_id) << 27);
+
+    const interval = endpointInterval(device.port_speed_id, configuration.endpoint_interval) orelse return null;
+    const max_packet_size = configuration.endpoint_max_packet_size & 0x07FF;
+    const max_burst_size: u8 = @truncate((configuration.endpoint_max_packet_size >> 11) & 0x3);
+    const max_esit_payload: u32 = @as(u32, max_packet_size) * (@as(u32, max_burst_size) + 1);
+    const endpoint = contextDwords(
+        input_context_address + (@as(usize, endpoint_id) + 1) * context_size,
+    );
+    endpoint[0] = @as(u32, interval) << 16;
+    endpoint[1] = (@as(u32, endpoint_error_count) << 1) |
+        (@as(u32, endpoint_type_interrupt_in) << 3) |
+        (@as(u32, max_burst_size) << 8) |
+        (@as(u32, max_packet_size) << 16);
+    endpoint[2] = @truncate(@as(u64, @intCast(transfer_ring_address)) | 1);
+    endpoint[3] = @truncate(@as(u64, @intCast(transfer_ring_address)) >> 32);
+    endpoint[4] = @as(u32, max_packet_size) | (max_esit_payload << 16);
+    zigos_memory_fence();
+
+    if (ownership.command_producer_index >= trbs_per_page - 1) return null;
+    const command_address = ownership.command_ring_address +
+        @as(usize, ownership.command_producer_index) * @sizeOf(Trb);
+    const command: *volatile Trb = @ptrFromInt(command_address);
+    command.parameter = input_context_address;
+    command.status = 0;
+    command.control = (trb_type_configure_endpoint << trb_type_shift) |
+        (@as(u32, device.slot_id) << 24) |
+        ownership.event_cycle;
+    zigos_memory_fence();
+    const doorbell_base = controller.base_address + controller.doorbell_offset;
+    write32(doorbell_base, 0, 0);
+    const completion = waitForCommandCompletion(
+        controller,
+        ownership,
+        command_address,
+        device.slot_id,
+    ) orelse return null;
+    ownership.command_producer_index += 1;
+
+    const device_slot = contextDwords(device.device_context_address);
+    const device_endpoint = contextDwords(
+        device.device_context_address + @as(usize, endpoint_id) * context_size,
+    );
+    const endpoint_state: u3 = @truncate(device_endpoint[0]);
+    const slot_context_entries: u5 = @truncate(device_slot[0] >> 27);
+    if (endpoint_state != 1 or slot_context_entries < endpoint_id) return null;
+
+    return .{
+        .configuration_value = configuration.configuration_value,
+        .set_configuration_completion = set_configuration.completion_code,
+        .endpoint_address = configuration.endpoint_address,
+        .endpoint_id = endpoint_id,
+        .endpoint_type = endpoint_type_interrupt_in,
+        .interval = interval,
+        .max_packet_size = max_packet_size,
+        .max_burst_size = max_burst_size,
+        .max_esit_payload = max_esit_payload,
+        .input_context_address = input_context_address,
+        .transfer_ring_address = transfer_ring_address,
+        .configure_completion = @truncate(completion.event.status >> 24),
+        .command_pointer = completion.event.parameter & ~@as(u64, 0xF),
+        .endpoint_state = endpoint_state,
+        .slot_context_entries = slot_context_entries,
+    };
+}
+
+fn controlNoData(
+    controller: Controller,
+    ownership: *Ownership,
+    device: *AddressedDevice,
+    request_type: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+) ?TransferCompletion {
+    if (device.transfer_producer_index > trbs_per_page - 3) return null;
+    const ring = trbPage(device.transfer_ring_address);
+    const start_index: usize = device.transfer_producer_index;
+    const cycle: u32 = device.transfer_cycle;
+    const setup_packet: u64 = @as(u64, request_type) |
+        (@as(u64, request) << 8) |
+        (@as(u64, value) << 16) |
+        (@as(u64, index) << 32);
+    ring[start_index].parameter = setup_packet;
+    ring[start_index].status = 8;
+    ring[start_index].control = (trb_type_setup_stage << trb_type_shift) |
+        trb_immediate_data | cycle;
+    ring[start_index + 1].parameter = 0;
+    ring[start_index + 1].status = 0;
+    ring[start_index + 1].control = (trb_type_status_stage << trb_type_shift) |
+        trb_interrupt_on_completion | trb_direction_in | cycle;
+    zigos_memory_fence();
+
+    const doorbell_base = controller.base_address + controller.doorbell_offset;
+    write32(doorbell_base, @as(usize, device.slot_id) * @sizeOf(u32), 1);
+    const status_trb_address = device.transfer_ring_address +
+        (start_index + 1) * @sizeOf(Trb);
+    const completion = waitForTransferCompletion(
+        controller,
+        ownership,
+        status_trb_address,
+        device.slot_id,
+        1,
+    ) orelse return null;
+    device.transfer_producer_index += 2;
+    return completion;
+}
+
+fn endpointInterval(speed_id: u4, descriptor_interval: u8) ?u8 {
+    if (descriptor_interval == 0) return null;
+    return switch (speed_id) {
+        3, 4 => descriptor_interval - 1,
+        1, 2 => blk: {
+            var exponent: u8 = 0;
+            var value: u16 = 1;
+            while (value < descriptor_interval and exponent < 8) : (exponent += 1) value <<= 1;
+            break :blk exponent + 3;
+        },
+        else => null,
+    };
 }
 
 fn firstConnectedPort(controller: Controller) ?Port {

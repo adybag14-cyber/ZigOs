@@ -316,6 +316,15 @@ if (-not [regex]::IsMatch($output, 'HID boot keyboard interface: number [0-9]+, 
 if (-not [regex]::IsMatch($output, 'HID interrupt endpoint: address 0x8[1-9A-F], attributes 0x[0-9A-F]{2}, max packet [1-9][0-9]*, interval [1-9][0-9]*, completion 1, residual 0')) {
     throw 'The HID interrupt-IN endpoint descriptor marker was not observed.'
 }
+if (-not [regex]::IsMatch($output, 'USB SET_CONFIGURATION completed: value [1-9][0-9]*, completion 1')) {
+    throw 'The USB SET_CONFIGURATION control transfer was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'xHCI HID endpoint configured: address 0x81, DCI 3, type 7, interval [1-9][0-9]*, max packet 8, max burst 0, max ESIT 8')) {
+    throw 'The boot-keyboard interrupt-IN endpoint context marker was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'xHCI Configure Endpoint completed: completion 1, endpoint state 1, slot context entries 3, input context 0x[0-9A-F]{16}, interrupt ring 0x[0-9A-F]{16}')) {
+    throw 'The xHCI Configure Endpoint command-completion marker was not observed.'
+}
 if (-not $output.Contains('AHCI controller active at')) {
     throw 'The AHCI PCI/BAR discovery marker was not observed.'
 }
