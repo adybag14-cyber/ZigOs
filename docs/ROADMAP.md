@@ -987,3 +987,13 @@
 - Health reports the configured quality budget, boundary count, quality-forced retry total, retry exhaustion, and retry-limit hit.
 - Explicit timeout clear resets quality, step, and retry counts; duplicate clear is rejected and a clean bootstrap request can restart immediately.
 - The verifier proves three transmissions, two consumed replies, exact reason counters, clean close, and exact ring/accounting deltas on both reference sources.
+
+## 3.75 - Synchronized quality-timeout recovery
+
+- A synchronized service that exhausts retry allowance through the pre-sample quality-rejection boundary enters the bounded recovery state machine without losing projected wall time.
+- Root-dispersion and stratum failures are consumed without reading HPET/ACPI PM timer or mutating the projected clock; the first forces retry and the second triggers timeout.
+- The clock remains visible and advances as holdover through timeout and the exact two-tick recovery cooldown; no packet is transmitted during the wait.
+- Automatic recovery starts on the existing socket with an originate timestamp derived from projected holdover time.
+- A quality-valid, bounded-step recovery sample applies at one hardware reference tick, increments recovery success, and resets recovery, retry, quality-rejection, and step-rejection budgets.
+- Health returns to synchronized state while retaining cumulative quality reasons, forced-retry, retry-limit, and recovery-success accounting.
+- The verifier proves four transmissions, four consumed replies, no pre-sample clock reads, no hidden cooldown traffic, exact HPET/ACPI PM timer behavior, clean close, and exact ring/accounting deltas.

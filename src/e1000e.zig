@@ -766,6 +766,88 @@ pub const NtpServiceStep = struct {
     recovery_started: bool,
 };
 
+pub const NtpQualityRecoveryReport = struct {
+    source_kind: time_reference.Kind,
+    frequency_hz: u64,
+    counter_bits: u8,
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    maximum_quality_rejections: u8,
+    maximum_retries: u8,
+    recovery_cooldown_ticks: u64,
+    maximum_recoveries: u8,
+    transmit_identifications: [4]u16,
+    transmit_descriptors: [4]u16,
+    transmit_next_cursors: [4]u16,
+    refresh_client_timestamp: u64,
+    recovery_client_timestamp: u64,
+    recovery_timestamp_automatic: bool,
+    first_quality_result: ntp.QualityResult,
+    first_quality_action: ntp.QualityRejectionAction,
+    first_sample_absent: bool,
+    first_apply_absent: bool,
+    first_clock_preserved: bool,
+    first_retry_timestamp_preserved: bool,
+    first_retry_transmissions: u64,
+    second_quality_result: ntp.QualityResult,
+    second_quality_action: ntp.QualityRejectionAction,
+    second_sample_absent: bool,
+    second_apply_absent: bool,
+    second_clock_preserved: bool,
+    timeout_state: NtpServiceState,
+    timeout_waiting: bool,
+    timeout_transmit_absent: bool,
+    request_cancelled: bool,
+    retry_exhausted: bool,
+    recovery_deadline_delta: u64,
+    timeout_health_state: NtpSynchronizationHealth,
+    timeout_health_timestamp: u64,
+    cooldown_health_state: NtpSynchronizationHealth,
+    cooldown_health_timestamp: u64,
+    holdover_visible: bool,
+    holdover_advanced: bool,
+    cooldown_no_tx: bool,
+    recovery_ready: bool,
+    recovery_started: bool,
+    accepted_quality_result: ntp.QualityResult,
+    accepted_step_result: ntp.ClockStepResult,
+    accepted_sample_tick: u64,
+    accepted_seconds: u64,
+    accepted_fraction: u32,
+    recovery_successes: u64,
+    recovery_budget_reset: bool,
+    retry_budget_reset: bool,
+    quality_budget_reset: bool,
+    step_budget_reset: bool,
+    clock_advanced: bool,
+    health_reports_success: bool,
+    quality_accepted: u64,
+    quality_rejected: u64,
+    quality_stratum_rejected: u64,
+    quality_root_dispersion_rejected: u64,
+    quality_forced_retries: u64,
+    step_accepted: u64,
+    step_rejected: u64,
+    requests_started: u64,
+    retries: u64,
+    responses: u64,
+    retry_limit_hits: u64,
+    close_succeeded: bool,
+    final_identification_cursor: u16,
+    final_tx_cursor: u16,
+    tx_submissions_delta: u64,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+};
+
 pub const NtpQualityRejectionExhaustionReport = struct {
     source_kind: time_reference.Kind,
     frequency_hz: u64,
@@ -3003,6 +3085,7 @@ pub const NetworkResult = struct {
     ntp_discipline_recovery: NtpDisciplineRecoveryReport,
     ntp_live_quality_rejection_budget: NtpLiveQualityRejectionBudgetReport,
     ntp_quality_rejection_exhaustion: NtpQualityRejectionExhaustionReport,
+    ntp_quality_recovery: NtpQualityRecoveryReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -3754,6 +3837,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_quality_recovery = verifyNtpQualityRecovery(device, continuous_counter) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -3935,6 +4022,7 @@ pub fn initializeAndTestNetwork(
         .ntp_discipline_recovery = ntp_discipline_recovery,
         .ntp_live_quality_rejection_budget = ntp_live_quality_rejection_budget,
         .ntp_quality_rejection_exhaustion = ntp_quality_rejection_exhaustion,
+        .ntp_quality_recovery = ntp_quality_recovery,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -6901,6 +6989,347 @@ fn verifyNtpRejectionExhaustion(
         .requests_started = service.requests_started,
         .retries = service.retries,
         .responses = service.responses,
+        .close_succeeded = close_succeeded,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_tx_cursor = device.tx_producer,
+        .tx_submissions_delta = device.tx_submissions - submissions_before,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+
+fn verifyNtpQualityRecovery(
+    device: *Device,
+    counter: *time_reference.ContinuousCounter,
+) ?NtpQualityRecoveryReport {
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_197 or
+        device.next_udp_generation != 56 or device.tx_producer != 6 or
+        device.next_udp_identification != 75 or device.next_dns_transaction_id != 8 or
+        completionQueueEnqueued(&tx_completion_queue) != 102 or
+        completionQueueDequeued(&tx_completion_queue) != 102 or
+        completionQueueEnqueued(&rx_completion_queue) != 22 or
+        device.software_rx_queue.enqueued != 107 or device.software_rx_queue.dequeued != 107 or
+        device.packets_dispatched != 96 or device.udp_packets_dispatched != 95 or
+        counter.frequency_hz == 0 or counter.counter_bits == 0)
+    {
+        return null;
+    }
+
+    const server = [4]u8{ 10, 0, 2, 4 };
+    const quality_rejection_policy = ntp.QualityRejectionPolicy{ .maximum_rejections_per_request = 1 };
+    const retry_policy = ntp.RetryPolicy{
+        .initial_interval_ticks = 1,
+        .maximum_interval_ticks = 1,
+        .maximum_retries = 1,
+    };
+    const recovery_policy = ntp.RecoveryPolicy{
+        .cooldown_ticks = 2,
+        .maximum_recoveries = 2,
+    };
+    var service = openNtpServiceWithResponseRejectionPolicies(
+        device,
+        server,
+        2,
+        ntp.default_quality_policy,
+        quality_rejection_policy,
+        .{ .maximum_forward_seconds = 4, .maximum_forward_fraction = 0 },
+        ntp.default_step_rejection_policy,
+        retry_policy,
+        recovery_policy,
+    ) orelse return null;
+    const socket = service.client.socket;
+    if (socket.endpoint_index != 2 or socket.generation != 56 or socket.local_port != 49_197 or
+        device.next_ephemeral_udp_port != 49_198 or device.next_udp_generation != 57 or
+        device.udp_endpoint_count != 3)
+        return null;
+
+    const submissions_before = device.tx_submissions;
+    const start_tick = counter.read();
+    var transmit_identifications = [4]u16{ 0, 0, 0, 0 };
+    var transmit_descriptors = [4]u16{ 0, 0, 0, 0 };
+    var transmit_next_cursors = [4]u16{ 0, 0, 0, 0 };
+
+    const initial = stepNtpServiceAutomatic(
+        device,
+        &service,
+        counter,
+        start_tick,
+        ntp.fixture_client_timestamp,
+        0,
+    ) orelse return null;
+    const initial_tx = initial.transmit orelse return null;
+    transmit_identifications[0] = initial_tx.identification;
+    transmit_descriptors[0] = initial_tx.completion.descriptor_index;
+    transmit_next_cursors[0] = initial_tx.completion.next_cursor;
+    if (initial.state != .awaiting or initial.start_reason != .initial or
+        initial_tx.identification != 75 or initial_tx.completion.descriptor_index != 6 or
+        initial_tx.completion.next_cursor != 7)
+        return null;
+
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        server,
+        service.request.client_timestamp,
+        ntp.fixture_server_timestamp,
+        0x8300,
+        0xF300,
+    )) return null;
+    const first_sync = stepNtpServiceAutomatic(device, &service, counter, start_tick, 0, 1) orelse return null;
+    const first_sample_tick = first_sync.sample_tick orelse return null;
+    if (first_sync.state != .idle or first_sync.quality_result != .accepted or
+        first_sync.step_result != .accepted or first_sync.apply_result != .accepted or
+        service.responses != 1 or service.refresh_deadline_tick != first_sample_tick + 2)
+        return null;
+
+    const refresh_tick = service.refresh_deadline_tick;
+    const expected_refresh_timestamp = ntp.projectedTimestampAt(&service.clock, refresh_tick) orelse return null;
+    const refresh = stepNtpServiceAutomatic(device, &service, counter, refresh_tick, 0, 0) orelse return null;
+    const refresh_tx = refresh.transmit orelse return null;
+    transmit_identifications[1] = refresh_tx.identification;
+    transmit_descriptors[1] = refresh_tx.completion.descriptor_index;
+    transmit_next_cursors[1] = refresh_tx.completion.next_cursor;
+    const refresh_client_timestamp = service.request.client_timestamp;
+    if (refresh.state != .awaiting or refresh.start_reason != .refresh or
+        refresh_client_timestamp != expected_refresh_timestamp or refresh_tx.identification != 76 or
+        refresh_tx.completion.descriptor_index != 7 or refresh_tx.completion.next_cursor != 0)
+        return null;
+
+    const clock_before_first_rejection = service.clock;
+    if (!enqueueNtpServiceResponseWithQuality(
+        device,
+        socket,
+        server,
+        service.request.client_timestamp,
+        ntp.fixture_server_timestamp,
+        2,
+        ntp.default_quality_policy.max_root_delay,
+        ntp.default_quality_policy.max_root_dispersion + 1,
+        0x8301,
+        0xF301,
+    )) return null;
+    const first_rejection = stepNtpServiceAutomatic(device, &service, counter, refresh_tick, 0, 1) orelse return null;
+    const first_quality_result = first_rejection.quality_result orelse return null;
+    const first_quality_action = first_rejection.quality_rejection_action orelse return null;
+    const first_sample_absent = first_rejection.sample_tick == null;
+    const first_apply_absent = first_rejection.apply_result == null;
+    const first_clock_preserved = std.meta.eql(service.clock, clock_before_first_rejection);
+    const forced_retry_tx = first_rejection.transmit orelse return null;
+    transmit_identifications[2] = forced_retry_tx.identification;
+    transmit_descriptors[2] = forced_retry_tx.completion.descriptor_index;
+    transmit_next_cursors[2] = forced_retry_tx.completion.next_cursor;
+    const first_retry_timestamp_preserved = service.request.client_timestamp == refresh_client_timestamp;
+    const first_retry_transmissions = service.request.transmissions;
+    if (first_quality_result != .root_dispersion or first_quality_action != .retry_now or
+        first_rejection.quality_rejection_count != 1 or first_rejection.quality_rejections_remaining != 0 or
+        !first_sample_absent or !first_apply_absent or !first_clock_preserved or
+        !first_rejection.retried or first_rejection.timeout_reached or forced_retry_tx.identification != 77 or
+        forced_retry_tx.completion.descriptor_index != 0 or forced_retry_tx.completion.next_cursor != 1 or
+        !first_retry_timestamp_preserved or first_retry_transmissions != 2 or
+        service.request_retry_attempts != 1 or service.request_quality_rejections != 0 or
+        service.quality_forced_retries != 1)
+        return null;
+
+    const clock_before_timeout = service.clock;
+    if (!enqueueNtpServiceResponseWithQuality(
+        device,
+        socket,
+        server,
+        service.request.client_timestamp,
+        ntp.fixture_server_timestamp,
+        ntp.default_quality_policy.max_stratum + 1,
+        ntp.default_quality_policy.max_root_delay,
+        ntp.default_quality_policy.max_root_dispersion,
+        0x8302,
+        0xF302,
+    )) return null;
+    const timeout_tick = refresh_tick + 1;
+    const timeout = stepNtpServiceAutomatic(device, &service, counter, timeout_tick, 0, 1) orelse return null;
+    const second_quality_result = timeout.quality_result orelse return null;
+    const second_quality_action = timeout.quality_rejection_action orelse return null;
+    const second_sample_absent = timeout.sample_tick == null;
+    const second_apply_absent = timeout.apply_result == null;
+    const second_clock_preserved = std.meta.eql(service.clock, clock_before_timeout);
+    const timeout_waiting = timeout.recovery_state == .waiting;
+    const timeout_transmit_absent = timeout.transmit == null;
+    const request_cancelled = service.request.cancelled;
+    const recovery_deadline_delta = service.recovery_deadline_tick - timeout_tick;
+    if (second_quality_result != .stratum or second_quality_action != .retry_now or
+        timeout.quality_rejection_count != 1 or timeout.quality_rejections_remaining != 0 or
+        !second_sample_absent or !second_apply_absent or !second_clock_preserved or
+        timeout.state != .timed_out or !timeout.timeout_reached or !timeout_waiting or
+        !timeout_transmit_absent or !request_cancelled or service.request_active or
+        !service.retry_exhausted or service.retry_limit_hits != 1 or recovery_deadline_delta != 2 or
+        service.automatic_recoveries != 0 or service.recovery_exhausted)
+        return null;
+
+    const timeout_health = readNtpServiceHealth(&service, timeout_tick, 1, 100) orelse return null;
+    const timeout_health_time = timeout_health.current_time orelse return null;
+    const timeout_health_timestamp = ntp.unixTimeToTimestamp(timeout_health_time) orelse return null;
+    const cooldown_tick = timeout_tick + 1;
+    const cooldown = stepNtpServiceAutomatic(device, &service, counter, cooldown_tick, 0, 0) orelse return null;
+    const cooldown_no_tx = cooldown.state == .timed_out and cooldown.recovery_state == .waiting and
+        cooldown.transmit == null and !cooldown.recovery_started;
+    if (!cooldown_no_tx) return null;
+    const cooldown_health = readNtpServiceHealth(&service, cooldown_tick, 1, 100) orelse return null;
+    const cooldown_health_time = cooldown_health.current_time orelse return null;
+    const cooldown_health_timestamp = ntp.unixTimeToTimestamp(cooldown_health_time) orelse return null;
+    const holdover_advanced = cooldown_health_timestamp > timeout_health_timestamp;
+    const holdover_visible = timeout_health.state == .holdover and cooldown_health.state == .holdover and
+        timeout_health_timestamp > refresh_client_timestamp and holdover_advanced;
+    if (!holdover_visible) return null;
+
+    const recovery_tick = timeout_tick + recovery_policy.cooldown_ticks;
+    const expected_recovery_timestamp = ntp.projectedTimestampAt(&service.clock, recovery_tick) orelse return null;
+    const recovery = stepNtpServiceAutomatic(device, &service, counter, recovery_tick, 0, 0) orelse return null;
+    const recovery_tx = recovery.transmit orelse return null;
+    transmit_identifications[3] = recovery_tx.identification;
+    transmit_descriptors[3] = recovery_tx.completion.descriptor_index;
+    transmit_next_cursors[3] = recovery_tx.completion.next_cursor;
+    const recovery_client_timestamp = service.request.client_timestamp;
+    const recovery_timestamp_automatic = recovery_client_timestamp == expected_recovery_timestamp and
+        recovery_client_timestamp > cooldown_health_timestamp;
+    const recovery_ready = recovery.recovery_state == .ready;
+    const recovery_started = recovery.state == .awaiting and recovery.start_reason == .recovery and
+        recovery.recovery_started and service.automatic_recoveries == 1;
+    if (!recovery_timestamp_automatic or !recovery_ready or !recovery_started or
+        recovery_tx.identification != 78 or recovery_tx.completion.descriptor_index != 1 or
+        recovery_tx.completion.next_cursor != 2 or service.request_retry_attempts != 0 or
+        service.request_quality_rejections != 0 or service.request_step_rejections != 0 or
+        service.retry_exhausted)
+        return null;
+
+    const recovered_server_timestamp = ntp.fixture_server_timestamp + (@as(u64, 2) << 32);
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        server,
+        service.request.client_timestamp,
+        recovered_server_timestamp,
+        0x8303,
+        0xF303,
+    )) return null;
+    const recovered = stepNtpServiceAutomatic(device, &service, counter, recovery_tick, 0, 1) orelse return null;
+    const accepted_quality_result = recovered.quality_result orelse return null;
+    const accepted_step_result = recovered.step_result orelse return null;
+    const accepted_sample_tick = recovered.sample_tick orelse return null;
+    const accepted_time = ntp.readProjectedClockAt(&service.clock, accepted_sample_tick) orelse return null;
+    const accepted_timestamp = ntp.unixTimeToTimestamp(accepted_time) orelse return null;
+    const recovery_budget_reset = service.automatic_recoveries == 0 and !service.recovery_exhausted and
+        service.recovery_deadline_tick == 0;
+    const retry_budget_reset = service.request_retry_attempts == 0 and !service.retry_exhausted;
+    const quality_budget_reset = service.request_quality_rejections == 0;
+    const step_budget_reset = service.request_step_rejections == 0;
+    const clock_advanced = accepted_timestamp > cooldown_health_timestamp;
+    const health_after_success = readNtpServiceHealth(&service, accepted_sample_tick, 1, 100) orelse return null;
+    const health_reports_success = health_after_success.state == .synchronized and
+        health_after_success.current_time != null and health_after_success.recovery_successes == 1 and
+        health_after_success.automatic_recoveries == 0 and !health_after_success.retry_exhausted and
+        !health_after_success.recovery_exhausted and health_after_success.request_quality_rejections == 0 and
+        health_after_success.request_step_rejections == 0 and health_after_success.quality_forced_retries == 1;
+    if (recovered.state != .idle or accepted_quality_result != .accepted or accepted_step_result != .accepted or
+        recovered.apply_result != .accepted or accepted_time.seconds != ntp.fixture_unix_seconds + 2 or
+        accepted_time.fraction != 0x80000000 or service.recovery_successes != 1 or
+        !recovery_budget_reset or !retry_budget_reset or !quality_budget_reset or !step_budget_reset or
+        !clock_advanced or !health_reports_success)
+        return null;
+
+    const close_succeeded = closeNtpService(device, &service);
+    if (!close_succeeded or service.active or service.client.active or service.request_active) return null;
+
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const overflow = completionQueueOverflow(&tx_completion_queue) + completionQueueOverflow(&rx_completion_queue);
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_198 or
+        device.next_udp_generation != 57 or device.next_udp_identification != 79 or
+        device.next_dns_transaction_id != 8 or device.tx_producer != 2 or
+        device.tx_submissions != submissions_before + 4 or txe != 106 or txd != 106 or rxe != 22 or
+        overflow != 0 or device.software_rx_queue.enqueued != 111 or
+        device.software_rx_queue.dequeued != 111 or device.packets_dispatched != 100 or
+        device.udp_packets_dispatched != 99 or service.quality_accepted != 2 or
+        service.quality_rejected != 2 or service.quality_stratum_rejected != 1 or
+        service.quality_root_dispersion_rejected != 1 or service.quality_forced_retries != 1 or
+        service.step_accepted != 2 or service.step_rejected != 0 or service.requests_started != 3 or
+        service.retries != 1 or service.responses != 2 or service.retry_limit_hits != 1 or
+        service.recovery_successes != 1 or service.automatic_recoveries != 0 or
+        service.recovery_limit_hits != 0)
+        return null;
+
+    return .{
+        .source_kind = counter.reference.kind,
+        .frequency_hz = counter.frequency_hz,
+        .counter_bits = counter.counter_bits,
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .maximum_quality_rejections = quality_rejection_policy.maximum_rejections_per_request,
+        .maximum_retries = retry_policy.maximum_retries,
+        .recovery_cooldown_ticks = recovery_policy.cooldown_ticks,
+        .maximum_recoveries = recovery_policy.maximum_recoveries,
+        .transmit_identifications = transmit_identifications,
+        .transmit_descriptors = transmit_descriptors,
+        .transmit_next_cursors = transmit_next_cursors,
+        .refresh_client_timestamp = refresh_client_timestamp,
+        .recovery_client_timestamp = recovery_client_timestamp,
+        .recovery_timestamp_automatic = recovery_timestamp_automatic,
+        .first_quality_result = first_quality_result,
+        .first_quality_action = first_quality_action,
+        .first_sample_absent = first_sample_absent,
+        .first_apply_absent = first_apply_absent,
+        .first_clock_preserved = first_clock_preserved,
+        .first_retry_timestamp_preserved = first_retry_timestamp_preserved,
+        .first_retry_transmissions = first_retry_transmissions,
+        .second_quality_result = second_quality_result,
+        .second_quality_action = second_quality_action,
+        .second_sample_absent = second_sample_absent,
+        .second_apply_absent = second_apply_absent,
+        .second_clock_preserved = second_clock_preserved,
+        .timeout_state = timeout.state,
+        .timeout_waiting = timeout_waiting,
+        .timeout_transmit_absent = timeout_transmit_absent,
+        .request_cancelled = request_cancelled,
+        .retry_exhausted = service.retry_limit_hits == 1,
+        .recovery_deadline_delta = recovery_deadline_delta,
+        .timeout_health_state = timeout_health.state,
+        .timeout_health_timestamp = timeout_health_timestamp,
+        .cooldown_health_state = cooldown_health.state,
+        .cooldown_health_timestamp = cooldown_health_timestamp,
+        .holdover_visible = holdover_visible,
+        .holdover_advanced = holdover_advanced,
+        .cooldown_no_tx = cooldown_no_tx,
+        .recovery_ready = recovery_ready,
+        .recovery_started = recovery_started,
+        .accepted_quality_result = accepted_quality_result,
+        .accepted_step_result = accepted_step_result,
+        .accepted_sample_tick = accepted_sample_tick,
+        .accepted_seconds = accepted_time.seconds,
+        .accepted_fraction = accepted_time.fraction,
+        .recovery_successes = service.recovery_successes,
+        .recovery_budget_reset = recovery_budget_reset,
+        .retry_budget_reset = retry_budget_reset,
+        .quality_budget_reset = quality_budget_reset,
+        .step_budget_reset = step_budget_reset,
+        .clock_advanced = clock_advanced,
+        .health_reports_success = health_reports_success,
+        .quality_accepted = service.quality_accepted,
+        .quality_rejected = service.quality_rejected,
+        .quality_stratum_rejected = service.quality_stratum_rejected,
+        .quality_root_dispersion_rejected = service.quality_root_dispersion_rejected,
+        .quality_forced_retries = service.quality_forced_retries,
+        .step_accepted = service.step_accepted,
+        .step_rejected = service.step_rejected,
+        .requests_started = service.requests_started,
+        .retries = service.retries,
+        .responses = service.responses,
+        .retry_limit_hits = service.retry_limit_hits,
         .close_succeeded = close_succeeded,
         .final_identification_cursor = device.next_udp_identification,
         .final_tx_cursor = device.tx_producer,
