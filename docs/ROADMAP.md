@@ -513,3 +513,12 @@
 - A budget-three service cycle reports `3/2/1/1` and two readable handles; a second cycle consumes the unmatched packet as `1/0/1/0` while preserving the same ready set.
 - The returned handles receive the two valid datagrams with stable payload metadata; a drained cycle reports no dispatch work and no readable sockets.
 - Closing the endpoints invalidates both previously returned handles by generation, while ingress/drop accounting advances deterministically to 42 packets examined.
+
+## 3.20 - Round-robin UDP service fairness
+
+- The device retains a bounded ready-socket cursor independent of endpoint allocation and ephemeral-port state.
+- `collectReadableUdpSocketsFair` scans from that cursor, returns at most a caller-supplied number of generation-tagged handles, and advances only when a readable endpoint is selected.
+- `serviceUdpSocketsFair` combines bounded ingress dispatch with the fair collector while preserving the existing slot-ordered polling APIs.
+- Two sockets each receive two datagrams; successive one-handle service cycles select slots `2,3,2,3` with cursor states `3,0,3,0`.
+- Payload delivery order becomes `0,2,1,3`, demonstrating inter-socket fairness while retaining FIFO order within each socket.
+- A zero-ready cycle leaves the cursor stable, and closing the temporary sockets preserves the original endpoint table and all prior drop accounting.

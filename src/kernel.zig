@@ -2379,6 +2379,55 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.udp_service_cycle.invalid_udp_dropped);
     debugWrite("\r\n");
+
+    debugWrite("e1000e UDP fair service verified: sockets ");
+    debugWriteU64Decimal(network.udp_fair_service.first_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_fair_service.first_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_fair_service.first_port);
+    debugWrite(" and ");
+    debugWriteU64Decimal(network.udp_fair_service.second_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_fair_service.second_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_fair_service.second_port);
+    debugWrite(", initial dispatch/ready/pending ");
+    debugWriteU64Decimal(network.udp_fair_service.initial_dispatch_examined);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_fair_service.initial_dispatch_routed);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_fair_service.initial_ready_count);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_fair_service.initial_total_pending);
+    debugWrite(", selections slot/gen/payload/cursor ");
+    for (network.udp_fair_service.selection_slots, 0..) |slot, index| {
+        if (index != 0) debugWrite(" -> ");
+        debugWriteU64Decimal(slot);
+        debugWrite("/");
+        debugWriteU64Decimal(network.udp_fair_service.selection_generations[index]);
+        debugWrite("/");
+        debugWriteU64Decimal(network.udp_fair_service.selection_payload_indexes[index]);
+        debugWrite("/");
+        debugWriteU64Decimal(network.udp_fair_service.ready_cursors_after[index]);
+    }
+    debugWrite(", empty/final cursor ");
+    debugWriteU64Decimal(network.udp_fair_service.empty_ready_count);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_fair_service.final_ready_cursor);
+    debugWrite(", endpoints/ephemeral cursor ");
+    debugWriteU64Decimal(network.udp_fair_service.final_registered_endpoints);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_fair_service.final_ephemeral_cursor);
+    debugWrite(", ingress ");
+    debugWriteU64Decimal(network.udp_fair_service.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_fair_service.ingress_dequeued);
+    debugWrite(", dispatch total/UDP ");
+    debugWriteU64Decimal(network.udp_fair_service.packets_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_fair_service.udp_dispatched);
+    debugWrite("\r\n");
     return true;
 }
 
