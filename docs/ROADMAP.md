@@ -1104,3 +1104,12 @@
 - Manual source selection preserves automatic source-rotation counts, timeout history, cumulative request/retry/response counters, and retry/recovery limit-hit diagnostics.
 - Duplicate reset attempts are rejected after the timeout latch has been cleared.
 - The packet-free verifier proves source `2 -> 1`, server `10.0.2.6 -> 10.0.2.5`, exact state preservation on invalid selection, same-socket valid selection, zero packet/ring activity, and clean close.
+
+## 3.87 - Live projected refresh after operator source selection
+
+- A synchronized terminal service can be reset directly from source two to source one through `resetNtpServiceTimeoutToSource` without replacing its UDP socket or projected clock.
+- The selected source becomes the connected peer before the timeout latch is cleared, while automatic rotation count and cumulative timeout diagnostics remain unchanged.
+- The next automatic step uses projected holdover time and starts a normal refresh on the selected source rather than bootstrap or recovery mode.
+- A valid response from source one is quality-gated, step-gated, sampled from the active hardware reference, and applied to the projected clock.
+- Successful acceptance leaves synchronized health on source one with no pending source, no source-failure chain, no retry/recovery latch, and all cumulative limit counters preserved.
+- The verifier proves two transmissions, two accepted samples, source-two to source-one selection, same-socket projected refresh, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
