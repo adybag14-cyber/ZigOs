@@ -1987,6 +1987,17 @@ fn inspectE1000e(
     debugWriteHex64(network.udp_endpoint_demux.rx_pending_mask);
     debugWrite("\r\n");
 
+    debugWrite("e1000e UDP datagram API verified: structured RX ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.structured_receives);
+    debugWrite(", connected TX ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.connected_sends);
+    debugWrite(", peer port ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.connected_peer_port);
+    debugWrite(" bound ");
+    debugWrite(if (network.udp_endpoint_demux.connected_peer_bound) "yes" else "no");
+    debugWrite(", payload metadata retained yes");
+    debugWrite("\r\n");
+
     debugWrite("e1000e UDP endpoint lifecycle verified: table ");
     debugWriteU64Decimal(network.udp_endpoint_lifecycle.table_capacity);
     debugWrite(", usable queue ");

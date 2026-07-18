@@ -222,6 +222,32 @@ pub const UdpSendOptions = struct {
     payload: []const u8,
 };
 
+pub const ConnectedUdpSendOptions = struct {
+    identification: u16,
+    ttl: u8 = 64,
+    payload: []const u8,
+};
+
+pub const ReceivedUdpDatagram = struct {
+    packet: Packet,
+    source_mac: [6]u8,
+    destination_mac: [6]u8,
+    source_ipv4: [4]u8,
+    destination_ipv4: [4]u8,
+    source_port: u16,
+    destination_port: u16,
+    ttl: u8,
+    identification: u16,
+    udp_checksum_present: bool,
+    payload_offset: u16,
+    payload_length: u16,
+
+    pub fn payload(self: *const ReceivedUdpDatagram) []const u8 {
+        const start: usize = self.payload_offset;
+        return self.packet.bytes[start .. start + self.payload_length];
+    }
+};
+
 pub const Device = struct {
     bar0: usize,
     rx_ring_address: usize,
@@ -399,6 +425,10 @@ pub const UdpEndpointDemuxReport = struct {
     endpoint_port: u16,
     socket_generation: u32,
     registered_endpoints: u16,
+    structured_receives: u16,
+    connected_sends: u16,
+    connected_peer_port: u16,
+    connected_peer_bound: bool,
     unmatched_port: u16,
     unmatched_dropped: u64,
     rrq: TxCompletion,
@@ -1448,6 +1478,35 @@ pub fn receiveUdpSocket(device: *Device, socket: UdpSocket) ?Packet {
     return dequeueQueuedPacket(&endpoint.queue);
 }
 
+pub fn receiveUdpDatagram(device: *Device, socket: UdpSocket) ?ReceivedUdpDatagram {
+    const endpoint = udpSocketEndpoint(device, socket) orelse return null;
+    const packet = dequeueQueuedPacket(&endpoint.queue) orelse return null;
+    const datagram = udp.parseFrame(packet.bytes[0..packet.length], .{
+        .destination_mac = device.local_mac,
+        .source_mac = if (endpoint.peer_bound) endpoint.peer.mac else null,
+        .destination_ipv4 = device.local_ipv4,
+        .source_ipv4 = if (endpoint.peer_bound) endpoint.peer.ipv4 else null,
+        .destination_port = endpoint.port,
+        .source_port = if (endpoint.peer_bound) endpoint.peer.port else null,
+    }) orelse return null;
+    const payload_offset = @intFromPtr(datagram.payload.ptr) - @intFromPtr(packet.bytes[0..].ptr);
+    if (payload_offset > packet.length or datagram.payload.len > packet.length - payload_offset) return null;
+    return .{
+        .packet = packet,
+        .source_mac = datagram.source_mac,
+        .destination_mac = datagram.destination_mac,
+        .source_ipv4 = datagram.source_ipv4,
+        .destination_ipv4 = datagram.destination_ipv4,
+        .source_port = datagram.source_port,
+        .destination_port = datagram.destination_port,
+        .ttl = datagram.ttl,
+        .identification = datagram.identification,
+        .udp_checksum_present = datagram.udp_checksum_present,
+        .payload_offset = @intCast(payload_offset),
+        .payload_length = @intCast(datagram.payload.len),
+    };
+}
+
 pub fn connectUdpSocket(device: *Device, socket: UdpSocket, peer: UdpPeer) bool {
     const endpoint = udpSocketEndpoint(device, socket) orelse return false;
     if (!validUdpPeer(peer) or endpoint.queue.head != endpoint.queue.tail) return false;
@@ -1487,6 +1546,23 @@ pub fn sendUdpSocket(device: *Device, socket: UdpSocket, options: UdpSendOptions
         .payload = options.payload,
     }) orelse return null;
     return submitFrame(device, frame[0..frame_length]);
+}
+
+pub fn sendConnectedUdpSocket(
+    device: *Device,
+    socket: UdpSocket,
+    options: ConnectedUdpSendOptions,
+) ?TxCompletion {
+    const endpoint = udpSocketEndpoint(device, socket) orelse return null;
+    if (!endpoint.peer_bound) return null;
+    return sendUdpSocket(device, socket, .{
+        .destination_mac = endpoint.peer.mac,
+        .destination_ipv4 = endpoint.peer.ipv4,
+        .destination_port = endpoint.peer.port,
+        .identification = options.identification,
+        .ttl = options.ttl,
+        .payload = options.payload,
+    });
 }
 
 pub fn closeUdpSocket(device: *Device, socket: UdpSocket) bool {
@@ -2049,32 +2125,32 @@ fn verifyUdpEndpointDemux(device: *Device) ?UdpEndpointDemuxReport {
     var payload_length: usize = 0;
     var payload_fnv1a64 = tftp.initial_fnv1a64;
     var final_block = false;
+    var structured_receives: u16 = 0;
+    var connected_sends: u16 = 0;
 
     while (block_count < tftp.expected_block_count) {
         if (!pumpReceive(device)) return null;
         if (!dispatchNextPacket(device)) return null;
-        const packet = receiveUdpSocket(device, socket) orelse return null;
-        const datagram = udp.parseFrame(packet.bytes[0..packet.length], .{
-            .destination_mac = device.local_mac,
-            .source_mac = device.gateway_mac,
-            .destination_ipv4 = device.local_ipv4,
-            .source_ipv4 = device.gateway_ipv4,
-            .destination_port = endpoint_tftp_client_port,
-            .source_port = if (server_port == 0) null else server_port,
-        }) orelse return null;
+        const datagram = receiveUdpDatagram(device, socket) orelse return null;
+        structured_receives +|= 1;
         if (server_port == 0) {
             server_port = datagram.source_port;
             reply_ttl = datagram.ttl;
+            if (!connectUdpSocket(device, socket, .{
+                .mac = datagram.source_mac,
+                .ipv4 = datagram.source_ipv4,
+                .port = datagram.source_port,
+            })) return null;
         } else if (datagram.source_port != server_port or datagram.ttl != reply_ttl) {
             return null;
         }
         udp_checksum_present = udp_checksum_present and datagram.udp_checksum_present;
 
         const expected_block: u16 = block_count + 1;
-        const data = tftp.parseData(datagram.payload, expected_block, payload_length) orelse return null;
+        const data = tftp.parseData(datagram.payload(), expected_block, payload_length) orelse return null;
         const index: usize = block_count;
-        data_descriptors[index] = packet.source_descriptor;
-        data_frame_lengths[index] = packet.length;
+        data_descriptors[index] = datagram.packet.source_descriptor;
+        data_frame_lengths[index] = datagram.packet.length;
         payload_fnv1a64 = tftp.updatePayloadHash(payload_fnv1a64, data.payload);
         payload_length += data.payload.len;
         block_count += 1;
@@ -2082,13 +2158,11 @@ fn verifyUdpEndpointDemux(device: *Device) ?UdpEndpointDemuxReport {
         if (final_block != (block_count == tftp.expected_block_count)) return null;
 
         const acknowledgement = tftp.buildAcknowledgement(&tftp_payload_buffer, data.block) orelse return null;
-        const acknowledgement_tx = sendUdpSocket(device, socket, .{
-            .destination_mac = device.gateway_mac,
-            .destination_ipv4 = device.gateway_ipv4,
-            .destination_port = server_port,
+        const acknowledgement_tx = sendConnectedUdpSocket(device, socket, .{
             .identification = endpoint_tftp_identification + block_count,
             .payload = acknowledgement,
         }) orelse return null;
+        connected_sends +|= 1;
         acknowledgement_descriptors[index] = acknowledgement_tx.descriptor_index;
         acknowledgement_frame_lengths[index] = acknowledgement_tx.frame_length;
     }
@@ -2114,6 +2188,8 @@ fn verifyUdpEndpointDemux(device: *Device) ?UdpEndpointDemuxReport {
         payload_length != tftp.expected_file_bytes or
         payload_fnv1a64 != tftp.expected_payload_fnv1a64 or
         server_port != tftp.server_port or reply_ttl == 0 or !udp_checksum_present or
+        structured_receives != tftp.expected_block_count or connected_sends != tftp.expected_block_count or
+        !endpoint.peer_bound or endpoint.peer.port != server_port or
         device.tx_producer != 1 or device.rx_consumer != 6 or
         device.tx_submissions != 15 or device.rx_deliveries != 13 or
         device.tx_cursor_wraps != 2 or device.rx_cursor_wraps != 1 or
@@ -2149,6 +2225,10 @@ fn verifyUdpEndpointDemux(device: *Device) ?UdpEndpointDemuxReport {
         .endpoint_port = endpoint.port,
         .socket_generation = socket.generation,
         .registered_endpoints = device.udp_endpoint_count,
+        .structured_receives = structured_receives,
+        .connected_sends = connected_sends,
+        .connected_peer_port = endpoint.peer.port,
+        .connected_peer_bound = endpoint.peer_bound,
         .unmatched_port = unmatched_udp_port,
         .unmatched_dropped = device.unmatched_udp_packets_dropped,
         .rrq = rrq,

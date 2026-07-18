@@ -460,3 +460,11 @@
 - Peer changes and disconnects are rejected while queued packets remain, and duplicate connection to the same peer is idempotent.
 - Deterministic packets prove that the correct peer is accepted while wrong MAC, wrong IPv4 address, wrong source port, and a corrupted UDP checksum are all rejected.
 - After disconnect, an alternate source is accepted again, proving that wildcard receive semantics are restored without reopening the socket.
+
+## 3.14 - Structured UDP datagrams and connected transmission
+
+- `receiveUdpDatagram` consumes a socket packet and returns stable packet ownership together with source/destination MAC and IPv4 addresses, ports, TTL, IPv4 identification, checksum presence, and a bounds-checked payload view.
+- The receive API revalidates the packet against the live socket and its optional connected peer before exposing metadata.
+- `sendConnectedUdpSocket` emits through the peer already attached to the generation-tagged socket, eliminating repeated destination arguments and rejecting unconnected handles.
+- The second five-block TFTP transfer receives every DATA frame through the structured API, connects to the validated first responder, and transmits every ACK through the connected-send API.
+- The proof requires five structured receives, five connected sends, a retained peer port of 69, unchanged descriptor order, unchanged completion totals, and the same 2,304-byte payload hash.
