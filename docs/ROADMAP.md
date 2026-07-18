@@ -495,3 +495,12 @@
 - A five-packet mixed batch contains three valid socket datagrams, one unmatched destination port, and one corrupted UDP checksum.
 - Budgets of two, two, and ten produce deterministic results `2/1/1/3`, `2/1/1/1`, and `1/1/0/0`; a subsequent empty batch reports zero work.
 - The three valid datagrams retain FIFO order and payload metadata while independent unmatched and invalid counters each advance by one.
+
+## 3.18 - Endpoint-wide UDP readiness polling
+
+- `pollUdpEndpoints` scans the fixed endpoint table without consuming packets and returns active, readable, and connected bitmasks plus counts, total pending packets, and maximum per-socket depth.
+- Two ephemeral sockets occupy slots 2 and 3 while the retained TFTP sockets remain in slots 0 and 1; slot 3 is peer-connected and slot 1 retains its TFTP peer.
+- Routing two datagrams to slot 2 and one to slot 3 produces masks `active=0x0F`, `readable=0x0C`, and `connected=0x0A`, with three total pending and maximum depth two.
+- Consuming one packet preserves both readable bits with total pending two; draining both sockets clears the readable mask while active and connected state remain unchanged.
+- Closing both temporary sockets returns masks to `active=0x03`, `readable=0x00`, and `connected=0x02`, leaving the original endpoints and their peer state intact.
+- Ingress and UDP dispatch totals advance exactly by three, with no new drops or hardware completions.
