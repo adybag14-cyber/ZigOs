@@ -3478,6 +3478,68 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.dns_automatic_cached_resolve.udp_dispatched);
     debugWrite("\r\n");
+
+    debugWrite("DNS negative response verified: socket ");
+    debugWriteU64Decimal(network.dns_negative.socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.local_port);
+    debugWrite(", server ");
+    debugWriteIpv4(network.dns_negative.server_ipv4);
+    debugWrite(":");
+    debugWriteU64Decimal(network.dns_negative.server_port);
+    debugWrite(", transaction 0x");
+    debugWriteHex16(network.dns_negative.transaction_id);
+    debugWrite(", TX ID/descriptor/cursor/frame ");
+    debugWriteU64Decimal(network.dns_negative.transmit_identification);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.transmit_descriptor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.transmit_next_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.transmit_frame_length);
+    debugWrite(", poll ");
+    debugWriteDnsState(network.dns_negative.poll_state);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.poll_examined);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.poll_rejected);
+    debugWrite(", response absent/queue empty ");
+    debugWrite(if (network.dns_negative.response_absent) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_negative.queue_empty) "yes" else "no");
+    debugWrite(", stale ");
+    debugWriteDnsState(network.dns_negative.stale_state);
+    debugWrite(", final DNS/IP/TX cursors ");
+    debugWriteU64Decimal(network.dns_negative.final_dns_transaction_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.final_identification_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.final_tx_cursor);
+    debugWrite(", submissions ");
+    debugWriteU64Decimal(network.dns_negative.tx_submissions_delta);
+    debugWrite(", completions TX/RX ");
+    debugWriteU64Decimal(network.dns_negative.tx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.tx_completion_dequeues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.rx_completion_enqueues);
+    debugWrite(", overflow ");
+    debugWriteU64Decimal(network.dns_negative.completion_overflow);
+    debugWrite(", endpoints/cursor ");
+    debugWriteU64Decimal(network.dns_negative.final_registered_endpoints);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.final_ephemeral_cursor);
+    debugWrite(", ingress ");
+    debugWriteU64Decimal(network.dns_negative.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.ingress_dequeued);
+    debugWrite(", dispatch total/UDP ");
+    debugWriteU64Decimal(network.dns_negative.packets_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_negative.udp_dispatched);
+    debugWrite("\r\n");
     return true;
 }
 
@@ -3486,6 +3548,7 @@ fn debugWriteDnsState(state: e1000e.DnsAQueryState) void {
         .inactive => "inactive",
         .pending => "pending",
         .resolved => "resolved",
+        .not_found => "not-found",
     });
 }
 

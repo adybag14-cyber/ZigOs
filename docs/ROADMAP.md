@@ -671,3 +671,12 @@
 - The matching response resolves and refreshes the cache; a later mixed-case hit returns 200 ticks remaining with no wire activity.
 - An invalid name is rejected without consuming DNS ID, IPv4 ID, descriptor, submission, or completion state.
 - Final cache statistics are two hits, one miss, two stores, one expiration, and one active entry; TX completions reach 46.
+
+## 3.38 - Terminal DNS negative outcomes
+
+- The DNS codec exposes `AOutcome`, distinguishing a validated A answer from a validated authoritative name error while retaining the compatibility `parseAResponse` wrapper.
+- `buildNameErrorResponse` creates a bounded NXDOMAIN response with the original question and no answer records.
+- `pollDnsAQuery` now returns `not_found` immediately for a matching NXDOMAIN instead of counting it as unrelated input and leaving the request pending.
+- A query for `missing.zigos.test` uses DNS transaction 3, IPv4 ID 19, TX descriptor 6, cursor 7, and a 78-byte frame.
+- Its NXDOMAIN response is consumed exactly once, returns no A payload, empties the endpoint queue, and becomes `inactive` after socket close.
+- TX completions reach 47 and ingress/UDP dispatch totals advance to `65/65` and `54/53` with no extra drops.

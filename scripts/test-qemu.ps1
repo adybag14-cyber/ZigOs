@@ -766,6 +766,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'DNS automatic cached resolve verified: socket 2/33/49174, server 10\.0\.2\.3:53, preload yes, initial hit/TTL/no-TX yes/900/yes, expired DNS/IP/descriptor/cursor/frame 0x0002/18/5/6/70, resolved resolved/1/0 A 192\.0\.2\.42 TTL 300, refreshed hit/TTL/no-TX yes/200/yes, invalid/cursors preserved yes/yes, final DNS/IP/TX cursors 3/19/6, submissions 1, completions TX/RX 46/46/22, overflow 0, cache hits/misses/stores/expirations/active 2/1/2/1/1, endpoints/cursor 2/49175, ingress 64/64, dispatch total/UDP 53/52')) {
         throw 'The automatic cached resolver did not keep cache hits off the wire, requery on expiry, cache the answer, and reject invalid names transactionally.'
     }
+    if (-not [regex]::IsMatch($output, 'DNS negative response verified: socket 2/34/49175, server 10\.0\.2\.3:53, transaction 0x0003, TX ID/descriptor/cursor/frame 19/6/7/78, poll not-found/1/0, response absent/queue empty yes/yes, stale inactive, final DNS/IP/TX cursors 4/20/7, submissions 1, completions TX/RX 47/47/22, overflow 0, endpoints/cursor 2/49176, ingress 65/65, dispatch total/UDP 54/53')) {
+        throw 'NXDOMAIN did not become a terminal not-found poll result with balanced socket and hardware accounting.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
