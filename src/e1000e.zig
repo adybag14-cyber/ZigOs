@@ -592,6 +592,22 @@ pub const DnsAQueryPoll = struct {
     response: ?DnsAResponse,
 };
 
+pub const DnsAliasReport = struct {
+    transaction_id: u16,
+    alias_name_length: u16,
+    alias_name_hash: u64,
+    canonical_name_length: u16,
+    canonical_name_hash: u64,
+    response_length: u16,
+    response_hash: u64,
+    address: [4]u8,
+    ttl: u32,
+    alias_hops: u8,
+    self_loop_rejected: bool,
+    truncated_rejected: bool,
+    case_insensitive_match: bool,
+};
+
 pub const DnsPollingReport = struct {
     socket_slot: u16,
     socket_generation: u32,
@@ -1231,6 +1247,7 @@ pub const NetworkResult = struct {
     dns_codec: DnsCodecReport,
     dns_transaction: DnsTransactionReport,
     dns_polling: DnsPollingReport,
+    dns_alias: DnsAliasReport,
 };
 
 var active_bar0: usize = 0;
@@ -1847,6 +1864,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const dns_alias = verifyDnsAlias() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -1961,6 +1982,7 @@ pub fn initializeAndTestNetwork(
         .dns_codec = dns_codec,
         .dns_transaction = dns_transaction,
         .dns_polling = dns_polling,
+        .dns_alias = dns_alias,
     };
 }
 
@@ -3535,6 +3557,83 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
     };
 }
 
+fn verifyDnsAlias() ?DnsAliasReport {
+    const transaction_id: u16 = dns.fixture_transaction_id + 2;
+    var response_buffer = std.mem.zeroes([256]u8);
+    const response = dns.buildCnameAResponse(
+        &response_buffer,
+        transaction_id,
+        dns.fixture_alias_name,
+        dns.fixture_name,
+        dns.fixture_address,
+        dns.default_ttl,
+    ) orelse return null;
+    if (response.len != 84) return null;
+    const parsed = dns.parseAResponse(response, transaction_id, dns.fixture_alias_name) orelse return null;
+    if (!std.mem.eql(u8, &parsed.address, &dns.fixture_address) or parsed.ttl != dns.default_ttl or
+        parsed.alias_hops != 1 or !parsed.authoritative or !parsed.recursion_available)
+    {
+        return null;
+    }
+
+    var loop_buffer = std.mem.zeroes([256]u8);
+    const loop_response = dns.buildCnameAResponse(
+        &loop_buffer,
+        transaction_id,
+        dns.fixture_alias_name,
+        dns.fixture_alias_name,
+        dns.fixture_address,
+        dns.default_ttl,
+    ) orelse return null;
+    const loop_a_type_offset = loop_response.len - 14;
+    loop_buffer[loop_a_type_offset] = 0;
+    loop_buffer[loop_a_type_offset + 1] = 28;
+    const self_loop_rejected = dns.parseAResponse(
+        loop_buffer[0..loop_response.len],
+        transaction_id,
+        dns.fixture_alias_name,
+    ) == null;
+    const truncated_rejected = dns.parseAResponse(
+        response[0 .. response.len - 1],
+        transaction_id,
+        dns.fixture_alias_name,
+    ) == null;
+
+    var mixed_buffer = std.mem.zeroes([256]u8);
+    const mixed_response = dns.buildCnameAResponse(
+        &mixed_buffer,
+        transaction_id,
+        "Alias.ZiGoS.TeSt",
+        "ZiGoS.TeSt",
+        dns.fixture_address,
+        dns.default_ttl,
+    ) orelse return null;
+    const mixed = dns.parseAResponse(
+        mixed_response,
+        transaction_id,
+        dns.fixture_alias_name,
+    ) orelse return null;
+    const case_insensitive_match = mixed.alias_hops == 1 and
+        std.mem.eql(u8, &mixed.address, &dns.fixture_address);
+    if (!self_loop_rejected or !truncated_rejected or !case_insensitive_match) return null;
+
+    return .{
+        .transaction_id = transaction_id,
+        .alias_name_length = dns.fixture_alias_name.len,
+        .alias_name_hash = tftp.updatePayloadHash(tftp.initial_fnv1a64, dns.fixture_alias_name),
+        .canonical_name_length = dns.fixture_name.len,
+        .canonical_name_hash = tftp.updatePayloadHash(tftp.initial_fnv1a64, dns.fixture_name),
+        .response_length = @intCast(response.len),
+        .response_hash = tftp.updatePayloadHash(tftp.initial_fnv1a64, response),
+        .address = parsed.address,
+        .ttl = parsed.ttl,
+        .alias_hops = parsed.alias_hops,
+        .self_loop_rejected = self_loop_rejected,
+        .truncated_rejected = truncated_rejected,
+        .case_insensitive_match = case_insensitive_match,
+    };
+}
+
 fn verifyDnsPolling(device: *Device) ?DnsPollingReport {
     const socket = openEphemeralUdpSocket(device) orelse return null;
     if (socket.endpoint_index != 2 or socket.generation != 28 or socket.local_port != 49_169 or
@@ -3900,7 +3999,7 @@ fn verifyDnsCodec() ?DnsCodecReport {
     if (response.len != 44) return null;
     const parsed = dns.parseAResponse(response, dns.fixture_transaction_id, dns.fixture_name) orelse return null;
     if (!std.mem.eql(u8, &parsed.address, &dns.fixture_address) or parsed.ttl != dns.default_ttl or
-        !parsed.authoritative or !parsed.recursion_available)
+        !parsed.authoritative or !parsed.recursion_available or parsed.alias_hops != 0)
     {
         return null;
     }

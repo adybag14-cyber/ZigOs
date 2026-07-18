@@ -5,6 +5,7 @@ const question_tail_bytes: usize = 4;
 const resource_record_fixed_bytes: usize = 10;
 pub const maximum_name_bytes: usize = 253;
 const maximum_compression_jumps: usize = 16;
+const maximum_alias_hops: usize = 8;
 const flag_response: u16 = 1 << 15;
 const flag_authoritative: u16 = 1 << 10;
 const flag_truncated: u16 = 1 << 9;
@@ -14,11 +15,13 @@ const opcode_mask: u16 = 0x7800;
 const response_code_mask: u16 = 0x000F;
 const class_internet: u16 = 1;
 const type_a: u16 = 1;
+const type_cname: u16 = 5;
 
 pub const server_port: u16 = 53;
 pub const default_ttl: u32 = 300;
 pub const fixture_transaction_id: u16 = 0x4453;
 pub const fixture_name = "zigos.test";
+pub const fixture_alias_name = "alias.zigos.test";
 pub const fixture_address = [4]u8{ 192, 0, 2, 42 };
 
 pub const AResponse = struct {
@@ -26,6 +29,7 @@ pub const AResponse = struct {
     ttl: u32,
     authoritative: bool,
     recursion_available: bool,
+    alias_hops: u8,
 };
 
 const DecodedName = struct {
@@ -71,6 +75,43 @@ pub fn buildAResponse(
     return buffer[0..length];
 }
 
+pub fn buildCnameAResponse(
+    buffer: []u8,
+    transaction_id: u16,
+    alias_name: []const u8,
+    canonical_name: []const u8,
+    address: [4]u8,
+    ttl: u32,
+) ?[]const u8 {
+    const canonical_encoded_bytes = encodedNameLength(canonical_name) orelse return null;
+    const query = buildAQuery(buffer, transaction_id, alias_name) orelse return null;
+    const length = query.len + 26 + canonical_encoded_bytes * 2;
+    if (buffer.len < length) return null;
+    writeNetwork16(buffer, 2, flag_response | flag_authoritative | flag_recursion_desired | flag_recursion_available);
+    writeNetwork16(buffer, 6, 2);
+
+    var offset = query.len;
+    writeNetwork16(buffer, offset, 0xC000 | @as(u16, header_bytes));
+    offset += 2;
+    writeNetwork16(buffer, offset, type_cname);
+    writeNetwork16(buffer, offset + 2, class_internet);
+    writeNetwork32(buffer, offset + 4, ttl);
+    writeNetwork16(buffer, offset + 8, @intCast(canonical_encoded_bytes));
+    offset += resource_record_fixed_bytes;
+    offset = encodeName(buffer, offset, canonical_name) orelse return null;
+
+    offset = encodeName(buffer, offset, canonical_name) orelse return null;
+    writeNetwork16(buffer, offset, type_a);
+    writeNetwork16(buffer, offset + 2, class_internet);
+    writeNetwork32(buffer, offset + 4, ttl);
+    writeNetwork16(buffer, offset + 8, address.len);
+    offset += resource_record_fixed_bytes;
+    @memcpy(buffer[offset .. offset + address.len], &address);
+    offset += address.len;
+    if (offset != length) return null;
+    return buffer[0..length];
+}
+
 pub fn parseAResponse(
     message: []const u8,
     expected_transaction_id: u16,
@@ -100,34 +141,77 @@ pub fn parseAResponse(
         return null;
     }
     offset += question_tail_bytes;
+    const answers_offset = offset;
 
-    var answer_index: u16 = 0;
-    while (answer_index < answer_count) : (answer_index += 1) {
-        var owner_buffer: [maximum_name_bytes]u8 = undefined;
-        const owner = decodeName(message, offset, &owner_buffer) orelse return null;
-        offset = owner.next_offset;
-        if (offset + resource_record_fixed_bytes > message.len) return null;
-        const record_type = readNetwork16(message, offset);
-        const record_class = readNetwork16(message, offset + 2);
-        const ttl = readNetwork32(message, offset + 4);
-        const data_length: usize = readNetwork16(message, offset + 8);
-        offset += resource_record_fixed_bytes;
-        if (offset + data_length > message.len) return null;
-        if (record_type == type_a and record_class == class_internet and data_length == 4 and
-            equalName(owner_buffer[0..owner.length], expected_name))
-        {
-            var address: [4]u8 = undefined;
-            @memcpy(&address, message[offset .. offset + 4]);
-            return .{
-                .address = address,
-                .ttl = ttl,
-                .authoritative = (flags & flag_authoritative) != 0,
-                .recursion_available = (flags & flag_recursion_available) != 0,
-            };
+    var current_name = std.mem.zeroes([maximum_name_bytes]u8);
+    @memcpy(current_name[0..expected_name.len], expected_name);
+    var current_length = expected_name.len;
+    var visited_names = std.mem.zeroes([maximum_alias_hops + 1][maximum_name_bytes]u8);
+    var visited_lengths = std.mem.zeroes([maximum_alias_hops + 1]usize);
+    @memcpy(visited_names[0][0..expected_name.len], expected_name);
+    visited_lengths[0] = expected_name.len;
+    var alias_hops: u8 = 0;
+
+    while (true) {
+        offset = answers_offset;
+        var cname_found = false;
+        var cname_target = std.mem.zeroes([maximum_name_bytes]u8);
+        var cname_target_length: usize = 0;
+        var answer_index: u16 = 0;
+        while (answer_index < answer_count) : (answer_index += 1) {
+            var owner_buffer: [maximum_name_bytes]u8 = undefined;
+            const owner = decodeName(message, offset, &owner_buffer) orelse return null;
+            offset = owner.next_offset;
+            if (offset + resource_record_fixed_bytes > message.len) return null;
+            const record_type = readNetwork16(message, offset);
+            const record_class = readNetwork16(message, offset + 2);
+            const ttl = readNetwork32(message, offset + 4);
+            const data_length: usize = readNetwork16(message, offset + 8);
+            offset += resource_record_fixed_bytes;
+            const data_offset = offset;
+            const data_end = data_offset + data_length;
+            if (data_end > message.len) return null;
+
+            if (record_class == class_internet and
+                equalName(owner_buffer[0..owner.length], current_name[0..current_length]))
+            {
+                if (record_type == type_a and data_length == 4) {
+                    var address: [4]u8 = undefined;
+                    @memcpy(&address, message[data_offset..data_end]);
+                    return .{
+                        .address = address,
+                        .ttl = ttl,
+                        .authoritative = (flags & flag_authoritative) != 0,
+                        .recursion_available = (flags & flag_recursion_available) != 0,
+                        .alias_hops = alias_hops,
+                    };
+                }
+                if (record_type == type_cname and !cname_found) {
+                    const decoded = decodeName(message, data_offset, &cname_target) orelse return null;
+                    if (decoded.next_offset != data_end) return null;
+                    _ = encodedNameLength(cname_target[0..decoded.length]) orelse return null;
+                    cname_target_length = decoded.length;
+                    cname_found = true;
+                }
+            }
+            offset = data_end;
         }
-        offset += data_length;
+
+        if (!cname_found or alias_hops >= maximum_alias_hops) return null;
+        var visited_index: usize = 0;
+        while (visited_index <= alias_hops) : (visited_index += 1) {
+            if (equalName(
+                cname_target[0..cname_target_length],
+                visited_names[visited_index][0..visited_lengths[visited_index]],
+            )) return null;
+        }
+        alias_hops += 1;
+        current_name = std.mem.zeroes([maximum_name_bytes]u8);
+        @memcpy(current_name[0..cname_target_length], cname_target[0..cname_target_length]);
+        current_length = cname_target_length;
+        @memcpy(visited_names[alias_hops][0..cname_target_length], cname_target[0..cname_target_length]);
+        visited_lengths[alias_hops] = cname_target_length;
     }
-    return null;
 }
 
 fn encodedNameLength(name: []const u8) ?usize {
@@ -260,5 +344,6 @@ fn readNetwork32(bytes: []const u8, offset: usize) u32 {
 
 comptime {
     if (fixture_name.len != 10) @compileError("DNS fixture name changed unexpectedly");
+    if (fixture_alias_name.len != 16) @compileError("DNS alias fixture name changed unexpectedly");
     if (maximum_name_bytes != 253) @compileError("DNS maximum domain length changed unexpectedly");
 }

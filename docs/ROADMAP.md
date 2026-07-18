@@ -609,3 +609,12 @@
 - The next poll resolves the matching response to `192.0.2.42`, and polling the request after socket close returns `inactive` without touching state.
 - The query uses IPv4 identification `0x0009`, descriptor 4, and cursor 5; endpoint accounting balances at `3/3` with high-water three.
 - TX completions reach 37 and ingress/UDP dispatch totals reach `60/60` and `49/48` with no new network-layer drops.
+
+## 3.31 - Loop-safe DNS CNAME resolution
+
+- DNS A responses now include an alias-hop count and can follow bounded CNAME chains before locating the final A record.
+- Answer scanning restarts from the bounded answer section for each canonical name, so record ordering does not require the A record to follow the CNAME immediately.
+- CNAME RDATA uses the same compression-safe decoder and must consume its declared record length exactly.
+- A visited-name set and eight-hop ceiling reject self-references, cycles, and unbounded alias chains.
+- The deterministic `alias.zigos.test -> zigos.test` response is 84 bytes and resolves `192.0.2.42` with one alias hop and TTL 300.
+- A self-alias and truncated response are rejected, while mixed-case alias and canonical names resolve case-insensitively.

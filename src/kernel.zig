@@ -3007,6 +3007,34 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.dns_polling.udp_dispatched);
     debugWrite("\r\n");
+
+    debugWrite("DNS alias verified: transaction 0x");
+    debugWriteHex16(network.dns_alias.transaction_id);
+    debugWrite(", alias length/hash ");
+    debugWriteU64Decimal(network.dns_alias.alias_name_length);
+    debugWrite("/0x");
+    debugWriteHex64(network.dns_alias.alias_name_hash);
+    debugWrite(", canonical length/hash ");
+    debugWriteU64Decimal(network.dns_alias.canonical_name_length);
+    debugWrite("/0x");
+    debugWriteHex64(network.dns_alias.canonical_name_hash);
+    debugWrite(", response length/hash ");
+    debugWriteU64Decimal(network.dns_alias.response_length);
+    debugWrite("/0x");
+    debugWriteHex64(network.dns_alias.response_hash);
+    debugWrite(", A ");
+    debugWriteIpv4(network.dns_alias.address);
+    debugWrite(" TTL ");
+    debugWriteU64Decimal(network.dns_alias.ttl);
+    debugWrite(" hops ");
+    debugWriteU64Decimal(network.dns_alias.alias_hops);
+    debugWrite(", loop/truncated rejected ");
+    debugWrite(if (network.dns_alias.self_loop_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_alias.truncated_rejected) "yes" else "no");
+    debugWrite(", case-insensitive ");
+    debugWrite(if (network.dns_alias.case_insensitive_match) "yes" else "no");
+    debugWrite("\r\n");
     return true;
 }
 

@@ -745,6 +745,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'DNS polling verified: socket 2/28/49169, server 10\.0\.2\.3:53, transaction 0x4454, name length/hash 10/0x[0-9A-F]{16}, invalid/cursor preserved yes/yes, TX ID/descriptor/cursor/frame 0x0009/4/5/70, zero state/examined/rejected/remaining pending/0/0/3, first pending/2/2/1, second resolved/1/0, A 192\.0\.2\.42 TTL 300, stale inactive, endpoint queue 3/3 high-water 3 dropped 0, final ID/TX cursor 10/5, submissions 1, completions TX/RX 37/37/22, overflow 0, endpoints/cursor 2/49170, ingress 60/60, dispatch total/UDP 49/48')) {
         throw 'The resumable DNS query did not respect polling budgets, reject unrelated responses, resolve the match, and become inactive with its stale socket.'
     }
+    if (-not [regex]::IsMatch($output, 'DNS alias verified: transaction 0x4455, alias length/hash 16/0x[0-9A-F]{16}, canonical length/hash 10/0x[0-9A-F]{16}, response length/hash 84/0x[0-9A-F]{16}, A 192\.0\.2\.42 TTL 300 hops 1, loop/truncated rejected yes/yes, case-insensitive yes')) {
+        throw 'DNS CNAME resolution did not follow the bounded alias, reject a loop, and preserve case-insensitive matching.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
