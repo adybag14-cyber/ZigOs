@@ -1027,6 +1027,20 @@ pub const NtpBackoffReport = struct {
     packets_dispatched: u64,
     udp_dispatched: u64,
 };
+pub const NtpStepRejectionPolicyReport = struct {
+    invalid_zero_rejected: bool,
+    zero_count_retained: bool,
+    zero_count_remaining: u8,
+    first_retained: bool,
+    first_remaining: u8,
+    penultimate_retained: bool,
+    penultimate_remaining: u8,
+    boundary_retries: bool,
+    boundary_remaining: u8,
+    beyond_retries: bool,
+    maximum_penultimate_retained: bool,
+    maximum_boundary_retries: bool,
+};
 pub const NtpStepPolicyReport = struct {
     invalid_zero_rejected: bool,
     unsynchronized_initial_accepted: bool,
@@ -2615,6 +2629,7 @@ pub const NetworkResult = struct {
     ntp_retry_policy: NtpRetryPolicyReport,
     ntp_recovery_policy: NtpRecoveryPolicyReport,
     ntp_step_policy: NtpStepPolicyReport,
+    ntp_step_rejection_policy: NtpStepRejectionPolicyReport,
 };
 
 var active_bar0: usize = 0;
@@ -3365,6 +3380,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_step_rejection_policy = verifyNtpStepRejectionPolicy() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -3512,6 +3531,7 @@ pub fn initializeAndTestNetwork(
         .ntp_retry_policy = ntp_retry_policy,
         .ntp_recovery_policy = ntp_recovery_policy,
         .ntp_step_policy = ntp_step_policy,
+        .ntp_step_rejection_policy = ntp_step_rejection_policy,
     };
 }
 
@@ -7379,6 +7399,56 @@ fn verifyNtpServiceBackoff(
         .ingress_dequeued = device.software_rx_queue.dequeued,
         .packets_dispatched = device.packets_dispatched,
         .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+fn verifyNtpStepRejectionPolicy() ?NtpStepRejectionPolicyReport {
+    const invalid = ntp.evaluateStepRejectionBudget(
+        .{ .maximum_rejections_per_request = 0 },
+        0,
+    );
+    const policy = ntp.StepRejectionPolicy{ .maximum_rejections_per_request = 3 };
+    const zero = ntp.evaluateStepRejectionBudget(policy, 0);
+    const first = ntp.evaluateStepRejectionBudget(policy, 1);
+    const penultimate = ntp.evaluateStepRejectionBudget(policy, 2);
+    const boundary = ntp.evaluateStepRejectionBudget(policy, 3);
+    const beyond = ntp.evaluateStepRejectionBudget(policy, 4);
+    const maximum = ntp.StepRejectionPolicy{ .maximum_rejections_per_request = std.math.maxInt(u8) };
+    const maximum_penultimate = ntp.evaluateStepRejectionBudget(maximum, std.math.maxInt(u8) - 1);
+    const maximum_boundary = ntp.evaluateStepRejectionBudget(maximum, std.math.maxInt(u8));
+
+    const invalid_zero_rejected = invalid.action == .invalid_policy and
+        invalid.remaining_before_retry == 0;
+    const zero_count_retained = zero.action == .retain_request;
+    const first_retained = first.action == .retain_request;
+    const penultimate_retained = penultimate.action == .retain_request;
+    const boundary_retries = boundary.action == .retry_now;
+    const beyond_retries = beyond.action == .retry_now and beyond.remaining_before_retry == 0;
+    const maximum_penultimate_retained = maximum_penultimate.action == .retain_request and
+        maximum_penultimate.remaining_before_retry == 1;
+    const maximum_boundary_retries = maximum_boundary.action == .retry_now and
+        maximum_boundary.remaining_before_retry == 0;
+
+    if (!invalid_zero_rejected or !zero_count_retained or zero.remaining_before_retry != 3 or
+        !first_retained or first.remaining_before_retry != 2 or !penultimate_retained or
+        penultimate.remaining_before_retry != 1 or !boundary_retries or
+        boundary.remaining_before_retry != 0 or !beyond_retries or
+        !maximum_penultimate_retained or !maximum_boundary_retries)
+    {
+        return null;
+    }
+    return .{
+        .invalid_zero_rejected = invalid_zero_rejected,
+        .zero_count_retained = zero_count_retained,
+        .zero_count_remaining = zero.remaining_before_retry,
+        .first_retained = first_retained,
+        .first_remaining = first.remaining_before_retry,
+        .penultimate_retained = penultimate_retained,
+        .penultimate_remaining = penultimate.remaining_before_retry,
+        .boundary_retries = boundary_retries,
+        .boundary_remaining = boundary.remaining_before_retry,
+        .beyond_retries = beyond_retries,
+        .maximum_penultimate_retained = maximum_penultimate_retained,
+        .maximum_boundary_retries = maximum_boundary_retries,
     };
 }
 fn verifyNtpStepPolicy() ?NtpStepPolicyReport {

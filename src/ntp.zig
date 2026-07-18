@@ -153,6 +153,40 @@ pub fn evaluateResponseStepAt(
         policy,
     );
 }
+pub const StepRejectionPolicy = struct {
+    maximum_rejections_per_request: u8,
+};
+
+pub const StepRejectionAction = enum(u8) {
+    invalid_policy,
+    retain_request,
+    retry_now,
+};
+
+pub const StepRejectionDecision = struct {
+    action: StepRejectionAction,
+    remaining_before_retry: u8,
+};
+
+pub fn stepRejectionPolicyValid(policy: StepRejectionPolicy) bool {
+    return policy.maximum_rejections_per_request > 0;
+}
+
+pub fn evaluateStepRejectionBudget(
+    policy: StepRejectionPolicy,
+    current_rejections: u8,
+) StepRejectionDecision {
+    if (!stepRejectionPolicyValid(policy)) {
+        return .{ .action = .invalid_policy, .remaining_before_retry = 0 };
+    }
+    if (current_rejections >= policy.maximum_rejections_per_request) {
+        return .{ .action = .retry_now, .remaining_before_retry = 0 };
+    }
+    return .{
+        .action = .retain_request,
+        .remaining_before_retry = policy.maximum_rejections_per_request - current_rejections,
+    };
+}
 pub const RecoveryPolicy = struct {
     cooldown_ticks: u64,
     maximum_recoveries: u8,

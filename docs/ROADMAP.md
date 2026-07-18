@@ -923,3 +923,11 @@
 - The retained request follows the normal deadline-driven retry path rather than opening a new socket or transaction.
 - A later bounded response on the same request may synchronize successfully and closes the rejection/retry cycle.
 - The live verifier proves stale transactional rejection, exact retry timing, retry timestamp preservation, two transmissions plus one retry, three consumed replies, clean close, and exact ring/accounting deltas.
+## 3.68 - Bounded NTP discipline-rejection budget
+
+- `ntp.StepRejectionPolicy` defines a nonzero maximum number of step rejections allowed for one active request.
+- `evaluateStepRejectionBudget` is side-effect free and returns invalid policy, retain request, or retry now plus the exact remaining allowance.
+- Counts strictly below the limit retain the request; equality and all larger counts transition deterministically to immediate retry.
+- Zero current rejections report the full allowance, making the decision usable before and after each rejection.
+- Arithmetic remains safe at the `u8` maximum: count 254 retains one allowance and count 255 retries immediately.
+- The verifier proves invalid zero policy, zero/first/penultimate retention, exact boundary/beyond retry, remaining allowance, and maximum-count behavior.

@@ -5354,6 +5354,31 @@ fn inspectE1000e(
     debugWrite("/0x");
     debugWriteHex32(network.ntp_step_policy.no_borrow_delta_fraction);
     debugWrite("\r\n");
+    debugWrite("NTP step rejection policy verified: invalid zero ");
+    debugWrite(if (network.ntp_step_rejection_policy.invalid_zero_rejected) "yes" else "no");
+    debugWrite(", zero/first/penultimate retain ");
+    debugWrite(if (network.ntp_step_rejection_policy.zero_count_retained) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_step_rejection_policy.first_retained) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_step_rejection_policy.penultimate_retained) "yes" else "no");
+    debugWrite(" remaining ");
+    debugWriteU64Decimal(network.ntp_step_rejection_policy.zero_count_remaining);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_step_rejection_policy.first_remaining);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_step_rejection_policy.penultimate_remaining);
+    debugWrite(", boundary/beyond retry ");
+    debugWrite(if (network.ntp_step_rejection_policy.boundary_retries) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_step_rejection_policy.beyond_retries) "yes" else "no");
+    debugWrite(" remaining ");
+    debugWriteU64Decimal(network.ntp_step_rejection_policy.boundary_remaining);
+    debugWrite(", maximum penultimate/boundary ");
+    debugWrite(if (network.ntp_step_rejection_policy.maximum_penultimate_retained) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_step_rejection_policy.maximum_boundary_retries) "yes" else "no");
+    debugWrite("\r\n");
     return true;
 }
 
