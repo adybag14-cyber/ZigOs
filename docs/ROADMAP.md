@@ -977,3 +977,13 @@
 - Every transmission and every quality-accepted response resets the per-transmission quality-rejection count; successful synchronization also resets retry state.
 - Health snapshots expose the configured quality budget, current count, and total quality-forced retries.
 - The live verifier proves root-dispersion retention, stratum boundary retry, no hardware samples on either rejection, accepted follow-up synchronization, exact reason counters, and exact ring/accounting deltas.
+
+## 3.74 - Quality-forced retry exhaustion
+
+- A one-rejection quality budget and one-retry transport budget prove the exact interaction between pre-sample quality rejection and terminal retry exhaustion.
+- The first low-quality response forces an immediate retry on the existing request with the originate timestamp preserved and no hardware clock sample.
+- A second low-quality response after that retry reaches the retry ceiling, cancels the request, latches timed-out state, and emits no hidden transmission.
+- Both root-dispersion and stratum rejections preserve the unsynchronized projected clock and expose no sample or apply result.
+- Health reports the configured quality budget, boundary count, quality-forced retry total, retry exhaustion, and retry-limit hit.
+- Explicit timeout clear resets quality, step, and retry counts; duplicate clear is rejected and a clean bootstrap request can restart immediately.
+- The verifier proves three transmissions, two consumed replies, exact reason counters, clean close, and exact ring/accounting deltas on both reference sources.
