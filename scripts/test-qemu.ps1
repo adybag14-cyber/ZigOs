@@ -464,18 +464,21 @@ if ($NoPs2) {
         throw 'The PS/2-available readiness marker was not observed.'
     }
 }
+if (-not [regex]::IsMatch($output, 'Continuous reference counter: source (HPET|ACPI PM timer), frequency [1-9][0-9]* Hz, bits (24|32|64), first/second/delta [0-9]+/[1-9][0-9]*/[1-9][0-9]*')) {
+    throw 'The selected platform clock did not expose an advancing continuous counter.'
+}
 if ($NoHpet) {
     if (-not $output.Contains('HPET not present')) {
         throw 'The no-HPET ACPI topology marker was not observed.'
     }
-    if (-not $output.Contains('PIT channel 2 reference active: 1193182 Hz polled one-shot, no IRQ route')) {
-        throw 'The PIT channel 2 reference-clock fallback marker was not observed.'
+    if (-not [regex]::IsMatch($output, 'ACPI PM timer active: address 0x[0-9A-F]{16}, system I/O, frequency 3579545 Hz, (24|32)-bit counter')) {
+        throw 'The ACPI PM timer continuous reference fallback marker was not observed.'
     }
     if ($output.Contains('HPET active:')) {
         throw 'HPET unexpectedly initialized while disabled.'
     }
-    if (-not [regex]::IsMatch($output, 'APIC timer calibrated with PIT channel 2: [1-9][0-9]* ticks/s, one-shot count [1-9][0-9]*')) {
-        throw 'The PIT-calibrated APIC timer rate was not observed.'
+    if (-not [regex]::IsMatch($output, 'APIC timer calibrated with ACPI PM timer: [1-9][0-9]* ticks/s, one-shot count [1-9][0-9]*')) {
+        throw 'The ACPI-PM-timer-calibrated APIC timer rate was not observed.'
     }
 } else {
     if (-not $output.Contains('HPET at 0x')) {

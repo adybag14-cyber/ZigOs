@@ -777,3 +777,12 @@
 - Zero-frequency application and reads before the anchor tick are rejected without changing synchronization state.
 - A newer response reanchors time and source metadata; an older response at a later monotonic tick is stale and cannot alter the anchor.
 - The proof finishes with two accepted samples, one stale sample, stratum 3, reference `SYNC`, and the projected quarter-second value `1800000002/0x50000000`.
+
+## 3.50 - ACPI PM timer continuous reference fallback
+
+- The FADT legacy and extended PM-timer blocks are parsed with checksum, address-space, width, and mapping validation.
+- HPET remains the preferred calibration/reference source; the 3.579545 MHz ACPI PM timer is selected when HPET is absent; PIT channel 2 remains delay-only last resort.
+- Both 24-bit and 32-bit PM timer counters are supported with mask-based wrap arithmetic and bounded nanosecond waits.
+- `time_reference.ContinuousCounter` extends finite-width hardware counters into a monotonic 64-bit tick stream.
+- Boot verification reads the selected continuous counter, waits one millisecond through the same reference, and requires a strictly positive delta.
+- The no-HPET QEMU topology now calibrates the APIC timer from the ACPI PM timer instead of the one-shot PIT fallback.

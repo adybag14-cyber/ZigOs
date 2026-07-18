@@ -38,6 +38,7 @@ const cursor_pixel_count: usize = 20;
 const TimerSetup = struct {
     result: apic.TimerResult,
     reference: time_reference.Reference,
+    continuous_counter: time_reference.ContinuousCounter,
 };
 
 var normalized_memory_layout: memory.Layout = undefined;
@@ -603,8 +604,8 @@ fn apicFailure(reason: []const u8) noreturn {
 }
 
 fn testApicTimer(discovery: acpi.Discovery) TimerSetup {
-    const reference = time_reference.Reference.initialize(discovery.hpet_address) orelse
-        timerFailure("neither HPET nor PIT channel 2 could provide a reference clock");
+    const reference = time_reference.Reference.initialize(discovery.hpet_address, discovery.facp_address) orelse
+        timerFailure("neither HPET, ACPI PM timer, nor PIT channel 2 could provide a reference clock");
 
     switch (reference.kind) {
         .hpet => {
@@ -615,6 +616,17 @@ fn testApicTimer(discovery: acpi.Discovery) TimerSetup {
             debugWrite(" fs, timers ");
             debugWriteU64Decimal(reference.timerCount());
             debugWrite(if (reference.counter64Bit()) ", 64-bit counter\r\n" else ", 32-bit counter\r\n");
+        },
+        .acpi_pm_timer => {
+            debugWrite("ACPI PM timer active: address 0x");
+            debugWriteHex64(@intCast(reference.baseAddress()));
+            debugWrite(", ");
+            debugWrite(reference.addressSpaceName());
+            debugWrite(", frequency ");
+            debugWriteU64Decimal(reference.continuousFrequencyHz().?);
+            debugWrite(" Hz, ");
+            debugWriteU64Decimal(reference.counterBits());
+            debugWrite("-bit counter\r\n");
         },
         .pit_channel2 => {
             debugWrite("PIT channel 2 reference active: 1193182 Hz polled one-shot, no IRQ route\r\n");
@@ -633,9 +645,32 @@ fn testApicTimer(discovery: acpi.Discovery) TimerSetup {
     debugWrite("Maskable interrupt vector 0x0040 handled ");
     debugWriteU64Decimal(result.interrupt_count);
     debugWrite(" time(s), EOI acknowledged\r\n");
+
+    var continuous_counter = time_reference.ContinuousCounter.initialize(reference) orelse
+        timerFailure("the selected calibration source did not expose a continuous counter");
+    const first_counter = continuous_counter.read();
+    if (!reference.waitNanoseconds(1_000_000))
+        timerFailure("the continuous reference counter delay failed");
+    const second_counter = continuous_counter.read();
+    if (second_counter <= first_counter)
+        timerFailure("the continuous reference counter did not advance");
+    debugWrite("Continuous reference counter: source ");
+    debugWrite(reference.sourceName());
+    debugWrite(", frequency ");
+    debugWriteU64Decimal(continuous_counter.frequency_hz);
+    debugWrite(" Hz, bits ");
+    debugWriteU64Decimal(continuous_counter.counter_bits);
+    debugWrite(", first/second/delta ");
+    debugWriteU64Decimal(first_counter);
+    debugWrite("/");
+    debugWriteU64Decimal(second_counter);
+    debugWrite("/");
+    debugWriteU64Decimal(second_counter - first_counter);
+    debugWrite("\r\n");
     return .{
         .result = result,
         .reference = reference,
+        .continuous_counter = continuous_counter,
     };
 }
 
