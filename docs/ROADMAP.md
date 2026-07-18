@@ -1095,3 +1095,12 @@
 - The next automatic step uses projected holdover time to start a normal refresh on the retained current source rather than switching, reopening, or reverting to bootstrap time.
 - A valid response from the current source returns the service to synchronized health with zero transient outage state while cumulative diagnostics remain visible.
 - The verifier isolates reset semantics by seeding the terminal state already proven in 3.84, then proves two transmissions, two accepted samples, source-two/socket/clock preservation, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
+
+## 3.86 - Transactional operator-selected NTP source reset
+
+- Added `resetNtpServiceTimeoutToSource`, combining valid pool-source selection with terminal timeout clearing in one operation.
+- Invalid source indexes, invalid pool/rotation policy state, inactive services, live requests, non-exhausted services, and stale sockets are rejected before mutation.
+- A valid target is applied through the existing transactional same-socket peer switch, then retry, rejection, recovery, pending-source, and consecutive-failure transient state is cleared.
+- Manual source selection preserves automatic source-rotation counts, timeout history, cumulative request/retry/response counters, and retry/recovery limit-hit diagnostics.
+- Duplicate reset attempts are rejected after the timeout latch has been cleared.
+- The packet-free verifier proves source `2 -> 1`, server `10.0.2.6 -> 10.0.2.5`, exact state preservation on invalid selection, same-socket valid selection, zero packet/ring activity, and clean close.
