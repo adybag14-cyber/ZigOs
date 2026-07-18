@@ -644,6 +644,64 @@ pub const NtpClient = struct {
     server_ipv4: [4]u8,
 };
 
+pub const NtpClockPoll = struct {
+    poll: NtpRequestPoll,
+    apply_result: ?ntp.ClockApplyResult,
+};
+
+pub const NtpClockPollingReport = struct {
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    server_ipv4: [4]u8,
+    server_port: u16,
+    first_identification: u16,
+    first_descriptor: u16,
+    first_next_cursor: u16,
+    first_frame_length: u16,
+    zero_state: NtpRequestState,
+    zero_examined: u16,
+    zero_rejected: u16,
+    zero_apply_absent: bool,
+    zero_queue_remaining: u16,
+    zero_clock_unsynchronized: bool,
+    accepted_state: NtpRequestState,
+    accepted_examined: u16,
+    accepted_rejected: u16,
+    accepted_apply: ntp.ClockApplyResult,
+    accepted_seconds: u64,
+    accepted_fraction: u32,
+    second_identification: u16,
+    second_descriptor: u16,
+    second_next_cursor: u16,
+    second_frame_length: u16,
+    duplicate_state: NtpRequestState,
+    duplicate_examined: u16,
+    duplicate_rejected: u16,
+    duplicate_apply: ntp.ClockApplyResult,
+    duplicate_clock_preserved: bool,
+    accepted_samples: u64,
+    stale_samples: u64,
+    close_succeeded: bool,
+    inactive_state: NtpRequestState,
+    inactive_apply_absent: bool,
+    inactive_clock_preserved: bool,
+    final_identification_cursor: u16,
+    final_dns_transaction_cursor: u16,
+    final_tx_cursor: u16,
+    tx_submissions_delta: u64,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    completion_overflow: u64,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+};
+
 pub const NtpClockReport = struct {
     initially_unsynchronized: bool,
     first_apply: ntp.ClockApplyResult,
@@ -1918,6 +1976,7 @@ pub const NetworkResult = struct {
     ntp_retry: NtpRetryReport,
     ntp_client_context: NtpClientContextReport,
     ntp_clock: NtpClockReport,
+    ntp_clock_polling: NtpClockPollingReport,
 };
 
 var active_bar0: usize = 0;
@@ -2603,6 +2662,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_clock_polling = verifyNtpClockPolling(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -2734,6 +2797,7 @@ pub fn initializeAndTestNetwork(
         .ntp_retry = ntp_retry,
         .ntp_client_context = ntp_client_context,
         .ntp_clock = ntp_clock,
+        .ntp_clock_polling = ntp_clock_polling,
     };
 }
 
@@ -3393,6 +3457,24 @@ pub fn pollNtpClientRequest(
         return .{ .state = .inactive, .examined = 0, .rejected = 0, .response = null };
     }
     return pollNtpRequest(device, request, budget);
+}
+
+pub fn pollNtpClientClock(
+    device: *Device,
+    client: *NtpClient,
+    request: *const NtpRequest,
+    clock: *ntp.Clock,
+    budget: u16,
+) NtpClockPoll {
+    const poll = pollNtpClientRequest(device, client, request, budget);
+    var result = NtpClockPoll{
+        .poll = poll,
+        .apply_result = null,
+    };
+    if (poll.response) |response| {
+        result.apply_result = ntp.applyResponse(clock, response);
+    }
+    return result;
 }
 
 pub fn retryNtpClientRequest(
@@ -4652,6 +4734,219 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyNtpClockPolling(device: *Device) ?NtpClockPollingReport {
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_184 or
+        device.next_udp_generation != 43 or device.tx_producer != 1 or
+        device.next_udp_identification != 30 or device.next_dns_transaction_id != 8)
+    {
+        return null;
+    }
+
+    const server_ipv4 = [4]u8{ 10, 0, 2, 4 };
+    var client = openNtpClient(device, server_ipv4) orelse return null;
+    const socket = client.socket;
+    if (!client.active or socket.endpoint_index != 2 or socket.generation != 43 or
+        socket.local_port != 49_184 or device.next_ephemeral_udp_port != 49_185 or
+        device.next_udp_generation != 44 or device.udp_endpoint_count != 3)
+    {
+        return null;
+    }
+    const endpoint = udpSocketEndpoint(device, socket) orelse return null;
+    const submissions_before = device.tx_submissions;
+    var clock = std.mem.zeroes(ntp.Clock);
+
+    var first_request = startNtpClientRequest(device, &client, ntp.fixture_client_timestamp) orelse return null;
+    const first_transmit = first_request.transmit;
+    if (first_transmit.identification != 30 or first_transmit.completion.descriptor_index != 1 or
+        first_transmit.completion.next_cursor != 2 or first_transmit.completion.frame_length != 90 or
+        device.next_udp_identification != 31 or device.tx_producer != 2 or
+        device.tx_submissions != submissions_before + 1)
+    {
+        return null;
+    }
+
+    const receive_timestamp = (@as(u64, ntp.fixture_server_seconds) << 32) | 0x40000000;
+    var first_payload_buffer = std.mem.zeroes([ntp.packet_bytes]u8);
+    const first_payload = ntp.buildServerResponse(
+        &first_payload_buffer,
+        first_request.client_timestamp,
+        receive_timestamp,
+        ntp.fixture_server_timestamp,
+    ) orelse return null;
+    var first_frame = std.mem.zeroes([128]u8);
+    const first_frame_length = udp.buildFrame(&first_frame, .{
+        .source_mac = device.gateway_mac,
+        .destination_mac = device.local_mac,
+        .source_ipv4 = server_ipv4,
+        .destination_ipv4 = device.local_ipv4,
+        .source_port = ntp.server_port,
+        .destination_port = socket.local_port,
+        .identification = 0x7500,
+        .payload = first_payload,
+    }) orelse return null;
+    var first_packet = std.mem.zeroes(Packet);
+    first_packet.length = first_frame_length;
+    first_packet.source_descriptor = 0xE600;
+    @memcpy(first_packet.bytes[0..first_frame_length], first_frame[0..first_frame_length]);
+    if (!enqueueQueuedPacket(&device.software_rx_queue, first_packet)) return null;
+    const first_dispatch = dispatchPacketBatch(device, 1);
+    if (first_dispatch.examined != 1 or first_dispatch.routed != 1 or first_dispatch.dropped != 0) return null;
+
+    const zero = pollNtpClientClock(device, &client, &first_request, &clock, 0);
+    const zero_queue_remaining = queueDepth(&endpoint.queue);
+    const zero_clock_unsynchronized = ntp.readClock(&clock) == null and
+        clock.accepted_samples == 0 and clock.stale_samples == 0;
+    if (zero.poll.state != .pending or zero.poll.examined != 0 or zero.poll.rejected != 0 or
+        zero.poll.response != null or zero.apply_result != null or zero_queue_remaining != 1 or
+        !zero_clock_unsynchronized)
+    {
+        return null;
+    }
+
+    const accepted = pollNtpClientClock(device, &client, &first_request, &clock, 1);
+    const accepted_apply = accepted.apply_result orelse return null;
+    const accepted_time = ntp.readClock(&clock) orelse return null;
+    if (accepted.poll.state != .resolved or accepted.poll.examined != 1 or accepted.poll.rejected != 0 or
+        accepted.poll.response == null or accepted_apply != .accepted or
+        accepted_time.seconds != ntp.fixture_unix_seconds or accepted_time.fraction != 0x80000000 or
+        clock.accepted_samples != 1 or clock.stale_samples != 0 or queueDepth(&endpoint.queue) != 0)
+    {
+        return null;
+    }
+
+    var second_request = startNtpClientRequest(device, &client, ntp.fixture_client_timestamp) orelse return null;
+    const second_transmit = second_request.transmit;
+    if (second_transmit.identification != 31 or second_transmit.completion.descriptor_index != 2 or
+        second_transmit.completion.next_cursor != 3 or second_transmit.completion.frame_length != 90 or
+        device.next_udp_identification != 32 or device.tx_producer != 3 or
+        device.tx_submissions != submissions_before + 2)
+    {
+        return null;
+    }
+
+    var second_payload_buffer = std.mem.zeroes([ntp.packet_bytes]u8);
+    const second_payload = ntp.buildServerResponse(
+        &second_payload_buffer,
+        second_request.client_timestamp,
+        receive_timestamp,
+        ntp.fixture_server_timestamp,
+    ) orelse return null;
+    var second_frame = std.mem.zeroes([128]u8);
+    const second_frame_length = udp.buildFrame(&second_frame, .{
+        .source_mac = device.gateway_mac,
+        .destination_mac = device.local_mac,
+        .source_ipv4 = server_ipv4,
+        .destination_ipv4 = device.local_ipv4,
+        .source_port = ntp.server_port,
+        .destination_port = socket.local_port,
+        .identification = 0x7501,
+        .payload = second_payload,
+    }) orelse return null;
+    var second_packet = std.mem.zeroes(Packet);
+    second_packet.length = second_frame_length;
+    second_packet.source_descriptor = 0xE601;
+    @memcpy(second_packet.bytes[0..second_frame_length], second_frame[0..second_frame_length]);
+    if (!enqueueQueuedPacket(&device.software_rx_queue, second_packet)) return null;
+    const second_dispatch = dispatchPacketBatch(device, 1);
+    if (second_dispatch.examined != 1 or second_dispatch.routed != 1 or second_dispatch.dropped != 0) return null;
+
+    const accepted_snapshot = clock;
+    const duplicate = pollNtpClientClock(device, &client, &second_request, &clock, 1);
+    const duplicate_apply = duplicate.apply_result orelse return null;
+    const duplicate_clock_preserved = clock.synchronized == accepted_snapshot.synchronized and
+        clock.unix_seconds == accepted_snapshot.unix_seconds and
+        clock.unix_fraction == accepted_snapshot.unix_fraction and
+        clock.stratum == accepted_snapshot.stratum and
+        std.mem.eql(u8, &clock.reference_id, &accepted_snapshot.reference_id) and
+        clock.accepted_samples == accepted_snapshot.accepted_samples and
+        clock.stale_samples == accepted_snapshot.stale_samples + 1;
+    if (duplicate.poll.state != .resolved or duplicate.poll.examined != 1 or duplicate.poll.rejected != 0 or
+        duplicate.poll.response == null or duplicate_apply != .stale or !duplicate_clock_preserved or
+        queueDepth(&endpoint.queue) != 0 or clock.accepted_samples != 1 or clock.stale_samples != 1)
+    {
+        return null;
+    }
+
+    const clock_before_close = clock;
+    const close_succeeded = closeNtpClient(device, &client);
+    const inactive = pollNtpClientClock(device, &client, &second_request, &clock, 1);
+    const inactive_clock_preserved = std.meta.eql(clock, clock_before_close);
+    if (!close_succeeded or client.active or inactive.poll.state != .inactive or
+        inactive.poll.examined != 0 or inactive.poll.rejected != 0 or inactive.poll.response != null or
+        inactive.apply_result != null or !inactive_clock_preserved)
+    {
+        return null;
+    }
+
+    const tx_enqueues = completionQueueEnqueued(&tx_completion_queue);
+    const tx_dequeues = completionQueueDequeued(&tx_completion_queue);
+    const rx_enqueues = completionQueueEnqueued(&rx_completion_queue);
+    const overflow = completionQueueOverflow(&tx_completion_queue) + completionQueueOverflow(&rx_completion_queue);
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_185 or
+        device.next_udp_generation != 44 or device.next_udp_identification != 32 or
+        device.next_dns_transaction_id != 8 or device.tx_producer != 3 or
+        device.tx_submissions != submissions_before + 2 or
+        device.software_rx_queue.enqueued != 78 or device.software_rx_queue.dequeued != 78 or
+        device.packets_dispatched != 67 or device.udp_packets_dispatched != 66 or
+        tx_enqueues != 59 or tx_dequeues != 59 or rx_enqueues != 22 or overflow != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .server_ipv4 = server_ipv4,
+        .server_port = ntp.server_port,
+        .first_identification = first_transmit.identification,
+        .first_descriptor = first_transmit.completion.descriptor_index,
+        .first_next_cursor = first_transmit.completion.next_cursor,
+        .first_frame_length = first_transmit.completion.frame_length,
+        .zero_state = zero.poll.state,
+        .zero_examined = zero.poll.examined,
+        .zero_rejected = zero.poll.rejected,
+        .zero_apply_absent = zero.apply_result == null,
+        .zero_queue_remaining = zero_queue_remaining,
+        .zero_clock_unsynchronized = zero_clock_unsynchronized,
+        .accepted_state = accepted.poll.state,
+        .accepted_examined = accepted.poll.examined,
+        .accepted_rejected = accepted.poll.rejected,
+        .accepted_apply = accepted_apply,
+        .accepted_seconds = accepted_time.seconds,
+        .accepted_fraction = accepted_time.fraction,
+        .second_identification = second_transmit.identification,
+        .second_descriptor = second_transmit.completion.descriptor_index,
+        .second_next_cursor = second_transmit.completion.next_cursor,
+        .second_frame_length = second_transmit.completion.frame_length,
+        .duplicate_state = duplicate.poll.state,
+        .duplicate_examined = duplicate.poll.examined,
+        .duplicate_rejected = duplicate.poll.rejected,
+        .duplicate_apply = duplicate_apply,
+        .duplicate_clock_preserved = duplicate_clock_preserved,
+        .accepted_samples = clock_before_close.accepted_samples,
+        .stale_samples = clock_before_close.stale_samples,
+        .close_succeeded = close_succeeded,
+        .inactive_state = inactive.poll.state,
+        .inactive_apply_absent = inactive.apply_result == null,
+        .inactive_clock_preserved = inactive_clock_preserved,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_dns_transaction_cursor = device.next_dns_transaction_id,
+        .final_tx_cursor = device.tx_producer,
+        .tx_submissions_delta = device.tx_submissions - submissions_before,
+        .tx_completion_enqueues = tx_enqueues,
+        .tx_completion_dequeues = tx_dequeues,
+        .rx_completion_enqueues = rx_enqueues,
+        .completion_overflow = overflow,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
     };
 }
 

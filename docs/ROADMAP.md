@@ -759,3 +759,12 @@
 - Duplicate timestamps and backward samples are rejected as stale without rolling back time or changing source metadata.
 - A later fractional sample in the same second is accepted, followed by a next-second sample that becomes the final clock value.
 - The deterministic proof ends at Unix second 1800000001, fraction `0x10000000`, stratum 4, reference `NEXT`, with three accepted and two stale samples.
+
+## 3.48 - Clock-aware bounded NTP polling
+
+- `pollNtpClientClock` composes the owned NTP client, bounded request polling, response validation, and monotonic clock application in one result.
+- A zero-budget poll leaves the queued response and unsynchronized clock untouched and reports no clock-application result.
+- The first valid response resolves the request and synchronizes the clock to Unix second 1800000000 with fraction `0x80000000`.
+- A second valid protocol response carrying the same server timestamp resolves normally but is classified as a stale clock sample without changing time or source metadata.
+- Closing the client makes later clock-aware polling inactive and leaves the synchronized clock byte-for-byte unchanged.
+- Two new transmissions finish at IPv4 ID 31, TX cursor 3, 59 TX completions, and ingress/UDP dispatch totals `78/78` and `67/66`.
