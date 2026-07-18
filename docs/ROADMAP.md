@@ -845,3 +845,11 @@
 - Root delay is interpreted as signed fixed-point and compared by magnitude, including the full negative `i32` range without overflow.
 - Exact threshold equality is accepted; the next representable positive or negative delay and dispersion values are rejected.
 - A boot-time verifier exercises the parsed fixture response, exact boundaries, invalid policy, excessive stratum, positive delay, negative delay, and dispersion.
+
+## 3.58 - Quality-gated live NTP service
+
+- `openNtpServiceWithPolicy` validates quality policy before opening a UDP socket; invalid policy is rejected without consuming endpoint, port, generation, TX, or identification state.
+- `NtpService` owns its quality policy plus accepted and per-reason rejection counters.
+- A syntactically valid response is evaluated before reading the continuous reference counter or applying wall time.
+- Rejected responses are consumed and reported while the request remains active for another response or deadline-driven retry.
+- The live verifier injects an excessive-dispersion response, proves no clock sample or mutation occurred, then accepts a good response on the retained request and completes the projected-time refresh cycle.

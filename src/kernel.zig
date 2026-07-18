@@ -4521,6 +4521,16 @@ fn inspectE1000e(
     debugWriteU64Decimal(network.ntp_service.socket_generation);
     debugWrite("/");
     debugWriteU64Decimal(network.ntp_service.local_port);
+    debugWrite(", invalid policy/state preserved ");
+    debugWrite(if (network.ntp_service.invalid_policy_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_service.invalid_policy_state_preserved) "yes" else "no");
+    debugWrite(", policy ");
+    debugWriteU64Decimal(network.ntp_service.quality_policy_max_stratum);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_service.quality_policy_max_root_delay);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_service.quality_policy_max_root_dispersion);
     debugWrite(", bootstrap rejected/state preserved ");
     debugWrite(if (network.ntp_service.bootstrap_zero_rejected) "yes" else "no");
     debugWrite("/");
@@ -4549,6 +4559,12 @@ fn inspectE1000e(
     debugWriteU64Decimal(network.ntp_service.retry_transmissions);
     debugWrite(" timestamp preserved ");
     debugWrite(if (network.ntp_service.retry_timestamp_preserved) "yes" else "no");
+    debugWrite(", quality reject ");
+    debugWriteNtpQuality(network.ntp_service.quality_rejection_reason);
+    debugWrite("/sample absent/request retained ");
+    debugWrite(if (network.ntp_service.quality_rejected_without_sample) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_service.quality_request_retained) "yes" else "no");
     debugWrite(", first sample ");
     debugWriteU64Decimal(network.ntp_service.first_sample_tick);
     debugWrite(" time ");
@@ -4583,6 +4599,18 @@ fn inspectE1000e(
     debugWriteU64Decimal(network.ntp_service.retries);
     debugWrite("/");
     debugWriteU64Decimal(network.ntp_service.responses);
+    debugWrite(", quality counts ");
+    debugWriteU64Decimal(network.ntp_service.quality_accepted);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_service.quality_rejected);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_service.quality_invalid_policy_rejected);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_service.quality_stratum_rejected);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_service.quality_root_delay_rejected);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_service.quality_root_dispersion_rejected);
     debugWrite(", close/inactive preserved ");
     debugWrite(if (network.ntp_service.close_succeeded) "yes" else "no");
     debugWrite("/");
@@ -4670,6 +4698,15 @@ fn debugWriteReferenceKind(kind: time_reference.Kind) void {
     });
 }
 
+fn debugWriteNtpQuality(result: ntp.QualityResult) void {
+    debugWrite(switch (result) {
+        .accepted => "accepted",
+        .invalid_policy => "invalid-policy",
+        .stratum => "stratum",
+        .root_delay => "root-delay",
+        .root_dispersion => "root-dispersion",
+    });
+}
 fn debugWriteNtpApply(result: ntp.ClockApplyResult) void {
     debugWrite(switch (result) {
         .accepted => "accepted",

@@ -60,6 +60,12 @@ pub const QualityPolicy = struct {
     max_root_dispersion: u32,
 };
 
+pub const default_quality_policy = QualityPolicy{
+    .max_stratum = 4,
+    .max_root_delay = 0x00020000,
+    .max_root_dispersion = 0x00010000,
+};
+
 pub const QualityResult = enum(u8) {
     accepted,
     invalid_policy,
@@ -74,8 +80,12 @@ pub fn rootDelayMagnitude(root_delay: u32) u32 {
     return @intCast(-@as(i64, signed));
 }
 
+pub fn qualityPolicyValid(policy: QualityPolicy) bool {
+    return policy.max_stratum > 0 and policy.max_stratum <= 15;
+}
+
 pub fn evaluateQuality(response: Response, policy: QualityPolicy) QualityResult {
-    if (policy.max_stratum == 0 or policy.max_stratum > 15) return .invalid_policy;
+    if (!qualityPolicyValid(policy)) return .invalid_policy;
     if (response.stratum > policy.max_stratum) return .stratum;
     if (rootDelayMagnitude(response.root_delay) > policy.max_root_delay) return .root_delay;
     if (response.root_dispersion > policy.max_root_dispersion) return .root_dispersion;
@@ -193,19 +203,39 @@ pub fn buildServerResponse(
     receive_timestamp: u64,
     transmit_timestamp: u64,
 ) ?[]const u8 {
+    return buildServerResponseWithQuality(
+        buffer,
+        originate_timestamp,
+        receive_timestamp,
+        transmit_timestamp,
+        2,
+        0x00010000,
+        0x00008000,
+    );
+}
+
+pub fn buildServerResponseWithQuality(
+    buffer: []u8,
+    originate_timestamp: u64,
+    receive_timestamp: u64,
+    transmit_timestamp: u64,
+    stratum: u8,
+    root_delay: u32,
+    root_dispersion: u32,
+) ?[]const u8 {
     if (buffer.len < packet_bytes or originate_timestamp == 0 or
         receive_timestamp == 0 or transmit_timestamp == 0 or
-        receive_timestamp > transmit_timestamp)
+        receive_timestamp > transmit_timestamp or stratum == 0 or stratum > 15)
     {
         return null;
     }
     @memset(buffer[0..packet_bytes], 0);
     buffer[0] = (version_4 << 3) | mode_server;
-    buffer[1] = 2;
+    buffer[1] = stratum;
     buffer[2] = 6;
     buffer[3] = @bitCast(@as(i8, -20));
-    writeNetwork32(buffer, 4, 0x00010000);
-    writeNetwork32(buffer, 8, 0x00008000);
+    writeNetwork32(buffer, 4, root_delay);
+    writeNetwork32(buffer, 8, root_dispersion);
     @memcpy(buffer[12..16], "LOCL");
     writeNetwork64(buffer, 16, transmit_timestamp - (@as(u64, 2) << 32));
     writeNetwork64(buffer, 24, originate_timestamp);
