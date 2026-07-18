@@ -850,6 +850,9 @@ if ($Network) {
     }    if (-not $output.Contains('NTP quality verified: fixture/boundary accepted yes/yes, rejects invalid/stratum/positive-delay/negative-delay/dispersion yes/yes/yes/yes/yes, delay magnitudes 0x00010000/0x00010001')) {
         throw 'The NTP quality policy did not enforce stratum, signed root-delay magnitude, root-dispersion, invalid-policy, and exact-boundary behavior.'
     }
+    if (-not $output.Contains('NTP health verified: invalid thresholds zero/equal/reversed yes/yes/yes, states inactive/unsynchronized/synchronized/holdover/expired, backward rejected yes, synchronized age/time 3/1800000001/0x40000000, holdover age/time 4/1800000001/0x80000000, expired age/time absent 8/yes, awaiting/counters preserved yes/yes')) {
+        throw 'The NTP health snapshot did not enforce threshold validity, exact state boundaries, projected-time visibility, expiry withholding, and non-mutating counter preservation.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

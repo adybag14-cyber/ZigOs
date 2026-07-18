@@ -657,6 +657,27 @@ pub const NtpReferenceClockPoll = struct {
 };
 pub const NtpServiceState = enum(u8) { inactive, idle, awaiting };
 pub const NtpServiceStartReason = enum(u8) { none, initial, refresh };
+pub const NtpSynchronizationHealth = enum(u8) {
+    inactive,
+    unsynchronized,
+    synchronized,
+    holdover,
+    expired,
+};
+
+pub const NtpServiceHealth = struct {
+    state: NtpSynchronizationHealth,
+    current_time: ?ntp.UnixTime,
+    sample_age_ticks: u64,
+    awaiting_response: bool,
+    retry_deadline_tick: u64,
+    refresh_deadline_tick: u64,
+    requests_started: u64,
+    retries: u64,
+    responses: u64,
+    quality_accepted: u64,
+    quality_rejected: u64,
+};
 
 pub const NtpService = struct {
     active: bool,
@@ -689,6 +710,28 @@ pub const NtpServiceStep = struct {
     quality_result: ?ntp.QualityResult,
     start_reason: NtpServiceStartReason,
     retried: bool,
+};
+
+pub const NtpHealthReport = struct {
+    invalid_zero_holdover_rejected: bool,
+    invalid_equal_threshold_rejected: bool,
+    invalid_reversed_threshold_rejected: bool,
+    inactive_state: NtpSynchronizationHealth,
+    unsynchronized_state: NtpSynchronizationHealth,
+    synchronized_state: NtpSynchronizationHealth,
+    holdover_state: NtpSynchronizationHealth,
+    expired_state: NtpSynchronizationHealth,
+    backward_tick_rejected: bool,
+    synchronized_age_ticks: u64,
+    synchronized_seconds: u64,
+    synchronized_fraction: u32,
+    holdover_age_ticks: u64,
+    holdover_seconds: u64,
+    holdover_fraction: u32,
+    expired_age_ticks: u64,
+    expired_time_absent: bool,
+    awaiting_response_preserved: bool,
+    counters_preserved: bool,
 };
 
 pub const NtpAutomaticTimestampReport = struct {
@@ -2212,6 +2255,7 @@ pub const NetworkResult = struct {
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
+    ntp_health: NtpHealthReport,
 };
 
 var active_bar0: usize = 0;
@@ -2926,6 +2970,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_health = verifyNtpHealth() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -3064,6 +3112,7 @@ pub fn initializeAndTestNetwork(
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
+        .ntp_health = ntp_health,
     };
 }
 
@@ -3828,6 +3877,44 @@ pub fn closeNtpService(device: *Device, service: *NtpService) bool {
     return true;
 }
 
+pub fn readNtpServiceHealth(
+    service: *const NtpService,
+    current_tick: u64,
+    holdover_after_ticks: u64,
+    expire_after_ticks: u64,
+) ?NtpServiceHealth {
+    if (holdover_after_ticks == 0 or expire_after_ticks <= holdover_after_ticks) return null;
+    const base = NtpServiceHealth{
+        .state = .inactive,
+        .current_time = null,
+        .sample_age_ticks = 0,
+        .awaiting_response = service.request_active,
+        .retry_deadline_tick = service.retry_deadline_tick,
+        .refresh_deadline_tick = service.refresh_deadline_tick,
+        .requests_started = service.requests_started,
+        .retries = service.retries,
+        .responses = service.responses,
+        .quality_accepted = service.quality_accepted,
+        .quality_rejected = service.quality_rejected,
+    };
+    if (!service.active or !service.client.active) return base;
+    if (!service.clock.clock.synchronized) {
+        var unsynchronized = base;
+        unsynchronized.state = .unsynchronized;
+        return unsynchronized;
+    }
+    if (current_tick < service.clock.anchor_tick) return null;
+    const age = current_tick - service.clock.anchor_tick;
+    var result = base;
+    result.sample_age_ticks = age;
+    if (age >= expire_after_ticks) {
+        result.state = .expired;
+        return result;
+    }
+    result.current_time = ntp.readProjectedClockAt(&service.clock, current_tick) orelse return null;
+    result.state = if (age >= holdover_after_ticks) .holdover else .synchronized;
+    return result;
+}
 pub fn selectNtpServiceTimestamp(
     service: *const NtpService,
     current_tick: u64,
@@ -5297,6 +5384,81 @@ fn enqueueNtpServiceResponseWithQuality(
     if (!enqueueQueuedPacket(&device.software_rx_queue, packet)) return false;
     const dispatch = dispatchPacketBatch(device, 1);
     return dispatch.examined == 1 and dispatch.routed == 1 and dispatch.dropped == 0;
+}
+fn verifyNtpHealth() ?NtpHealthReport {
+    var service = std.mem.zeroes(NtpService);
+    service.requests_started = 5;
+    service.retries = 2;
+    service.responses = 3;
+    service.quality_accepted = 3;
+    service.quality_rejected = 1;
+    service.retry_deadline_tick = 106;
+    service.refresh_deadline_tick = 104;
+    service.request_active = true;
+
+    const invalid_zero_holdover_rejected = readNtpServiceHealth(&service, 100, 0, 8) == null;
+    const invalid_equal_threshold_rejected = readNtpServiceHealth(&service, 100, 4, 4) == null;
+    const invalid_reversed_threshold_rejected = readNtpServiceHealth(&service, 100, 8, 4) == null;
+    const inactive = readNtpServiceHealth(&service, 100, 4, 8) orelse return null;
+    if (inactive.state != .inactive or inactive.current_time != null) return null;
+
+    service.active = true;
+    service.client.active = true;
+    const unsynchronized = readNtpServiceHealth(&service, 100, 4, 8) orelse return null;
+    if (unsynchronized.state != .unsynchronized or unsynchronized.current_time != null) return null;
+
+    service.clock.clock.synchronized = true;
+    service.clock.clock.unix_seconds = ntp.fixture_unix_seconds;
+    service.clock.clock.unix_fraction = 0x80000000;
+    service.clock.anchor_tick = 100;
+    service.clock.ticks_per_second = 4;
+    const backward_tick_rejected = readNtpServiceHealth(&service, 99, 4, 8) == null;
+    const synchronized = readNtpServiceHealth(&service, 103, 4, 8) orelse return null;
+    const synchronized_time = synchronized.current_time orelse return null;
+    const holdover = readNtpServiceHealth(&service, 104, 4, 8) orelse return null;
+    const holdover_time = holdover.current_time orelse return null;
+    const expired = readNtpServiceHealth(&service, 108, 4, 8) orelse return null;
+
+    const awaiting_response_preserved = synchronized.awaiting_response and holdover.awaiting_response and
+        expired.awaiting_response;
+    const counters_preserved = synchronized.requests_started == 5 and synchronized.retries == 2 and
+        synchronized.responses == 3 and synchronized.quality_accepted == 3 and
+        synchronized.quality_rejected == 1 and synchronized.retry_deadline_tick == 106 and
+        synchronized.refresh_deadline_tick == 104 and holdover.requests_started == 5 and
+        expired.responses == 3;
+    if (!invalid_zero_holdover_rejected or !invalid_equal_threshold_rejected or
+        !invalid_reversed_threshold_rejected or !backward_tick_rejected or
+        synchronized.state != .synchronized or synchronized.sample_age_ticks != 3 or
+        synchronized_time.seconds != ntp.fixture_unix_seconds + 1 or
+        synchronized_time.fraction != 0x40000000 or holdover.state != .holdover or
+        holdover.sample_age_ticks != 4 or holdover_time.seconds != ntp.fixture_unix_seconds + 1 or
+        holdover_time.fraction != 0x80000000 or expired.state != .expired or
+        expired.sample_age_ticks != 8 or expired.current_time != null or
+        !awaiting_response_preserved or !counters_preserved)
+    {
+        return null;
+    }
+    return .{
+        .invalid_zero_holdover_rejected = invalid_zero_holdover_rejected,
+        .invalid_equal_threshold_rejected = invalid_equal_threshold_rejected,
+        .invalid_reversed_threshold_rejected = invalid_reversed_threshold_rejected,
+        .inactive_state = inactive.state,
+        .unsynchronized_state = unsynchronized.state,
+        .synchronized_state = synchronized.state,
+        .holdover_state = holdover.state,
+        .expired_state = expired.state,
+        .backward_tick_rejected = backward_tick_rejected,
+        .synchronized_age_ticks = synchronized.sample_age_ticks,
+        .synchronized_seconds = synchronized_time.seconds,
+        .synchronized_fraction = synchronized_time.fraction,
+        .holdover_age_ticks = holdover.sample_age_ticks,
+        .holdover_seconds = holdover_time.seconds,
+        .holdover_fraction = holdover_time.fraction,
+        .expired_age_ticks = expired.sample_age_ticks,
+        .expired_time_absent = expired.current_time == null,
+        .awaiting_response_preserved = awaiting_response_preserved,
+        .counters_preserved = counters_preserved,
+    };
 }
 fn verifyNtpQuality() ?NtpQualityReport {
     var payload_buffer = std.mem.zeroes([ntp.packet_bytes]u8);

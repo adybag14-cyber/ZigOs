@@ -4687,9 +4687,57 @@ fn inspectE1000e(
     debugWrite("/0x");
     debugWriteHex32(network.ntp_quality.negative_delay_magnitude);
     debugWrite("\r\n");
+    debugWrite("NTP health verified: invalid thresholds zero/equal/reversed ");
+    debugWrite(if (network.ntp_health.invalid_zero_holdover_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_health.invalid_equal_threshold_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_health.invalid_reversed_threshold_rejected) "yes" else "no");
+    debugWrite(", states ");
+    debugWriteNtpHealth(network.ntp_health.inactive_state);
+    debugWrite("/");
+    debugWriteNtpHealth(network.ntp_health.unsynchronized_state);
+    debugWrite("/");
+    debugWriteNtpHealth(network.ntp_health.synchronized_state);
+    debugWrite("/");
+    debugWriteNtpHealth(network.ntp_health.holdover_state);
+    debugWrite("/");
+    debugWriteNtpHealth(network.ntp_health.expired_state);
+    debugWrite(", backward rejected ");
+    debugWrite(if (network.ntp_health.backward_tick_rejected) "yes" else "no");
+    debugWrite(", synchronized age/time ");
+    debugWriteU64Decimal(network.ntp_health.synchronized_age_ticks);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_health.synchronized_seconds);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_health.synchronized_fraction);
+    debugWrite(", holdover age/time ");
+    debugWriteU64Decimal(network.ntp_health.holdover_age_ticks);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_health.holdover_seconds);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_health.holdover_fraction);
+    debugWrite(", expired age/time absent ");
+    debugWriteU64Decimal(network.ntp_health.expired_age_ticks);
+    debugWrite("/");
+    debugWrite(if (network.ntp_health.expired_time_absent) "yes" else "no");
+    debugWrite(", awaiting/counters preserved ");
+    debugWrite(if (network.ntp_health.awaiting_response_preserved) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_health.counters_preserved) "yes" else "no");
+    debugWrite("\r\n");
     return true;
 }
 
+fn debugWriteNtpHealth(state: e1000e.NtpSynchronizationHealth) void {
+    debugWrite(switch (state) {
+        .inactive => "inactive",
+        .unsynchronized => "unsynchronized",
+        .synchronized => "synchronized",
+        .holdover => "holdover",
+        .expired => "expired",
+    });
+}
 fn debugWriteReferenceKind(kind: time_reference.Kind) void {
     debugWrite(switch (kind) {
         .hpet => "HPET",

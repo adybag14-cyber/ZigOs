@@ -853,3 +853,10 @@
 - A syntactically valid response is evaluated before reading the continuous reference counter or applying wall time.
 - Rejected responses are consumed and reported while the request remains active for another response or deadline-driven retry.
 - The live verifier injects an excessive-dispersion response, proves no clock sample or mutation occurred, then accepts a good response on the retained request and completes the projected-time refresh cycle.
+## 3.59 - NTP synchronization health snapshots
+
+- `readNtpServiceHealth` classifies a service as inactive, unsynchronized, synchronized, holdover, or expired without mutating service, socket, clock, deadline, or accounting state.
+- Callers supply strict holdover and expiry thresholds; zero, equal, and reversed thresholds are rejected.
+- Synchronized and holdover snapshots expose projected Unix time and sample age. Expired snapshots explicitly withhold wall time.
+- Reads before the projected-clock anchor are rejected instead of underflowing sample age.
+- Snapshot metadata includes request activity, retry/refresh deadlines, request/retry/response counters, and quality acceptance/rejection totals.
