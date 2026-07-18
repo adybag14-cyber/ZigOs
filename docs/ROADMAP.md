@@ -539,3 +539,11 @@
 - A 1,476-byte payload emits a full 1,518-byte frame through descriptor 5 with identification `0x0002`.
 - A zero-byte UDP payload remains valid and emits the Ethernet minimum frame of 60 bytes through descriptor 6 with identification `0x0003`.
 - Both successful sends advance the identification cursor to 4 and TX producer to 7 without wrapping, while completion totals reach 31 with zero overflow.
+
+## 3.23 - Application UDP TX ring wrap
+
+- The connected automatic-send path begins at TX producer 7 after the payload-boundary proof.
+- Two minimum-sized UDP frames use descriptors `7` and `0`, advancing software cursors `0` and `1` across the eight-entry ring boundary.
+- Automatic IPv4 identifications advance from `0x0004` to `0x0005`, leaving cursor 6 after both completions.
+- The device TX wrap counter advances exactly once, from 2 to 3, while completion totals reach 33 with zero overflow.
+- TX pending state returns to zero, all RX descriptors remain owned by hardware, and the original two UDP endpoints remain registered.

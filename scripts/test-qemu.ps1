@@ -721,6 +721,9 @@ if ($Network) {
     if (-not $output.Contains('e1000e UDP payload boundary verified: socket 2/21/49162, maximum/oversized 1476/1477, oversized rejected/cursor preserved yes/yes, maximum ID/descriptor/cursor/frame 0x0002/5/6/1518, empty ID/descriptor/cursor/frame 0x0003/6/7/60, final ID/TX cursor 4/7, submissions 2, completions 31/31, overflow 0, wraps unchanged yes, endpoints/ephemeral cursor 2/49163')) {
         throw 'UDP payload limits did not accept the maximum frame, reject oversize transactionally, or preserve empty datagrams.'
     }
+    if (-not $output.Contains('e1000e UDP transmit wrap verified: socket 2/22/49163, IDs 0x0004/0x0005, descriptors 7/0, cursors 0/1, frames 60/60, wraps 2->3 delta 1, final ID/TX cursor 6/1, submissions 2, completions 33/33, overflow 0, pending TX/RX 0x0000000000000000/0x00000000000000FF, endpoints/ephemeral cursor 2/49164')) {
+        throw 'Connected UDP transmission did not cross the hardware TX ring boundary with clean completion ownership.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
