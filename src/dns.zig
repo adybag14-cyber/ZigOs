@@ -3,7 +3,7 @@ const std = @import("std");
 const header_bytes: usize = 12;
 const question_tail_bytes: usize = 4;
 const resource_record_fixed_bytes: usize = 10;
-const maximum_domain_text_bytes: usize = 253;
+pub const maximum_name_bytes: usize = 253;
 const maximum_compression_jumps: usize = 16;
 const flag_response: u16 = 1 << 15;
 const flag_authoritative: u16 = 1 << 10;
@@ -89,7 +89,7 @@ pub fn parseAResponse(
     const answer_count = readNetwork16(message, 6);
     if (question_count != 1 or answer_count == 0) return null;
 
-    var question_name_buffer: [maximum_domain_text_bytes]u8 = undefined;
+    var question_name_buffer: [maximum_name_bytes]u8 = undefined;
     const question_name = decodeName(message, header_bytes, &question_name_buffer) orelse return null;
     if (!equalName(question_name_buffer[0..question_name.length], expected_name)) return null;
     var offset = question_name.next_offset;
@@ -103,7 +103,7 @@ pub fn parseAResponse(
 
     var answer_index: u16 = 0;
     while (answer_index < answer_count) : (answer_index += 1) {
-        var owner_buffer: [maximum_domain_text_bytes]u8 = undefined;
+        var owner_buffer: [maximum_name_bytes]u8 = undefined;
         const owner = decodeName(message, offset, &owner_buffer) orelse return null;
         offset = owner.next_offset;
         if (offset + resource_record_fixed_bytes > message.len) return null;
@@ -131,7 +131,7 @@ pub fn parseAResponse(
 }
 
 fn encodedNameLength(name: []const u8) ?usize {
-    if (name.len == 0 or name.len > maximum_domain_text_bytes or
+    if (name.len == 0 or name.len > maximum_name_bytes or
         name[0] == '.' or name[name.len - 1] == '.')
     {
         return null;
@@ -260,5 +260,5 @@ fn readNetwork32(bytes: []const u8, offset: usize) u32 {
 
 comptime {
     if (fixture_name.len != 10) @compileError("DNS fixture name changed unexpectedly");
-    if (maximum_domain_text_bytes != 253) @compileError("DNS maximum domain length changed unexpectedly");
+    if (maximum_name_bytes != 253) @compileError("DNS maximum domain length changed unexpectedly");
 }

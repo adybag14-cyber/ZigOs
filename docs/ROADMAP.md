@@ -600,3 +600,12 @@
 - A 28-byte `zigos.test` query uses IPv4 identification `0x0008`, TX descriptor 3, cursor 4, and a 70-byte Ethernet frame.
 - Two synthetic server responses are routed through the endpoint queue: the wrong transaction is consumed and rejected, then the matching response resolves `192.0.2.42` with TTL 300.
 - Endpoint accounting balances at `2/2`, TX completions reach 36, and ingress/UDP dispatch totals advance exactly by the two responses.
+
+## 3.30 - Resumable bounded DNS polling
+
+- `startDnsAQuery` stores the generation-tagged socket, transaction ID, bounded name copy, and completed query transmission in a resumable request object.
+- `pollDnsAQuery` consumes at most a caller-supplied number of queued server datagrams and returns `inactive`, `pending`, or `resolved` with examined/rejected counts.
+- A zero budget leaves all three queued responses untouched; a budget of two consumes and rejects a wrong transaction and NXDOMAIN response while leaving one packet.
+- The next poll resolves the matching response to `192.0.2.42`, and polling the request after socket close returns `inactive` without touching state.
+- The query uses IPv4 identification `0x0009`, descriptor 4, and cursor 5; endpoint accounting balances at `3/3` with high-water three.
+- TX completions reach 37 and ingress/UDP dispatch totals reach `60/60` and `49/48` with no new network-layer drops.

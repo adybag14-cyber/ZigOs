@@ -2915,7 +2915,107 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.dns_transaction.udp_dispatched);
     debugWrite("\r\n");
+
+    debugWrite("DNS polling verified: socket ");
+    debugWriteU64Decimal(network.dns_polling.socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.local_port);
+    debugWrite(", server ");
+    debugWriteIpv4(network.dns_polling.server_ipv4);
+    debugWrite(":");
+    debugWriteU64Decimal(network.dns_polling.server_port);
+    debugWrite(", transaction 0x");
+    debugWriteHex16(network.dns_polling.transaction_id);
+    debugWrite(", name length/hash ");
+    debugWriteU64Decimal(network.dns_polling.name_length);
+    debugWrite("/0x");
+    debugWriteHex64(network.dns_polling.name_hash);
+    debugWrite(", invalid/cursor preserved ");
+    debugWrite(if (network.dns_polling.invalid_request_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_polling.cursor_preserved_on_rejection) "yes" else "no");
+    debugWrite(", TX ID/descriptor/cursor/frame 0x");
+    debugWriteHex16(network.dns_polling.transmit_identification);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.transmit_descriptor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.transmit_next_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.transmit_frame_length);
+    debugWrite(", zero state/examined/rejected/remaining ");
+    debugWriteDnsState(network.dns_polling.zero_budget_state);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.zero_budget_examined);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.zero_budget_rejected);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.zero_budget_remaining);
+    debugWrite(", first ");
+    debugWriteDnsState(network.dns_polling.first_poll_state);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.first_poll_examined);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.first_poll_rejected);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.first_poll_remaining);
+    debugWrite(", second ");
+    debugWriteDnsState(network.dns_polling.second_poll_state);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.second_poll_examined);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.second_poll_rejected);
+    debugWrite(", A ");
+    debugWriteIpv4(network.dns_polling.address);
+    debugWrite(" TTL ");
+    debugWriteU64Decimal(network.dns_polling.ttl);
+    debugWrite(", stale ");
+    debugWriteDnsState(network.dns_polling.stale_poll_state);
+    debugWrite(", endpoint queue ");
+    debugWriteU64Decimal(network.dns_polling.endpoint_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.endpoint_dequeued);
+    debugWrite(" high-water ");
+    debugWriteU64Decimal(network.dns_polling.endpoint_high_water);
+    debugWrite(" dropped ");
+    debugWriteU64Decimal(network.dns_polling.endpoint_dropped);
+    debugWrite(", final ID/TX cursor ");
+    debugWriteU64Decimal(network.dns_polling.final_identification_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.final_tx_cursor);
+    debugWrite(", submissions ");
+    debugWriteU64Decimal(network.dns_polling.tx_submissions_delta);
+    debugWrite(", completions TX/RX ");
+    debugWriteU64Decimal(network.dns_polling.tx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.tx_completion_dequeues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.rx_completion_enqueues);
+    debugWrite(", overflow ");
+    debugWriteU64Decimal(network.dns_polling.completion_overflow);
+    debugWrite(", endpoints/cursor ");
+    debugWriteU64Decimal(network.dns_polling.final_registered_endpoints);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.final_ephemeral_cursor);
+    debugWrite(", ingress ");
+    debugWriteU64Decimal(network.dns_polling.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.ingress_dequeued);
+    debugWrite(", dispatch total/UDP ");
+    debugWriteU64Decimal(network.dns_polling.packets_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_polling.udp_dispatched);
+    debugWrite("\r\n");
     return true;
+}
+
+fn debugWriteDnsState(state: e1000e.DnsAQueryState) void {
+    debugWrite(switch (state) {
+        .inactive => "inactive",
+        .pending => "pending",
+        .resolved => "resolved",
+    });
 }
 
 fn networkFailure(reason: []const u8) noreturn {

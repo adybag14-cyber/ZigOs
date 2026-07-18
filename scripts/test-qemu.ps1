@@ -742,6 +742,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'DNS transaction verified: socket 2/27/49168, server 10\.0\.2\.3:53, transaction 0x4453, invalid name/cursor preserved yes/yes, query length/hash 28/0x[0-9A-F]{16}, TX ID/descriptor/cursor/frame 0x0008/3/4/70, wrong transaction rejected yes, A 192\.0\.2\.42 TTL 300 authoritative/recursion yes/yes, endpoint queue 2/2 high-water 2 dropped 0, final ID/TX cursor 9/4, submissions 1, completions TX/RX 36/36/22, overflow 0, endpoints/cursor 2/49169, ingress 57/57, dispatch total/UDP 46/45')) {
         throw 'The DNS client transaction did not use connected UDP, reject a mismatched transaction, and return the validated A record.'
     }
+    if (-not [regex]::IsMatch($output, 'DNS polling verified: socket 2/28/49169, server 10\.0\.2\.3:53, transaction 0x4454, name length/hash 10/0x[0-9A-F]{16}, invalid/cursor preserved yes/yes, TX ID/descriptor/cursor/frame 0x0009/4/5/70, zero state/examined/rejected/remaining pending/0/0/3, first pending/2/2/1, second resolved/1/0, A 192\.0\.2\.42 TTL 300, stale inactive, endpoint queue 3/3 high-water 3 dropped 0, final ID/TX cursor 10/5, submissions 1, completions TX/RX 37/37/22, overflow 0, endpoints/cursor 2/49170, ingress 60/60, dispatch total/UDP 49/48')) {
+        throw 'The resumable DNS query did not respect polling budgets, reject unrelated responses, resolve the match, and become inactive with its stale socket.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
