@@ -556,3 +556,12 @@
 - A four-byte payload received into eight bytes reports no truncation and leaves the unused output tail unchanged.
 - A zero-length datagram received into a zero-length buffer remains valid and reports no truncation.
 - Three routed packets produce balanced endpoint and ingress dequeue accounting with no hardware completion changes.
+
+## 3.25 - Non-consuming UDP preview and exact receive
+
+- `peekUdpDatagram` validates the next queued datagram and returns full endpoint metadata plus payload length without moving the queue tail or dequeue counters.
+- Repeated previews of the same datagram are stable and preserve its source/destination identity, TTL, checksum state, and IPv4 identification.
+- `receiveUdpExact` compares the previewed payload length against the caller buffer and rejects insufficient buffers without consuming or modifying the output.
+- A six-byte datagram rejects a four-byte exact buffer while remaining queued, then succeeds with a six-byte buffer and exact payload hash.
+- A following two-byte datagram previews and receives independently, after which preview and exact receive both report an empty queue.
+- Endpoint, ingress, dispatch, and hardware completion accounting remains balanced across both datagrams.
