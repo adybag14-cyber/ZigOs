@@ -75,6 +75,8 @@ const completion_queue_capacity: usize = 32;
 const software_packet_queue_capacity: usize = 8;
 const udp_endpoint_capacity: usize = 4;
 const maximum_software_packet_bytes: usize = 2048;
+const maximum_ethernet_frame_bytes: usize = 1518;
+pub const maximum_udp_payload_bytes: usize = maximum_ethernet_frame_bytes - 14 - ipv4_header_bytes - 8;
 const all_rx_descriptors_pending: u32 = (1 << ring_descriptor_count) - 1;
 const ethernet_minimum_frame_bytes: usize = 60;
 const arp_payload_bytes: usize = 42;
@@ -526,6 +528,33 @@ pub const UdpEndpointDemuxReport = struct {
     rx_pending_mask: u32,
 };
 
+pub const UdpPayloadBoundaryReport = struct {
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    maximum_payload_bytes: u16,
+    oversized_payload_bytes: u16,
+    oversized_rejected: bool,
+    cursor_preserved_on_rejection: bool,
+    maximum_identification: u16,
+    maximum_descriptor: u16,
+    maximum_next_cursor: u16,
+    maximum_frame_length: u16,
+    empty_identification: u16,
+    empty_descriptor: u16,
+    empty_next_cursor: u16,
+    empty_frame_length: u16,
+    final_identification_cursor: u16,
+    tx_submissions_delta: u64,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    completion_overflow: u64,
+    final_tx_cursor: u16,
+    tx_wraps_unchanged: bool,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+};
+
 pub const UdpAutomaticIdentificationReport = struct {
     socket_slot: u16,
     socket_generation: u32,
@@ -881,6 +910,7 @@ pub const NetworkResult = struct {
     udp_service_cycle: UdpServiceCycleReport,
     udp_fair_service: UdpFairServiceReport,
     udp_automatic_identification: UdpAutomaticIdentificationReport,
+    udp_payload_boundary: UdpPayloadBoundaryReport,
 };
 
 var active_bar0: usize = 0;
@@ -1461,6 +1491,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const udp_payload_boundary = verifyUdpPayloadBoundary(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -1566,6 +1600,7 @@ pub fn initializeAndTestNetwork(
         .udp_service_cycle = udp_service_cycle,
         .udp_fair_service = udp_fair_service,
         .udp_automatic_identification = udp_automatic_identification,
+        .udp_payload_boundary = udp_payload_boundary,
     };
 }
 
@@ -1985,7 +2020,11 @@ pub fn udpSocketPeer(device: *Device, socket: UdpSocket) ?UdpPeer {
 
 pub fn sendUdpSocket(device: *Device, socket: UdpSocket, options: UdpSendOptions) ?TxCompletion {
     const endpoint = udpSocketEndpoint(device, socket) orelse return null;
-    if (options.destination_port == 0 or options.ttl == 0) return null;
+    if (options.destination_port == 0 or options.ttl == 0 or
+        options.payload.len > maximum_udp_payload_bytes)
+    {
+        return null;
+    }
     var frame = std.mem.zeroes([maximum_software_packet_bytes]u8);
     const frame_length = udp.buildFrame(&frame, .{
         .source_mac = device.local_mac,
@@ -2925,6 +2964,98 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyUdpPayloadBoundary(device: *Device) ?UdpPayloadBoundaryReport {
+    const socket = openEphemeralUdpSocket(device) orelse return null;
+    if (socket.endpoint_index != 2 or socket.generation != 21 or socket.local_port != 49_162 or
+        device.next_ephemeral_udp_port != 49_163 or device.next_udp_generation != 22 or
+        device.next_udp_identification != 2 or device.udp_endpoint_count != 3 or
+        device.tx_producer != 5)
+    {
+        return null;
+    }
+    const peer = UdpPeer{
+        .mac = device.gateway_mac,
+        .ipv4 = device.gateway_ipv4,
+        .port = 9,
+    };
+    if (!connectUdpSocket(device, socket, peer)) return null;
+
+    var oversized_payload = std.mem.zeroes([maximum_udp_payload_bytes + 1]u8);
+    @memset(&oversized_payload, 0xEE);
+    const submissions_before = device.tx_submissions;
+    const wraps_before = device.tx_cursor_wraps;
+    const completion_before = completionQueueEnqueued(&tx_completion_queue);
+    const oversized_rejected = sendConnectedUdpDatagram(device, socket, 64, &oversized_payload) == null;
+    const cursor_preserved_on_rejection = oversized_rejected and
+        device.next_udp_identification == 2 and device.tx_producer == 5 and
+        device.tx_submissions == submissions_before and
+        completionQueueEnqueued(&tx_completion_queue) == completion_before;
+    if (!cursor_preserved_on_rejection) return null;
+
+    var maximum_payload = std.mem.zeroes([maximum_udp_payload_bytes]u8);
+    for (&maximum_payload, 0..) |*byte, index| byte.* = @truncate(index);
+    const maximum = sendConnectedUdpDatagram(device, socket, 64, &maximum_payload) orelse return null;
+    const empty_payload = [_]u8{};
+    const empty = sendConnectedUdpDatagram(device, socket, 64, &empty_payload) orelse return null;
+    if (maximum.identification != 2 or maximum.completion.descriptor_index != 5 or
+        maximum.completion.next_cursor != 6 or maximum.completion.frame_length != maximum_ethernet_frame_bytes or
+        empty.identification != 3 or empty.completion.descriptor_index != 6 or
+        empty.completion.next_cursor != 7 or empty.completion.frame_length != ethernet_minimum_frame_bytes or
+        device.next_udp_identification != 4 or device.tx_producer != 7 or
+        device.tx_submissions != submissions_before + 2 or device.tx_cursor_wraps != wraps_before)
+    {
+        return null;
+    }
+
+    const tx_completion_enqueues = completionQueueEnqueued(&tx_completion_queue);
+    const tx_completion_dequeues = completionQueueDequeued(&tx_completion_queue);
+    const completion_overflow = completionQueueOverflow(&tx_completion_queue) +
+        completionQueueOverflow(&rx_completion_queue);
+    if (tx_completion_enqueues != 31 or tx_completion_dequeues != 31 or completion_overflow != 0 or
+        @atomicLoad(u32, &tx_pending_mask, .acquire) != 0 or
+        @atomicLoad(u32, &rx_pending_mask, .acquire) != all_rx_descriptors_pending or
+        tx_ready_mask != 0 or rx_ready_mask != 0)
+    {
+        return null;
+    }
+    if (!closeUdpSocket(device, socket)) return null;
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_163 or
+        device.software_rx_queue.enqueued != 46 or device.software_rx_queue.dequeued != 46 or
+        device.packets_dispatched != 35 or device.udp_packets_dispatched != 34 or
+        device.unmatched_udp_packets_dropped != 3 or device.invalid_udp_packets_dropped != 3 or
+        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .maximum_payload_bytes = maximum_udp_payload_bytes,
+        .oversized_payload_bytes = maximum_udp_payload_bytes + 1,
+        .oversized_rejected = oversized_rejected,
+        .cursor_preserved_on_rejection = cursor_preserved_on_rejection,
+        .maximum_identification = maximum.identification,
+        .maximum_descriptor = maximum.completion.descriptor_index,
+        .maximum_next_cursor = maximum.completion.next_cursor,
+        .maximum_frame_length = maximum.completion.frame_length,
+        .empty_identification = empty.identification,
+        .empty_descriptor = empty.completion.descriptor_index,
+        .empty_next_cursor = empty.completion.next_cursor,
+        .empty_frame_length = empty.completion.frame_length,
+        .final_identification_cursor = device.next_udp_identification,
+        .tx_submissions_delta = device.tx_submissions - submissions_before,
+        .tx_completion_enqueues = tx_completion_enqueues,
+        .tx_completion_dequeues = tx_completion_dequeues,
+        .completion_overflow = completion_overflow,
+        .final_tx_cursor = device.tx_producer,
+        .tx_wraps_unchanged = device.tx_cursor_wraps == wraps_before,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
     };
 }
 
@@ -4460,6 +4591,7 @@ comptime {
     if (completion_queue_capacity > std.math.maxInt(u8)) @compileError("e1000e completion queue indices must fit in u8");
     if (software_packet_queue_capacity < 2) @compileError("e1000e software packet queue is too small");
     if (maximum_software_packet_bytes < 1518) @compileError("e1000e software packet entries must hold a full Ethernet frame");
+    if (maximum_udp_payload_bytes != 1476) @compileError("e1000e UDP payload boundary must remain a full Ethernet frame");
     if (icmp_payload.len != 16) @compileError("ICMP payload must remain deterministic");
     if (icmp_ipv4_total_bytes != 44) @compileError("ICMP IPv4 packet must remain 44 bytes");
     if (icmp_ethernet_frame_bytes != 58) @compileError("ICMP Ethernet payload must fit one padded frame");

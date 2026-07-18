@@ -531,3 +531,11 @@
 - Two normal sends emit IDs `0x7000` and `0x7001`; forcing the cursor to `0xFFFF` proves wrap to `0x0001` while zero remains reserved.
 - The four frames use TX descriptors `1/2/3/4`, advance cursors `2/3/4/5`, and each retain the Ethernet minimum length of 60 bytes.
 - Completion totals advance from 25 to 29 with zero overflow, clean TX pending state, unchanged RX ownership, and the original two UDP endpoints preserved.
+
+## 3.22 - Exact UDP payload boundaries
+
+- The socket layer publishes a maximum UDP payload of 1,476 bytes, derived from the 1,518-byte Ethernet frame buffer minus Ethernet, IPv4, and UDP headers.
+- A 1,477-byte connected payload is rejected before descriptor submission, preserving the automatic-identification cursor, TX producer, completion count, and submission total.
+- A 1,476-byte payload emits a full 1,518-byte frame through descriptor 5 with identification `0x0002`.
+- A zero-byte UDP payload remains valid and emits the Ethernet minimum frame of 60 bytes through descriptor 6 with identification `0x0003`.
+- Both successful sends advance the identification cursor to 4 and TX producer to 7 without wrapping, while completion totals reach 31 with zero overflow.

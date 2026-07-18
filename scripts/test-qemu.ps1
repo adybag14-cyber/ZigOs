@@ -718,6 +718,9 @@ if ($Network) {
     if (-not $output.Contains('e1000e UDP automatic identification verified: socket 2/20/49161, peer port 9, unconnected/zero-TTL rejected yes/yes, cursor preserved yes, IDs 0x7000/0x7001/0xFFFF/0x0001, descriptors 1/2/3/4, cursors 2/3/4/5, frames 60/60/60/60, final ID/TX cursor 2/5, submissions 4, completions 29/29, overflow 0, pending TX/RX 0x0000000000000000/0x00000000000000FF, endpoints/ephemeral cursor 2/49162')) {
         throw 'Automatic UDP IPv4 identification did not preserve cursor state on failure or wrap without emitting zero.'
     }
+    if (-not $output.Contains('e1000e UDP payload boundary verified: socket 2/21/49162, maximum/oversized 1476/1477, oversized rejected/cursor preserved yes/yes, maximum ID/descriptor/cursor/frame 0x0002/5/6/1518, empty ID/descriptor/cursor/frame 0x0003/6/7/60, final ID/TX cursor 4/7, submissions 2, completions 31/31, overflow 0, wraps unchanged yes, endpoints/ephemeral cursor 2/49163')) {
+        throw 'UDP payload limits did not accept the maximum frame, reject oversize transactionally, or preserve empty datagrams.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
