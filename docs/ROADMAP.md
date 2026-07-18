@@ -805,3 +805,12 @@
 - QEMU runs at below-normal Windows process priority and its process object is disposed after forced or normal shutdown.
 - `scripts/cleanup-zigos-tests.ps1` provides inspection-first manual recovery and requires `-Terminate` before stopping repository-owned QEMU, test-harness PowerShell, or bounded build-helper Python processes.
 - The cleanup and mutex rules prevent the duplicate process trees that previously exhausted host memory while preserving the single-test shared artifact model.
+
+## 3.53 - Deadline-driven NTP synchronization service
+
+- `NtpService` owns one NTP client, one projected wall clock, optional in-flight request state, retry/refresh deadlines, and lifecycle counters.
+- `stepNtpService` is externally driven and bounded: it never sleeps, busy-waits, or launches work outside the caller's budget.
+- The unsynchronized service starts immediately, emits no packet before its retry deadline, and retransmits the same originate timestamp exactly at the deadline.
+- A valid response samples the live HPET or ACPI PM counter, synchronizes wall time, and schedules a refresh deadline.
+- Before refresh no packet is sent; at the deadline a fresh request crosses TX descriptor 7 to cursor 0 and a newer response advances time to Unix second 1800000002.
+- Closing invalidates the owned socket and makes later service steps inactive without sampling time or consuming network state.
