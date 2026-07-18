@@ -690,6 +690,17 @@ pub const NtpAutomaticTimestampReport = struct {
     quarter_timestamp: u64,
     backward_tick_rejected: bool,
 };
+pub const NtpQualityReport = struct {
+    fixture_accepted: bool,
+    boundary_accepted: bool,
+    invalid_policy_rejected: bool,
+    stratum_rejected: bool,
+    positive_delay_rejected: bool,
+    negative_delay_rejected: bool,
+    dispersion_rejected: bool,
+    fixture_delay_magnitude: u32,
+    negative_delay_magnitude: u32,
+};
 pub const NtpTimestampReport = struct {
     base_timestamp: u64,
     anchor_timestamp: u64,
@@ -2178,6 +2189,7 @@ pub const NetworkResult = struct {
     ntp_service: NtpServiceReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
+    ntp_quality: NtpQualityReport,
 };
 
 var active_bar0: usize = 0;
@@ -2888,6 +2900,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_quality = verifyNtpQuality() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -3025,6 +3041,7 @@ pub fn initializeAndTestNetwork(
         .ntp_service = ntp_service,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
+        .ntp_quality = ntp_quality,
     };
 }
 
@@ -5091,6 +5108,65 @@ fn enqueueNtpServiceResponse(device: *Device, socket: UdpSocket, server_ipv4: [4
     return dispatch.examined == 1 and dispatch.routed == 1 and dispatch.dropped == 0;
 }
 
+fn verifyNtpQuality() ?NtpQualityReport {
+    var payload_buffer = std.mem.zeroes([ntp.packet_bytes]u8);
+    const payload = ntp.buildServerResponse(
+        &payload_buffer,
+        ntp.fixture_client_timestamp,
+        ntp.fixture_server_timestamp - 0x40000000,
+        ntp.fixture_server_timestamp,
+    ) orelse return null;
+    const response = ntp.parseServerResponse(payload, ntp.fixture_client_timestamp) orelse return null;
+    const permissive = ntp.QualityPolicy{
+        .max_stratum = 4,
+        .max_root_delay = 0x00020000,
+        .max_root_dispersion = 0x00010000,
+    };
+    const boundary = ntp.QualityPolicy{
+        .max_stratum = response.stratum,
+        .max_root_delay = ntp.rootDelayMagnitude(response.root_delay),
+        .max_root_dispersion = response.root_dispersion,
+    };
+    const fixture_accepted = ntp.evaluateQuality(response, permissive) == .accepted;
+    const boundary_accepted = ntp.evaluateQuality(response, boundary) == .accepted;
+    const invalid_policy_rejected = ntp.evaluateQuality(response, .{
+        .max_stratum = 0,
+        .max_root_delay = std.math.maxInt(u32),
+        .max_root_dispersion = std.math.maxInt(u32),
+    }) == .invalid_policy;
+    var high_stratum = response;
+    high_stratum.stratum = boundary.max_stratum + 1;
+    const stratum_rejected = ntp.evaluateQuality(high_stratum, boundary) == .stratum;
+    var positive_delay = response;
+    positive_delay.root_delay = boundary.max_root_delay + 1;
+    const positive_delay_rejected = ntp.evaluateQuality(positive_delay, boundary) == .root_delay;
+    var negative_delay = response;
+    negative_delay.root_delay = @bitCast(@as(i32, -65_537));
+    const negative_delay_magnitude = ntp.rootDelayMagnitude(negative_delay.root_delay);
+    const negative_delay_rejected = ntp.evaluateQuality(negative_delay, boundary) == .root_delay;
+    var high_dispersion = response;
+    high_dispersion.root_dispersion = boundary.max_root_dispersion + 1;
+    const dispersion_rejected = ntp.evaluateQuality(high_dispersion, boundary) == .root_dispersion;
+    const fixture_delay_magnitude = ntp.rootDelayMagnitude(response.root_delay);
+    if (!fixture_accepted or !boundary_accepted or !invalid_policy_rejected or
+        !stratum_rejected or !positive_delay_rejected or !negative_delay_rejected or
+        !dispersion_rejected or fixture_delay_magnitude != 0x00010000 or
+        negative_delay_magnitude != 0x00010001)
+    {
+        return null;
+    }
+    return .{
+        .fixture_accepted = fixture_accepted,
+        .boundary_accepted = boundary_accepted,
+        .invalid_policy_rejected = invalid_policy_rejected,
+        .stratum_rejected = stratum_rejected,
+        .positive_delay_rejected = positive_delay_rejected,
+        .negative_delay_rejected = negative_delay_rejected,
+        .dispersion_rejected = dispersion_rejected,
+        .fixture_delay_magnitude = fixture_delay_magnitude,
+        .negative_delay_magnitude = negative_delay_magnitude,
+    };
+}
 fn verifyNtpAutomaticTimestamp() ?NtpAutomaticTimestampReport {
     var service = std.mem.zeroes(NtpService);
     const zero_bootstrap_rejected = selectNtpServiceTimestamp(&service, 1000, 0) == null;

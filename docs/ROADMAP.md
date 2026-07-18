@@ -837,3 +837,11 @@
 - The initial request uses the explicit bootstrap timestamp; retries preserve that request's original originate timestamp exactly.
 - Once synchronized, a refresh request ignores the bootstrap argument and derives its originate timestamp from projected wall time at the refresh deadline.
 - The live e1000e verifier proves bootstrap rejection, retry preservation, pre-anchor idle behavior, projected-time refresh, two accepted samples, exact accounting, and inert shutdown.
+
+## 3.57 - Deterministic NTP sample-quality policy
+
+- `ntp.QualityPolicy` bounds accepted stratum, signed 16.16 root-delay magnitude, and unsigned 16.16 root dispersion.
+- `ntp.evaluateQuality` returns one deterministic outcome: accepted, invalid policy, stratum, root delay, or root dispersion.
+- Root delay is interpreted as signed fixed-point and compared by magnitude, including the full negative `i32` range without overflow.
+- Exact threshold equality is accepted; the next representable positive or negative delay and dispersion values are rejected.
+- A boot-time verifier exercises the parsed fixture response, exact boundaries, invalid policy, excessive stratum, positive delay, negative delay, and dispersion.

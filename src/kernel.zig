@@ -4640,6 +4640,25 @@ fn inspectE1000e(
     debugWrite(", backward tick rejected ");
     debugWrite(if (network.ntp_automatic_timestamp.backward_tick_rejected) "yes" else "no");
     debugWrite("\r\n");
+    debugWrite("NTP quality verified: fixture/boundary accepted ");
+    debugWrite(if (network.ntp_quality.fixture_accepted) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality.boundary_accepted) "yes" else "no");
+    debugWrite(", rejects invalid/stratum/positive-delay/negative-delay/dispersion ");
+    debugWrite(if (network.ntp_quality.invalid_policy_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality.stratum_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality.positive_delay_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality.negative_delay_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality.dispersion_rejected) "yes" else "no");
+    debugWrite(", delay magnitudes 0x");
+    debugWriteHex32(network.ntp_quality.fixture_delay_magnitude);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_quality.negative_delay_magnitude);
+    debugWrite("\r\n");
     return true;
 }
 

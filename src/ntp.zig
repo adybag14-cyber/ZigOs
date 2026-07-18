@@ -54,6 +54,34 @@ pub const Response = struct {
     unix_fraction: u32,
 };
 
+pub const QualityPolicy = struct {
+    max_stratum: u8,
+    max_root_delay: u32,
+    max_root_dispersion: u32,
+};
+
+pub const QualityResult = enum(u8) {
+    accepted,
+    invalid_policy,
+    stratum,
+    root_delay,
+    root_dispersion,
+};
+
+pub fn rootDelayMagnitude(root_delay: u32) u32 {
+    const signed: i32 = @bitCast(root_delay);
+    if (signed >= 0) return @intCast(signed);
+    return @intCast(-@as(i64, signed));
+}
+
+pub fn evaluateQuality(response: Response, policy: QualityPolicy) QualityResult {
+    if (policy.max_stratum == 0 or policy.max_stratum > 15) return .invalid_policy;
+    if (response.stratum > policy.max_stratum) return .stratum;
+    if (rootDelayMagnitude(response.root_delay) > policy.max_root_delay) return .root_delay;
+    if (response.root_dispersion > policy.max_root_dispersion) return .root_dispersion;
+    return .accepted;
+}
+
 pub fn readClock(clock: *const Clock) ?UnixTime {
     if (!clock.synchronized) return null;
     return .{ .seconds = clock.unix_seconds, .fraction = clock.unix_fraction };
