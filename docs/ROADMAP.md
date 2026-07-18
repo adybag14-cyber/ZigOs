@@ -451,3 +451,12 @@
 - A rejected stale send must not arm a TX descriptor or change the device submission count.
 - The topology matrix continues to require twenty-five TX and twenty-two RX completions, zero completion overflow, and clean pending masks.
 - The QEMU harness serializes its shared OVMF, NVMe, serial, and debug artifacts across concurrent invocations, and combined no-graphics/no-keyboard runs follow the zero-device assertion path.
+
+## 3.13 - Validated UDP ingress and peer filtering
+
+- UDP dispatch now parses the full Ethernet/IPv4/UDP envelope before endpoint lookup, including destination MAC/IP, IPv4 checksum, fragmentation, UDP length, and any nonzero UDP checksum.
+- Invalid UDP packets have independent accounting and never enter a socket queue; unregistered destination ports remain separately counted.
+- A live socket can bind an exact remote MAC, IPv4 address, and UDP port through `connectUdpSocket`, inspect that peer, and return to wildcard receive mode through `disconnectUdpSocket`.
+- Peer changes and disconnects are rejected while queued packets remain, and duplicate connection to the same peer is idempotent.
+- Deterministic packets prove that the correct peer is accepted while wrong MAC, wrong IPv4 address, wrong source port, and a corrupted UDP checksum are all rejected.
+- After disconnect, an alternate source is accepted again, proving that wildcard receive semantics are restored without reopening the socket.

@@ -109,6 +109,9 @@ const lifecycle_second_udp_port: u16 = 41_001;
 const lifecycle_overflow_udp_port: u16 = 41_002;
 const lifecycle_reuse_udp_port: u16 = 41_003;
 const lifecycle_source_port: u16 = 12_345;
+const peer_filter_udp_port: u16 = 42_000;
+const peer_filter_source_port: u16 = 23_456;
+const peer_filter_alternate_port: u16 = 23_457;
 const icmp_payload = "ZigOs-ICMP-ECHO!";
 const icmp_ipv4_total_bytes: usize = ipv4_header_bytes + icmp_header_bytes + icmp_payload.len;
 const icmp_ethernet_frame_bytes: usize = 14 + icmp_ipv4_total_bytes;
@@ -189,10 +192,18 @@ pub const PacketKind = enum(u8) {
     unknown,
 };
 
+pub const UdpPeer = struct {
+    mac: [6]u8,
+    ipv4: [4]u8,
+    port: u16,
+};
+
 pub const UdpEndpoint = struct {
     active: bool,
     port: u16,
     generation: u32,
+    peer_bound: bool,
+    peer: UdpPeer,
     queue: SoftwarePacketQueue,
 };
 
@@ -241,6 +252,8 @@ pub const Device = struct {
     udp_endpoint_count: u16,
     next_udp_generation: u32,
     unmatched_udp_packets_dropped: u64,
+    invalid_udp_packets_dropped: u64,
+    peer_mismatch_udp_packets_dropped: u64,
     packets_dispatched: u64,
     arp_packets_dispatched: u64,
     icmp_packets_dispatched: u64,
@@ -424,6 +437,32 @@ pub const UdpEndpointDemuxReport = struct {
     rx_pending_mask: u32,
 };
 
+pub const UdpPeerFilterReport = struct {
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    peer_port: u16,
+    peer_bound: bool,
+    correct_peer_accepted: bool,
+    wrong_mac_rejected: bool,
+    wrong_ipv4_rejected: bool,
+    wrong_port_rejected: bool,
+    invalid_checksum_rejected: bool,
+    wildcard_after_disconnect: bool,
+    endpoint_enqueued: u64,
+    endpoint_dequeued: u64,
+    endpoint_high_water: u16,
+    endpoint_dropped: u64,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+    unmatched_dropped: u64,
+    invalid_udp_dropped: u64,
+    peer_mismatch_dropped: u64,
+    final_registered_endpoints: u16,
+};
+
 pub const UdpEndpointLifecycleReport = struct {
     table_capacity: u16,
     usable_queue_capacity: u16,
@@ -555,6 +594,7 @@ pub const NetworkResult = struct {
     udp_tftp_dispatch: UdpTftpDispatchReport,
     udp_endpoint_demux: UdpEndpointDemuxReport,
     udp_endpoint_lifecycle: UdpEndpointLifecycleReport,
+    udp_peer_filter: UdpPeerFilterReport,
 };
 
 var active_bar0: usize = 0;
@@ -1067,6 +1107,8 @@ pub fn initializeAndTestNetwork(
         .udp_endpoint_count = 0,
         .next_udp_generation = 1,
         .unmatched_udp_packets_dropped = 0,
+        .invalid_udp_packets_dropped = 0,
+        .peer_mismatch_udp_packets_dropped = 0,
         .packets_dispatched = 0,
         .arp_packets_dispatched = 0,
         .icmp_packets_dispatched = 0,
@@ -1095,6 +1137,10 @@ pub fn initializeAndTestNetwork(
         return null;
     };
     const udp_endpoint_lifecycle = verifyUdpEndpointLifecycle(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
+    const udp_peer_filter = verifyUdpPeerFiltering(device) orelse {
         active_device_storage = null;
         return null;
     };
@@ -1195,6 +1241,7 @@ pub fn initializeAndTestNetwork(
         .udp_tftp_dispatch = udp_tftp_dispatch,
         .udp_endpoint_demux = udp_endpoint_demux,
         .udp_endpoint_lifecycle = udp_endpoint_lifecycle,
+        .udp_peer_filter = udp_peer_filter,
     };
 }
 
@@ -1296,15 +1343,27 @@ pub fn dispatchNextPacket(device: *Device) bool {
         .arp => &device.arp_rx_queue,
         .icmp => &device.icmp_rx_queue,
         .udp => blk: {
-            const destination_port = udpDestinationPort(packet.bytes[0..packet.length]) orelse {
-                device.unknown_packets_dropped +|= 1;
+            const datagram = udp.parseFrame(packet.bytes[0..packet.length], .{
+                .destination_mac = device.local_mac,
+                .destination_ipv4 = device.local_ipv4,
+            }) orelse {
+                device.invalid_udp_packets_dropped +|= 1;
                 return false;
             };
-            const endpoint_index = findUdpEndpoint(device, destination_port) orelse {
+            const endpoint_index = findUdpEndpoint(device, datagram.destination_port) orelse {
                 device.unmatched_udp_packets_dropped +|= 1;
                 return false;
             };
-            break :blk &device.udp_endpoints[endpoint_index].queue;
+            const endpoint = &device.udp_endpoints[endpoint_index];
+            if (endpoint.peer_bound and
+                (!std.mem.eql(u8, &datagram.source_mac, &endpoint.peer.mac) or
+                    !std.mem.eql(u8, &datagram.source_ipv4, &endpoint.peer.ipv4) or
+                    datagram.source_port != endpoint.peer.port))
+            {
+                device.peer_mismatch_udp_packets_dropped +|= 1;
+                return false;
+            }
+            break :blk &endpoint.queue;
         },
         .unknown => {
             device.unknown_packets_dropped +|= 1;
@@ -1343,6 +1402,8 @@ pub fn registerUdpEndpoint(device: *Device, port: u16) ?u16 {
             .active = true,
             .port = port,
             .generation = allocateUdpGeneration(device),
+            .peer_bound = false,
+            .peer = std.mem.zeroes(UdpPeer),
             .queue = std.mem.zeroes(SoftwarePacketQueue),
         };
         device.udp_endpoint_count +|= 1;
@@ -1387,6 +1448,29 @@ pub fn receiveUdpSocket(device: *Device, socket: UdpSocket) ?Packet {
     return dequeueQueuedPacket(&endpoint.queue);
 }
 
+pub fn connectUdpSocket(device: *Device, socket: UdpSocket, peer: UdpPeer) bool {
+    const endpoint = udpSocketEndpoint(device, socket) orelse return false;
+    if (!validUdpPeer(peer) or endpoint.queue.head != endpoint.queue.tail) return false;
+    if (endpoint.peer_bound) return std.meta.eql(endpoint.peer, peer);
+    endpoint.peer = peer;
+    endpoint.peer_bound = true;
+    return true;
+}
+
+pub fn disconnectUdpSocket(device: *Device, socket: UdpSocket) bool {
+    const endpoint = udpSocketEndpoint(device, socket) orelse return false;
+    if (!endpoint.peer_bound or endpoint.queue.head != endpoint.queue.tail) return false;
+    endpoint.peer = std.mem.zeroes(UdpPeer);
+    endpoint.peer_bound = false;
+    return true;
+}
+
+pub fn udpSocketPeer(device: *Device, socket: UdpSocket) ?UdpPeer {
+    const endpoint = udpSocketEndpoint(device, socket) orelse return null;
+    if (!endpoint.peer_bound) return null;
+    return endpoint.peer;
+}
+
 pub fn sendUdpSocket(device: *Device, socket: UdpSocket, options: UdpSendOptions) ?TxCompletion {
     const endpoint = udpSocketEndpoint(device, socket) orelse return null;
     if (options.destination_port == 0 or options.ttl == 0) return null;
@@ -1426,6 +1510,15 @@ fn findUdpEndpoint(device: *Device, port: u16) ?usize {
         if (endpoint.active and endpoint.port == port) return index;
     }
     return null;
+}
+
+fn validUdpPeer(peer: UdpPeer) bool {
+    if (peer.port == 0) return false;
+    var mac_nonzero = false;
+    for (peer.mac) |octet| mac_nonzero = mac_nonzero or octet != 0;
+    var ipv4_nonzero = false;
+    for (peer.ipv4) |octet| ipv4_nonzero = ipv4_nonzero or octet != 0;
+    return mac_nonzero and ipv4_nonzero;
 }
 
 fn allocateUdpGeneration(device: *Device) u32 {
@@ -1501,25 +1594,6 @@ fn classifyPacket(frame: []const u8) PacketKind {
         ipv4_protocol_udp => .udp,
         else => .unknown,
     };
-}
-
-fn udpDestinationPort(frame: []const u8) ?u16 {
-    if (frame.len < 14 + ipv4_header_bytes + 8) return null;
-    if (readNetwork16(frame, 12) != ether_type_ipv4) return null;
-    const ip_offset: usize = 14;
-    if ((frame[ip_offset] >> 4) != 4) return null;
-    const ihl_bytes: usize = @as(usize, frame[ip_offset] & 0x0F) * 4;
-    if (ihl_bytes < ipv4_header_bytes or ip_offset + ihl_bytes + 8 > frame.len) return null;
-    const total_length: usize = readNetwork16(frame, ip_offset + 2);
-    if (total_length < ihl_bytes + 8 or ip_offset + total_length > frame.len) return null;
-    if (frame[ip_offset + 9] != ipv4_protocol_udp) return null;
-    if ((readNetwork16(frame, ip_offset + 6) & 0x3FFF) != 0) return null;
-    const udp_offset = ip_offset + ihl_bytes;
-    const udp_length: usize = readNetwork16(frame, udp_offset + 4);
-    if (udp_length < 8 or udp_offset + udp_length != ip_offset + total_length) return null;
-    const destination_port = readNetwork16(frame, udp_offset + 2);
-    if (destination_port == 0) return null;
-    return destination_port;
 }
 
 fn verifyPersistentQueueOwner(device: *Device) ?PersistentQueueReport {
@@ -2285,6 +2359,206 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyUdpPeerFiltering(device: *Device) ?UdpPeerFilterReport {
+    const socket = openUdpSocket(device, peer_filter_udp_port) orelse return null;
+    if (socket.endpoint_index != 2 or socket.generation != 6 or device.udp_endpoint_count != 3) return null;
+    const endpoint = &device.udp_endpoints[socket.endpoint_index];
+    const peer = UdpPeer{
+        .mac = device.gateway_mac,
+        .ipv4 = device.gateway_ipv4,
+        .port = peer_filter_source_port,
+    };
+    if (!connectUdpSocket(device, socket, peer)) return null;
+    if (!connectUdpSocket(device, socket, peer)) return null;
+    const observed_peer = udpSocketPeer(device, socket) orelse return null;
+    if (!std.meta.eql(observed_peer, peer)) return null;
+    const conflicting_peer = UdpPeer{
+        .mac = device.gateway_mac,
+        .ipv4 = device.gateway_ipv4,
+        .port = peer_filter_alternate_port,
+    };
+    if (connectUdpSocket(device, socket, conflicting_peer)) return null;
+
+    const payload = [_]u8{ 0x50, 0x45, 0x45, 0x52 };
+    var correct_frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+    const correct_length = udp.buildFrame(&correct_frame, .{
+        .source_mac = peer.mac,
+        .destination_mac = device.local_mac,
+        .source_ipv4 = peer.ipv4,
+        .destination_ipv4 = device.local_ipv4,
+        .source_port = peer.port,
+        .destination_port = peer_filter_udp_port,
+        .identification = 0x5C00,
+        .payload = &payload,
+    }) orelse return null;
+    var correct_packet = std.mem.zeroes(Packet);
+    correct_packet.length = correct_length;
+    correct_packet.source_descriptor = 0xFC00;
+    @memcpy(correct_packet.bytes[0..correct_length], correct_frame[0..correct_length]);
+    if (!enqueueQueuedPacket(&device.software_rx_queue, correct_packet)) return null;
+    const correct_peer_accepted = dispatchNextPacket(device);
+    if (!correct_peer_accepted) return null;
+
+    var wrong_mac = peer.mac;
+    wrong_mac[5] +%= 1;
+    var wrong_mac_frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+    const wrong_mac_length = udp.buildFrame(&wrong_mac_frame, .{
+        .source_mac = wrong_mac,
+        .destination_mac = device.local_mac,
+        .source_ipv4 = peer.ipv4,
+        .destination_ipv4 = device.local_ipv4,
+        .source_port = peer.port,
+        .destination_port = peer_filter_udp_port,
+        .identification = 0x5C01,
+        .payload = &payload,
+    }) orelse return null;
+    var wrong_mac_packet = std.mem.zeroes(Packet);
+    wrong_mac_packet.length = wrong_mac_length;
+    wrong_mac_packet.source_descriptor = 0xFC01;
+    @memcpy(wrong_mac_packet.bytes[0..wrong_mac_length], wrong_mac_frame[0..wrong_mac_length]);
+    if (!enqueueQueuedPacket(&device.software_rx_queue, wrong_mac_packet)) return null;
+    const wrong_mac_rejected = !dispatchNextPacket(device);
+    if (!wrong_mac_rejected) return null;
+
+    var wrong_ipv4 = peer.ipv4;
+    wrong_ipv4[3] +%= 1;
+    var wrong_ipv4_frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+    const wrong_ipv4_length = udp.buildFrame(&wrong_ipv4_frame, .{
+        .source_mac = peer.mac,
+        .destination_mac = device.local_mac,
+        .source_ipv4 = wrong_ipv4,
+        .destination_ipv4 = device.local_ipv4,
+        .source_port = peer.port,
+        .destination_port = peer_filter_udp_port,
+        .identification = 0x5C02,
+        .payload = &payload,
+    }) orelse return null;
+    var wrong_ipv4_packet = std.mem.zeroes(Packet);
+    wrong_ipv4_packet.length = wrong_ipv4_length;
+    wrong_ipv4_packet.source_descriptor = 0xFC02;
+    @memcpy(wrong_ipv4_packet.bytes[0..wrong_ipv4_length], wrong_ipv4_frame[0..wrong_ipv4_length]);
+    if (!enqueueQueuedPacket(&device.software_rx_queue, wrong_ipv4_packet)) return null;
+    const wrong_ipv4_rejected = !dispatchNextPacket(device);
+    if (!wrong_ipv4_rejected) return null;
+
+    var wrong_port_frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+    const wrong_port_length = udp.buildFrame(&wrong_port_frame, .{
+        .source_mac = peer.mac,
+        .destination_mac = device.local_mac,
+        .source_ipv4 = peer.ipv4,
+        .destination_ipv4 = device.local_ipv4,
+        .source_port = peer_filter_alternate_port,
+        .destination_port = peer_filter_udp_port,
+        .identification = 0x5C03,
+        .payload = &payload,
+    }) orelse return null;
+    var wrong_port_packet = std.mem.zeroes(Packet);
+    wrong_port_packet.length = wrong_port_length;
+    wrong_port_packet.source_descriptor = 0xFC03;
+    @memcpy(wrong_port_packet.bytes[0..wrong_port_length], wrong_port_frame[0..wrong_port_length]);
+    if (!enqueueQueuedPacket(&device.software_rx_queue, wrong_port_packet)) return null;
+    const wrong_port_rejected = !dispatchNextPacket(device);
+    if (!wrong_port_rejected) return null;
+
+    var invalid_frame = correct_frame;
+    invalid_frame[14 + ipv4_header_bytes + 8] ^= 0x01;
+    var invalid_packet = std.mem.zeroes(Packet);
+    invalid_packet.length = correct_length;
+    invalid_packet.source_descriptor = 0xFC04;
+    @memcpy(invalid_packet.bytes[0..correct_length], invalid_frame[0..correct_length]);
+    if (!enqueueQueuedPacket(&device.software_rx_queue, invalid_packet)) return null;
+    const invalid_checksum_rejected = !dispatchNextPacket(device);
+    if (!invalid_checksum_rejected) return null;
+
+    const received_correct = receiveUdpSocket(device, socket) orelse return null;
+    const correct_datagram = udp.parseFrame(received_correct.bytes[0..received_correct.length], .{
+        .destination_mac = device.local_mac,
+        .source_mac = peer.mac,
+        .destination_ipv4 = device.local_ipv4,
+        .source_ipv4 = peer.ipv4,
+        .destination_port = peer_filter_udp_port,
+        .source_port = peer.port,
+    }) orelse return null;
+    if (!std.mem.eql(u8, correct_datagram.payload, &payload)) return null;
+    if (!disconnectUdpSocket(device, socket) or udpSocketPeer(device, socket) != null) return null;
+
+    const alternate_peer = UdpPeer{
+        .mac = wrong_mac,
+        .ipv4 = wrong_ipv4,
+        .port = peer_filter_alternate_port,
+    };
+    var alternate_frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+    const alternate_length = udp.buildFrame(&alternate_frame, .{
+        .source_mac = alternate_peer.mac,
+        .destination_mac = device.local_mac,
+        .source_ipv4 = alternate_peer.ipv4,
+        .destination_ipv4 = device.local_ipv4,
+        .source_port = alternate_peer.port,
+        .destination_port = peer_filter_udp_port,
+        .identification = 0x5C04,
+        .payload = &payload,
+    }) orelse return null;
+    var alternate_packet = std.mem.zeroes(Packet);
+    alternate_packet.length = alternate_length;
+    alternate_packet.source_descriptor = 0xFC05;
+    @memcpy(alternate_packet.bytes[0..alternate_length], alternate_frame[0..alternate_length]);
+    if (!enqueueQueuedPacket(&device.software_rx_queue, alternate_packet)) return null;
+    const wildcard_after_disconnect = dispatchNextPacket(device);
+    if (!wildcard_after_disconnect) return null;
+    const received_alternate = receiveUdpSocket(device, socket) orelse return null;
+    const alternate_datagram = udp.parseFrame(received_alternate.bytes[0..received_alternate.length], .{
+        .destination_mac = device.local_mac,
+        .source_mac = alternate_peer.mac,
+        .destination_ipv4 = device.local_ipv4,
+        .source_ipv4 = alternate_peer.ipv4,
+        .destination_port = peer_filter_udp_port,
+        .source_port = alternate_peer.port,
+    }) orelse return null;
+    if (!std.mem.eql(u8, alternate_datagram.payload, &payload)) return null;
+
+    const endpoint_enqueued = endpoint.queue.enqueued;
+    const endpoint_dequeued = endpoint.queue.dequeued;
+    const endpoint_high_water = endpoint.queue.high_water;
+    const endpoint_dropped = endpoint.queue.dropped;
+    if (!closeUdpSocket(device, socket)) return null;
+    if (device.udp_endpoint_count != 2 or
+        device.software_rx_queue.enqueued != 27 or device.software_rx_queue.dequeued != 27 or
+        device.software_rx_queue.dropped != 0 or device.software_rx_queue.head != device.software_rx_queue.tail or
+        device.packets_dispatched != 20 or device.udp_packets_dispatched != 19 or
+        device.unmatched_udp_packets_dropped != 1 or device.invalid_udp_packets_dropped != 1 or
+        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0 or
+        endpoint_enqueued != 2 or endpoint_dequeued != 2 or endpoint_high_water != 1 or endpoint_dropped != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .peer_port = peer.port,
+        .peer_bound = true,
+        .correct_peer_accepted = correct_peer_accepted,
+        .wrong_mac_rejected = wrong_mac_rejected,
+        .wrong_ipv4_rejected = wrong_ipv4_rejected,
+        .wrong_port_rejected = wrong_port_rejected,
+        .invalid_checksum_rejected = invalid_checksum_rejected,
+        .wildcard_after_disconnect = wildcard_after_disconnect,
+        .endpoint_enqueued = endpoint_enqueued,
+        .endpoint_dequeued = endpoint_dequeued,
+        .endpoint_high_water = endpoint_high_water,
+        .endpoint_dropped = endpoint_dropped,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+        .unmatched_dropped = device.unmatched_udp_packets_dropped,
+        .invalid_udp_dropped = device.invalid_udp_packets_dropped,
+        .peer_mismatch_dropped = device.peer_mismatch_udp_packets_dropped,
+        .final_registered_endpoints = device.udp_endpoint_count,
     };
 }
 

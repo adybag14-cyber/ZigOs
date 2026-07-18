@@ -24,8 +24,8 @@ pub const ParseOptions = struct {
     destination_mac: [6]u8,
     source_mac: ?[6]u8 = null,
     destination_ipv4: [4]u8,
-    source_ipv4: [4]u8,
-    destination_port: u16,
+    source_ipv4: ?[4]u8 = null,
+    destination_port: ?u16 = null,
     source_port: ?u16 = null,
 };
 
@@ -122,16 +122,18 @@ pub fn parseFrame(frame: []const u8, options: ParseOptions) ?Datagram {
     @memcpy(&source_ipv4, frame[ip_offset + 12 .. ip_offset + 16]);
     var destination_ipv4: [4]u8 = undefined;
     @memcpy(&destination_ipv4, frame[ip_offset + 16 .. ip_offset + 20]);
-    if (!std.mem.eql(u8, &source_ipv4, &options.source_ipv4) or
-        !std.mem.eql(u8, &destination_ipv4, &options.destination_ipv4))
-    {
-        return null;
+    if (options.source_ipv4) |expected| {
+        if (!std.mem.eql(u8, &source_ipv4, &expected)) return null;
     }
+    if (!std.mem.eql(u8, &destination_ipv4, &options.destination_ipv4)) return null;
 
     const udp_offset = ip_offset + ihl_bytes;
     const source_port = readNetwork16(frame, udp_offset);
     const destination_port = readNetwork16(frame, udp_offset + 2);
-    if (source_port == 0 or destination_port != options.destination_port) return null;
+    if (source_port == 0 or destination_port == 0) return null;
+    if (options.destination_port) |expected| {
+        if (destination_port != expected) return null;
+    }
     if (options.source_port) |expected| {
         if (source_port != expected) return null;
     }

@@ -691,6 +691,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e UDP socket handles verified: TFTP slot 1 generation 2, lifecycle slot 2 generation 3, duplicate handle yes, reuse slot 2 generation 5, stale active/receive/send/close rejected yes/yes/yes/yes')) {
         throw 'Generation-tagged UDP sockets did not reject stale lookup, receive, send, and close operations after slot reuse.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e UDP peer filtering verified: socket slot 2 generation 6, local/peer ports 42000/23456, correct accepted yes, wrong MAC/IP/port rejected yes/yes/yes, invalid checksum rejected yes, wildcard after disconnect yes, endpoint queue 2/2 high-water 1 dropped 0, ingress 27/27, dispatch total/UDP 20/19, drops unmatched/invalid/peer 1/1/3, final endpoints 2')) {
+        throw 'Validated UDP dispatch or connected-peer filtering did not reject malformed and wrong-peer datagrams.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
