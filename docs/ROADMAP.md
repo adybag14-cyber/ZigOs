@@ -421,3 +421,13 @@
 - Five ACK frames are submitted through the retained TX producer; expected DATA descriptors are `4/5/6/7/0` and ACK descriptors are `6/7/0/1/2`.
 - Both TX and RX software cursors wrap once, the UDP queue reports five balanced enqueue/dequeue operations with zero drops, and the ingress queue remains empty.
 - Final hardware completion totals are nineteen TX and seventeen RX records with zero overflow and clean descriptor masks across the topology matrix.
+
+
+## 3.10 - UDP endpoint demultiplexing
+
+- The retained network device owns a four-slot UDP endpoint table keyed by destination port, with duplicate-safe registration and bounded per-endpoint queues.
+- UDP dispatch validates the IPv4/UDP envelope, extracts the destination port, and routes packets only to a matching active endpoint.
+- A valid synthetic datagram for unregistered port 49999 is rejected and counted without polluting any endpoint queue.
+- Existing TFTP client port 40001 occupies slot 0; a second endpoint on port 40002 occupies slot 1 and completes another five-block transfer.
+- Port 40002 receives DATA descriptors `1/2/3/4/5`, sends ACK descriptors `4/5/6/7/0`, and validates the same 2,304-byte deterministic payload.
+- Final hardware completion totals are twenty-five TX and twenty-two RX records with two TX wraps, one RX wrap, one unmatched drop, zero queue drops, and clean descriptor masks.

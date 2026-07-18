@@ -8,9 +8,9 @@ The project deliberately uses the canonical Zig builds published by [`adybag14-c
 
 > ZigOs is a research and learning operating system. It is not ready for production use or general physical-hardware support.
 
-## Current milestone: 3.9
+## Current milestone: 3.10
 
-The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, a persistent queue owner, a bounded software RX packet queue, protocol-specific packet dispatch, and a complete retained UDP/TFTP transfer.
+The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, a persistent queue owner, a bounded software RX packet queue, protocol-specific packet dispatch, retained UDP/TFTP transfers, and destination-port UDP endpoint demultiplexing.
 
 The deterministic networking sequence is:
 
@@ -125,7 +125,7 @@ Assembly is used where exact instruction, register, descriptor, interrupt-entry,
 - A retained `Device` owner exposes reusable frame submission, receive, and release operations with persistent TX/RX cursors and DMA addresses.
 - A bounded eight-entry software RX queue copies frames out of DMA before immediately recycling their hardware descriptors; later protocol code dequeues stable packet copies.
 - After DHCP/ARP/ICMP/TFTP bootstrap, a second ICMP exchange exercises the generic owner APIs and a third ICMP exchange exercises DMA-to-software queuing.
-- The complete flow produces nineteen TX and seventeen RX completion records, each dequeued once with zero overflow; ingress, ICMP, and UDP queues report balanced totals and zero drops.
+- The complete flow produces twenty-five TX and twenty-two RX completion records, each dequeued once with zero overflow; two UDP endpoints remain isolated and unmatched traffic is accounted for.
 - MSI-X vector `0x49` routed to a valid BSP or application-processor destination.
 - DHCP Discover/Offer/Request/ACK with BOOTP identity and option validation.
 - Runtime lease fields for local address, subnet mask, server, lease duration, and optional router/DNS data.
@@ -135,6 +135,7 @@ Assembly is used where exact instruction, register, descriptor, interrupt-entry,
 - Multi-block TFTP RRQ/DATA/ACK transfer against QEMU's restricted built-in TFTP service.
 - Bounded software ingress queue with ARP/ICMP/UDP classification and independent protocol queues.
 - Retained five-block TFTP transfer routed through the UDP packet queue with TX/RX wrap.
+- Four-slot UDP endpoint table with destination-port routing and unmatched-port accounting.
 - Deterministic 2,304-byte fixture validation, cumulative hash, TX descriptor reuse, and RX descriptor recycling.
 
 ## Requirements

@@ -1914,6 +1914,78 @@ fn inspectE1000e(
     debugWrite(", RX 0x");
     debugWriteHex64(network.udp_tftp_dispatch.rx_pending_mask);
     debugWrite("\r\n");
+
+    debugWrite("e1000e UDP endpoint demux verified: endpoints ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.registered_endpoints);
+    debugWrite(", miss port ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.unmatched_port);
+    debugWrite(" dropped ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.unmatched_dropped);
+    debugWrite(", TFTP port ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.endpoint_port);
+    debugWrite(" slot ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.endpoint_index);
+    debugWrite(", RRQ TX descriptor ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.rrq.descriptor_index);
+    debugWrite(", DATA RX descriptors ");
+    for (network.udp_endpoint_demux.data_descriptors, 0..) |descriptor, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(descriptor);
+    }
+    debugWrite(", ACK TX descriptors ");
+    for (network.udp_endpoint_demux.acknowledgement_descriptors, 0..) |descriptor, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(descriptor);
+    }
+    debugWrite(", blocks ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.block_count);
+    debugWrite(", payload ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.payload_length);
+    debugWrite(" bytes, FNV-1a64 0x");
+    debugWriteHex64(network.udp_endpoint_demux.payload_fnv1a64);
+    debugWrite(", endpoint queue ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.endpoint_queue_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_endpoint_demux.endpoint_queue_dequeued);
+    debugWrite(" high-water ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.endpoint_queue_high_water);
+    debugWrite(" dropped ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.endpoint_queue_dropped);
+    debugWrite(", final cursors TX/RX ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.device_tx_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_endpoint_demux.device_rx_cursor);
+    debugWrite(", wraps ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.tx_cursor_wraps);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_endpoint_demux.rx_cursor_wraps);
+    debugWrite(", ingress ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_endpoint_demux.ingress_dequeued);
+    debugWrite(" dropped ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.ingress_dropped);
+    debugWrite(", dispatch ARP/ICMP/UDP ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.arp_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_endpoint_demux.icmp_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_endpoint_demux.udp_dispatched);
+    debugWrite(", completions TX ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.tx_queue_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_endpoint_demux.tx_queue_dequeues);
+    debugWrite(" RX ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.rx_queue_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_endpoint_demux.rx_queue_dequeues);
+    debugWrite(", overflow ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.completion_queue_overflows);
+    debugWrite(", pending TX 0x");
+    debugWriteHex64(network.udp_endpoint_demux.tx_pending_mask);
+    debugWrite(", RX 0x");
+    debugWriteHex64(network.udp_endpoint_demux.rx_pending_mask);
+    debugWrite("\r\n");
     return true;
 }
 
