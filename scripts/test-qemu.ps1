@@ -733,6 +733,9 @@ if ($Network) {
     if (-not $output.Contains('e1000e UDP discard-close verified: socket 2/25/49166, peer 23456, normal close rejected yes, discarded/connected 3/yes, queue 3/3 high-water 3 dropped 0, stale close/force/receive rejected yes/yes/yes, endpoints/cursor 2/49167, ingress 54/54, dispatch total/UDP 43/42, completions TX/RX 33/22')) {
         throw 'Discarding UDP close did not drain queued packets atomically or invalidate the socket handle.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e UDP send-to/reply verified: socket 2/26/49167, request source/payload/hash 34567/4/0x[0-9A-F]{16}, invalid peer/zero-TTL rejected yes/yes, cursor preserved yes, reply ID/descriptor/cursor/frame 0x0006/1/2/60, send-to 0x0007/2/3/60, final ID/TX cursor 8/3, submissions 2, completions TX/RX 35/35/22, overflow 0, endpoints/cursor 2/49168, ingress 55/55, dispatch total/UDP 44/43')) {
+        throw 'Unconnected UDP send-to or stateless reply did not preserve transactional identification and completion ownership.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

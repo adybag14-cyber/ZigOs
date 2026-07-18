@@ -573,3 +573,12 @@
 - A connected ephemeral socket receives three packets; normal close is rejected while all three remain readable.
 - Discard-close reports three discarded packets, balanced `3/3` endpoint accounting, high-water three, zero drops, and the original connected peer.
 - The former handle is rejected by normal close, force close, and receive after endpoint removal, while the original two TFTP endpoints remain active.
+
+## 3.27 - Transactional unconnected send-to and replies
+
+- `sendUdpDatagramTo` applies automatic nonzero IPv4 identification to an explicit validated remote peer without connecting the socket.
+- `sendUdpReply` validates that a received datagram targeted the live socket and local interface, then addresses a response to its source MAC, IPv4 address, and UDP port.
+- Invalid peer ports and zero-TTL sends are rejected without consuming identification, descriptor, completion, or submission state.
+- A synthetic four-byte request from port 34567 is received and answered with a reply using identification `0x0006` and TX descriptor 1.
+- A second unconnected send-to uses identification `0x0007` and descriptor 2, leaving the automatic cursor at 8 and TX producer at 3.
+- Completion totals reach 35 with zero overflow while the receive path advances by exactly one routed request.
