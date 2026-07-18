@@ -486,3 +486,12 @@
 - A connected ephemeral socket receives three deterministic datagrams, reports pending depth three and high-water three, and refuses peer disconnection while packets remain queued.
 - After an explicit three-packet discard, readiness clears, disconnection and close succeed, and stale status/discard operations are rejected.
 - The original two TFTP endpoints remain active while ingress and UDP dispatch accounting advance exactly by the three routed test datagrams.
+
+## 3.17 - Bounded packet dispatch batches
+
+- `dispatchNextPacketResult` distinguishes an empty ingress queue from a successfully routed packet and a consumed-but-rejected packet.
+- The legacy boolean `dispatchNextPacket` remains available and reports only successful routing, preserving existing callers.
+- `dispatchPacketBatch` examines at most a caller-supplied budget, continues after malformed or unmatched packets, and returns examined/routed/dropped totals plus remaining ingress depth.
+- A five-packet mixed batch contains three valid socket datagrams, one unmatched destination port, and one corrupted UDP checksum.
+- Budgets of two, two, and ten produce deterministic results `2/1/1/3`, `2/1/1/1`, and `1/1/0/0`; a subsequent empty batch reports zero work.
+- The three valid datagrams retain FIFO order and payload metadata while independent unmatched and invalid counters each advance by one.

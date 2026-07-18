@@ -703,6 +703,9 @@ if ($Network) {
     if (-not $output.Contains('e1000e UDP socket queue verified: slot/gen/port 2/12/49153, connected peer 23456, pending/readable before 3/yes, disconnect pending rejected yes, discarded 3, pending/readable after 0/no, queue 3/3 high-water 3 dropped 0, stale status/discard rejected yes/yes, ingress 30/30, dispatch total/UDP 23/22, final endpoints 2')) {
         throw 'UDP readiness inspection, queue discard, or queued-peer transition guards did not behave deterministically.'
     }
+    if (-not $output.Contains('e1000e UDP dispatch batch verified: slot/gen/port 2/13/49154, initial 5, batches examined/routed/dropped/remaining 2/1/1/3 -> 2/1/1/1 -> 1/1/0/0, empty 0/0, delivered/high-water 3/3, ingress 35/35, dispatch total/UDP 26/25, drops unmatched/invalid 2/2, final endpoints 2')) {
+        throw 'Bounded packet dispatch did not continue across drops or preserve ordered delivery and remaining-depth accounting.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

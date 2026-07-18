@@ -195,6 +195,19 @@ pub const PacketKind = enum(u8) {
     unknown,
 };
 
+pub const PacketDispatchResult = enum(u8) {
+    empty,
+    routed,
+    dropped,
+};
+
+pub const PacketDispatchBatch = struct {
+    examined: u16,
+    routed: u16,
+    dropped: u16,
+    remaining: u16,
+};
+
 pub const UdpPeer = struct {
     mac: [6]u8,
     ipv4: [4]u8,
@@ -484,6 +497,36 @@ pub const UdpEndpointDemuxReport = struct {
     rx_pending_mask: u32,
 };
 
+pub const UdpDispatchBatchReport = struct {
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    initial_ingress_depth: u16,
+    first_examined: u16,
+    first_routed: u16,
+    first_dropped: u16,
+    first_remaining: u16,
+    second_examined: u16,
+    second_routed: u16,
+    second_dropped: u16,
+    second_remaining: u16,
+    final_examined: u16,
+    final_routed: u16,
+    final_dropped: u16,
+    final_remaining: u16,
+    empty_examined: u16,
+    empty_remaining: u16,
+    delivered_datagrams: u16,
+    endpoint_high_water: u16,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+    unmatched_dropped: u64,
+    invalid_udp_dropped: u64,
+    final_registered_endpoints: u16,
+};
+
 pub const UdpSocketQueueReport = struct {
     socket_slot: u16,
     socket_generation: u32,
@@ -693,6 +736,7 @@ pub const NetworkResult = struct {
     udp_peer_filter: UdpPeerFilterReport,
     udp_ephemeral_ports: UdpEphemeralPortReport,
     udp_socket_queue: UdpSocketQueueReport,
+    udp_dispatch_batch: UdpDispatchBatchReport,
 };
 
 var active_bar0: usize = 0;
@@ -1251,6 +1295,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const udp_dispatch_batch = verifyUdpDispatchBatch(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -1351,6 +1399,7 @@ pub fn initializeAndTestNetwork(
         .udp_peer_filter = udp_peer_filter,
         .udp_ephemeral_ports = udp_ephemeral_ports,
         .udp_socket_queue = udp_socket_queue,
+        .udp_dispatch_batch = udp_dispatch_batch,
     };
 }
 
@@ -1446,7 +1495,11 @@ pub fn dequeuePacket(device: *Device) ?Packet {
 }
 
 pub fn dispatchNextPacket(device: *Device) bool {
-    const packet = dequeuePacket(device) orelse return false;
+    return dispatchNextPacketResult(device) == .routed;
+}
+
+pub fn dispatchNextPacketResult(device: *Device) PacketDispatchResult {
+    const packet = dequeuePacket(device) orelse return .empty;
     const kind = classifyPacket(packet.bytes[0..packet.length]);
     const queue = switch (kind) {
         .arp => &device.arp_rx_queue,
@@ -1457,11 +1510,11 @@ pub fn dispatchNextPacket(device: *Device) bool {
                 .destination_ipv4 = device.local_ipv4,
             }) orelse {
                 device.invalid_udp_packets_dropped +|= 1;
-                return false;
+                return .dropped;
             };
             const endpoint_index = findUdpEndpoint(device, datagram.destination_port) orelse {
                 device.unmatched_udp_packets_dropped +|= 1;
-                return false;
+                return .dropped;
             };
             const endpoint = &device.udp_endpoints[endpoint_index];
             if (endpoint.peer_bound and
@@ -1470,16 +1523,16 @@ pub fn dispatchNextPacket(device: *Device) bool {
                     datagram.source_port != endpoint.peer.port))
             {
                 device.peer_mismatch_udp_packets_dropped +|= 1;
-                return false;
+                return .dropped;
             }
             break :blk &endpoint.queue;
         },
         .unknown => {
             device.unknown_packets_dropped +|= 1;
-            return false;
+            return .dropped;
         },
     };
-    if (!enqueueQueuedPacket(queue, packet)) return false;
+    if (!enqueueQueuedPacket(queue, packet)) return .dropped;
     device.packets_dispatched +|= 1;
     switch (kind) {
         .arp => device.arp_packets_dispatched +|= 1,
@@ -1487,7 +1540,31 @@ pub fn dispatchNextPacket(device: *Device) bool {
         .udp => device.udp_packets_dispatched +|= 1,
         .unknown => unreachable,
     }
-    return true;
+    return .routed;
+}
+
+pub fn dispatchPacketBatch(device: *Device, budget: u16) PacketDispatchBatch {
+    var batch = PacketDispatchBatch{
+        .examined = 0,
+        .routed = 0,
+        .dropped = 0,
+        .remaining = queueDepth(&device.software_rx_queue),
+    };
+    while (batch.examined < budget) {
+        switch (dispatchNextPacketResult(device)) {
+            .empty => break,
+            .routed => {
+                batch.examined +|= 1;
+                batch.routed +|= 1;
+            },
+            .dropped => {
+                batch.examined +|= 1;
+                batch.dropped +|= 1;
+            },
+        }
+    }
+    batch.remaining = queueDepth(&device.software_rx_queue);
+    return batch;
 }
 
 pub fn dequeueArpPacket(device: *Device) ?Packet {
@@ -2570,6 +2647,102 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyUdpDispatchBatch(device: *Device) ?UdpDispatchBatchReport {
+    const socket = openEphemeralUdpSocket(device) orelse return null;
+    if (socket.endpoint_index != 2 or socket.generation != 13 or socket.local_port != 49_154 or
+        device.next_ephemeral_udp_port != 49_155 or device.udp_endpoint_count != 3)
+    {
+        return null;
+    }
+
+    var packet_index: u16 = 0;
+    while (packet_index < 5) : (packet_index += 1) {
+        var frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+        const payload = [_]u8{ 0x42, @intCast(packet_index) };
+        const destination_port: u16 = if (packet_index == 1) unmatched_udp_port - 1 else socket.local_port;
+        const frame_length = udp.buildFrame(&frame, .{
+            .source_mac = device.gateway_mac,
+            .destination_mac = device.local_mac,
+            .source_ipv4 = device.gateway_ipv4,
+            .destination_ipv4 = device.local_ipv4,
+            .source_port = peer_filter_source_port,
+            .destination_port = destination_port,
+            .identification = 0x5E00 + packet_index,
+            .payload = &payload,
+        }) orelse return null;
+        if (packet_index == 2) frame[14 + ipv4_header_bytes + 8] ^= 0x01;
+        var packet = std.mem.zeroes(Packet);
+        packet.length = frame_length;
+        packet.source_descriptor = 0xFE00 + packet_index;
+        @memcpy(packet.bytes[0..frame_length], frame[0..frame_length]);
+        if (!enqueueQueuedPacket(&device.software_rx_queue, packet)) return null;
+    }
+
+    const initial_ingress_depth = queueDepth(&device.software_rx_queue);
+    const zero = dispatchPacketBatch(device, 0);
+    if (zero.examined != 0 or zero.routed != 0 or zero.dropped != 0 or zero.remaining != 5) return null;
+    const first = dispatchPacketBatch(device, 2);
+    if (first.examined != 2 or first.routed != 1 or first.dropped != 1 or first.remaining != 3) return null;
+    const second = dispatchPacketBatch(device, 2);
+    if (second.examined != 2 or second.routed != 1 or second.dropped != 1 or second.remaining != 1) return null;
+    const final = dispatchPacketBatch(device, 10);
+    if (final.examined != 1 or final.routed != 1 or final.dropped != 0 or final.remaining != 0) return null;
+    const empty = dispatchPacketBatch(device, 10);
+    if (empty.examined != 0 or empty.routed != 0 or empty.dropped != 0 or empty.remaining != 0) return null;
+
+    const status = inspectUdpSocket(device, socket) orelse return null;
+    if (status.pending_packets != 3 or status.high_water != 3 or status.enqueued != 3 or status.dequeued != 0) return null;
+    const expected_payload_indexes = [_]u8{ 0, 3, 4 };
+    var delivered: u16 = 0;
+    for (expected_payload_indexes) |expected_index| {
+        const datagram = receiveUdpDatagram(device, socket) orelse return null;
+        const payload = datagram.payload();
+        if (payload.len != 2 or payload[0] != 0x42 or payload[1] != expected_index) return null;
+        delivered +|= 1;
+    }
+    if (receiveUdpDatagram(device, socket) != null or udpSocketReadable(device, socket)) return null;
+    if (!closeUdpSocket(device, socket)) return null;
+    if (device.udp_endpoint_count != 2 or
+        device.software_rx_queue.enqueued != 35 or device.software_rx_queue.dequeued != 35 or
+        device.software_rx_queue.dropped != 0 or device.software_rx_queue.head != device.software_rx_queue.tail or
+        device.packets_dispatched != 26 or device.udp_packets_dispatched != 25 or
+        device.unmatched_udp_packets_dropped != 2 or device.invalid_udp_packets_dropped != 2 or
+        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .initial_ingress_depth = initial_ingress_depth,
+        .first_examined = first.examined,
+        .first_routed = first.routed,
+        .first_dropped = first.dropped,
+        .first_remaining = first.remaining,
+        .second_examined = second.examined,
+        .second_routed = second.routed,
+        .second_dropped = second.dropped,
+        .second_remaining = second.remaining,
+        .final_examined = final.examined,
+        .final_routed = final.routed,
+        .final_dropped = final.dropped,
+        .final_remaining = final.remaining,
+        .empty_examined = empty.examined,
+        .empty_remaining = empty.remaining,
+        .delivered_datagrams = delivered,
+        .endpoint_high_water = status.high_water,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+        .unmatched_dropped = device.unmatched_udp_packets_dropped,
+        .invalid_udp_dropped = device.invalid_udp_packets_dropped,
+        .final_registered_endpoints = device.udp_endpoint_count,
     };
 }
 
