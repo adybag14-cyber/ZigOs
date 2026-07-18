@@ -967,3 +967,13 @@
 - Zero current rejections report the full allowance, making the decision usable before and after each quality rejection.
 - Arithmetic remains safe at the `u8` maximum: count 254 retains one allowance and count 255 retries immediately.
 - The verifier proves invalid zero policy, zero/first/penultimate retention, exact boundary/beyond retry, remaining allowance, and maximum-count behavior.
+
+## 3.73 - Live pre-sample NTP quality retry
+
+- `NtpService` now owns a quality-rejection policy, per-transmission quality rejection count, and total quality-forced retry counter.
+- `openNtpServiceWithResponseRejectionPolicies` validates quality, quality-rejection, clock-step, step-rejection, retry, and optional recovery policies before opening a socket; existing constructors retain maximum-budget compatibility.
+- Quality-rejected responses are consumed and reason-counted without sampling HPET/ACPI PM timer or mutating projected time.
+- Rejections below the exact budget retain the active request; the boundary triggers an immediate retry on the same socket and request with the originate timestamp preserved.
+- Every transmission and every quality-accepted response resets the per-transmission quality-rejection count; successful synchronization also resets retry state.
+- Health snapshots expose the configured quality budget, current count, and total quality-forced retries.
+- The live verifier proves root-dispersion retention, stratum boundary retry, no hardware samples on either rejection, accepted follow-up synchronization, exact reason counters, and exact ring/accounting deltas.
