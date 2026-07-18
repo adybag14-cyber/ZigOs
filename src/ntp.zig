@@ -153,6 +153,65 @@ pub fn evaluateResponseStepAt(
         policy,
     );
 }
+pub const SourceRotationPolicy = struct {
+    source_count: u8,
+    failures_before_rotation: u8,
+};
+
+pub const SourceRotationAction = enum(u8) {
+    invalid_policy,
+    invalid_source,
+    stay,
+    rotate,
+};
+
+pub const SourceRotationDecision = struct {
+    action: SourceRotationAction,
+    next_source_index: u8,
+    remaining_before_rotation: u8,
+};
+
+pub fn sourceRotationPolicyValid(policy: SourceRotationPolicy) bool {
+    return policy.source_count >= 2 and policy.failures_before_rotation > 0;
+}
+
+pub fn evaluateSourceRotation(
+    policy: SourceRotationPolicy,
+    current_source_index: u8,
+    consecutive_failures: u8,
+) SourceRotationDecision {
+    if (!sourceRotationPolicyValid(policy)) {
+        return .{
+            .action = .invalid_policy,
+            .next_source_index = 0,
+            .remaining_before_rotation = 0,
+        };
+    }
+    if (current_source_index >= policy.source_count) {
+        return .{
+            .action = .invalid_source,
+            .next_source_index = 0,
+            .remaining_before_rotation = 0,
+        };
+    }
+    if (consecutive_failures >= policy.failures_before_rotation) {
+        const next_source = if (current_source_index + 1 == policy.source_count)
+            0
+        else
+            current_source_index + 1;
+        return .{
+            .action = .rotate,
+            .next_source_index = next_source,
+            .remaining_before_rotation = 0,
+        };
+    }
+    return .{
+        .action = .stay,
+        .next_source_index = current_source_index,
+        .remaining_before_rotation = policy.failures_before_rotation - consecutive_failures,
+    };
+}
+
 pub const QualityRejectionPolicy = struct {
     maximum_rejections_per_request: u8,
 };

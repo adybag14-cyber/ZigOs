@@ -1471,6 +1471,25 @@ pub const NtpBackoffReport = struct {
     packets_dispatched: u64,
     udp_dispatched: u64,
 };
+pub const NtpSourceRotationPolicyReport = struct {
+    invalid_zero_sources_rejected: bool,
+    invalid_single_source_rejected: bool,
+    invalid_zero_threshold_rejected: bool,
+    invalid_source_index_rejected: bool,
+    zero_failures_stay: bool,
+    zero_remaining: u8,
+    first_failure_stay: bool,
+    first_remaining: u8,
+    boundary_rotates: bool,
+    boundary_next_source: u8,
+    beyond_rotates: bool,
+    beyond_next_source: u8,
+    wrap_rotates: bool,
+    wrap_next_source: u8,
+    maximum_penultimate_stays: bool,
+    maximum_boundary_rotates: bool,
+    maximum_boundary_next_source: u8,
+};
 pub const NtpQualityRejectionPolicyReport = struct {
     invalid_zero_rejected: bool,
     zero_count_retained: bool,
@@ -3095,6 +3114,7 @@ pub const NetworkResult = struct {
     ntp_step_policy: NtpStepPolicyReport,
     ntp_step_rejection_policy: NtpStepRejectionPolicyReport,
     ntp_quality_rejection_policy: NtpQualityRejectionPolicyReport,
+    ntp_source_rotation_policy: NtpSourceRotationPolicyReport,
 };
 
 var active_bar0: usize = 0;
@@ -3877,6 +3897,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_source_rotation_policy = verifyNtpSourceRotationPolicy() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -4032,6 +4056,7 @@ pub fn initializeAndTestNetwork(
         .ntp_step_policy = ntp_step_policy,
         .ntp_step_rejection_policy = ntp_step_rejection_policy,
         .ntp_quality_rejection_policy = ntp_quality_rejection_policy,
+        .ntp_source_rotation_policy = ntp_source_rotation_policy,
     };
 }
 
@@ -9772,6 +9797,96 @@ fn verifyNtpServiceBackoff(
         .udp_dispatched = device.udp_packets_dispatched,
     };
 }
+fn verifyNtpSourceRotationPolicy() ?NtpSourceRotationPolicyReport {
+    const invalid_zero_sources = ntp.evaluateSourceRotation(
+        .{ .source_count = 0, .failures_before_rotation = 2 },
+        0,
+        0,
+    );
+    const invalid_single_source = ntp.evaluateSourceRotation(
+        .{ .source_count = 1, .failures_before_rotation = 2 },
+        0,
+        0,
+    );
+    const invalid_zero_threshold = ntp.evaluateSourceRotation(
+        .{ .source_count = 3, .failures_before_rotation = 0 },
+        0,
+        0,
+    );
+    const policy = ntp.SourceRotationPolicy{
+        .source_count = 3,
+        .failures_before_rotation = 2,
+    };
+    const invalid_source = ntp.evaluateSourceRotation(policy, 3, 0);
+    const zero = ntp.evaluateSourceRotation(policy, 1, 0);
+    const first = ntp.evaluateSourceRotation(policy, 1, 1);
+    const boundary = ntp.evaluateSourceRotation(policy, 1, 2);
+    const beyond = ntp.evaluateSourceRotation(policy, 1, 3);
+    const wrap = ntp.evaluateSourceRotation(policy, 2, 2);
+    const maximum = ntp.SourceRotationPolicy{
+        .source_count = std.math.maxInt(u8),
+        .failures_before_rotation = std.math.maxInt(u8),
+    };
+    const maximum_penultimate = ntp.evaluateSourceRotation(
+        maximum,
+        std.math.maxInt(u8) - 1,
+        std.math.maxInt(u8) - 1,
+    );
+    const maximum_boundary = ntp.evaluateSourceRotation(
+        maximum,
+        std.math.maxInt(u8) - 1,
+        std.math.maxInt(u8),
+    );
+
+    const invalid_zero_sources_rejected = invalid_zero_sources.action == .invalid_policy;
+    const invalid_single_source_rejected = invalid_single_source.action == .invalid_policy;
+    const invalid_zero_threshold_rejected = invalid_zero_threshold.action == .invalid_policy;
+    const invalid_source_index_rejected = invalid_source.action == .invalid_source and
+        invalid_source.next_source_index == 0 and invalid_source.remaining_before_rotation == 0;
+    const zero_failures_stay = zero.action == .stay and zero.next_source_index == 1;
+    const first_failure_stay = first.action == .stay and first.next_source_index == 1;
+    const boundary_rotates = boundary.action == .rotate;
+    const beyond_rotates = beyond.action == .rotate;
+    const wrap_rotates = wrap.action == .rotate;
+    const maximum_penultimate_stays = maximum_penultimate.action == .stay and
+        maximum_penultimate.next_source_index == std.math.maxInt(u8) - 1 and
+        maximum_penultimate.remaining_before_rotation == 1;
+    const maximum_boundary_rotates = maximum_boundary.action == .rotate;
+
+    if (!invalid_zero_sources_rejected or !invalid_single_source_rejected or
+        !invalid_zero_threshold_rejected or !invalid_source_index_rejected or
+        !zero_failures_stay or zero.remaining_before_rotation != 2 or
+        !first_failure_stay or first.remaining_before_rotation != 1 or
+        !boundary_rotates or boundary.next_source_index != 2 or boundary.remaining_before_rotation != 0 or
+        !beyond_rotates or beyond.next_source_index != 2 or beyond.remaining_before_rotation != 0 or
+        !wrap_rotates or wrap.next_source_index != 0 or
+        !maximum_penultimate_stays or !maximum_boundary_rotates or
+        maximum_boundary.next_source_index != 0 or maximum_boundary.remaining_before_rotation != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .invalid_zero_sources_rejected = invalid_zero_sources_rejected,
+        .invalid_single_source_rejected = invalid_single_source_rejected,
+        .invalid_zero_threshold_rejected = invalid_zero_threshold_rejected,
+        .invalid_source_index_rejected = invalid_source_index_rejected,
+        .zero_failures_stay = zero_failures_stay,
+        .zero_remaining = zero.remaining_before_rotation,
+        .first_failure_stay = first_failure_stay,
+        .first_remaining = first.remaining_before_rotation,
+        .boundary_rotates = boundary_rotates,
+        .boundary_next_source = boundary.next_source_index,
+        .beyond_rotates = beyond_rotates,
+        .beyond_next_source = beyond.next_source_index,
+        .wrap_rotates = wrap_rotates,
+        .wrap_next_source = wrap.next_source_index,
+        .maximum_penultimate_stays = maximum_penultimate_stays,
+        .maximum_boundary_rotates = maximum_boundary_rotates,
+        .maximum_boundary_next_source = maximum_boundary.next_source_index,
+    };
+}
+
 fn verifyNtpQualityRejectionPolicy() ?NtpQualityRejectionPolicyReport {
     const invalid = ntp.evaluateQualityRejectionBudget(
         .{ .maximum_rejections_per_request = 0 },

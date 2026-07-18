@@ -899,6 +899,9 @@ if ($Network) {
     if (-not $output.Contains('NTP step policy verified: invalid zero rejected yes, initial accepted yes, stale equal/behind yes/yes, exact borrow/no-borrow yes/yes, excessive fraction/seconds yes/yes, deltas borrow 1/0x80000000 no-borrow 1/0x80000000')) {
         throw 'The NTP clock-step policy did not enforce exact fixed-point stale, borrow, no-borrow, boundary, and excessive-forward-step behavior.'
     }
+    if (-not $output.Contains('NTP source rotation policy verified: invalid sources/single/threshold/index yes/yes/yes/yes, stay zero/first yes/yes remaining 2/1, rotate boundary/beyond yes/yes next 2/2, wrap 2->0 yes, maximum stay/rotate yes/yes next 0')) {
+        throw 'The NTP source-rotation policy did not enforce validation, exact stay/rotate boundaries, wraparound, invalid-index handling, and u8-maximum behavior.'
+    }
     if (-not $output.Contains('NTP quality rejection policy verified: invalid zero yes, zero/first/penultimate retain yes/yes/yes remaining 3/2/1, boundary/beyond retry yes/yes remaining 0, maximum penultimate/boundary yes/yes')) {
         throw 'The NTP quality-rejection budget did not enforce validation, exact retain/retry boundaries, remaining allowance, and u8-maximum behavior.'
     }

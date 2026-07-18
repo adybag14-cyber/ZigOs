@@ -997,3 +997,13 @@
 - A quality-valid, bounded-step recovery sample applies at one hardware reference tick, increments recovery success, and resets recovery, retry, quality-rejection, and step-rejection budgets.
 - Health returns to synchronized state while retaining cumulative quality reasons, forced-retry, retry-limit, and recovery-success accounting.
 - The verifier proves four transmissions, four consumed replies, no pre-sample clock reads, no hidden cooldown traffic, exact HPET/ACPI PM timer behavior, clean close, and exact ring/accounting deltas.
+
+## 3.76 - Deterministic NTP source rotation policy
+
+- `ntp.SourceRotationPolicy` requires at least two sources and a nonzero consecutive-failure threshold.
+- `evaluateSourceRotation` is side-effect free and returns invalid policy, invalid source, stay, or rotate plus the selected source index and exact remaining failure allowance.
+- Failure counts below the threshold stay on the current source; equality and all larger counts rotate to the next source.
+- Rotation from the final configured source wraps deterministically to source zero.
+- Out-of-range current source indices are rejected without yielding a usable selection.
+- Arithmetic remains safe at the `u8` maximum: source 254 with 254 failures stays with one allowance, while failure 255 rotates to source zero.
+- The verifier proves zero/single-source and zero-threshold rejection, invalid-index handling, exact stay/rotate boundaries, wraparound, and maximum-count behavior.
