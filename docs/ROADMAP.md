@@ -477,3 +477,12 @@
 - A deterministic proof allocates ports 49152 and 49153, rejects a full-table request, skips occupied 49153 to select 49154 after slot reuse, and preserves advancing generations.
 - Starting at 65535 proves range wrap: the next allocation returns 65535, advances to 49152, and the following socket receives 49152.
 - All temporary sockets close cleanly, the original two TFTP endpoints remain active, and packet/completion accounting is unchanged.
+
+## 3.16 - UDP socket readiness and queue control
+
+- `inspectUdpSocket` exposes generation-validated local/peer state, pending packet depth, usable capacity, enqueue/dequeue totals, drops, and high-water marks.
+- `udpSocketReadable` provides a nonblocking readiness check suitable for a future event loop without touching the queue.
+- `discardUdpSocketPackets` drains all queued datagrams through normal dequeue accounting and rejects stale handles.
+- A connected ephemeral socket receives three deterministic datagrams, reports pending depth three and high-water three, and refuses peer disconnection while packets remain queued.
+- After an explicit three-packet discard, readiness clears, disconnection and close succeed, and stale status/discard operations are rejected.
+- The original two TFTP endpoints remain active while ingress and UDP dispatch accounting advance exactly by the three routed test datagrams.

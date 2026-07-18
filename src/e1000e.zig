@@ -231,6 +231,19 @@ pub const ConnectedUdpSendOptions = struct {
     payload: []const u8,
 };
 
+pub const UdpSocketStatus = struct {
+    local_port: u16,
+    generation: u32,
+    connected: bool,
+    peer_port: u16,
+    pending_packets: u16,
+    usable_capacity: u16,
+    enqueued: u64,
+    dequeued: u64,
+    dropped: u64,
+    high_water: u16,
+};
+
 pub const ReceivedUdpDatagram = struct {
     packet: Packet,
     source_mac: [6]u8,
@@ -471,6 +484,31 @@ pub const UdpEndpointDemuxReport = struct {
     rx_pending_mask: u32,
 };
 
+pub const UdpSocketQueueReport = struct {
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    connected: bool,
+    peer_port: u16,
+    pending_before_discard: u16,
+    readable_before_discard: bool,
+    disconnect_while_pending_rejected: bool,
+    discarded_packets: u16,
+    pending_after_discard: u16,
+    readable_after_discard: bool,
+    queue_enqueued: u64,
+    queue_dequeued: u64,
+    queue_high_water: u16,
+    queue_dropped: u64,
+    stale_status_rejected: bool,
+    stale_discard_rejected: bool,
+    final_registered_endpoints: u16,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+};
+
 pub const UdpEphemeralPortReport = struct {
     range_first: u16,
     range_last: u16,
@@ -654,6 +692,7 @@ pub const NetworkResult = struct {
     udp_endpoint_lifecycle: UdpEndpointLifecycleReport,
     udp_peer_filter: UdpPeerFilterReport,
     udp_ephemeral_ports: UdpEphemeralPortReport,
+    udp_socket_queue: UdpSocketQueueReport,
 };
 
 var active_bar0: usize = 0;
@@ -1208,6 +1247,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const udp_socket_queue = verifyUdpSocketQueueControl(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -1307,6 +1350,7 @@ pub fn initializeAndTestNetwork(
         .udp_endpoint_lifecycle = udp_endpoint_lifecycle,
         .udp_peer_filter = udp_peer_filter,
         .udp_ephemeral_ports = udp_ephemeral_ports,
+        .udp_socket_queue = udp_socket_queue,
     };
 }
 
@@ -1524,6 +1568,34 @@ pub fn udpSocketActive(device: *Device, socket: UdpSocket) bool {
     return udpSocketEndpoint(device, socket) != null;
 }
 
+pub fn inspectUdpSocket(device: *Device, socket: UdpSocket) ?UdpSocketStatus {
+    const endpoint = udpSocketEndpoint(device, socket) orelse return null;
+    return .{
+        .local_port = endpoint.port,
+        .generation = endpoint.generation,
+        .connected = endpoint.peer_bound,
+        .peer_port = if (endpoint.peer_bound) endpoint.peer.port else 0,
+        .pending_packets = queueDepth(&endpoint.queue),
+        .usable_capacity = software_packet_queue_capacity - 1,
+        .enqueued = endpoint.queue.enqueued,
+        .dequeued = endpoint.queue.dequeued,
+        .dropped = endpoint.queue.dropped,
+        .high_water = endpoint.queue.high_water,
+    };
+}
+
+pub fn udpSocketReadable(device: *Device, socket: UdpSocket) bool {
+    const status = inspectUdpSocket(device, socket) orelse return false;
+    return status.pending_packets != 0;
+}
+
+pub fn discardUdpSocketPackets(device: *Device, socket: UdpSocket) ?u16 {
+    const endpoint = udpSocketEndpoint(device, socket) orelse return null;
+    var discarded: u16 = 0;
+    while (dequeueQueuedPacket(&endpoint.queue) != null) discarded +|= 1;
+    return discarded;
+}
+
 pub fn receiveUdpSocket(device: *Device, socket: UdpSocket) ?Packet {
     const endpoint = udpSocketEndpoint(device, socket) orelse return null;
     return dequeueQueuedPacket(&endpoint.queue);
@@ -1658,6 +1730,10 @@ fn allocateUdpGeneration(device: *Device) u32 {
     device.next_udp_generation = generation +% 1;
     if (device.next_udp_generation == 0) device.next_udp_generation = 1;
     return generation;
+}
+
+fn queueDepth(queue: *const SoftwarePacketQueue) u16 {
+    return @intCast((queue.head + software_packet_queue_capacity - queue.tail) % software_packet_queue_capacity);
 }
 
 fn dequeueQueuedPacket(queue: *SoftwarePacketQueue) ?Packet {
@@ -2494,6 +2570,101 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyUdpSocketQueueControl(device: *Device) ?UdpSocketQueueReport {
+    const socket = openEphemeralUdpSocket(device) orelse return null;
+    if (socket.endpoint_index != 2 or socket.generation != 12 or socket.local_port != 49_153 or
+        device.next_ephemeral_udp_port != 49_154 or device.udp_endpoint_count != 3)
+    {
+        return null;
+    }
+    const peer = UdpPeer{
+        .mac = device.gateway_mac,
+        .ipv4 = device.gateway_ipv4,
+        .port = peer_filter_source_port,
+    };
+    if (!connectUdpSocket(device, socket, peer)) return null;
+
+    var packet_index: u16 = 0;
+    while (packet_index < 3) : (packet_index += 1) {
+        var frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+        const payload = [_]u8{ 0x51, @intCast(packet_index) };
+        const frame_length = udp.buildFrame(&frame, .{
+            .source_mac = peer.mac,
+            .destination_mac = device.local_mac,
+            .source_ipv4 = peer.ipv4,
+            .destination_ipv4 = device.local_ipv4,
+            .source_port = peer.port,
+            .destination_port = socket.local_port,
+            .identification = 0x5D00 + packet_index,
+            .payload = &payload,
+        }) orelse return null;
+        var packet = std.mem.zeroes(Packet);
+        packet.length = frame_length;
+        packet.source_descriptor = 0xFD00 + packet_index;
+        @memcpy(packet.bytes[0..frame_length], frame[0..frame_length]);
+        if (!enqueueQueuedPacket(&device.software_rx_queue, packet) or !dispatchNextPacket(device)) return null;
+    }
+
+    const before = inspectUdpSocket(device, socket) orelse return null;
+    const readable_before_discard = udpSocketReadable(device, socket);
+    const disconnect_while_pending_rejected = !disconnectUdpSocket(device, socket);
+    if (before.local_port != socket.local_port or before.generation != socket.generation or
+        !before.connected or before.peer_port != peer.port or before.pending_packets != 3 or
+        before.usable_capacity != software_packet_queue_capacity - 1 or
+        before.enqueued != 3 or before.dequeued != 0 or before.dropped != 0 or before.high_water != 3 or
+        !readable_before_discard or !disconnect_while_pending_rejected)
+    {
+        return null;
+    }
+
+    const discarded = discardUdpSocketPackets(device, socket) orelse return null;
+    const after = inspectUdpSocket(device, socket) orelse return null;
+    const readable_after_discard = udpSocketReadable(device, socket);
+    if (discarded != 3 or after.pending_packets != 0 or after.enqueued != 3 or after.dequeued != 3 or
+        after.high_water != 3 or after.dropped != 0 or readable_after_discard)
+    {
+        return null;
+    }
+    if (!disconnectUdpSocket(device, socket) or !closeUdpSocket(device, socket)) return null;
+    const stale_status_rejected = inspectUdpSocket(device, socket) == null;
+    const stale_discard_rejected = discardUdpSocketPackets(device, socket) == null;
+    if (!stale_status_rejected or !stale_discard_rejected or udpSocketReadable(device, socket)) return null;
+    if (device.udp_endpoint_count != 2 or
+        device.software_rx_queue.enqueued != 30 or device.software_rx_queue.dequeued != 30 or
+        device.software_rx_queue.dropped != 0 or device.software_rx_queue.head != device.software_rx_queue.tail or
+        device.packets_dispatched != 23 or device.udp_packets_dispatched != 22 or
+        device.unmatched_udp_packets_dropped != 1 or device.invalid_udp_packets_dropped != 1 or
+        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .connected = before.connected,
+        .peer_port = before.peer_port,
+        .pending_before_discard = before.pending_packets,
+        .readable_before_discard = readable_before_discard,
+        .disconnect_while_pending_rejected = disconnect_while_pending_rejected,
+        .discarded_packets = discarded,
+        .pending_after_discard = after.pending_packets,
+        .readable_after_discard = readable_after_discard,
+        .queue_enqueued = after.enqueued,
+        .queue_dequeued = after.dequeued,
+        .queue_high_water = after.high_water,
+        .queue_dropped = after.dropped,
+        .stale_status_rejected = stale_status_rejected,
+        .stale_discard_rejected = stale_discard_rejected,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
     };
 }
 

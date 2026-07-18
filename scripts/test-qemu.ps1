@@ -700,6 +700,9 @@ if ($Network) {
     if (-not $output.Contains('e1000e UDP ephemeral ports verified: range 49152-65535, first slot/gen/port 2/7/49152, second 3/8/49153, full-table rejected yes, collision skipped yes -> 2/9/49154, wrap 2/10/65535 -> 3/11/49152, final cursor/endpoints 49153/2')) {
         throw 'Ephemeral UDP allocation did not skip collisions, preserve cursor state on full tables, or wrap deterministically.'
     }
+    if (-not $output.Contains('e1000e UDP socket queue verified: slot/gen/port 2/12/49153, connected peer 23456, pending/readable before 3/yes, disconnect pending rejected yes, discarded 3, pending/readable after 0/no, queue 3/3 high-water 3 dropped 0, stale status/discard rejected yes/yes, ingress 30/30, dispatch total/UDP 23/22, final endpoints 2')) {
+        throw 'UDP readiness inspection, queue discard, or queued-peer transition guards did not behave deterministically.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
