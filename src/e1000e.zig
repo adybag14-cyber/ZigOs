@@ -683,6 +683,13 @@ pub const NtpServiceStep = struct {
     retried: bool,
 };
 
+pub const NtpAutomaticTimestampReport = struct {
+    zero_bootstrap_rejected: bool,
+    bootstrap_timestamp: u64,
+    anchor_timestamp: u64,
+    quarter_timestamp: u64,
+    backward_tick_rejected: bool,
+};
 pub const NtpTimestampReport = struct {
     base_timestamp: u64,
     anchor_timestamp: u64,
@@ -2163,6 +2170,7 @@ pub const NetworkResult = struct {
     ntp_reference_clock: NtpReferenceClockReport,
     ntp_service: NtpServiceReport,
     ntp_timestamp: NtpTimestampReport,
+    ntp_automatic_timestamp: NtpAutomaticTimestampReport,
 };
 
 var active_bar0: usize = 0;
@@ -2869,6 +2877,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_automatic_timestamp = verifyNtpAutomaticTimestamp() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -3005,6 +3017,7 @@ pub fn initializeAndTestNetwork(
         .ntp_reference_clock = ntp_reference_clock,
         .ntp_service = ntp_service,
         .ntp_timestamp = ntp_timestamp,
+        .ntp_automatic_timestamp = ntp_automatic_timestamp,
     };
 }
 
@@ -3728,6 +3741,35 @@ pub fn closeNtpService(device: *Device, service: *NtpService) bool {
     return true;
 }
 
+pub fn selectNtpServiceTimestamp(
+    service: *const NtpService,
+    current_tick: u64,
+    bootstrap_timestamp: u64,
+) ?u64 {
+    if (service.clock.clock.synchronized) {
+        return ntp.projectedTimestampAt(&service.clock, current_tick);
+    }
+    if (bootstrap_timestamp == 0) return null;
+    return bootstrap_timestamp;
+}
+
+pub fn stepNtpServiceAutomatic(
+    device: *Device,
+    service: *NtpService,
+    counter: *time_reference.ContinuousCounter,
+    now_tick: u64,
+    bootstrap_timestamp: u64,
+    budget: u16,
+) ?NtpServiceStep {
+    if (!service.active or !service.client.active or !udpSocketActive(device, service.client.socket)) {
+        return stepNtpService(device, service, counter, now_tick, bootstrap_timestamp, budget);
+    }
+    if (service.request_active) {
+        return stepNtpService(device, service, counter, now_tick, service.request.client_timestamp, budget);
+    }
+    const timestamp = selectNtpServiceTimestamp(service, now_tick, bootstrap_timestamp) orelse return null;
+    return stepNtpService(device, service, counter, now_tick, timestamp, budget);
+}
 pub fn stepNtpService(device: *Device, service: *NtpService, counter: *time_reference.ContinuousCounter, now_tick: u64, client_timestamp: u64, budget: u16) ?NtpServiceStep {
     const inactive_poll = NtpRequestPoll{ .state = .inactive, .examined = 0, .rejected = 0, .response = null };
     if (!service.active or !service.client.active or !udpSocketActive(device, service.client.socket))
@@ -5038,6 +5080,33 @@ fn enqueueNtpServiceResponse(device: *Device, socket: UdpSocket, server_ipv4: [4
     return dispatch.examined == 1 and dispatch.routed == 1 and dispatch.dropped == 0;
 }
 
+fn verifyNtpAutomaticTimestamp() ?NtpAutomaticTimestampReport {
+    var service = std.mem.zeroes(NtpService);
+    const zero_bootstrap_rejected = selectNtpServiceTimestamp(&service, 1000, 0) == null;
+    const bootstrap = selectNtpServiceTimestamp(&service, 1000, ntp.fixture_client_timestamp) orelse return null;
+    service.clock.clock.synchronized = true;
+    service.clock.clock.unix_seconds = ntp.fixture_unix_seconds;
+    service.clock.clock.unix_fraction = 0x80000000;
+    service.clock.anchor_tick = 1000;
+    service.clock.ticks_per_second = 1000;
+    const anchor = selectNtpServiceTimestamp(&service, 1000, 0) orelse return null;
+    const quarter = selectNtpServiceTimestamp(&service, 1250, 0) orelse return null;
+    const backward_tick_rejected = selectNtpServiceTimestamp(&service, 999, 0) == null;
+    const expected_quarter = (@as(u64, ntp.fixture_server_seconds) << 32) | 0xC0000000;
+    if (!zero_bootstrap_rejected or bootstrap != ntp.fixture_client_timestamp or
+        anchor != ntp.fixture_server_timestamp or quarter != expected_quarter or
+        !backward_tick_rejected)
+    {
+        return null;
+    }
+    return .{
+        .zero_bootstrap_rejected = zero_bootstrap_rejected,
+        .bootstrap_timestamp = bootstrap,
+        .anchor_timestamp = anchor,
+        .quarter_timestamp = quarter,
+        .backward_tick_rejected = backward_tick_rejected,
+    };
+}
 fn verifyNtpTimestamp() ?NtpTimestampReport {
     const base = ntp.UnixTime{ .seconds = ntp.fixture_unix_seconds, .fraction = 0x80000000 };
     const base_timestamp = ntp.unixTimeToTimestamp(base) orelse return null;

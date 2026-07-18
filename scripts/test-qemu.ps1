@@ -845,6 +845,8 @@ if ($Network) {
         throw 'The owned NTP service did not enforce retry and refresh deadlines, accept two forward samples, and shut down transactionally.'
     }    if (-not $output.Contains('NTP timestamp verified: base/anchor 0xEEF4508080000000/0xEEF4508080000000, quarter/rollover 0xEEF45080C0000000/0xEEF4508140000000, maximum 0xFFFFFFFFFFFFFFFF, rejects unsynchronized/backward/overflow yes/yes/yes')) {
         throw 'Projected Unix time did not convert into exact NTP timestamps or enforce the supported NTP-era boundary.'
+    }    if (-not $output.Contains('NTP automatic timestamp verified: zero bootstrap rejected yes, bootstrap/anchor/quarter 0xEEF4507F40000000/0xEEF4508080000000/0xEEF45080C0000000, backward tick rejected yes')) {
+        throw 'The NTP service timestamp selector did not enforce bootstrap requirements or derive synchronized timestamps from projected time.'
     }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {

@@ -4615,6 +4615,17 @@ fn inspectE1000e(
     debugWrite("/");
     debugWrite(if (network.ntp_timestamp.overflow_rejected) "yes" else "no");
     debugWrite("\r\n");
+    debugWrite("NTP automatic timestamp verified: zero bootstrap rejected ");
+    debugWrite(if (network.ntp_automatic_timestamp.zero_bootstrap_rejected) "yes" else "no");
+    debugWrite(", bootstrap/anchor/quarter 0x");
+    debugWriteHex64(network.ntp_automatic_timestamp.bootstrap_timestamp);
+    debugWrite("/0x");
+    debugWriteHex64(network.ntp_automatic_timestamp.anchor_timestamp);
+    debugWrite("/0x");
+    debugWriteHex64(network.ntp_automatic_timestamp.quarter_timestamp);
+    debugWrite(", backward tick rejected ");
+    debugWrite(if (network.ntp_automatic_timestamp.backward_tick_rejected) "yes" else "no");
+    debugWrite("\r\n");
     return true;
 }
 

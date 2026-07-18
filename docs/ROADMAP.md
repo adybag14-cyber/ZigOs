@@ -822,3 +822,11 @@
 - The fixture anchor maps exactly to `0xEEF4508080000000`; quarter-second and fractional-carry reads map to `0xEEF45080C0000000` and `0xEEF4508140000000`.
 - Unsynchronized clocks, ticks before the projection anchor, and Unix times outside the supported 32-bit NTP seconds era are rejected.
 - The maximum supported Unix time with fraction `0xFFFFFFFF` maps exactly to `0xFFFFFFFFFFFFFFFF`.
+
+## 3.55 - Automatic NTP service timestamp selection
+
+- `selectNtpServiceTimestamp` accepts a nonzero bootstrap timestamp only while the service clock is unsynchronized.
+- Once synchronized, the selector ignores the bootstrap value and derives timestamps from the projected clock at the caller's monotonic tick.
+- `stepNtpServiceAutomatic` reuses an in-flight request's retained originate timestamp and selects a fresh projected timestamp only when starting a new transaction.
+- Zero bootstrap and ticks before the projection anchor are rejected without producing a timestamp.
+- The deterministic proof maps bootstrap, anchor, and quarter-second selection to `0xEEF4507F40000000`, `0xEEF4508080000000`, and `0xEEF45080C0000000`.
