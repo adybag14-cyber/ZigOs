@@ -664,6 +664,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e software RX queue verified: TX descriptor 3 -> cursor 4, DMA RX descriptor 2 recycled -> cursor 3, packet 60 bytes, ICMP 0x5A51/3, queue 1/1, high-water 1, dropped 0, final completions TX 12/12, RX 11/11, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
         throw 'The software packet queue did not copy, recycle, dequeue, and parse the third ICMP reply.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e protocol dispatch verified: TX descriptor 4 -> cursor 5, DMA RX descriptor 3 recycled -> cursor 4, ICMP 0x5A52/4, ingress 2/2 dropped 0, dispatch total 1 ARP/ICMP/UDP 0/1/0, unknown 0, ICMP queue 1/1 high-water 1 dropped 0, final completions TX 13/13, RX 12/12, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
+        throw 'The protocol dispatcher did not route the fourth ICMP reply through the bounded ICMP queue.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
@@ -960,7 +963,7 @@ if ([Int64]$nvmeFileMatch.Groups[1].Value -ne $builtEfiSize) {
     throw "The NVMe FAT file size did not match the built EFI image: NVMe=$($nvmeFileMatch.Groups[1].Value), built=$builtEfiSize."
 }
 
-if ($NvmeOnly) {
+if ($NvmeOnly -or ($LegacyPci -and -not $LegacyAhci)) {
     if ($LegacyPci) {
         if (-not $output.Contains('AHCI controller not present; continuing with another storage backend')) {
             throw 'The legacy machine did not report the expected absence of an AHCI controller.'
@@ -980,10 +983,10 @@ if ($NvmeOnly) {
         }
     }
     if ($output.Contains('ATA IDENTIFY completed on port')) {
-        throw 'ATA IDENTIFY unexpectedly ran without a SATA disk in NVMe-only mode.'
+        throw 'ATA IDENTIFY unexpectedly ran without an active AHCI SATA device.'
     }
     if (-not $output.Contains('Storage backends ready: NVMe yes, AHCI no')) {
-        throw 'The NVMe-only storage readiness marker was not observed.'
+        throw 'The NVMe-backed storage readiness marker was not observed.'
     }
 } else {
     if (-not $output.Contains('AHCI controller active at')) {
@@ -1084,8 +1087,8 @@ Write-Host $serialOutput
 if (-not $NoGraphics -and ($NoUsbKeyboard -or $UsbMouseOnly) -and -not $serialOutput.Contains('resets 0, lit pixels 1744')) {
     throw 'COM1 decimal formatting dropped the zero-valued framebuffer reset counter.'
 }
-if (-not $serialOutput.Contains('BdsDxe: starting Boot0001 "UEFI QEMU NVMe Ctrl ZIGOSNVME 1"')) {
-    throw 'OVMF did not boot ZigOs from the GPT/FAT NVMe namespace.'
+if (-not $LegacyPci -and -not $serialOutput.Contains('BdsDxe: starting Boot0001 "UEFI QEMU NVMe Ctrl ZIGOSNVME 1"')) {
+    throw 'OVMF did not report the expected q35 NVMe Boot0001 path.'
 }
 if (-not $serialOutput.Contains('ZigOs COM1 serial diagnostics online')) {
     throw 'The COM1 loopback-tested online marker was not captured.'

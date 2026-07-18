@@ -85,6 +85,7 @@ const arp_request: u16 = 1;
 const arp_reply: u16 = 2;
 const ipv4_header_bytes: usize = 20;
 const ipv4_protocol_icmp: u8 = 1;
+const ipv4_protocol_udp: u8 = 17;
 const ipv4_dont_fragment: u16 = 1 << 14;
 const icmp_echo_reply: u8 = 0;
 const icmp_echo_request: u8 = 8;
@@ -95,6 +96,8 @@ const persistent_icmp_identifier: u16 = 0x5A50;
 const persistent_icmp_sequence: u16 = 2;
 const queued_icmp_identifier: u16 = 0x5A51;
 const queued_icmp_sequence: u16 = 3;
+const dispatched_icmp_identifier: u16 = 0x5A52;
+const dispatched_icmp_sequence: u16 = 4;
 const icmp_payload = "ZigOs-ICMP-ECHO!";
 const icmp_ipv4_total_bytes: usize = ipv4_header_bytes + icmp_header_bytes + icmp_payload.len;
 const icmp_ethernet_frame_bytes: usize = 14 + icmp_ipv4_total_bytes;
@@ -168,6 +171,13 @@ pub const SoftwarePacketQueue = struct {
     high_water: u16,
 };
 
+pub const PacketKind = enum(u8) {
+    arp,
+    icmp,
+    udp,
+    unknown,
+};
+
 pub const Device = struct {
     bar0: usize,
     rx_ring_address: usize,
@@ -191,6 +201,14 @@ pub const Device = struct {
     rx_descriptor_wraps: u16,
     previous_recycled_rx_descriptor: ?usize,
     software_rx_queue: SoftwarePacketQueue,
+    arp_rx_queue: SoftwarePacketQueue,
+    icmp_rx_queue: SoftwarePacketQueue,
+    udp_rx_queue: SoftwarePacketQueue,
+    packets_dispatched: u64,
+    arp_packets_dispatched: u64,
+    icmp_packets_dispatched: u64,
+    udp_packets_dispatched: u64,
+    unknown_packets_dropped: u64,
 };
 
 pub const TxCompletion = struct {
@@ -249,6 +267,37 @@ pub const SoftwarePacketQueueReport = struct {
     queue_dropped: u64,
     device_tx_cursor: u16,
     device_rx_cursor: u16,
+    tx_queue_enqueues: u64,
+    tx_queue_dequeues: u64,
+    rx_queue_enqueues: u64,
+    rx_queue_dequeues: u64,
+    completion_queue_overflows: u64,
+    tx_pending_mask: u32,
+    rx_pending_mask: u32,
+};
+
+pub const ProtocolDispatchReport = struct {
+    tx: TxCompletion,
+    dma_rx_descriptor: u16,
+    device_tx_cursor: u16,
+    device_rx_cursor: u16,
+    packet_length: u16,
+    identifier: u16,
+    sequence: u16,
+    ttl: u8,
+    payload_length: u16,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    ingress_dropped: u64,
+    packets_dispatched: u64,
+    arp_dispatched: u64,
+    icmp_dispatched: u64,
+    udp_dispatched: u64,
+    unknown_dropped: u64,
+    icmp_queue_enqueued: u64,
+    icmp_queue_dequeued: u64,
+    icmp_queue_high_water: u16,
+    icmp_queue_dropped: u64,
     tx_queue_enqueues: u64,
     tx_queue_dequeues: u64,
     rx_queue_enqueues: u64,
@@ -350,6 +399,7 @@ pub const NetworkResult = struct {
     rx_pending_mask_after_stream: u32,
     persistent: PersistentQueueReport,
     software_packet_queue: SoftwarePacketQueueReport,
+    protocol_dispatch: ProtocolDispatchReport,
 };
 
 var active_bar0: usize = 0;
@@ -855,6 +905,14 @@ pub fn initializeAndTestNetwork(
         .rx_descriptor_wraps = 0,
         .previous_recycled_rx_descriptor = 0,
         .software_rx_queue = std.mem.zeroes(SoftwarePacketQueue),
+        .arp_rx_queue = std.mem.zeroes(SoftwarePacketQueue),
+        .icmp_rx_queue = std.mem.zeroes(SoftwarePacketQueue),
+        .udp_rx_queue = std.mem.zeroes(SoftwarePacketQueue),
+        .packets_dispatched = 0,
+        .arp_packets_dispatched = 0,
+        .icmp_packets_dispatched = 0,
+        .udp_packets_dispatched = 0,
+        .unknown_packets_dropped = 0,
     };
     const device = activeDevice() orelse return null;
     const persistent = verifyPersistentQueueOwner(device) orelse {
@@ -862,6 +920,10 @@ pub fn initializeAndTestNetwork(
         return null;
     };
     const software_packet_queue = verifySoftwarePacketQueue(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
+    const protocol_dispatch = verifyProtocolDispatch(device) orelse {
         active_device_storage = null;
         return null;
     };
@@ -958,6 +1020,7 @@ pub fn initializeAndTestNetwork(
         .rx_pending_mask_after_stream = rx_pending_mask_after_stream,
         .persistent = persistent,
         .software_packet_queue = software_packet_queue,
+        .protocol_dispatch = protocol_dispatch,
     };
 }
 
@@ -1049,7 +1112,45 @@ pub fn pumpReceive(device: *Device) bool {
 }
 
 pub fn dequeuePacket(device: *Device) ?Packet {
-    const queue = &device.software_rx_queue;
+    return dequeueQueuedPacket(&device.software_rx_queue);
+}
+
+pub fn dispatchNextPacket(device: *Device) bool {
+    const packet = dequeuePacket(device) orelse return false;
+    const kind = classifyPacket(packet.bytes[0..packet.length]);
+    const queue = switch (kind) {
+        .arp => &device.arp_rx_queue,
+        .icmp => &device.icmp_rx_queue,
+        .udp => &device.udp_rx_queue,
+        .unknown => {
+            device.unknown_packets_dropped +|= 1;
+            return false;
+        },
+    };
+    if (!enqueueQueuedPacket(queue, packet)) return false;
+    device.packets_dispatched +|= 1;
+    switch (kind) {
+        .arp => device.arp_packets_dispatched +|= 1,
+        .icmp => device.icmp_packets_dispatched +|= 1,
+        .udp => device.udp_packets_dispatched +|= 1,
+        .unknown => unreachable,
+    }
+    return true;
+}
+
+pub fn dequeueArpPacket(device: *Device) ?Packet {
+    return dequeueQueuedPacket(&device.arp_rx_queue);
+}
+
+pub fn dequeueIcmpPacket(device: *Device) ?Packet {
+    return dequeueQueuedPacket(&device.icmp_rx_queue);
+}
+
+pub fn dequeueUdpPacket(device: *Device) ?Packet {
+    return dequeueQueuedPacket(&device.udp_rx_queue);
+}
+
+fn dequeueQueuedPacket(queue: *SoftwarePacketQueue) ?Packet {
     if (queue.tail == queue.head) return null;
     const packet = queue.entries[queue.tail];
     queue.tail = @intCast((queue.tail + 1) % software_packet_queue_capacity);
@@ -1079,6 +1180,41 @@ fn enqueueSoftwarePacket(queue: *SoftwarePacketQueue, frame: ReceivedFrame) bool
     const depth: u16 = @intCast((queue.head + software_packet_queue_capacity - queue.tail) % software_packet_queue_capacity);
     if (depth > queue.high_water) queue.high_water = depth;
     return true;
+}
+
+fn enqueueQueuedPacket(queue: *SoftwarePacketQueue, packet: Packet) bool {
+    const next: u16 = @intCast((queue.head + 1) % software_packet_queue_capacity);
+    if (next == queue.tail) {
+        queue.dropped +|= 1;
+        return false;
+    }
+    queue.entries[queue.head] = packet;
+    queue.head = next;
+    queue.enqueued +|= 1;
+    const depth: u16 = @intCast((queue.head + software_packet_queue_capacity - queue.tail) % software_packet_queue_capacity);
+    if (depth > queue.high_water) queue.high_water = depth;
+    return true;
+}
+
+fn classifyPacket(frame: []const u8) PacketKind {
+    if (frame.len < 14) return .unknown;
+    const ether_type = readNetwork16(frame, 12);
+    if (ether_type == ether_type_arp) return .arp;
+    if (ether_type != ether_type_ipv4 or frame.len < 14 + ipv4_header_bytes) return .unknown;
+
+    const ip_offset: usize = 14;
+    if ((frame[ip_offset] >> 4) != 4) return .unknown;
+    const ihl_bytes: usize = @as(usize, frame[ip_offset] & 0x0F) * 4;
+    if (ihl_bytes < ipv4_header_bytes or ip_offset + ihl_bytes > frame.len) return .unknown;
+    const total_length: usize = readNetwork16(frame, ip_offset + 2);
+    if (total_length < ihl_bytes or ip_offset + total_length > frame.len) return .unknown;
+    if ((readNetwork16(frame, ip_offset + 6) & 0x3FFF) != 0) return .unknown;
+
+    return switch (frame[ip_offset + 9]) {
+        ipv4_protocol_icmp => .icmp,
+        ipv4_protocol_udp => .udp,
+        else => .unknown,
+    };
 }
 
 fn verifyPersistentQueueOwner(device: *Device) ?PersistentQueueReport {
@@ -1216,6 +1352,99 @@ fn verifySoftwarePacketQueue(device: *Device) ?SoftwarePacketQueueReport {
         .queue_dropped = device.software_rx_queue.dropped,
         .device_tx_cursor = device.tx_producer,
         .device_rx_cursor = device.rx_consumer,
+        .tx_queue_enqueues = tx_queue_enqueues,
+        .tx_queue_dequeues = tx_queue_dequeues,
+        .rx_queue_enqueues = rx_queue_enqueues,
+        .rx_queue_dequeues = rx_queue_dequeues,
+        .completion_queue_overflows = completion_queue_overflows,
+        .tx_pending_mask = final_tx_pending,
+        .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyProtocolDispatch(device: *Device) ?ProtocolDispatchReport {
+    var request = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+    buildIcmpEchoRequest(
+        &request,
+        device.local_mac,
+        device.gateway_mac,
+        device.local_ipv4,
+        device.gateway_ipv4,
+        dispatched_icmp_identifier,
+        dispatched_icmp_sequence,
+    );
+    const tx = submitFrame(device, &request) orelse return null;
+    if (!pumpReceive(device)) return null;
+    if (!dispatchNextPacket(device)) return null;
+    const packet = dequeueIcmpPacket(device) orelse return null;
+    const parsed = parseIcmpEchoReply(
+        packet.bytes[0..packet.length],
+        device.local_mac,
+        device.gateway_mac,
+        device.local_ipv4,
+        device.gateway_ipv4,
+        dispatched_icmp_identifier,
+        dispatched_icmp_sequence,
+    ) orelse return null;
+
+    const tx_queue_enqueues = completionQueueEnqueued(&tx_completion_queue);
+    const tx_queue_dequeues = completionQueueDequeued(&tx_completion_queue);
+    const rx_queue_enqueues = completionQueueEnqueued(&rx_completion_queue);
+    const rx_queue_dequeues = completionQueueDequeued(&rx_completion_queue);
+    const completion_queue_overflows = completionQueueOverflow(&tx_completion_queue) +
+        completionQueueOverflow(&rx_completion_queue);
+    const final_tx_pending = @atomicLoad(u32, &tx_pending_mask, .acquire);
+    const final_rx_pending = @atomicLoad(u32, &rx_pending_mask, .acquire);
+    if (tx.descriptor_index != 4 or tx.next_cursor != 5 or
+        packet.source_descriptor != 3 or device.rx_consumer != 4 or
+        device.software_rx_queue.enqueued != 2 or
+        device.software_rx_queue.dequeued != 2 or
+        device.software_rx_queue.dropped != 0 or
+        device.software_rx_queue.head != device.software_rx_queue.tail or
+        device.packets_dispatched != 1 or
+        device.arp_packets_dispatched != 0 or
+        device.icmp_packets_dispatched != 1 or
+        device.udp_packets_dispatched != 0 or
+        device.unknown_packets_dropped != 0 or
+        device.arp_rx_queue.enqueued != 0 or device.arp_rx_queue.dequeued != 0 or
+        device.udp_rx_queue.enqueued != 0 or device.udp_rx_queue.dequeued != 0 or
+        device.icmp_rx_queue.enqueued != 1 or
+        device.icmp_rx_queue.dequeued != 1 or
+        device.icmp_rx_queue.high_water != 1 or
+        device.icmp_rx_queue.dropped != 0 or
+        device.icmp_rx_queue.head != device.icmp_rx_queue.tail or
+        device.rx_recycled_descriptors != 3 or
+        tx_queue_enqueues != 13 or tx_queue_dequeues != 13 or
+        rx_queue_enqueues != 12 or rx_queue_dequeues != 12 or
+        completion_queue_overflows != 0 or final_tx_pending != 0 or
+        final_rx_pending != all_rx_descriptors_pending or
+        tx_ready_mask != 0 or rx_ready_mask != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .tx = tx,
+        .dma_rx_descriptor = packet.source_descriptor,
+        .device_tx_cursor = device.tx_producer,
+        .device_rx_cursor = device.rx_consumer,
+        .packet_length = packet.length,
+        .identifier = parsed.identifier,
+        .sequence = parsed.sequence,
+        .ttl = parsed.ttl,
+        .payload_length = parsed.payload_length,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .ingress_dropped = device.software_rx_queue.dropped,
+        .packets_dispatched = device.packets_dispatched,
+        .arp_dispatched = device.arp_packets_dispatched,
+        .icmp_dispatched = device.icmp_packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+        .unknown_dropped = device.unknown_packets_dropped,
+        .icmp_queue_enqueued = device.icmp_rx_queue.enqueued,
+        .icmp_queue_dequeued = device.icmp_rx_queue.dequeued,
+        .icmp_queue_high_water = device.icmp_rx_queue.high_water,
+        .icmp_queue_dropped = device.icmp_rx_queue.dropped,
         .tx_queue_enqueues = tx_queue_enqueues,
         .tx_queue_dequeues = tx_queue_dequeues,
         .rx_queue_enqueues = rx_queue_enqueues,

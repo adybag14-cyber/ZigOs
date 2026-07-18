@@ -401,3 +401,13 @@
 - A third ICMP Echo (`identifier 0x5A51`, sequence `3`) uses TX descriptor 3 and RX descriptor 2; the reply is copied, descriptor 2 is returned to hardware, and only then is the packet parsed.
 - The software queue must report one enqueue, one dequeue, high-water one, zero drops, and an empty final queue.
 - Final hardware completion totals are twelve TX and eleven RX records with zero overflow and clean pending/ready masks across the full topology matrix.
+
+
+## 3.8 - Protocol packet dispatch
+
+- Software-owned ingress packets are classified by Ethernet type and bounded IPv4 metadata before protocol parsing.
+- ARP, ICMP, and UDP each have independent eight-entry packet queues with enqueue/dequeue, high-water, and drop accounting.
+- `dispatchNextPacket` removes one packet from the driver ingress queue and routes it without exposing DMA storage; unknown or malformed packets are counted and rejected.
+- A fourth ICMP Echo (`identifier 0x5A52`, sequence `4`) uses TX descriptor 4 and RX descriptor 3, then follows `pumpReceive -> dispatchNextPacket -> dequeueIcmpPacket`.
+- The dispatcher must report exactly one ICMP dispatch, zero ARP/UDP/unknown packets, one ICMP enqueue/dequeue, high-water one, and zero drops.
+- Final hardware completion totals are thirteen TX and twelve RX records with zero overflow and clean descriptor masks across the topology matrix.
