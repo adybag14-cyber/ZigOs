@@ -748,6 +748,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'DNS alias verified: transaction 0x4455, alias length/hash 16/0x[0-9A-F]{16}, canonical length/hash 10/0x[0-9A-F]{16}, response length/hash 84/0x[0-9A-F]{16}, A 192\.0\.2\.42 TTL 300 hops 1, loop/truncated rejected yes/yes, case-insensitive yes')) {
         throw 'DNS CNAME resolution did not follow the bounded alias, reject a loop, and preserve case-insensitive matching.'
     }
+    if (-not [regex]::IsMatch($output, 'DNS alias transaction verified: socket 2/29/49170, server 10\.0\.2\.3:53, transaction 0x4456, name length/hash 16/0x[0-9A-F]{16}, TX ID/descriptor/cursor/frame 0x000A/5/6/76, poll resolved/1/0, A 192\.0\.2\.42 TTL 300 hops 1, endpoint queue 1/1 high-water 1 dropped 0, final ID/TX cursor 11/6, submissions 1, completions TX/RX 38/38/22, overflow 0, endpoints/cursor 2/49171, ingress 61/61, dispatch total/UDP 50/49')) {
+        throw 'The resumable DNS transaction did not resolve a CNAME response through the connected UDP polling path.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

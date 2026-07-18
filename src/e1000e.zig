@@ -592,6 +592,44 @@ pub const DnsAQueryPoll = struct {
     response: ?DnsAResponse,
 };
 
+pub const DnsAliasTransactionReport = struct {
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    server_ipv4: [4]u8,
+    server_port: u16,
+    transaction_id: u16,
+    name_length: u8,
+    name_hash: u64,
+    transmit_identification: u16,
+    transmit_descriptor: u16,
+    transmit_next_cursor: u16,
+    transmit_frame_length: u16,
+    poll_state: DnsAQueryState,
+    poll_examined: u16,
+    poll_rejected: u16,
+    address: [4]u8,
+    ttl: u32,
+    alias_hops: u8,
+    endpoint_enqueued: u64,
+    endpoint_dequeued: u64,
+    endpoint_high_water: u16,
+    endpoint_dropped: u64,
+    final_identification_cursor: u16,
+    final_tx_cursor: u16,
+    tx_submissions_delta: u64,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    completion_overflow: u64,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+};
+
 pub const DnsAliasReport = struct {
     transaction_id: u16,
     alias_name_length: u16,
@@ -1248,6 +1286,7 @@ pub const NetworkResult = struct {
     dns_transaction: DnsTransactionReport,
     dns_polling: DnsPollingReport,
     dns_alias: DnsAliasReport,
+    dns_alias_transaction: DnsAliasTransactionReport,
 };
 
 var active_bar0: usize = 0;
@@ -1868,6 +1907,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const dns_alias_transaction = verifyDnsAliasTransaction(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -1983,6 +2026,7 @@ pub fn initializeAndTestNetwork(
         .dns_transaction = dns_transaction,
         .dns_polling = dns_polling,
         .dns_alias = dns_alias,
+        .dns_alias_transaction = dns_alias_transaction,
     };
 }
 
@@ -3554,6 +3598,137 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyDnsAliasTransaction(device: *Device) ?DnsAliasTransactionReport {
+    const socket = openEphemeralUdpSocket(device) orelse return null;
+    if (socket.endpoint_index != 2 or socket.generation != 29 or socket.local_port != 49_170 or
+        device.next_ephemeral_udp_port != 49_171 or device.next_udp_generation != 30 or
+        device.udp_endpoint_count != 3 or device.tx_producer != 5 or device.next_udp_identification != 10)
+    {
+        return null;
+    }
+    const dns_server_ipv4 = [4]u8{ 10, 0, 2, 3 };
+    const peer = UdpPeer{
+        .mac = device.gateway_mac,
+        .ipv4 = dns_server_ipv4,
+        .port = dns.server_port,
+    };
+    if (!connectUdpSocket(device, socket, peer)) return null;
+
+    const transaction_id: u16 = dns.fixture_transaction_id + 3;
+    const submissions_before = device.tx_submissions;
+    const request = startDnsAQuery(device, socket, transaction_id, dns.fixture_alias_name) orelse return null;
+    if (request.name_length != dns.fixture_alias_name.len or
+        request.transmit.identification != 10 or request.transmit.completion.descriptor_index != 5 or
+        request.transmit.completion.next_cursor != 6 or request.transmit.completion.frame_length != 76 or
+        device.next_udp_identification != 11 or device.tx_producer != 6 or
+        device.tx_submissions != submissions_before + 1)
+    {
+        return null;
+    }
+
+    var response_buffer = std.mem.zeroes([256]u8);
+    const response_payload = dns.buildCnameAResponse(
+        &response_buffer,
+        transaction_id,
+        dns.fixture_alias_name,
+        dns.fixture_name,
+        dns.fixture_address,
+        dns.default_ttl,
+    ) orelse return null;
+    var response_frame = std.mem.zeroes([160]u8);
+    const response_length = udp.buildFrame(&response_frame, .{
+        .source_mac = peer.mac,
+        .destination_mac = device.local_mac,
+        .source_ipv4 = peer.ipv4,
+        .destination_ipv4 = device.local_ipv4,
+        .source_port = peer.port,
+        .destination_port = socket.local_port,
+        .identification = 0x6800,
+        .payload = response_payload,
+    }) orelse return null;
+    var packet = std.mem.zeroes(Packet);
+    packet.length = response_length;
+    packet.source_descriptor = 0xF100;
+    @memcpy(packet.bytes[0..response_length], response_frame[0..response_length]);
+    if (!enqueueQueuedPacket(&device.software_rx_queue, packet)) return null;
+    const dispatch = dispatchPacketBatch(device, 1);
+    if (dispatch.examined != 1 or dispatch.routed != 1 or dispatch.dropped != 0 or dispatch.remaining != 0) return null;
+    const endpoint = &device.udp_endpoints[socket.endpoint_index];
+    if (endpoint.queue.enqueued != 1 or endpoint.queue.dequeued != 0 or
+        endpoint.queue.high_water != 1 or endpoint.queue.dropped != 0)
+    {
+        return null;
+    }
+
+    const poll = pollDnsAQuery(device, &request, 1);
+    const resolved = poll.response orelse return null;
+    if (poll.state != .resolved or poll.examined != 1 or poll.rejected != 0 or
+        !std.mem.eql(u8, &resolved.address, &dns.fixture_address) or resolved.ttl != dns.default_ttl or
+        resolved.alias_hops != 1 or endpoint.queue.dequeued != 1 or endpoint.queue.head != endpoint.queue.tail)
+    {
+        return null;
+    }
+
+    const endpoint_enqueued = endpoint.queue.enqueued;
+    const endpoint_dequeued = endpoint.queue.dequeued;
+    const endpoint_high_water = endpoint.queue.high_water;
+    const endpoint_dropped = endpoint.queue.dropped;
+    if (!closeUdpSocket(device, socket)) return null;
+    const tx_completion_enqueues = completionQueueEnqueued(&tx_completion_queue);
+    const tx_completion_dequeues = completionQueueDequeued(&tx_completion_queue);
+    const rx_completion_enqueues = completionQueueEnqueued(&rx_completion_queue);
+    const completion_overflow = completionQueueOverflow(&tx_completion_queue) + completionQueueOverflow(&rx_completion_queue);
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_171 or
+        device.software_rx_queue.enqueued != 61 or device.software_rx_queue.dequeued != 61 or
+        device.software_rx_queue.dropped != 0 or device.software_rx_queue.head != device.software_rx_queue.tail or
+        device.packets_dispatched != 50 or device.udp_packets_dispatched != 49 or
+        device.unmatched_udp_packets_dropped != 3 or device.invalid_udp_packets_dropped != 3 or
+        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0 or
+        tx_completion_enqueues != 38 or tx_completion_dequeues != 38 or rx_completion_enqueues != 22 or
+        completion_overflow != 0 or @atomicLoad(u32, &tx_pending_mask, .acquire) != 0 or
+        @atomicLoad(u32, &rx_pending_mask, .acquire) != all_rx_descriptors_pending)
+    {
+        return null;
+    }
+    return .{
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .server_ipv4 = dns_server_ipv4,
+        .server_port = peer.port,
+        .transaction_id = transaction_id,
+        .name_length = request.name_length,
+        .name_hash = tftp.updatePayloadHash(tftp.initial_fnv1a64, request.name[0..request.name_length]),
+        .transmit_identification = request.transmit.identification,
+        .transmit_descriptor = request.transmit.completion.descriptor_index,
+        .transmit_next_cursor = request.transmit.completion.next_cursor,
+        .transmit_frame_length = request.transmit.completion.frame_length,
+        .poll_state = poll.state,
+        .poll_examined = poll.examined,
+        .poll_rejected = poll.rejected,
+        .address = resolved.address,
+        .ttl = resolved.ttl,
+        .alias_hops = resolved.alias_hops,
+        .endpoint_enqueued = endpoint_enqueued,
+        .endpoint_dequeued = endpoint_dequeued,
+        .endpoint_high_water = endpoint_high_water,
+        .endpoint_dropped = endpoint_dropped,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_tx_cursor = device.tx_producer,
+        .tx_submissions_delta = device.tx_submissions - submissions_before,
+        .tx_completion_enqueues = tx_completion_enqueues,
+        .tx_completion_dequeues = tx_completion_dequeues,
+        .rx_completion_enqueues = rx_completion_enqueues,
+        .completion_overflow = completion_overflow,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
     };
 }
 

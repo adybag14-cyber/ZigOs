@@ -618,3 +618,11 @@
 - A visited-name set and eight-hop ceiling reject self-references, cycles, and unbounded alias chains.
 - The deterministic `alias.zigos.test -> zigos.test` response is 84 bytes and resolves `192.0.2.42` with one alias hop and TTL 300.
 - A self-alias and truncated response are rejected, while mixed-case alias and canonical names resolve case-insensitively.
+
+## 3.32 - CNAME resolution through the UDP client
+
+- A resumable DNS request now queries `alias.zigos.test` through the same connected port-53 socket and bounded polling API used for direct A records.
+- The 34-byte alias query emits a 76-byte Ethernet frame with IPv4 identification `0x000A`, TX descriptor 5, and cursor 6.
+- A synthetic 84-byte CNAME-plus-A response is routed through the exact DNS peer and resolved in one poll operation.
+- The result reports `192.0.2.42`, TTL 300, and one alias hop while endpoint accounting balances at `1/1`.
+- TX completions reach 38; ingress and UDP dispatch totals advance to `61/61` and `50/49` with no additional drops.
