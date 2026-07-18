@@ -626,3 +626,12 @@
 - A synthetic 84-byte CNAME-plus-A response is routed through the exact DNS peer and resolved in one poll operation.
 - The result reports `192.0.2.42`, TTL 300, and one alias hop while endpoint accounting balances at `1/1`.
 - TX completions reach 38; ingress and UDP dispatch totals advance to `61/61` and `50/49` with no additional drops.
+
+## 3.33 - Transactional DNS retransmission
+
+- `DnsARequest` tracks its completed transmission count and latest hardware transmit record.
+- `retryDnsAQuery` reuses the original DNS transaction ID and bounded name while allocating a fresh automatic IPv4 identification.
+- An initial query emits ID `0x000B` through descriptor 6; an empty poll remains pending without touching state.
+- The retry emits ID `0x000C` through descriptor 7, wraps the TX producer to zero, and advances the device TX-wrap counter from 3 to 4.
+- A subsequent matching response resolves normally, while retrying the request after socket close is rejected without consuming identification, descriptor, completion, or transmission-count state.
+- Two transmissions raise TX completions to 40; ingress/UDP dispatch advance by one response to `62/62` and `51/50`.

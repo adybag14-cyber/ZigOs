@@ -751,6 +751,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'DNS alias transaction verified: socket 2/29/49170, server 10\.0\.2\.3:53, transaction 0x4456, name length/hash 16/0x[0-9A-F]{16}, TX ID/descriptor/cursor/frame 0x000A/5/6/76, poll resolved/1/0, A 192\.0\.2\.42 TTL 300 hops 1, endpoint queue 1/1 high-water 1 dropped 0, final ID/TX cursor 11/6, submissions 1, completions TX/RX 38/38/22, overflow 0, endpoints/cursor 2/49171, ingress 61/61, dispatch total/UDP 50/49')) {
         throw 'The resumable DNS transaction did not resolve a CNAME response through the connected UDP polling path.'
     }
+    if (-not [regex]::IsMatch($output, 'DNS retry verified: socket 2/30/49171, server 10\.0\.2\.3:53, transaction 0x4457, name length/hash 10/0x[0-9A-F]{16}, initial ID/descriptor/cursor/frame 0x000B/6/7/70, pending pending/0/0, retry 0x000C/7/0/70, transmissions 2, wraps 3->4, resolved resolved/1/0, A 192\.0\.2\.42 TTL 300, stale retry/cursor preserved yes/yes, final ID/TX cursor 13/0, submissions 2, completions TX/RX 40/40/22, overflow 0, endpoints/cursor 2/49172, ingress 62/62, dispatch total/UDP 51/50')) {
+        throw 'DNS retry did not preserve the application transaction, allocate fresh packet IDs, cross the TX ring, and reject stale requests transactionally.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
