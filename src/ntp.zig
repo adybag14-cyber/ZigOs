@@ -13,6 +13,26 @@ const mode_server: u8 = 4;
 const version_4: u8 = 4;
 const leap_alarm: u8 = 3;
 
+pub const UnixTime = struct {
+    seconds: u64,
+    fraction: u32,
+};
+
+pub const ClockApplyResult = enum(u8) {
+    accepted,
+    stale,
+};
+
+pub const Clock = struct {
+    synchronized: bool,
+    unix_seconds: u64,
+    unix_fraction: u32,
+    stratum: u8,
+    reference_id: [4]u8,
+    accepted_samples: u64,
+    stale_samples: u64,
+};
+
 pub const Response = struct {
     leap_indicator: u8,
     version: u8,
@@ -27,6 +47,40 @@ pub const Response = struct {
     unix_seconds: u64,
     unix_fraction: u32,
 };
+
+pub fn readClock(clock: *const Clock) ?UnixTime {
+    if (!clock.synchronized) return null;
+    return .{ .seconds = clock.unix_seconds, .fraction = clock.unix_fraction };
+}
+
+pub fn applyResponse(clock: *Clock, response: Response) ClockApplyResult {
+    if (clock.synchronized and !timeAfter(
+        response.unix_seconds,
+        response.unix_fraction,
+        clock.unix_seconds,
+        clock.unix_fraction,
+    )) {
+        clock.stale_samples +|= 1;
+        return .stale;
+    }
+    clock.synchronized = true;
+    clock.unix_seconds = response.unix_seconds;
+    clock.unix_fraction = response.unix_fraction;
+    clock.stratum = response.stratum;
+    clock.reference_id = response.reference_id;
+    clock.accepted_samples +|= 1;
+    return .accepted;
+}
+
+fn timeAfter(
+    candidate_seconds: u64,
+    candidate_fraction: u32,
+    current_seconds: u64,
+    current_fraction: u32,
+) bool {
+    return candidate_seconds > current_seconds or
+        (candidate_seconds == current_seconds and candidate_fraction > current_fraction);
+}
 
 pub fn buildClientRequest(buffer: []u8, transmit_timestamp: u64) ?[]const u8 {
     if (buffer.len < packet_bytes or transmit_timestamp == 0) return null;

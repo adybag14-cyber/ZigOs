@@ -680,3 +680,82 @@
 - A query for `missing.zigos.test` uses DNS transaction 3, IPv4 ID 19, TX descriptor 6, cursor 7, and a 78-byte frame.
 - Its NXDOMAIN response is consumed exactly once, returns no A payload, empties the endpoint queue, and becomes `inactive` after socket close.
 - TX completions reach 47 and ingress/UDP dispatch totals advance to `65/65` and `54/53` with no extra drops.
+
+## 3.39 - TTL-bounded negative DNS caching
+
+- The fixed DNS cache can now represent either a positive A record or a negative name-error outcome under the same bounded name, TTL, LRU, and expiry rules.
+- `startAutomaticDnsAResolveCachedOutcome` returns a positive hit, cached not-found TTL, or a new automatic request without allocating on live cache hits.
+- `pollDnsAResolveCachedOutcome` stores successful A records or matching NXDOMAIN results with a caller-supplied bounded negative TTL.
+- The first missing-name lookup uses DNS ID 4 and IPv4 ID 20 on descriptor 7, then stores its `not-found` result for 60 ticks.
+- A mixed-case lookup at tick 10 returns cached not-found with 50 ticks remaining and performs no TX work.
+- At tick 60 the negative entry expires and a fresh request uses DNS ID 5, IPv4 ID 21, and descriptor 0; final cache statistics are one hit, two misses, one store, and one expiration.
+
+## 3.40 - Explicit DNS request cancellation
+
+- `DnsARequest` carries a cancellation flag, and `cancelDnsAQuery` is idempotent: the first cancellation succeeds and repeated cancellation is rejected.
+- Cancelled requests immediately poll as `inactive` and cannot be retried, without consuming DNS IDs, IPv4 IDs, TX descriptors, submissions, or completions.
+- Cancellation does not silently consume already queued responses; the socket queue and dequeue counters remain unchanged until close policy is chosen.
+- A queued matching response remains protected by normal close, which is rejected while the packet is present.
+- Explicit discard-close drains exactly one response and invalidates the generation-tagged socket; later polls remain inactive.
+- The cancelled query uses DNS ID 6, IPv4 ID 22, descriptor 1, and cursor 2; TX completions reach 50 and ingress/UDP dispatch totals reach `67/67` and `56/55`.
+
+## 3.41 - Stateful DNS resolver context
+
+- `DnsResolver` owns a generation-tagged ephemeral UDP socket, selected server IPv4 address, active lifetime, and fixed positive/negative cache.
+- Resolver opening validates the server peer before allocating a port or endpoint generation; invalid server addresses leave all allocation state untouched.
+- Resolver start and poll wrappers require the live owned socket and route automatic IDs, cache outcomes, bounded polling, and negative TTL policy through one context.
+- A direct query uses DNS ID 7, IPv4 ID 23, descriptor 2, and cursor 3, resolves `192.0.2.42`, and stores it in the resolver cache.
+- A mixed-case follow-up returns the cached record with 200 ticks remaining and performs no TX work.
+- Normal close invalidates the resolver and socket; subsequent starts are rejected without even mutating cache hit statistics.
+
+## 3.42 - Bounded NTPv4 wire codec
+
+- A new `ntp.zig` module builds allocation-free 48-byte NTPv4 client requests with a nonzero transmit timestamp.
+- Synthetic server responses include stratum, poll, precision, fixed-point root delay/dispersion, reference ID, and all four timestamps.
+- Response parsing validates server mode, NTP version 3/4, non-alarm leap state, stratum 1-15, exact originate echo, monotonic receive/transmit timestamps, and post-1970 epoch conversion.
+- The deterministic response reports stratum 2, poll 6, precision -20, reference `LOCL`, Unix second 1800000000, and half-second fraction `0x80000000`.
+- Zero timestamps, short buffers, client-mode replies, leap alarms, invalid strata, wrong originate timestamps, zero transmit time, pre-Unix epochs, and truncation are rejected.
+
+## 3.43 - Connected NTP client transaction
+
+- `sendNtpRequest` requires a generation-valid socket connected to UDP port 123 and transmits the bounded 48-byte request through automatic IPv4 identification.
+- `receiveNtpResponse` consumes one connected datagram and validates the echoed originate timestamp before exposing server time.
+- A zero client timestamp is rejected without consuming IPv4 ID, TX descriptor, submission, or completion state.
+- The valid request uses IPv4 ID 24, descriptor 3, cursor 4, and a 90-byte Ethernet frame.
+- Two server responses are queued: a wrong originate timestamp is consumed and rejected, then the valid response returns Unix second 1800000000, half-second fraction, stratum 2, and reference `LOCL`.
+- Endpoint accounting balances at `2/2`; TX completions reach 52 and ingress/UDP dispatch totals reach `70/70` and `59/58`.
+
+## 3.44 - Resumable bounded NTP polling and cancellation
+
+- `NtpRequest` retains the generation-tagged socket, client originate timestamp, completed transmit record, transmission count, and cancellation state.
+- `pollNtpRequest` consumes at most a caller budget, rejecting malformed or mismatched replies while returning `inactive`, `pending`, or `resolved`.
+- A zero budget leaves three replies queued; a budget of two rejects wrong-originate and client-mode packets, leaving one valid reply for the next poll.
+- The next poll resolves Unix second 1800000000 with half-second fraction and drains the endpoint queue.
+- A second request proves idempotent cancellation: polling becomes inactive without consuming its queued valid reply, normal close is rejected, and explicit discard-close drains one packet.
+- The two requests use IPv4 IDs 25/26 and descriptors 4/5; TX completions reach 54 while ingress/UDP dispatch totals reach `74/74` and `63/62`.
+
+## 3.45 - Transactional NTP retransmission
+
+- `retryNtpRequest` reuses the original nonzero client originate timestamp while sending a fresh UDP/NTP request through automatic IPv4 identification.
+- An initial request uses IPv4 ID 27, descriptor 6, and cursor 7; an empty poll remains pending without consuming state.
+- The retry uses IPv4 ID 28 and descriptor 7, wraps the TX producer to zero, and advances the TX-wrap counter from 5 to 6.
+- A matching server response resolves normally with the same originate timestamp and deterministic Unix time.
+- Retrying the request after socket close is rejected without changing IPv4 ID, TX cursor, submissions, completions, or request transmission count.
+- Two transmissions raise TX completions to 56; ingress/UDP dispatch advance by one response to `75/75` and `64/63`.
+
+## 3.46 - Stateful NTP client context
+
+- `NtpClient` owns a validated server IPv4 address, connected generation-tagged ephemeral UDP socket, and active lifetime.
+- Opening rejects an invalid server before consuming endpoint slots, ephemeral ports, or generations.
+- Start, poll, and retry wrappers require the live owned socket and reject requests from another or closed context.
+- A context request uses IPv4 ID 29, descriptor 0, cursor 1, and resolves the deterministic Unix time in one poll.
+- Closing invalidates both client and socket; subsequent start, poll, and retry operations are rejected without changing TX state or request transmission count.
+- TX completions reach 57 and ingress/UDP dispatch totals reach `76/76` and `65/64`.
+
+## 3.47 - Monotonic synchronized network clock
+
+- `ntp.Clock` begins unsynchronized and exposes time only after a validated NTP response is applied.
+- Applying a response stores Unix seconds/fraction, stratum, reference ID, and accepted/stale sample counters.
+- Duplicate timestamps and backward samples are rejected as stale without rolling back time or changing source metadata.
+- A later fractional sample in the same second is accepted, followed by a next-second sample that becomes the final clock value.
+- The deterministic proof ends at Unix second 1800000001, fraction `0x10000000`, stratum 4, reference `NEXT`, with three accepted and two stale samples.

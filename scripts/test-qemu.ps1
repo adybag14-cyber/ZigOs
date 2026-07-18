@@ -769,6 +769,33 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'DNS negative response verified: socket 2/34/49175, server 10\.0\.2\.3:53, transaction 0x0003, TX ID/descriptor/cursor/frame 19/6/7/78, poll not-found/1/0, response absent/queue empty yes/yes, stale inactive, final DNS/IP/TX cursors 4/20/7, submissions 1, completions TX/RX 47/47/22, overflow 0, endpoints/cursor 2/49176, ingress 65/65, dispatch total/UDP 54/53')) {
         throw 'NXDOMAIN did not become a terminal not-found poll result with balanced socket and hardware accounting.'
     }
+    if (-not [regex]::IsMatch($output, 'DNS negative cache verified: socket 2/35/49176, server 10\.0\.2\.3:53, initial DNS/IP/descriptor/cursor/frame 4/20/7/0/78, poll/stored not-found/yes, cached not-found/TTL/no-TX yes/50/yes, expiry DNS/IP/descriptor/cursor/frame 5/21/0/1/78, stale inactive, final DNS/IP/TX cursors 6/22/1, submissions 2, completions TX/RX 49/49/22, overflow 0, cache hits/misses/stores/expirations/active 1/2/1/1/0, endpoints/cursor 2/49177, ingress 66/66, dispatch total/UDP 55/54')) {
+        throw 'Negative DNS caching did not suppress live repeated lookups, expire by TTL, and start a fresh query afterward.'
+    }
+    if (-not [regex]::IsMatch($output, 'DNS cancellation verified: socket 2/36/49177, DNS/IP/descriptor/cursor/frame 6/22/1/2/70, queued 1, cancel/duplicate rejected yes/yes, poll inactive/0/0, queue preserved yes, retry/cursors preserved yes/yes, normal close rejected/discarded yes/1, stale poll inactive, final DNS/IP/TX cursors 7/23/2, submissions 1, completions TX/RX 50/50/22, overflow 0, endpoints/cursor 2/49178, ingress 67/67, dispatch total/UDP 56/55')) {
+        throw 'DNS cancellation did not stop polling/retry transactionally while preserving queued responses for explicit close policy.'
+    }
+    if (-not [regex]::IsMatch($output, 'DNS resolver context verified: socket 2/37/49178, server 10\.0\.2\.3:53, invalid/state preserved yes/yes, DNS/IP/descriptor/cursor/frame 7/23/2/3/70, resolved resolved/1/0 A 192\.0\.2\.42 TTL 300, cached hit/TTL/no-TX yes/200/yes, close/inactive/stale/state preserved yes/yes/yes/yes, final DNS/IP/TX cursors 8/24/3, submissions 1, completions TX/RX 51/51/22, overflow 0, cache hits/misses/stores/active 1/1/1/1, endpoints/cursor 2/49179, ingress 68/68, dispatch total/UDP 57/56')) {
+        throw 'The DNS resolver context did not own socket/cache state transactionally or reject operations after close.'
+    }
+    if (-not [regex]::IsMatch($output, 'NTP codec verified: client/server timestamp 0x[0-9A-F]{16}/0x[0-9A-F]{16}, request length/hash 48/0x[0-9A-F]{16}, response length/hash 48/0x[0-9A-F]{16}, LI/version/stratum/poll/precision 0/4/2/6/-20, root delay/dispersion 0x00010000/0x00008000, reference LOCL, Unix seconds/fraction 1800000000/0x80000000, rejects zero/small/mode/alarm/stratum/originate/transmit/epoch/truncated yes/yes/yes/yes/yes/yes/yes/yes/yes')) {
+        throw 'The NTPv4 codec did not validate timestamps, epoch conversion, server identity fields, and malformed responses.'
+    }
+    if (-not [regex]::IsMatch($output, 'NTP transaction verified: socket 2/38/49179, server 10\.0\.2\.4:123, client timestamp 0x[0-9A-F]{16}, invalid/state preserved yes/yes, TX ID/descriptor/cursor/frame 24/3/4/90, wrong originate rejected yes, Unix seconds/fraction 1800000000/0x80000000, stratum/poll/precision 2/6/-20, reference LOCL, endpoint queue 2/2 high-water 2 dropped 0, final IP/DNS/TX cursors 25/8/4, submissions 1, completions TX/RX 52/52/22, overflow 0, endpoints/cursor 2/49180, ingress 70/70, dispatch total/UDP 59/58')) {
+        throw 'The NTP client did not transmit through connected UDP, reject a mismatched originate timestamp, and accept the valid server time.'
+    }
+    if (-not [regex]::IsMatch($output, 'NTP polling verified: poll socket 2/39/49180, TX 25/4/5/90, zero pending/0/0/3, first pending/2/2/1, second resolved/1/0 time 1800000000/0x80000000, cancel socket 2/40/49181 TX 26/5/6/90, queued 1, cancel/duplicate yes/yes, poll inactive/0/0, queue preserved yes, close/discard yes/1, final IP/DNS/TX 27/8/6, submissions 2, completions TX/RX 54/54/22, overflow 0, endpoints/cursor 2/49182, ingress 74/74, dispatch total/UDP 63/62')) {
+        throw 'Bounded NTP polling or cancellation did not preserve queue ownership, work budgets, and explicit close policy.'
+    }
+    if (-not [regex]::IsMatch($output, 'NTP retry verified: socket 2/41/49182, client 0x[0-9A-F]{16}, initial 27/6/7/90, pending pending/0/0, retry 28/7/0/90, transmissions 2, wraps 5->6, resolved resolved/1/0 time 1800000000/0x80000000, stale/state preserved yes/yes, final IP/DNS/TX 29/8/0, submissions 2, completions TX/RX 56/56/22, overflow 0, endpoints/cursor 2/49183, ingress 75/75, dispatch total/UDP 64/63')) {
+        throw 'NTP retry did not preserve the originate timestamp, allocate a fresh IPv4 ID, cross the TX ring, and reject stale requests transactionally.'
+    }
+    if (-not [regex]::IsMatch($output, 'NTP client context verified: socket 2/42/49183, server 10\.0\.2\.4:123, invalid/state preserved yes/yes, client 0x[0-9A-F]{16}, TX 29/0/1/90, poll resolved/1/0 time 1800000000/0x80000000, close/inactive/stale start/poll/retry/state yes/yes/yes/inactive/yes/yes, final IP/DNS/TX 30/8/1, submissions 1, completions TX/RX 57/57/22, overflow 0, endpoints/cursor 2/49184, ingress 76/76, dispatch total/UDP 65/64')) {
+        throw 'The NTP client context did not own its socket transactionally or reject start, poll, and retry after close.'
+    }
+    if (-not $output.Contains('NTP clock verified: initially unsynchronized yes, apply first/duplicate/backward/fraction/second accepted/stale/stale/accepted/accepted, duplicate/backward preserved yes/yes, final seconds/fraction 1800000001/0x10000000, stratum/reference 4/NEXT, accepted/stale 3/2')) {
+        throw 'The synchronized NTP clock did not reject non-forward samples or retain the newest validated time and source metadata.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

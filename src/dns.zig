@@ -33,13 +33,24 @@ pub const AResponse = struct {
     alias_hops: u8,
 };
 
+pub const AOutcome = union(enum) {
+    answer: AResponse,
+    name_error: void,
+};
+
 pub const CachedA = struct {
     address: [4]u8,
     ttl_remaining: u32,
 };
 
+pub const CachedOutcome = union(enum) {
+    answer: CachedA,
+    name_error: u32,
+};
+
 pub const CacheEntry = struct {
     active: bool,
+    negative: bool,
     name_length: u8,
     name: [maximum_name_bytes]u8,
     address: [4]u8,
@@ -71,7 +82,7 @@ pub fn cacheEntryCount(cache: *const Cache) u8 {
     return count;
 }
 
-pub fn lookupCachedA(cache: *Cache, name: []const u8, now: u64) ?CachedA {
+pub fn lookupCachedOutcome(cache: *Cache, name: []const u8, now: u64) ?CachedOutcome {
     _ = encodedNameLength(name) orelse return null;
     for (&cache.entries) |*entry| {
         if (!entry.active) continue;
@@ -81,6 +92,30 @@ pub fn lookupCachedA(cache: *Cache, name: []const u8, now: u64) ?CachedA {
             continue;
         }
         if (!equalName(entry.name[0..entry.name_length], name)) continue;
+        cache.clock +|= 1;
+        entry.last_used = cache.clock;
+        cache.hits +|= 1;
+        const remaining: u32 = @intCast(@min(entry.expires_at - now, std.math.maxInt(u32)));
+        if (entry.negative) return .{ .name_error = remaining };
+        return .{ .answer = .{
+            .address = entry.address,
+            .ttl_remaining = remaining,
+        } };
+    }
+    cache.misses +|= 1;
+    return null;
+}
+
+pub fn lookupCachedA(cache: *Cache, name: []const u8, now: u64) ?CachedA {
+    _ = encodedNameLength(name) orelse return null;
+    for (&cache.entries) |*entry| {
+        if (!entry.active) continue;
+        if (entry.expires_at <= now) {
+            entry.* = std.mem.zeroes(CacheEntry);
+            cache.expirations +|= 1;
+            continue;
+        }
+        if (!equalName(entry.name[0..entry.name_length], name) or entry.negative) continue;
         cache.clock +|= 1;
         entry.last_used = cache.clock;
         cache.hits +|= 1;
@@ -106,7 +141,7 @@ pub fn storeCachedA(
 
     var free_index: ?usize = null;
     var oldest_index: ?usize = null;
-    var oldest_use = std.math.maxInt(u64);
+    var oldest_use: u64 = std.math.maxInt(u64);
     for (&cache.entries, 0..) |*entry, index| {
         if (entry.active and entry.expires_at <= now) {
             entry.* = std.mem.zeroes(CacheEntry);
@@ -118,6 +153,7 @@ pub fn storeCachedA(
         }
         if (equalName(entry.name[0..entry.name_length], name)) {
             cache.clock +|= 1;
+            entry.negative = false;
             entry.address = address;
             entry.expires_at = now +| ttl;
             entry.last_used = cache.clock;
@@ -136,9 +172,62 @@ pub fn storeCachedA(
     cache.clock +|= 1;
     var entry = std.mem.zeroes(CacheEntry);
     entry.active = true;
+    entry.negative = false;
     entry.name_length = @intCast(name.len);
     @memcpy(entry.name[0..name.len], name);
     entry.address = address;
+    entry.expires_at = now +| ttl;
+    entry.last_used = cache.clock;
+    cache.entries[index] = entry;
+    cache.stores +|= 1;
+    return true;
+}
+
+pub fn storeCachedNameError(
+    cache: *Cache,
+    name: []const u8,
+    ttl: u32,
+    now: u64,
+) bool {
+    _ = encodedNameLength(name) orelse return false;
+    if (ttl == 0) return false;
+
+    var free_index: ?usize = null;
+    var oldest_index: ?usize = null;
+    var oldest_use: u64 = std.math.maxInt(u64);
+    for (&cache.entries, 0..) |*entry, index| {
+        if (entry.active and entry.expires_at <= now) {
+            entry.* = std.mem.zeroes(CacheEntry);
+            cache.expirations +|= 1;
+        }
+        if (!entry.active) {
+            if (free_index == null) free_index = index;
+            continue;
+        }
+        if (equalName(entry.name[0..entry.name_length], name)) {
+            cache.clock +|= 1;
+            entry.negative = true;
+            entry.address = .{ 0, 0, 0, 0 };
+            entry.expires_at = now +| ttl;
+            entry.last_used = cache.clock;
+            cache.stores +|= 1;
+            cache.refreshes +|= 1;
+            return true;
+        }
+        if (entry.last_used < oldest_use) {
+            oldest_use = entry.last_used;
+            oldest_index = index;
+        }
+    }
+
+    const index = free_index orelse oldest_index orelse return false;
+    if (free_index == null) cache.evictions +|= 1;
+    cache.clock +|= 1;
+    var entry = std.mem.zeroes(CacheEntry);
+    entry.active = true;
+    entry.negative = true;
+    entry.name_length = @intCast(name.len);
+    @memcpy(entry.name[0..name.len], name);
     entry.expires_at = now +| ttl;
     entry.last_used = cache.clock;
     cache.entries[index] = entry;
@@ -184,6 +273,22 @@ pub fn buildAResponse(
     return buffer[0..length];
 }
 
+pub fn buildNameErrorResponse(
+    buffer: []u8,
+    transaction_id: u16,
+    name: []const u8,
+) ?[]const u8 {
+    const query = buildAQuery(buffer, transaction_id, name) orelse return null;
+    writeNetwork16(
+        buffer,
+        2,
+        flag_response | flag_authoritative | flag_recursion_desired |
+            flag_recursion_available | 3,
+    );
+    writeNetwork16(buffer, 6, 0);
+    return query;
+}
+
 pub fn buildCnameAResponse(
     buffer: []u8,
     transaction_id: u16,
@@ -226,18 +331,31 @@ pub fn parseAResponse(
     expected_transaction_id: u16,
     expected_name: []const u8,
 ) ?AResponse {
+    const outcome = parseAOutcome(message, expected_transaction_id, expected_name) orelse return null;
+    return switch (outcome) {
+        .answer => |answer| answer,
+        .name_error => null,
+    };
+}
+
+pub fn parseAOutcome(
+    message: []const u8,
+    expected_transaction_id: u16,
+    expected_name: []const u8,
+) ?AOutcome {
     _ = encodedNameLength(expected_name) orelse return null;
     if (message.len < header_bytes) return null;
     if (readNetwork16(message, 0) != expected_transaction_id) return null;
     const flags = readNetwork16(message, 2);
+    const response_code = flags & response_code_mask;
     if ((flags & flag_response) == 0 or (flags & opcode_mask) != 0 or
-        (flags & flag_truncated) != 0 or (flags & response_code_mask) != 0)
+        (flags & flag_truncated) != 0 or (response_code != 0 and response_code != 3))
     {
         return null;
     }
     const question_count = readNetwork16(message, 4);
     const answer_count = readNetwork16(message, 6);
-    if (question_count != 1 or answer_count == 0) return null;
+    if (question_count != 1) return null;
 
     var question_name_buffer: [maximum_name_bytes]u8 = undefined;
     const question_name = decodeName(message, header_bytes, &question_name_buffer) orelse return null;
@@ -250,6 +368,11 @@ pub fn parseAResponse(
         return null;
     }
     offset += question_tail_bytes;
+    if (response_code == 3) {
+        if (answer_count != 0) return null;
+        return .{ .name_error = {} };
+    }
+    if (answer_count == 0) return null;
     const answers_offset = offset;
 
     var current_name = std.mem.zeroes([maximum_name_bytes]u8);
@@ -287,13 +410,13 @@ pub fn parseAResponse(
                 if (record_type == type_a and data_length == 4) {
                     var address: [4]u8 = undefined;
                     @memcpy(&address, message[data_offset..data_end]);
-                    return .{
+                    return .{ .answer = .{
                         .address = address,
                         .ttl = ttl,
                         .authoritative = (flags & flag_authoritative) != 0,
                         .recursion_available = (flags & flag_recursion_available) != 0,
                         .alias_hops = alias_hops,
-                    };
+                    } };
                 }
                 if (record_type == type_cname and !cname_found) {
                     const decoded = decodeName(message, data_offset, &cname_target) orelse return null;
