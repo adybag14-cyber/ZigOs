@@ -644,3 +644,12 @@
 - Existing names refresh in place; new names use inactive or expired slots before evicting the least-recently-used live entry.
 - The deterministic proof fills all four entries, protects a recently used record, evicts the oldest, expires a short-TTL record, reuses its slot, and refreshes `b.test` to `192.0.2.99`.
 - Final statistics are nine hits, two misses, seven stores, one refresh, one eviction, and one expiration with all four slots active.
+
+## 3.35 - Cache-aware DNS resolution
+
+- `startDnsAResolve` returns a cached A record immediately when its caller-clocked TTL remains live, otherwise starts a resumable connected UDP request.
+- `pollDnsAResolve` delegates bounded DNS polling and stores successful answers under the original requested name and response TTL.
+- The first `zigos.test` lookup misses, transmits ID `0x000D` through descriptor 0, resolves one response, and stores the result.
+- A mixed-case lookup at tick 1100 returns the cached address with 200 ticks remaining and does not change identification, TX producer, submissions, or completion totals.
+- At expiry tick 1300 the cache entry is removed and a new request transmits ID `0x000E` through descriptor 1.
+- Closing the socket makes that pending request inactive; final cache statistics are one hit, two misses, one expiration, and zero active entries.
