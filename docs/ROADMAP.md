@@ -565,3 +565,11 @@
 - A six-byte datagram rejects a four-byte exact buffer while remaining queued, then succeeds with a six-byte buffer and exact payload hash.
 - A following two-byte datagram previews and receives independently, after which preview and exact receive both report an empty queue.
 - Endpoint, ingress, dispatch, and hardware completion accounting remains balanced across both datagrams.
+
+## 3.26 - Explicit discard-on-close semantics
+
+- Normal `closeUdpSocket` continues to reject nonempty queues, preventing accidental packet loss.
+- `closeUdpSocketDiscarding` explicitly drains queued packets through normal dequeue accounting, captures connection and queue statistics, and then unregisters the endpoint.
+- A connected ephemeral socket receives three packets; normal close is rejected while all three remain readable.
+- Discard-close reports three discarded packets, balanced `3/3` endpoint accounting, high-water three, zero drops, and the original connected peer.
+- The former handle is rejected by normal close, force close, and receive after endpoint removal, while the original two TFTP endpoints remain active.

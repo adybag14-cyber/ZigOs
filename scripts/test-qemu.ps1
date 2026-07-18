@@ -730,6 +730,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e UDP peek/exact verified: socket 2/24/49165, first payload/ID 6/0x6300, repeated stable yes, insufficient rejected/queue preserved yes/yes, first exact/hash 6/0x[0-9A-F]{16}, second payload/ID/exact/hash 2/0x6301/2/0x[0-9A-F]{16}, final preview empty yes, endpoint queue 2/2 high-water 2 dropped 0, endpoints/cursor 2/49166, ingress 51/51, dispatch total/UDP 40/39, completions TX/RX 33/22')) {
         throw 'UDP preview or exact-buffer receive consumed data on insufficient buffers or returned unstable metadata.'
     }
+    if (-not $output.Contains('e1000e UDP discard-close verified: socket 2/25/49166, peer 23456, normal close rejected yes, discarded/connected 3/yes, queue 3/3 high-water 3 dropped 0, stale close/force/receive rejected yes/yes/yes, endpoints/cursor 2/49167, ingress 54/54, dispatch total/UDP 43/42, completions TX/RX 33/22')) {
+        throw 'Discarding UDP close did not drain queued packets atomically or invalidate the socket handle.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
