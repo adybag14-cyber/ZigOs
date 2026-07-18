@@ -1838,6 +1838,82 @@ fn inspectE1000e(
     debugWrite(", RX 0x");
     debugWriteHex64(network.protocol_dispatch.rx_pending_mask);
     debugWrite("\r\n");
+
+    debugWrite("e1000e UDP/TFTP dispatch verified: RRQ TX descriptor ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.rrq.descriptor_index);
+    debugWrite(", DATA RX descriptors ");
+    for (network.udp_tftp_dispatch.data_descriptors, 0..) |descriptor, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(descriptor);
+    }
+    debugWrite(", ACK TX descriptors ");
+    for (network.udp_tftp_dispatch.acknowledgement_descriptors, 0..) |descriptor, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(descriptor);
+    }
+    debugWrite(", blocks ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.block_count);
+    debugWrite(", payload ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.payload_length);
+    debugWrite(" bytes, FNV-1a64 0x");
+    debugWriteHex64(network.udp_tftp_dispatch.payload_fnv1a64);
+    debugWrite(", frames ");
+    for (network.udp_tftp_dispatch.data_frame_lengths, 0..) |length, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(length);
+    }
+    debugWrite(", ACKs ");
+    for (network.udp_tftp_dispatch.acknowledgement_frame_lengths, 0..) |length, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(length);
+    }
+    debugWrite(", server port ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.server_port);
+    debugWrite(", checksum ");
+    debugWrite(if (network.udp_tftp_dispatch.udp_checksum_present) "present" else "absent");
+    debugWrite(", final cursors TX/RX ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.device_tx_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.device_rx_cursor);
+    debugWrite(", wraps ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.tx_cursor_wraps);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.rx_cursor_wraps);
+    debugWrite(", ingress ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.ingress_dequeued);
+    debugWrite(" dropped ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.ingress_dropped);
+    debugWrite(", dispatch ARP/ICMP/UDP ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.arp_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.icmp_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.udp_dispatched);
+    debugWrite(", UDP queue ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.udp_queue_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.udp_queue_dequeued);
+    debugWrite(" high-water ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.udp_queue_high_water);
+    debugWrite(" dropped ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.udp_queue_dropped);
+    debugWrite(", final completions TX ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.tx_queue_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.tx_queue_dequeues);
+    debugWrite(", RX ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.rx_queue_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.rx_queue_dequeues);
+    debugWrite(", overflow ");
+    debugWriteU64Decimal(network.udp_tftp_dispatch.completion_queue_overflows);
+    debugWrite(", pending TX 0x");
+    debugWriteHex64(network.udp_tftp_dispatch.tx_pending_mask);
+    debugWrite(", RX 0x");
+    debugWriteHex64(network.udp_tftp_dispatch.rx_pending_mask);
+    debugWrite("\r\n");
     return true;
 }
 

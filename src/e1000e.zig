@@ -98,6 +98,8 @@ const queued_icmp_identifier: u16 = 0x5A51;
 const queued_icmp_sequence: u16 = 3;
 const dispatched_icmp_identifier: u16 = 0x5A52;
 const dispatched_icmp_sequence: u16 = 4;
+const dispatched_tftp_client_port: u16 = 40_001;
+const dispatched_tftp_identification: u16 = 0x5A60;
 const icmp_payload = "ZigOs-ICMP-ECHO!";
 const icmp_ipv4_total_bytes: usize = ipv4_header_bytes + icmp_header_bytes + icmp_payload.len;
 const icmp_ethernet_frame_bytes: usize = 14 + icmp_ipv4_total_bytes;
@@ -307,6 +309,43 @@ pub const ProtocolDispatchReport = struct {
     rx_pending_mask: u32,
 };
 
+pub const UdpTftpDispatchReport = struct {
+    rrq: TxCompletion,
+    data_descriptors: [tftp.expected_block_count]u16,
+    acknowledgement_descriptors: [tftp.expected_block_count]u16,
+    data_frame_lengths: [tftp.expected_block_count]u16,
+    acknowledgement_frame_lengths: [tftp.expected_block_count]u16,
+    block_count: u16,
+    payload_length: u32,
+    payload_fnv1a64: u64,
+    server_port: u16,
+    reply_ttl: u8,
+    udp_checksum_present: bool,
+    device_tx_cursor: u16,
+    device_rx_cursor: u16,
+    tx_cursor_wraps: u16,
+    rx_cursor_wraps: u16,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    ingress_dropped: u64,
+    packets_dispatched: u64,
+    arp_dispatched: u64,
+    icmp_dispatched: u64,
+    udp_dispatched: u64,
+    unknown_dropped: u64,
+    udp_queue_enqueued: u64,
+    udp_queue_dequeued: u64,
+    udp_queue_high_water: u16,
+    udp_queue_dropped: u64,
+    tx_queue_enqueues: u64,
+    tx_queue_dequeues: u64,
+    rx_queue_enqueues: u64,
+    rx_queue_dequeues: u64,
+    completion_queue_overflows: u64,
+    tx_pending_mask: u32,
+    rx_pending_mask: u32,
+};
+
 pub const NetworkResult = struct {
     rx_ring_address: usize,
     tx_ring_address: usize,
@@ -400,6 +439,7 @@ pub const NetworkResult = struct {
     persistent: PersistentQueueReport,
     software_packet_queue: SoftwarePacketQueueReport,
     protocol_dispatch: ProtocolDispatchReport,
+    udp_tftp_dispatch: UdpTftpDispatchReport,
 };
 
 var active_bar0: usize = 0;
@@ -927,6 +967,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const udp_tftp_dispatch = verifyUdpTftpDispatch(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -1021,6 +1065,7 @@ pub fn initializeAndTestNetwork(
         .persistent = persistent,
         .software_packet_queue = software_packet_queue,
         .protocol_dispatch = protocol_dispatch,
+        .udp_tftp_dispatch = udp_tftp_dispatch,
     };
 }
 
@@ -1445,6 +1490,167 @@ fn verifyProtocolDispatch(device: *Device) ?ProtocolDispatchReport {
         .icmp_queue_dequeued = device.icmp_rx_queue.dequeued,
         .icmp_queue_high_water = device.icmp_rx_queue.high_water,
         .icmp_queue_dropped = device.icmp_rx_queue.dropped,
+        .tx_queue_enqueues = tx_queue_enqueues,
+        .tx_queue_dequeues = tx_queue_dequeues,
+        .rx_queue_enqueues = rx_queue_enqueues,
+        .rx_queue_dequeues = rx_queue_dequeues,
+        .completion_queue_overflows = completion_queue_overflows,
+        .tx_pending_mask = final_tx_pending,
+        .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyUdpTftpDispatch(device: *Device) ?UdpTftpDispatchReport {
+    var tftp_payload_buffer: [128]u8 = undefined;
+    const read_request = tftp.buildReadRequest(&tftp_payload_buffer) orelse return null;
+    var frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+    const rrq_length = udp.buildFrame(&frame, .{
+        .source_mac = device.local_mac,
+        .destination_mac = device.gateway_mac,
+        .source_ipv4 = device.local_ipv4,
+        .destination_ipv4 = device.gateway_ipv4,
+        .source_port = dispatched_tftp_client_port,
+        .destination_port = tftp.server_port,
+        .identification = dispatched_tftp_identification,
+        .payload = read_request,
+    }) orelse return null;
+    const rrq = submitFrame(device, frame[0..rrq_length]) orelse return null;
+
+    var data_descriptors = std.mem.zeroes([tftp.expected_block_count]u16);
+    var acknowledgement_descriptors = std.mem.zeroes([tftp.expected_block_count]u16);
+    var data_frame_lengths = std.mem.zeroes([tftp.expected_block_count]u16);
+    var acknowledgement_frame_lengths = std.mem.zeroes([tftp.expected_block_count]u16);
+    var server_port: u16 = 0;
+    var reply_ttl: u8 = 0;
+    var udp_checksum_present = true;
+    var block_count: u16 = 0;
+    var payload_length: usize = 0;
+    var payload_fnv1a64 = tftp.initial_fnv1a64;
+    var final_block = false;
+
+    while (block_count < tftp.expected_block_count) {
+        if (!pumpReceive(device)) return null;
+        if (!dispatchNextPacket(device)) return null;
+        const packet = dequeueUdpPacket(device) orelse return null;
+        const datagram = udp.parseFrame(packet.bytes[0..packet.length], .{
+            .destination_mac = device.local_mac,
+            .source_mac = device.gateway_mac,
+            .destination_ipv4 = device.local_ipv4,
+            .source_ipv4 = device.gateway_ipv4,
+            .destination_port = dispatched_tftp_client_port,
+            .source_port = if (server_port == 0) null else server_port,
+        }) orelse return null;
+        if (server_port == 0) {
+            server_port = datagram.source_port;
+            reply_ttl = datagram.ttl;
+        } else if (datagram.source_port != server_port or datagram.ttl != reply_ttl) {
+            return null;
+        }
+        udp_checksum_present = udp_checksum_present and datagram.udp_checksum_present;
+
+        const expected_block: u16 = block_count + 1;
+        const data = tftp.parseData(datagram.payload, expected_block, payload_length) orelse return null;
+        const index: usize = block_count;
+        data_descriptors[index] = packet.source_descriptor;
+        data_frame_lengths[index] = packet.length;
+        payload_fnv1a64 = tftp.updatePayloadHash(payload_fnv1a64, data.payload);
+        payload_length += data.payload.len;
+        block_count += 1;
+        final_block = data.final_block;
+        if (final_block != (block_count == tftp.expected_block_count)) return null;
+
+        const acknowledgement = tftp.buildAcknowledgement(&tftp_payload_buffer, data.block) orelse return null;
+        const acknowledgement_length = udp.buildFrame(&frame, .{
+            .source_mac = device.local_mac,
+            .destination_mac = device.gateway_mac,
+            .source_ipv4 = device.local_ipv4,
+            .destination_ipv4 = device.gateway_ipv4,
+            .source_port = dispatched_tftp_client_port,
+            .destination_port = server_port,
+            .identification = dispatched_tftp_identification + block_count,
+            .payload = acknowledgement,
+        }) orelse return null;
+        const acknowledgement_tx = submitFrame(device, frame[0..acknowledgement_length]) orelse return null;
+        acknowledgement_descriptors[index] = acknowledgement_tx.descriptor_index;
+        acknowledgement_frame_lengths[index] = acknowledgement_tx.frame_length;
+    }
+
+    const tx_queue_enqueues = completionQueueEnqueued(&tx_completion_queue);
+    const tx_queue_dequeues = completionQueueDequeued(&tx_completion_queue);
+    const rx_queue_enqueues = completionQueueEnqueued(&rx_completion_queue);
+    const rx_queue_dequeues = completionQueueDequeued(&rx_completion_queue);
+    const completion_queue_overflows = completionQueueOverflow(&tx_completion_queue) +
+        completionQueueOverflow(&rx_completion_queue);
+    const final_tx_pending = @atomicLoad(u32, &tx_pending_mask, .acquire);
+    const final_rx_pending = @atomicLoad(u32, &rx_pending_mask, .acquire);
+    const expected_data_descriptors = [tftp.expected_block_count]u16{ 4, 5, 6, 7, 0 };
+    const expected_acknowledgement_descriptors = [tftp.expected_block_count]u16{ 6, 7, 0, 1, 2 };
+    const expected_data_frame_lengths = [tftp.expected_block_count]u16{ 558, 558, 558, 558, 302 };
+    const expected_acknowledgement_frame_lengths = [tftp.expected_block_count]u16{ 60, 60, 60, 60, 60 };
+    if (rrq.descriptor_index != 5 or rrq.next_cursor != 6 or rrq.frame_length != 60 or
+        !std.mem.eql(u16, &data_descriptors, &expected_data_descriptors) or
+        !std.mem.eql(u16, &acknowledgement_descriptors, &expected_acknowledgement_descriptors) or
+        !std.mem.eql(u16, &data_frame_lengths, &expected_data_frame_lengths) or
+        !std.mem.eql(u16, &acknowledgement_frame_lengths, &expected_acknowledgement_frame_lengths) or
+        !final_block or block_count != tftp.expected_block_count or
+        payload_length != tftp.expected_file_bytes or
+        payload_fnv1a64 != tftp.expected_payload_fnv1a64 or
+        server_port != tftp.server_port or reply_ttl == 0 or !udp_checksum_present or
+        device.tx_producer != 3 or device.rx_consumer != 1 or
+        device.tx_submissions != 9 or device.rx_deliveries != 8 or
+        device.tx_cursor_wraps != 1 or device.rx_cursor_wraps != 1 or
+        device.rx_recycled_descriptors != 8 or device.rx_descriptor_wraps != 1 or
+        device.software_rx_queue.enqueued != 7 or
+        device.software_rx_queue.dequeued != 7 or
+        device.software_rx_queue.dropped != 0 or
+        device.software_rx_queue.head != device.software_rx_queue.tail or
+        device.packets_dispatched != 6 or
+        device.arp_packets_dispatched != 0 or
+        device.icmp_packets_dispatched != 1 or
+        device.udp_packets_dispatched != tftp.expected_block_count or
+        device.unknown_packets_dropped != 0 or
+        device.udp_rx_queue.enqueued != tftp.expected_block_count or
+        device.udp_rx_queue.dequeued != tftp.expected_block_count or
+        device.udp_rx_queue.high_water != 1 or
+        device.udp_rx_queue.dropped != 0 or
+        device.udp_rx_queue.head != device.udp_rx_queue.tail or
+        tx_queue_enqueues != 19 or tx_queue_dequeues != 19 or
+        rx_queue_enqueues != 17 or rx_queue_dequeues != 17 or
+        completion_queue_overflows != 0 or final_tx_pending != 0 or
+        final_rx_pending != all_rx_descriptors_pending or
+        tx_ready_mask != 0 or rx_ready_mask != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .rrq = rrq,
+        .data_descriptors = data_descriptors,
+        .acknowledgement_descriptors = acknowledgement_descriptors,
+        .data_frame_lengths = data_frame_lengths,
+        .acknowledgement_frame_lengths = acknowledgement_frame_lengths,
+        .block_count = block_count,
+        .payload_length = @intCast(payload_length),
+        .payload_fnv1a64 = payload_fnv1a64,
+        .server_port = server_port,
+        .reply_ttl = reply_ttl,
+        .udp_checksum_present = udp_checksum_present,
+        .device_tx_cursor = device.tx_producer,
+        .device_rx_cursor = device.rx_consumer,
+        .tx_cursor_wraps = device.tx_cursor_wraps,
+        .rx_cursor_wraps = device.rx_cursor_wraps,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .ingress_dropped = device.software_rx_queue.dropped,
+        .packets_dispatched = device.packets_dispatched,
+        .arp_dispatched = device.arp_packets_dispatched,
+        .icmp_dispatched = device.icmp_packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+        .unknown_dropped = device.unknown_packets_dropped,
+        .udp_queue_enqueued = device.udp_rx_queue.enqueued,
+        .udp_queue_dequeued = device.udp_rx_queue.dequeued,
+        .udp_queue_high_water = device.udp_rx_queue.high_water,
+        .udp_queue_dropped = device.udp_rx_queue.dropped,
         .tx_queue_enqueues = tx_queue_enqueues,
         .tx_queue_dequeues = tx_queue_dequeues,
         .rx_queue_enqueues = rx_queue_enqueues,

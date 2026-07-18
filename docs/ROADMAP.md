@@ -411,3 +411,13 @@
 - A fourth ICMP Echo (`identifier 0x5A52`, sequence `4`) uses TX descriptor 4 and RX descriptor 3, then follows `pumpReceive -> dispatchNextPacket -> dequeueIcmpPacket`.
 - The dispatcher must report exactly one ICMP dispatch, zero ARP/UDP/unknown packets, one ICMP enqueue/dequeue, high-water one, and zero drops.
 - Final hardware completion totals are thirteen TX and twelve RX records with zero overflow and clean descriptor masks across the topology matrix.
+
+
+## 3.9 - UDP/TFTP protocol queue transfer
+
+- A fresh TFTP RRQ is submitted through the persistent e1000e owner on UDP client port 40001 after the ICMP dispatch proof.
+- All five TFTP DATA frames follow `pumpReceive -> dispatchNextPacket -> dequeueUdpPacket`, so protocol parsing consumes only stable software-owned packets.
+- Every DATA payload is validated byte-for-byte, accumulated to 2,304 bytes, and checked against FNV-1a64 `0x6175986CBBAB5125`.
+- Five ACK frames are submitted through the retained TX producer; expected DATA descriptors are `4/5/6/7/0` and ACK descriptors are `6/7/0/1/2`.
+- Both TX and RX software cursors wrap once, the UDP queue reports five balanced enqueue/dequeue operations with zero drops, and the ingress queue remains empty.
+- Final hardware completion totals are nineteen TX and seventeen RX records with zero overflow and clean descriptor masks across the topology matrix.

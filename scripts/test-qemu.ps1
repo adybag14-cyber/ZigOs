@@ -667,6 +667,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e protocol dispatch verified: TX descriptor 4 -> cursor 5, DMA RX descriptor 3 recycled -> cursor 4, ICMP 0x5A52/4, ingress 2/2 dropped 0, dispatch total 1 ARP/ICMP/UDP 0/1/0, unknown 0, ICMP queue 1/1 high-water 1 dropped 0, final completions TX 13/13, RX 12/12, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
         throw 'The protocol dispatcher did not route the fourth ICMP reply through the bounded ICMP queue.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e UDP/TFTP dispatch verified: RRQ TX descriptor 5, DATA RX descriptors 4/5/6/7/0, ACK TX descriptors 6/7/0/1/2, blocks 5, payload 2304 bytes, FNV-1a64 0x6175986CBBAB5125, frames 558/558/558/558/302, ACKs 60/60/60/60/60, server port 69, checksum present, final cursors TX/RX 3/1, wraps 1/1, ingress 7/7 dropped 0, dispatch ARP/ICMP/UDP 0/1/5, UDP queue 5/5 high-water 1 dropped 0, final completions TX 19/19, RX 17/17, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
+        throw 'The retained UDP/TFTP path did not dispatch five DATA packets and acknowledge the complete fixture.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
