@@ -662,3 +662,12 @@
 - Three successful queries use DNS IDs `0x5000`, `0xFFFF`, and `0x0001`, proving zero-skipping wraparound.
 - Their IPv4 IDs are 15/16/17 and descriptors are 2/3/4, with frame lengths 70/70/76 for direct and alias names.
 - Final DNS, IPv4, and TX cursors are 2, 18, and 5; TX completions reach 45 with no ring wrap or network receive changes.
+
+## 3.37 - Fully automatic cache-aware DNS starts
+
+- `startAutomaticDnsAResolve` checks the TTL cache first and allocates DNS transaction and IPv4 packet IDs only for a real cache miss.
+- A preloaded mixed-case cache hit returns `192.0.2.42` with 900 ticks remaining without changing either cursor, TX producer, submissions, or completions.
+- At tick 1000 the entry expires and the resolver starts DNS transaction `0x0002` with IPv4 ID 18 on TX descriptor 5.
+- The matching response resolves and refreshes the cache; a later mixed-case hit returns 200 ticks remaining with no wire activity.
+- An invalid name is rejected without consuming DNS ID, IPv4 ID, descriptor, submission, or completion state.
+- Final cache statistics are two hits, one miss, two stores, one expiration, and one active entry; TX completions reach 46.
