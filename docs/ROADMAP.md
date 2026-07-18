@@ -468,3 +468,12 @@
 - `sendConnectedUdpSocket` emits through the peer already attached to the generation-tagged socket, eliminating repeated destination arguments and rejecting unconnected handles.
 - The second five-block TFTP transfer receives every DATA frame through the structured API, connects to the validated first responder, and transmits every ACK through the connected-send API.
 - The proof requires five structured receives, five connected sends, a retained peer port of 69, unchanged descriptor order, unchanged completion totals, and the same 2,304-byte payload hash.
+
+## 3.15 - Deterministic UDP ephemeral ports
+
+- `openEphemeralUdpSocket` allocates from the IANA dynamic/private range `49152-65535` while retaining the existing generation-tagged endpoint semantics.
+- Allocation checks endpoint capacity before advancing state, so a full table is rejected without consuming a port cursor.
+- Active-port collisions are skipped rather than treated as duplicate opens, and the next genuinely unused candidate is selected.
+- A deterministic proof allocates ports 49152 and 49153, rejects a full-table request, skips occupied 49153 to select 49154 after slot reuse, and preserves advancing generations.
+- Starting at 65535 proves range wrap: the next allocation returns 65535, advances to 49152, and the following socket receives 49152.
+- All temporary sockets close cleanly, the original two TFTP endpoints remain active, and packet/completion accounting is unchanged.

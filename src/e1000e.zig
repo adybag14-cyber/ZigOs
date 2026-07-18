@@ -112,6 +112,9 @@ const lifecycle_source_port: u16 = 12_345;
 const peer_filter_udp_port: u16 = 42_000;
 const peer_filter_source_port: u16 = 23_456;
 const peer_filter_alternate_port: u16 = 23_457;
+const ephemeral_udp_port_first: u16 = 49_152;
+const ephemeral_udp_port_last: u16 = 65_535;
+const ephemeral_udp_port_count: u32 = @as(u32, ephemeral_udp_port_last) - ephemeral_udp_port_first + 1;
 const icmp_payload = "ZigOs-ICMP-ECHO!";
 const icmp_ipv4_total_bytes: usize = ipv4_header_bytes + icmp_header_bytes + icmp_payload.len;
 const icmp_ethernet_frame_bytes: usize = 14 + icmp_ipv4_total_bytes;
@@ -277,6 +280,7 @@ pub const Device = struct {
     udp_endpoints: [udp_endpoint_capacity]UdpEndpoint,
     udp_endpoint_count: u16,
     next_udp_generation: u32,
+    next_ephemeral_udp_port: u16,
     unmatched_udp_packets_dropped: u64,
     invalid_udp_packets_dropped: u64,
     peer_mismatch_udp_packets_dropped: u64,
@@ -467,6 +471,30 @@ pub const UdpEndpointDemuxReport = struct {
     rx_pending_mask: u32,
 };
 
+pub const UdpEphemeralPortReport = struct {
+    range_first: u16,
+    range_last: u16,
+    first_slot: u16,
+    first_generation: u32,
+    first_port: u16,
+    second_slot: u16,
+    second_generation: u32,
+    second_port: u16,
+    full_table_rejected: bool,
+    collision_skipped: bool,
+    collision_slot: u16,
+    collision_generation: u32,
+    collision_port: u16,
+    wrap_slot: u16,
+    wrap_generation: u32,
+    wrap_port: u16,
+    post_wrap_slot: u16,
+    post_wrap_generation: u32,
+    post_wrap_port: u16,
+    final_cursor: u16,
+    final_registered_endpoints: u16,
+};
+
 pub const UdpPeerFilterReport = struct {
     socket_slot: u16,
     socket_generation: u32,
@@ -625,6 +653,7 @@ pub const NetworkResult = struct {
     udp_endpoint_demux: UdpEndpointDemuxReport,
     udp_endpoint_lifecycle: UdpEndpointLifecycleReport,
     udp_peer_filter: UdpPeerFilterReport,
+    udp_ephemeral_ports: UdpEphemeralPortReport,
 };
 
 var active_bar0: usize = 0;
@@ -1136,6 +1165,7 @@ pub fn initializeAndTestNetwork(
         .udp_endpoints = std.mem.zeroes([udp_endpoint_capacity]UdpEndpoint),
         .udp_endpoint_count = 0,
         .next_udp_generation = 1,
+        .next_ephemeral_udp_port = ephemeral_udp_port_first,
         .unmatched_udp_packets_dropped = 0,
         .invalid_udp_packets_dropped = 0,
         .peer_mismatch_udp_packets_dropped = 0,
@@ -1171,6 +1201,10 @@ pub fn initializeAndTestNetwork(
         return null;
     };
     const udp_peer_filter = verifyUdpPeerFiltering(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
+    const udp_ephemeral_ports = verifyUdpEphemeralPorts(device) orelse {
         active_device_storage = null;
         return null;
     };
@@ -1272,6 +1306,7 @@ pub fn initializeAndTestNetwork(
         .udp_endpoint_demux = udp_endpoint_demux,
         .udp_endpoint_lifecycle = udp_endpoint_lifecycle,
         .udp_peer_filter = udp_peer_filter,
+        .udp_ephemeral_ports = udp_ephemeral_ports,
     };
 }
 
@@ -1469,6 +1504,22 @@ pub fn openUdpSocket(device: *Device, port: u16) ?UdpSocket {
     };
 }
 
+pub fn openEphemeralUdpSocket(device: *Device) ?UdpSocket {
+    if (device.udp_endpoint_count >= udp_endpoint_capacity) return null;
+    var candidate = device.next_ephemeral_udp_port;
+    if (candidate < ephemeral_udp_port_first) candidate = ephemeral_udp_port_first;
+    var attempts: u32 = 0;
+    while (attempts < ephemeral_udp_port_count) : (attempts += 1) {
+        if (findUdpEndpoint(device, candidate) == null) {
+            const socket = openUdpSocket(device, candidate) orelse return null;
+            device.next_ephemeral_udp_port = nextEphemeralUdpPort(candidate);
+            return socket;
+        }
+        candidate = nextEphemeralUdpPort(candidate);
+    }
+    return null;
+}
+
 pub fn udpSocketActive(device: *Device, socket: UdpSocket) bool {
     return udpSocketEndpoint(device, socket) != null;
 }
@@ -1595,6 +1646,10 @@ fn validUdpPeer(peer: UdpPeer) bool {
     var ipv4_nonzero = false;
     for (peer.ipv4) |octet| ipv4_nonzero = ipv4_nonzero or octet != 0;
     return mac_nonzero and ipv4_nonzero;
+}
+
+fn nextEphemeralUdpPort(port: u16) u16 {
+    return if (port >= ephemeral_udp_port_last) ephemeral_udp_port_first else port + 1;
 }
 
 fn allocateUdpGeneration(device: *Device) u32 {
@@ -2439,6 +2494,85 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyUdpEphemeralPorts(device: *Device) ?UdpEphemeralPortReport {
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != ephemeral_udp_port_first) return null;
+
+    const first = openEphemeralUdpSocket(device) orelse return null;
+    if (first.endpoint_index != 2 or first.generation != 7 or first.local_port != ephemeral_udp_port_first or
+        device.next_ephemeral_udp_port != ephemeral_udp_port_first + 1)
+    {
+        return null;
+    }
+    const second = openEphemeralUdpSocket(device) orelse return null;
+    if (second.endpoint_index != 3 or second.generation != 8 or second.local_port != ephemeral_udp_port_first + 1 or
+        device.next_ephemeral_udp_port != ephemeral_udp_port_first + 2)
+    {
+        return null;
+    }
+    const cursor_before_full = device.next_ephemeral_udp_port;
+    const full_table_rejected = openEphemeralUdpSocket(device) == null and
+        device.next_ephemeral_udp_port == cursor_before_full;
+    if (!full_table_rejected) return null;
+
+    if (!closeUdpSocket(device, first)) return null;
+    device.next_ephemeral_udp_port = second.local_port;
+    const collision = openEphemeralUdpSocket(device) orelse return null;
+    const collision_skipped = collision.endpoint_index == first.endpoint_index and
+        collision.generation == 9 and collision.local_port == ephemeral_udp_port_first + 2 and
+        device.next_ephemeral_udp_port == ephemeral_udp_port_first + 3;
+    if (!collision_skipped) return null;
+    if (!closeUdpSocket(device, collision) or !closeUdpSocket(device, second)) return null;
+
+    device.next_ephemeral_udp_port = ephemeral_udp_port_last;
+    const wrap = openEphemeralUdpSocket(device) orelse return null;
+    if (wrap.endpoint_index != 2 or wrap.generation != 10 or wrap.local_port != ephemeral_udp_port_last or
+        device.next_ephemeral_udp_port != ephemeral_udp_port_first)
+    {
+        return null;
+    }
+    const post_wrap = openEphemeralUdpSocket(device) orelse return null;
+    if (post_wrap.endpoint_index != 3 or post_wrap.generation != 11 or
+        post_wrap.local_port != ephemeral_udp_port_first or
+        device.next_ephemeral_udp_port != ephemeral_udp_port_first + 1)
+    {
+        return null;
+    }
+    if (!udpSocketActive(device, wrap) or !udpSocketActive(device, post_wrap)) return null;
+    if (!closeUdpSocket(device, post_wrap) or !closeUdpSocket(device, wrap)) return null;
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != ephemeral_udp_port_first + 1 or
+        device.next_udp_generation != 12 or
+        device.software_rx_queue.enqueued != 27 or device.software_rx_queue.dequeued != 27 or
+        device.packets_dispatched != 20 or device.udp_packets_dispatched != 19 or
+        device.invalid_udp_packets_dropped != 1 or device.peer_mismatch_udp_packets_dropped != 3)
+    {
+        return null;
+    }
+
+    return .{
+        .range_first = ephemeral_udp_port_first,
+        .range_last = ephemeral_udp_port_last,
+        .first_slot = first.endpoint_index,
+        .first_generation = first.generation,
+        .first_port = first.local_port,
+        .second_slot = second.endpoint_index,
+        .second_generation = second.generation,
+        .second_port = second.local_port,
+        .full_table_rejected = full_table_rejected,
+        .collision_skipped = collision_skipped,
+        .collision_slot = collision.endpoint_index,
+        .collision_generation = collision.generation,
+        .collision_port = collision.local_port,
+        .wrap_slot = wrap.endpoint_index,
+        .wrap_generation = wrap.generation,
+        .wrap_port = wrap.local_port,
+        .post_wrap_slot = post_wrap.endpoint_index,
+        .post_wrap_generation = post_wrap.generation,
+        .post_wrap_port = post_wrap.local_port,
+        .final_cursor = device.next_ephemeral_udp_port,
+        .final_registered_endpoints = device.udp_endpoint_count,
     };
 }
 

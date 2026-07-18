@@ -697,6 +697,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e UDP peer filtering verified: socket slot 2 generation 6, local/peer ports 42000/23456, correct accepted yes, wrong MAC/IP/port rejected yes/yes/yes, invalid checksum rejected yes, wildcard after disconnect yes, endpoint queue 2/2 high-water 1 dropped 0, ingress 27/27, dispatch total/UDP 20/19, drops unmatched/invalid/peer 1/1/3, final endpoints 2')) {
         throw 'Validated UDP dispatch or connected-peer filtering did not reject malformed and wrong-peer datagrams.'
     }
+    if (-not $output.Contains('e1000e UDP ephemeral ports verified: range 49152-65535, first slot/gen/port 2/7/49152, second 3/8/49153, full-table rejected yes, collision skipped yes -> 2/9/49154, wrap 2/10/65535 -> 3/11/49152, final cursor/endpoints 49153/2')) {
+        throw 'Ephemeral UDP allocation did not skip collisions, preserve cursor state on full tables, or wrap deterministically.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
