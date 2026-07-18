@@ -949,3 +949,12 @@
 - The projected clock remains unchanged and readable in holdover; health reports the active rejection count, forced-retry total, and retry exhaustion.
 - The timed-out state is inert until `clearNtpServiceTimeout`; clearing now also resets the per-request discipline-rejection count.
 - The live verifier proves one forced retry, second-boundary exhaustion, request cancellation, latched timeout, health exposure, explicit clear, duplicate-clear rejection, clean close, and exact three-TX/three-RX accounting.
+
+## 3.71 - Synchronized discipline-timeout recovery
+
+- A synchronized service that exhausts retry allowance through the discipline-rejection boundary enters the same bounded recovery state machine as an ordinary network timeout.
+- The projected clock remains visible and advances through the timeout instant and recovery cooldown; no packet is transmitted before the exact recovery deadline.
+- The automatic recovery request derives its originate timestamp from projected holdover time and starts on the existing socket without manual timeout clearing.
+- A bounded, quality-valid recovery sample applies at one hardware reference tick, increments recovery success, and resets consecutive recovery, retry, and discipline-rejection budgets.
+- Health returns to synchronized state with monotonic wall time and exposes the completed recovery without losing timeout or forced-retry accounting.
+- The live verifier proves four transmissions, four consumed replies, no hidden cooldown traffic, exact HPET/ACPI PM timer behavior, clean close, and exact ring/accounting deltas.
