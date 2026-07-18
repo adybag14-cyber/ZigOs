@@ -4969,6 +4969,117 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.ntp_synchronized_recovery.udp_dispatched);
     debugWrite("\r\n");
+    debugWrite("NTP live step gate verified: source ");
+    debugWriteReferenceKind(network.ntp_live_step_gate.source_kind);
+    debugWrite(", frequency/bits ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.frequency_hz);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.counter_bits);
+    debugWrite(", invalid policy/state preserved ");
+    debugWrite(if (network.ntp_live_step_gate.invalid_policy_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_live_step_gate.invalid_policy_state_preserved) "yes" else "no");
+    debugWrite(", socket ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.local_port);
+    debugWrite(", policy ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.maximum_forward_seconds);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_live_step_gate.maximum_forward_fraction);
+    debugWrite(", initial TX ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.initial_identification);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.initial_descriptor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.initial_next_cursor);
+    debugWrite(" results ");
+    debugWriteNtpQuality(network.ntp_live_step_gate.initial_quality_result);
+    debugWrite("/");
+    debugWriteNtpStep(network.ntp_live_step_gate.initial_step_result);
+    debugWrite(" sample/time ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.first_sample_tick);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.first_seconds);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_live_step_gate.first_fraction);
+    debugWrite(", refresh TX ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.refresh_identification);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.refresh_descriptor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.refresh_next_cursor);
+    debugWrite(" timestamp 0x");
+    debugWriteHex64(network.ntp_live_step_gate.refresh_client_timestamp);
+    debugWrite(", excessive ");
+    debugWriteNtpQuality(network.ntp_live_step_gate.excessive_quality_result);
+    debugWrite("/");
+    debugWriteNtpStep(network.ntp_live_step_gate.excessive_step_result);
+    debugWrite(" sample ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.excessive_sample_tick);
+    debugWrite(" apply-absent/clock-preserved/request-retained ");
+    debugWrite(if (network.ntp_live_step_gate.excessive_apply_absent) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_live_step_gate.excessive_clock_preserved) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_live_step_gate.excessive_request_retained) "yes" else "no");
+    debugWrite(", accepted ");
+    debugWriteNtpQuality(network.ntp_live_step_gate.accepted_quality_result);
+    debugWrite("/");
+    debugWriteNtpStep(network.ntp_live_step_gate.accepted_step_result);
+    debugWrite(" sample/time ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.accepted_sample_tick);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.accepted_seconds);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_live_step_gate.accepted_fraction);
+    debugWrite(" advanced ");
+    debugWrite(if (network.ntp_live_step_gate.final_clock_advanced) "yes" else "no");
+    debugWrite(", counts quality ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.quality_accepted);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.quality_rejected);
+    debugWrite(" step ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.step_accepted);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.step_rejected);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.step_invalid_policy_rejected);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.step_stale_rejected);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.step_excessive_forward_rejected);
+    debugWrite(" responses ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.responses);
+    debugWrite(", close ");
+    debugWrite(if (network.ntp_live_step_gate.close_succeeded) "yes" else "no");
+    debugWrite(", final IP/TX ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.final_identification_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.final_tx_cursor);
+    debugWrite(", submissions ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.tx_submissions_delta);
+    debugWrite(", completions TX/RX ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.tx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.tx_completion_dequeues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.rx_completion_enqueues);
+    debugWrite(", endpoints/cursor ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.final_registered_endpoints);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.final_ephemeral_cursor);
+    debugWrite(", ingress ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.ingress_dequeued);
+    debugWrite(", dispatch ");
+    debugWriteU64Decimal(network.ntp_live_step_gate.packets_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_live_step_gate.udp_dispatched);
+    debugWrite("\r\n");
     debugWrite("NTP timestamp verified: base/anchor 0x");
     debugWriteHex64(network.ntp_timestamp.base_timestamp);
     debugWrite("/0x");
@@ -5156,6 +5267,14 @@ fn debugWriteReferenceKind(kind: time_reference.Kind) void {
     });
 }
 
+fn debugWriteNtpStep(result: ntp.ClockStepResult) void {
+    debugWrite(switch (result) {
+        .accepted => "accepted",
+        .invalid_policy => "invalid-policy",
+        .stale => "stale",
+        .excessive_forward_step => "excessive-forward",
+    });
+}
 fn debugWriteNtpQuality(result: ntp.QualityResult) void {
     debugWrite(switch (result) {
         .accepted => "accepted",

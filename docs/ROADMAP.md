@@ -908,3 +908,11 @@
 - Exact policy equality is accepted. One fractional unit or one whole-second excess is rejected as an excessive forward step.
 - `evaluateResponseStepAt` applies the same policy against projected wall time at a caller-supplied monotonic tick.
 - The verifier proves invalid zero policy, initial acceptance, stale equality/backward behavior, borrow/no-borrow equality, and exact over-boundary rejection.
+## 3.66 - Quality and step-gated live NTP discipline
+
+- `NtpService` owns a validated `ClockStepPolicy`; legacy constructors use a one-hour default forward bound.
+- The response path evaluates syntax, quality, one continuous-counter sample, and projected forward-step policy in that order.
+- Step evaluation and clock application share the same sampled tick, eliminating a time-of-check/time-of-use gap.
+- A quality-accepted but stale or excessive response is consumed and counted while the request remains active; wall time and recovery state remain unchanged.
+- Health snapshots expose accepted and per-reason step rejection counters alongside quality and retry state.
+- The live verifier injects an excessive 100-second reply, proves sampled-but-unapplied transactional rejection, then accepts a bounded two-second reply on the retained request with exact two-TX/three-RX accounting.

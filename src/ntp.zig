@@ -89,6 +89,11 @@ pub const ClockStepPolicy = struct {
     maximum_forward_fraction: u32,
 };
 
+pub const default_clock_step_policy = ClockStepPolicy{
+    .maximum_forward_seconds = 3600,
+    .maximum_forward_fraction = 0,
+};
+
 pub const ClockStepResult = enum(u8) {
     accepted,
     invalid_policy,
