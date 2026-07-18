@@ -582,3 +582,12 @@
 - A synthetic four-byte request from port 34567 is received and answered with a reply using identification `0x0006` and TX descriptor 1.
 - A second unconnected send-to uses identification `0x0007` and descriptor 2, leaving the automatic cursor at 8 and TX producer at 3.
 - Completion totals reach 35 with zero overflow while the receive path advances by exactly one routed request.
+
+## 3.28 - Bounded DNS A-record wire codec
+
+- A new `dns.zig` module builds recursion-desired A queries and authoritative compressed A responses without allocation.
+- Domain validation enforces total and label lengths, rejects empty labels, leading/trailing dots, invalid characters, and leading/trailing hyphens.
+- Response parsing validates transaction identity, response/opcode/truncation/error flags, one matching A/IN question, bounded record lengths, and a matching A answer.
+- DNS compression pointers are decoded with a strict jump budget, rejecting self-referential loops and out-of-range pointers.
+- The deterministic `zigos.test` query is 28 bytes; its compressed response is 44 bytes and resolves to `192.0.2.42` with TTL 300.
+- Wrong transaction IDs, truncation, NXDOMAIN, wrong answer type, insufficient buffers, malformed names, and compression loops are rejected; matching is case-insensitive.

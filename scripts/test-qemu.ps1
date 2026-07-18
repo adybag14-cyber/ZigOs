@@ -736,6 +736,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e UDP send-to/reply verified: socket 2/26/49167, request source/payload/hash 34567/4/0x[0-9A-F]{16}, invalid peer/zero-TTL rejected yes/yes, cursor preserved yes, reply ID/descriptor/cursor/frame 0x0006/1/2/60, send-to 0x0007/2/3/60, final ID/TX cursor 8/3, submissions 2, completions TX/RX 35/35/22, overflow 0, endpoints/cursor 2/49168, ingress 55/55, dispatch total/UDP 44/43')) {
         throw 'Unconnected UDP send-to or stateless reply did not preserve transactional identification and completion ownership.'
     }
+    if (-not [regex]::IsMatch($output, 'DNS codec verified: transaction 0x4453, query length/hash 28/0x[0-9A-F]{16}, response length/hash 44/0x[0-9A-F]{16}, A 192\.0\.2\.42, TTL 300, authoritative/recursion yes/yes, rejects names/small/ID/truncated/loop/error/type yes/yes/yes/yes/yes/yes/yes, case-insensitive yes')) {
+        throw 'The DNS wire codec did not validate names, compressed responses, transaction identity, and malformed-message rejection.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

@@ -2805,6 +2805,42 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.udp_send_to_reply.udp_dispatched);
     debugWrite("\r\n");
+
+    debugWrite("DNS codec verified: transaction 0x");
+    debugWriteHex16(network.dns_codec.transaction_id);
+    debugWrite(", query length/hash ");
+    debugWriteU64Decimal(network.dns_codec.query_length);
+    debugWrite("/0x");
+    debugWriteHex64(network.dns_codec.query_hash);
+    debugWrite(", response length/hash ");
+    debugWriteU64Decimal(network.dns_codec.response_length);
+    debugWrite("/0x");
+    debugWriteHex64(network.dns_codec.response_hash);
+    debugWrite(", A ");
+    debugWriteIpv4(network.dns_codec.address);
+    debugWrite(", TTL ");
+    debugWriteU64Decimal(network.dns_codec.ttl);
+    debugWrite(", authoritative/recursion ");
+    debugWrite(if (network.dns_codec.authoritative) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_codec.recursion_available) "yes" else "no");
+    debugWrite(", rejects names/small/ID/truncated/loop/error/type ");
+    debugWrite(if (network.dns_codec.invalid_names_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_codec.small_buffer_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_codec.wrong_transaction_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_codec.truncated_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_codec.compression_loop_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_codec.error_response_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_codec.wrong_type_rejected) "yes" else "no");
+    debugWrite(", case-insensitive ");
+    debugWrite(if (network.dns_codec.case_insensitive_match) "yes" else "no");
+    debugWrite("\r\n");
     return true;
 }
 

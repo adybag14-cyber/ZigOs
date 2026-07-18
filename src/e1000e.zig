@@ -6,6 +6,7 @@ const apic = @import("apic.zig");
 const dhcp = @import("dhcp.zig");
 const udp = @import("udp.zig");
 const tftp = @import("tftp.zig");
+const dns = @import("dns.zig");
 
 const cc = std.os.uefi.cc;
 const pci_command_memory_space: u16 = 1 << 1;
@@ -568,6 +569,26 @@ pub const UdpEndpointDemuxReport = struct {
     rx_pending_mask: u32,
 };
 
+pub const DnsCodecReport = struct {
+    transaction_id: u16,
+    query_length: u16,
+    query_hash: u64,
+    response_length: u16,
+    response_hash: u64,
+    address: [4]u8,
+    ttl: u32,
+    authoritative: bool,
+    recursion_available: bool,
+    invalid_names_rejected: bool,
+    small_buffer_rejected: bool,
+    wrong_transaction_rejected: bool,
+    truncated_rejected: bool,
+    compression_loop_rejected: bool,
+    error_response_rejected: bool,
+    wrong_type_rejected: bool,
+    case_insensitive_match: bool,
+};
+
 pub const UdpSendToReplyReport = struct {
     socket_slot: u16,
     socket_generation: u32,
@@ -1097,6 +1118,7 @@ pub const NetworkResult = struct {
     udp_peek_exact: UdpPeekExactReport,
     udp_discard_close: UdpDiscardCloseReport,
     udp_send_to_reply: UdpSendToReplyReport,
+    dns_codec: DnsCodecReport,
 };
 
 var active_bar0: usize = 0;
@@ -1701,6 +1723,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const dns_codec = verifyDnsCodec() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -1812,6 +1838,7 @@ pub fn initializeAndTestNetwork(
         .udp_peek_exact = udp_peek_exact,
         .udp_discard_close = udp_discard_close,
         .udp_send_to_reply = udp_send_to_reply,
+        .dns_codec = dns_codec,
     };
 }
 
@@ -3308,6 +3335,115 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyDnsCodec() ?DnsCodecReport {
+    var query_buffer = std.mem.zeroes([256]u8);
+    const query = dns.buildAQuery(&query_buffer, dns.fixture_transaction_id, dns.fixture_name) orelse return null;
+    if (query.len != 28) return null;
+    var response_buffer = std.mem.zeroes([256]u8);
+    const response = dns.buildAResponse(
+        &response_buffer,
+        dns.fixture_transaction_id,
+        dns.fixture_name,
+        dns.fixture_address,
+        dns.default_ttl,
+    ) orelse return null;
+    if (response.len != 44) return null;
+    const parsed = dns.parseAResponse(response, dns.fixture_transaction_id, dns.fixture_name) orelse return null;
+    if (!std.mem.eql(u8, &parsed.address, &dns.fixture_address) or parsed.ttl != dns.default_ttl or
+        !parsed.authoritative or !parsed.recursion_available)
+    {
+        return null;
+    }
+
+    var invalid_buffer = std.mem.zeroes([256]u8);
+    const long_label = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.test";
+    const invalid_names_rejected = dns.buildAQuery(&invalid_buffer, 1, "") == null and
+        dns.buildAQuery(&invalid_buffer, 1, ".zigos") == null and
+        dns.buildAQuery(&invalid_buffer, 1, "zigos.") == null and
+        dns.buildAQuery(&invalid_buffer, 1, "bad..name") == null and
+        dns.buildAQuery(&invalid_buffer, 1, "-bad.test") == null and
+        dns.buildAQuery(&invalid_buffer, 1, "bad-.test") == null and
+        dns.buildAQuery(&invalid_buffer, 1, long_label) == null;
+    var small_buffer = std.mem.zeroes([27]u8);
+    const small_buffer_rejected = dns.buildAQuery(&small_buffer, dns.fixture_transaction_id, dns.fixture_name) == null;
+
+    var wrong_transaction = response_buffer;
+    wrong_transaction[1] ^= 1;
+    const wrong_transaction_rejected = dns.parseAResponse(
+        wrong_transaction[0..response.len],
+        dns.fixture_transaction_id,
+        dns.fixture_name,
+    ) == null;
+    const truncated_rejected = dns.parseAResponse(
+        response[0 .. response.len - 1],
+        dns.fixture_transaction_id,
+        dns.fixture_name,
+    ) == null;
+    var compression_loop = response_buffer;
+    compression_loop[12] = 0xC0;
+    compression_loop[13] = 0x0C;
+    const compression_loop_rejected = dns.parseAResponse(
+        compression_loop[0..response.len],
+        dns.fixture_transaction_id,
+        dns.fixture_name,
+    ) == null;
+    var error_response = response_buffer;
+    error_response[3] = (error_response[3] & 0xF0) | 3;
+    const error_response_rejected = dns.parseAResponse(
+        error_response[0..response.len],
+        dns.fixture_transaction_id,
+        dns.fixture_name,
+    ) == null;
+    var wrong_type = response_buffer;
+    wrong_type[query.len + 2] = 0;
+    wrong_type[query.len + 3] = 5;
+    const wrong_type_rejected = dns.parseAResponse(
+        wrong_type[0..response.len],
+        dns.fixture_transaction_id,
+        dns.fixture_name,
+    ) == null;
+
+    var mixed_case_buffer = std.mem.zeroes([256]u8);
+    const mixed_case = dns.buildAResponse(
+        &mixed_case_buffer,
+        dns.fixture_transaction_id,
+        "ZiGoS.TeSt",
+        dns.fixture_address,
+        dns.default_ttl,
+    ) orelse return null;
+    const case_insensitive = dns.parseAResponse(
+        mixed_case,
+        dns.fixture_transaction_id,
+        dns.fixture_name,
+    ) orelse return null;
+    const case_insensitive_match = std.mem.eql(u8, &case_insensitive.address, &dns.fixture_address);
+    if (!invalid_names_rejected or !small_buffer_rejected or !wrong_transaction_rejected or
+        !truncated_rejected or !compression_loop_rejected or !error_response_rejected or
+        !wrong_type_rejected or !case_insensitive_match)
+    {
+        return null;
+    }
+    return .{
+        .transaction_id = dns.fixture_transaction_id,
+        .query_length = @intCast(query.len),
+        .query_hash = tftp.updatePayloadHash(tftp.initial_fnv1a64, query),
+        .response_length = @intCast(response.len),
+        .response_hash = tftp.updatePayloadHash(tftp.initial_fnv1a64, response),
+        .address = parsed.address,
+        .ttl = parsed.ttl,
+        .authoritative = parsed.authoritative,
+        .recursion_available = parsed.recursion_available,
+        .invalid_names_rejected = invalid_names_rejected,
+        .small_buffer_rejected = small_buffer_rejected,
+        .wrong_transaction_rejected = wrong_transaction_rejected,
+        .truncated_rejected = truncated_rejected,
+        .compression_loop_rejected = compression_loop_rejected,
+        .error_response_rejected = error_response_rejected,
+        .wrong_type_rejected = wrong_type_rejected,
+        .case_insensitive_match = case_insensitive_match,
     };
 }
 
