@@ -649,6 +649,35 @@ pub const NtpClockPoll = struct {
     apply_result: ?ntp.ClockApplyResult,
 };
 
+pub const NtpProjectedClockReport = struct {
+    invalid_frequency_rejected: bool,
+    invalid_frequency_state_preserved: bool,
+    initially_unsynchronized: bool,
+    first_apply: ntp.ClockApplyResult,
+    first_anchor_tick: u64,
+    first_frequency: u64,
+    quarter_seconds: u64,
+    quarter_fraction: u32,
+    three_quarter_seconds: u64,
+    three_quarter_fraction: u32,
+    one_second_seconds: u64,
+    one_second_fraction: u32,
+    backward_tick_rejected: bool,
+    resync_apply: ntp.ClockApplyResult,
+    resync_anchor_tick: u64,
+    resync_frequency: u64,
+    resync_seconds: u64,
+    resync_fraction: u32,
+    resync_stratum: u8,
+    resync_reference_id: [4]u8,
+    resync_quarter_seconds: u64,
+    resync_quarter_fraction: u32,
+    stale_apply: ntp.ClockApplyResult,
+    stale_state_preserved: bool,
+    accepted_samples: u64,
+    stale_samples: u64,
+};
+
 pub const NtpClockPollingReport = struct {
     socket_slot: u16,
     socket_generation: u32,
@@ -1977,6 +2006,7 @@ pub const NetworkResult = struct {
     ntp_client_context: NtpClientContextReport,
     ntp_clock: NtpClockReport,
     ntp_clock_polling: NtpClockPollingReport,
+    ntp_projected_clock: NtpProjectedClockReport,
 };
 
 var active_bar0: usize = 0;
@@ -2666,6 +2696,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_projected_clock = verifyNtpProjectedClock() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -2798,6 +2832,7 @@ pub fn initializeAndTestNetwork(
         .ntp_client_context = ntp_client_context,
         .ntp_clock = ntp_clock,
         .ntp_clock_polling = ntp_clock_polling,
+        .ntp_projected_clock = ntp_projected_clock,
     };
 }
 
@@ -4734,6 +4769,101 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyNtpProjectedClock() ?NtpProjectedClockReport {
+    var response_buffer = std.mem.zeroes([ntp.packet_bytes]u8);
+    const receive_timestamp = (@as(u64, ntp.fixture_server_seconds) << 32) | 0x40000000;
+    const response_bytes = ntp.buildServerResponse(
+        &response_buffer,
+        ntp.fixture_client_timestamp,
+        receive_timestamp,
+        ntp.fixture_server_timestamp,
+    ) orelse return null;
+    const base = ntp.parseServerResponse(response_bytes, ntp.fixture_client_timestamp) orelse return null;
+
+    var projected = std.mem.zeroes(ntp.ProjectedClock);
+    const invalid_snapshot = projected;
+    const invalid_frequency_rejected = ntp.applyResponseAt(&projected, base, 1_000, 0) == null;
+    const invalid_frequency_state_preserved = invalid_frequency_rejected and std.meta.eql(projected, invalid_snapshot);
+    const initially_unsynchronized = ntp.readProjectedClockAt(&projected, 1_000) == null;
+    if (!invalid_frequency_state_preserved or !initially_unsynchronized) return null;
+
+    const first_apply = ntp.applyResponseAt(&projected, base, 1_000, 1_000) orelse return null;
+    const quarter = ntp.readProjectedClockAt(&projected, 1_250) orelse return null;
+    const three_quarter = ntp.readProjectedClockAt(&projected, 1_750) orelse return null;
+    const one_second = ntp.readProjectedClockAt(&projected, 2_000) orelse return null;
+    const backward_tick_rejected = ntp.readProjectedClockAt(&projected, 999) == null;
+    if (first_apply != .accepted or quarter.seconds != ntp.fixture_unix_seconds or
+        quarter.fraction != 0xC0000000 or
+        three_quarter.seconds != ntp.fixture_unix_seconds + 1 or three_quarter.fraction != 0x40000000 or
+        one_second.seconds != ntp.fixture_unix_seconds + 1 or one_second.fraction != 0x80000000 or
+        !backward_tick_rejected or projected.clock.accepted_samples != 1 or projected.clock.stale_samples != 0)
+    {
+        return null;
+    }
+
+    var resync = base;
+    resync.unix_seconds = ntp.fixture_unix_seconds + 2;
+    resync.unix_fraction = 0x10000000;
+    resync.stratum = 3;
+    resync.reference_id = .{ 'S', 'Y', 'N', 'C' };
+    const resync_apply = ntp.applyResponseAt(&projected, resync, 2_000, 1_000) orelse return null;
+    const resync_quarter = ntp.readProjectedClockAt(&projected, 2_250) orelse return null;
+    if (resync_apply != .accepted or projected.anchor_tick != 2_000 or projected.ticks_per_second != 1_000 or
+        projected.clock.unix_seconds != ntp.fixture_unix_seconds + 2 or
+        projected.clock.unix_fraction != 0x10000000 or projected.clock.stratum != 3 or
+        !std.mem.eql(u8, &projected.clock.reference_id, "SYNC") or
+        resync_quarter.seconds != ntp.fixture_unix_seconds + 2 or resync_quarter.fraction != 0x50000000)
+    {
+        return null;
+    }
+
+    const stale_snapshot = projected;
+    const stale_apply = ntp.applyResponseAt(&projected, base, 2_500, 1_000) orelse return null;
+    const stale_state_preserved = projected.clock.synchronized == stale_snapshot.clock.synchronized and
+        projected.clock.unix_seconds == stale_snapshot.clock.unix_seconds and
+        projected.clock.unix_fraction == stale_snapshot.clock.unix_fraction and
+        projected.clock.stratum == stale_snapshot.clock.stratum and
+        std.mem.eql(u8, &projected.clock.reference_id, &stale_snapshot.clock.reference_id) and
+        projected.clock.accepted_samples == stale_snapshot.clock.accepted_samples and
+        projected.clock.stale_samples == stale_snapshot.clock.stale_samples + 1 and
+        projected.anchor_tick == stale_snapshot.anchor_tick and
+        projected.ticks_per_second == stale_snapshot.ticks_per_second;
+    if (stale_apply != .stale or !stale_state_preserved or
+        projected.clock.accepted_samples != 2 or projected.clock.stale_samples != 1)
+    {
+        return null;
+    }
+
+    return .{
+        .invalid_frequency_rejected = invalid_frequency_rejected,
+        .invalid_frequency_state_preserved = invalid_frequency_state_preserved,
+        .initially_unsynchronized = initially_unsynchronized,
+        .first_apply = first_apply,
+        .first_anchor_tick = 1_000,
+        .first_frequency = 1_000,
+        .quarter_seconds = quarter.seconds,
+        .quarter_fraction = quarter.fraction,
+        .three_quarter_seconds = three_quarter.seconds,
+        .three_quarter_fraction = three_quarter.fraction,
+        .one_second_seconds = one_second.seconds,
+        .one_second_fraction = one_second.fraction,
+        .backward_tick_rejected = backward_tick_rejected,
+        .resync_apply = resync_apply,
+        .resync_anchor_tick = projected.anchor_tick,
+        .resync_frequency = projected.ticks_per_second,
+        .resync_seconds = projected.clock.unix_seconds,
+        .resync_fraction = projected.clock.unix_fraction,
+        .resync_stratum = projected.clock.stratum,
+        .resync_reference_id = projected.clock.reference_id,
+        .resync_quarter_seconds = resync_quarter.seconds,
+        .resync_quarter_fraction = resync_quarter.fraction,
+        .stale_apply = stale_apply,
+        .stale_state_preserved = stale_state_preserved,
+        .accepted_samples = projected.clock.accepted_samples,
+        .stale_samples = projected.clock.stale_samples,
     };
 }
 

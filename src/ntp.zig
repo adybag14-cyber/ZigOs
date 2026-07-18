@@ -33,6 +33,12 @@ pub const Clock = struct {
     stale_samples: u64,
 };
 
+pub const ProjectedClock = struct {
+    clock: Clock,
+    anchor_tick: u64,
+    ticks_per_second: u64,
+};
+
 pub const Response = struct {
     leap_indicator: u8,
     version: u8,
@@ -80,6 +86,58 @@ fn timeAfter(
 ) bool {
     return candidate_seconds > current_seconds or
         (candidate_seconds == current_seconds and candidate_fraction > current_fraction);
+}
+
+pub fn readProjectedClockAt(projected: *const ProjectedClock, current_tick: u64) ?UnixTime {
+    if (!projected.clock.synchronized or projected.ticks_per_second == 0 or
+        current_tick < projected.anchor_tick)
+    {
+        return null;
+    }
+    const elapsed_ticks = current_tick - projected.anchor_tick;
+    const elapsed_seconds = elapsed_ticks / projected.ticks_per_second;
+    const remainder_ticks = elapsed_ticks % projected.ticks_per_second;
+    const fraction_increment_u128 =
+        (@as(u128, remainder_ticks) << 32) / projected.ticks_per_second;
+    const fraction_sum = @as(u64, projected.clock.unix_fraction) +
+        @as(u64, @intCast(fraction_increment_u128));
+    const fraction_carry = fraction_sum >> 32;
+    const total_increment = elapsed_seconds +| fraction_carry;
+    if (total_increment > std.math.maxInt(u64) - projected.clock.unix_seconds) return null;
+    return .{
+        .seconds = projected.clock.unix_seconds + total_increment,
+        .fraction = @truncate(fraction_sum),
+    };
+}
+
+pub fn applyResponseAt(
+    projected: *ProjectedClock,
+    response: Response,
+    monotonic_tick: u64,
+    ticks_per_second: u64,
+) ?ClockApplyResult {
+    if (ticks_per_second == 0) return null;
+    if (projected.clock.synchronized) {
+        const current = readProjectedClockAt(projected, monotonic_tick) orelse return null;
+        if (!timeAfter(
+            response.unix_seconds,
+            response.unix_fraction,
+            current.seconds,
+            current.fraction,
+        )) {
+            projected.clock.stale_samples +|= 1;
+            return .stale;
+        }
+    }
+    projected.clock.synchronized = true;
+    projected.clock.unix_seconds = response.unix_seconds;
+    projected.clock.unix_fraction = response.unix_fraction;
+    projected.clock.stratum = response.stratum;
+    projected.clock.reference_id = response.reference_id;
+    projected.clock.accepted_samples +|= 1;
+    projected.anchor_tick = monotonic_tick;
+    projected.ticks_per_second = ticks_per_second;
+    return .accepted;
 }
 
 pub fn buildClientRequest(buffer: []u8, transmit_timestamp: u64) ?[]const u8 {

@@ -799,6 +799,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'NTP clock polling verified: socket 2/43/49184, server 10\.0\.2\.4:123, first TX 30/1/2/90, zero pending/0/0/apply absent yes/queue 1/clock unsynchronized yes, accepted resolved/1/0/apply accepted time 1800000000/0x80000000, second TX 31/2/3/90, duplicate resolved/1/0/apply stale/clock preserved yes, samples 1/1, close/inactive/apply absent/clock preserved yes/inactive/yes/yes, final IP/DNS/TX 32/8/3, submissions 2, completions TX/RX 59/59/22, overflow 0, endpoints/cursor 2/49185, ingress 78/78, dispatch total/UDP 67/66')) {
         throw 'Clock-aware NTP polling did not preserve zero-budget work, apply the first response, reject a duplicate clock sample, and remain inert after close.'
     }
+    if (-not $output.Contains('NTP projected clock verified: invalid frequency/state preserved yes/yes, initially unsynchronized yes, first apply accepted at tick/frequency 1000/1000, quarter 1800000000/0xC0000000, three-quarter 1800000001/0x40000000, one-second 1800000001/0x80000000, backward tick rejected yes, resync accepted at 2000/1000 time 1800000002/0x10000000 stratum/reference 3/SYNC, quarter after resync 1800000002/0x50000000, stale apply/preserved stale/yes, samples 2/1')) {
+        throw 'The projected NTP clock did not advance fractional Unix time from monotonic ticks or preserve its anchor on invalid and stale updates.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

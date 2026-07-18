@@ -768,3 +768,12 @@
 - A second valid protocol response carrying the same server timestamp resolves normally but is classified as a stale clock sample without changing time or source metadata.
 - Closing the client makes later clock-aware polling inactive and leaves the synchronized clock byte-for-byte unchanged.
 - Two new transmissions finish at IPv4 ID 31, TX cursor 3, 59 TX completions, and ingress/UDP dispatch totals `78/78` and `67/66`.
+
+## 3.49 - Monotonic-tick wall-clock projection
+
+- `ntp.ProjectedClock` anchors a validated Unix timestamp to a caller-owned monotonic tick and tick frequency.
+- Reads convert elapsed ticks to exact 32-bit Unix fractions with carry into whole seconds, without floating-point arithmetic or allocation.
+- The deterministic proof advances a half-second sample through quarter-, three-quarter-, and one-second elapsed positions with exact fractions.
+- Zero-frequency application and reads before the anchor tick are rejected without changing synchronization state.
+- A newer response reanchors time and source metadata; an older response at a later monotonic tick is stale and cannot alter the anchor.
+- The proof finishes with two accepted samples, one stale sample, stratum 3, reference `SYNC`, and the projected quarter-second value `1800000002/0x50000000`.
