@@ -892,3 +892,11 @@
 - Unsynchronized recovery preserves the original bootstrap originate timestamp; synchronized recovery derives a fresh projected timestamp.
 - Synchronization-health snapshots expose recovery deadline, automatic recovery count, exhaustion, and terminal limit hits.
 - The live verifier proves two cooldown-gated restarts, three retry timeouts, terminal exhaustion after the second recovery, no hidden fourth request, clean close, and exact six-transmission ring/accounting deltas.
+## 3.64 - Synchronized holdover recovery and budget reset
+
+- Synchronization-health snapshots keep projected wall time visible and advancing through refresh timeout and recovery cooldown while the sample remains within holdover limits.
+- Recovery requests from a synchronized clock use fresh projected originate timestamps rather than the original bootstrap value.
+- `NtpService.recovery_successes` records successful automatic recoveries monotonically.
+- An accepted recovery sample clears timeout/recovery state, resets the consecutive automatic-recovery allowance, and preserves monotonic wall time.
+- A subsequent outage receives the full recovery budget again, proving recovery success is a circuit-breaker reset rather than a lifetime allowance consumption.
+- The live verifier proves two accepted samples, visible holdover, projected recovery timestamps, success accounting, a second allowed recovery, clean close, and exact seven-transmission/two-response accounting.
