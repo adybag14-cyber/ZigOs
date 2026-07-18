@@ -547,3 +547,12 @@
 - Automatic IPv4 identifications advance from `0x0004` to `0x0005`, leaving cursor 6 after both completions.
 - The device TX wrap counter advances exactly once, from 2 to 3, while completion totals reach 33 with zero overflow.
 - TX pending state returns to zero, all RX descriptors remain owned by hardware, and the original two UDP endpoints remain registered.
+
+## 3.24 - Bounded-copy UDP receive
+
+- `receiveUdpInto` parses directly from the endpoint queue, copies at most the caller's buffer length, and returns complete source/destination metadata without returning the 2 KiB packet backing object.
+- Queue ownership advances only after successful validation and copy, preserving generation and connected-peer checks.
+- An eight-byte payload received into five bytes reports `payload=8`, `copied=5`, and truncation while preserving the first five bytes exactly.
+- A four-byte payload received into eight bytes reports no truncation and leaves the unused output tail unchanged.
+- A zero-length datagram received into a zero-length buffer remains valid and reports no truncation.
+- Three routed packets produce balanced endpoint and ingress dequeue accounting with no hardware completion changes.

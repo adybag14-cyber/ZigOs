@@ -724,6 +724,9 @@ if ($Network) {
     if (-not $output.Contains('e1000e UDP transmit wrap verified: socket 2/22/49163, IDs 0x0004/0x0005, descriptors 7/0, cursors 0/1, frames 60/60, wraps 2->3 delta 1, final ID/TX cursor 6/1, submissions 2, completions 33/33, overflow 0, pending TX/RX 0x0000000000000000/0x00000000000000FF, endpoints/ephemeral cursor 2/49164')) {
         throw 'Connected UDP transmission did not cross the hardware TX ring boundary with clean completion ownership.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e UDP receive-into verified: socket 2/23/49164, first payload/copied/truncated/hash 8/5/yes/0x[0-9A-F]{16}, second 4/4/no/0x[0-9A-F]{16}, empty 0/0/no, source port 23456, endpoint queue 3/3 high-water 3 dropped 0, endpoints/cursor 2/49165, ingress 49/49, dispatch total/UDP 38/37, completions TX/RX 33/22')) {
+        throw 'Bounded UDP receive copies did not report truncation, preserve metadata, or consume queue entries exactly once.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
