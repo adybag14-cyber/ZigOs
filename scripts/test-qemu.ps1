@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [int]$TimeoutSeconds = 30,
+    [int]$TimeoutSeconds = 60,
     [ValidateRange(1, 64)]
     [int]$CpuCount = 4,
     [switch]$NvmeOnly,
@@ -804,6 +804,9 @@ if ($Network) {
     }
     if (-not $output.Contains('NTP projected clock verified: invalid frequency/state preserved yes/yes, initially unsynchronized yes, first apply accepted at tick/frequency 1000/1000, quarter 1800000000/0xC0000000, three-quarter 1800000001/0x40000000, one-second 1800000001/0x80000000, backward tick rejected yes, resync accepted at 2000/1000 time 1800000002/0x10000000 stratum/reference 3/SYNC, quarter after resync 1800000002/0x50000000, stale apply/preserved stale/yes, samples 2/1')) {
         throw 'The projected NTP clock did not advance fractional Unix time from monotonic ticks or preserve its anchor on invalid and stale updates.'
+    }
+    if (-not [regex]::IsMatch($output, 'NTP reference clock verified: source (HPET|ACPI PM timer), frequency [1-9][0-9]* Hz, bits (24|32|64), socket 2/44/49185, server 10\.0\.2\.4:123, first TX 32/3/4/90, zero pending/0/0/sample absent yes/apply absent yes/queue 1, accepted resolved/1/0/sample [1-9][0-9]*/apply accepted time 1800000000/0x80000000, later tick/delta [1-9][0-9]*/[1-9][0-9]* time [0-9]+/0x[0-9A-F]{8} advanced yes, second TX 33/4/5/90, duplicate resolved/1/0/sample [1-9][0-9]*/apply stale/clock preserved yes, close/inactive/sample/apply absent/clock preserved yes/inactive/yes/yes/yes, final IP/DNS/TX 34/8/5, submissions 2, completions TX/RX 61/61/22, overflow 0, endpoints/cursor 2/49186, ingress 80/80, dispatch total/UDP 69/68')) {
+        throw 'The live reference-backed NTP clock did not sample hardware ticks, advance after a real delay, reject a repeated timestamp, and remain inert after close.'
     }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {

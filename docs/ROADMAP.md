@@ -786,3 +786,13 @@
 - `time_reference.ContinuousCounter` extends finite-width hardware counters into a monotonic 64-bit tick stream.
 - Boot verification reads the selected continuous counter, waits one millisecond through the same reference, and requires a strictly positive delta.
 - The no-HPET QEMU topology now calibrates the APIC timer from the ACPI PM timer instead of the one-shot PIT fallback.
+
+## 3.51 - Live reference-backed NTP wall clock
+
+- The kernel passes its wrap-extending HPET/ACPI-PM continuous counter into the e1000e network validation path.
+- `pollNtpClientReferenceClock` samples the hardware counter only when a validated NTP response is actually consumed.
+- A zero-budget poll leaves both the queued response and the continuous-counter anchor untouched.
+- The first response anchors Unix time to the live hardware tick; after a real two-millisecond reference delay, projected Unix time is strictly later.
+- A second protocol-valid response with the original server timestamp is stale relative to the advanced hardware-backed clock and cannot reanchor it.
+- Closing the NTP client makes later reference-clock polling inactive without sampling the counter or changing synchronized time.
+- The proof completes at IPv4 ID 33, TX cursor 5, 61 TX completions, and ingress/UDP dispatch totals `80/80` and `69/68` on both HPET and ACPI PM timer paths.

@@ -85,7 +85,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
 
     const acpi_info = discoverAcpi(info);
     const local_apic_info = initializeApic(acpi_info);
-    const timer_setup = testApicTimer(acpi_info);
+    var timer_setup = testApicTimer(acpi_info);
     const legacy_irq_target = startApplicationProcessors(
         info,
         &frame_allocator,
@@ -164,6 +164,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
         pci_inventory,
         &frame_allocator,
         legacy_irq_target,
+        &timer_setup.continuous_counter,
     );
     const graphical_console: ?*framebuffer_console.Console = if (graphical_console_storage) |*console|
         console
@@ -1386,6 +1387,7 @@ fn inspectE1000e(
     inventory: pci.Inventory,
     allocator: *memory.FrameAllocator,
     interrupt_target: ?u8,
+    continuous_counter: *time_reference.ContinuousCounter,
 ) bool {
     var network_function: ?pci.Function = null;
     for (inventory.functions[0..inventory.retained_count]) |function| {
@@ -1491,6 +1493,7 @@ fn inspectE1000e(
         &controller,
         allocator,
         target_apic_id,
+        continuous_counter,
     ) orelse networkFailure("reset, DMA rings, MSI-X, DHCP, ARP, ICMP, UDP, or TFTP validation failed");
 
     debugWrite("e1000e rings active: RX 0x");
@@ -4386,7 +4389,135 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.ntp_projected_clock.stale_samples);
     debugWrite("\r\n");
+
+    debugWrite("NTP reference clock verified: source ");
+    debugWriteReferenceKind(network.ntp_reference_clock.source_kind);
+    debugWrite(", frequency ");
+    debugWriteU64Decimal(network.ntp_reference_clock.frequency_hz);
+    debugWrite(" Hz, bits ");
+    debugWriteU64Decimal(network.ntp_reference_clock.counter_bits);
+    debugWrite(", socket ");
+    debugWriteU64Decimal(network.ntp_reference_clock.socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.local_port);
+    debugWrite(", server ");
+    debugWriteIpv4(network.ntp_reference_clock.server_ipv4);
+    debugWrite(":");
+    debugWriteU64Decimal(network.ntp_reference_clock.server_port);
+    debugWrite(", first TX ");
+    debugWriteU64Decimal(network.ntp_reference_clock.first_identification);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.first_descriptor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.first_next_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.first_frame_length);
+    debugWrite(", zero ");
+    debugWriteNtpState(network.ntp_reference_clock.zero_state);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.zero_examined);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.zero_rejected);
+    debugWrite("/sample absent ");
+    debugWrite(if (network.ntp_reference_clock.zero_sample_absent) "yes" else "no");
+    debugWrite("/apply absent ");
+    debugWrite(if (network.ntp_reference_clock.zero_apply_absent) "yes" else "no");
+    debugWrite("/queue ");
+    debugWriteU64Decimal(network.ntp_reference_clock.zero_queue_remaining);
+    debugWrite(", accepted ");
+    debugWriteNtpState(network.ntp_reference_clock.accepted_state);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.accepted_examined);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.accepted_rejected);
+    debugWrite("/sample ");
+    debugWriteU64Decimal(network.ntp_reference_clock.accepted_sample_tick);
+    debugWrite("/apply ");
+    debugWriteNtpApply(network.ntp_reference_clock.accepted_apply);
+    debugWrite(" time ");
+    debugWriteU64Decimal(network.ntp_reference_clock.accepted_seconds);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_reference_clock.accepted_fraction);
+    debugWrite(", later tick/delta ");
+    debugWriteU64Decimal(network.ntp_reference_clock.later_tick);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.later_delta);
+    debugWrite(" time ");
+    debugWriteU64Decimal(network.ntp_reference_clock.later_seconds);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_reference_clock.later_fraction);
+    debugWrite(" advanced ");
+    debugWrite(if (network.ntp_reference_clock.time_advanced) "yes" else "no");
+    debugWrite(", second TX ");
+    debugWriteU64Decimal(network.ntp_reference_clock.second_identification);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.second_descriptor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.second_next_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.second_frame_length);
+    debugWrite(", duplicate ");
+    debugWriteNtpState(network.ntp_reference_clock.duplicate_state);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.duplicate_examined);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.duplicate_rejected);
+    debugWrite("/sample ");
+    debugWriteU64Decimal(network.ntp_reference_clock.duplicate_sample_tick);
+    debugWrite("/apply ");
+    debugWriteNtpApply(network.ntp_reference_clock.duplicate_apply);
+    debugWrite("/clock preserved ");
+    debugWrite(if (network.ntp_reference_clock.duplicate_clock_preserved) "yes" else "no");
+    debugWrite(", close/inactive/sample/apply absent/clock preserved ");
+    debugWrite(if (network.ntp_reference_clock.close_succeeded) "yes" else "no");
+    debugWrite("/");
+    debugWriteNtpState(network.ntp_reference_clock.inactive_state);
+    debugWrite("/");
+    debugWrite(if (network.ntp_reference_clock.inactive_sample_absent) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reference_clock.inactive_apply_absent) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reference_clock.inactive_clock_preserved) "yes" else "no");
+    debugWrite(", final IP/DNS/TX ");
+    debugWriteU64Decimal(network.ntp_reference_clock.final_identification_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.final_dns_transaction_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.final_tx_cursor);
+    debugWrite(", submissions ");
+    debugWriteU64Decimal(network.ntp_reference_clock.tx_submissions_delta);
+    debugWrite(", completions TX/RX ");
+    debugWriteU64Decimal(network.ntp_reference_clock.tx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.tx_completion_dequeues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.rx_completion_enqueues);
+    debugWrite(", overflow ");
+    debugWriteU64Decimal(network.ntp_reference_clock.completion_overflow);
+    debugWrite(", endpoints/cursor ");
+    debugWriteU64Decimal(network.ntp_reference_clock.final_registered_endpoints);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.final_ephemeral_cursor);
+    debugWrite(", ingress ");
+    debugWriteU64Decimal(network.ntp_reference_clock.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.ingress_dequeued);
+    debugWrite(", dispatch total/UDP ");
+    debugWriteU64Decimal(network.ntp_reference_clock.packets_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reference_clock.udp_dispatched);
+    debugWrite("\r\n");
     return true;
+}
+
+fn debugWriteReferenceKind(kind: time_reference.Kind) void {
+    debugWrite(switch (kind) {
+        .hpet => "HPET",
+        .acpi_pm_timer => "ACPI PM timer",
+        .pit_channel2 => "PIT channel 2",
+    });
 }
 
 fn debugWriteNtpApply(result: ntp.ClockApplyResult) void {
