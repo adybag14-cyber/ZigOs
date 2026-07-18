@@ -72,6 +72,8 @@ pub const msix_table_index: u16 = 0;
 const ring_descriptor_count: usize = 8;
 const ring_bytes: u32 = ring_descriptor_count * @sizeOf(RxDescriptor);
 const completion_queue_capacity: usize = 32;
+const software_packet_queue_capacity: usize = 8;
+const maximum_software_packet_bytes: usize = 2048;
 const all_rx_descriptors_pending: u32 = (1 << ring_descriptor_count) - 1;
 const ethernet_minimum_frame_bytes: usize = 60;
 const arp_payload_bytes: usize = 42;
@@ -91,6 +93,8 @@ const icmp_identifier: u16 = 0x5A49;
 const icmp_sequence: u16 = 1;
 const persistent_icmp_identifier: u16 = 0x5A50;
 const persistent_icmp_sequence: u16 = 2;
+const queued_icmp_identifier: u16 = 0x5A51;
+const queued_icmp_sequence: u16 = 3;
 const icmp_payload = "ZigOs-ICMP-ECHO!";
 const icmp_ipv4_total_bytes: usize = ipv4_header_bytes + icmp_header_bytes + icmp_payload.len;
 const icmp_ethernet_frame_bytes: usize = 14 + icmp_ipv4_total_bytes;
@@ -146,6 +150,24 @@ pub const Controller = struct {
     link_speed_mbps: u16,
 };
 
+pub const Packet = struct {
+    length: u16,
+    source_descriptor: u16,
+    interrupt_count: u64,
+    interrupt_cause: u32,
+    bytes: [maximum_software_packet_bytes]u8,
+};
+
+pub const SoftwarePacketQueue = struct {
+    entries: [software_packet_queue_capacity]Packet,
+    head: u16,
+    tail: u16,
+    enqueued: u64,
+    dequeued: u64,
+    dropped: u64,
+    high_water: u16,
+};
+
 pub const Device = struct {
     bar0: usize,
     rx_ring_address: usize,
@@ -168,6 +190,7 @@ pub const Device = struct {
     rx_recycled_descriptors: u16,
     rx_descriptor_wraps: u16,
     previous_recycled_rx_descriptor: ?usize,
+    software_rx_queue: SoftwarePacketQueue,
 };
 
 pub const TxCompletion = struct {
@@ -207,6 +230,30 @@ pub const PersistentQueueReport = struct {
     rx_queue_enqueues: u64,
     rx_queue_dequeues: u64,
     queue_overflows: u64,
+    tx_pending_mask: u32,
+    rx_pending_mask: u32,
+};
+
+pub const SoftwarePacketQueueReport = struct {
+    tx: TxCompletion,
+    dma_rx_descriptor: u16,
+    rx_next_cursor: u16,
+    packet_length: u16,
+    identifier: u16,
+    sequence: u16,
+    ttl: u8,
+    payload_length: u16,
+    queue_enqueued: u64,
+    queue_dequeued: u64,
+    queue_high_water: u16,
+    queue_dropped: u64,
+    device_tx_cursor: u16,
+    device_rx_cursor: u16,
+    tx_queue_enqueues: u64,
+    tx_queue_dequeues: u64,
+    rx_queue_enqueues: u64,
+    rx_queue_dequeues: u64,
+    completion_queue_overflows: u64,
     tx_pending_mask: u32,
     rx_pending_mask: u32,
 };
@@ -302,6 +349,7 @@ pub const NetworkResult = struct {
     tx_pending_mask_after_stream: u32,
     rx_pending_mask_after_stream: u32,
     persistent: PersistentQueueReport,
+    software_packet_queue: SoftwarePacketQueueReport,
 };
 
 var active_bar0: usize = 0;
@@ -806,9 +854,14 @@ pub fn initializeAndTestNetwork(
         .rx_recycled_descriptors = 0,
         .rx_descriptor_wraps = 0,
         .previous_recycled_rx_descriptor = 0,
+        .software_rx_queue = std.mem.zeroes(SoftwarePacketQueue),
     };
     const device = activeDevice() orelse return null;
     const persistent = verifyPersistentQueueOwner(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
+    const software_packet_queue = verifySoftwarePacketQueue(device) orelse {
         active_device_storage = null;
         return null;
     };
@@ -904,6 +957,7 @@ pub fn initializeAndTestNetwork(
         .tx_pending_mask_after_stream = tx_pending_mask_after_stream,
         .rx_pending_mask_after_stream = rx_pending_mask_after_stream,
         .persistent = persistent,
+        .software_packet_queue = software_packet_queue,
     };
 }
 
@@ -987,6 +1041,46 @@ pub fn releaseFrame(device: *Device, frame: ReceivedFrame) bool {
     );
 }
 
+pub fn pumpReceive(device: *Device) bool {
+    const frame = receiveFrame(device) orelse return false;
+    const enqueued = enqueueSoftwarePacket(&device.software_rx_queue, frame);
+    const released = releaseFrame(device, frame);
+    return enqueued and released;
+}
+
+pub fn dequeuePacket(device: *Device) ?Packet {
+    const queue = &device.software_rx_queue;
+    if (queue.tail == queue.head) return null;
+    const packet = queue.entries[queue.tail];
+    queue.tail = @intCast((queue.tail + 1) % software_packet_queue_capacity);
+    queue.dequeued +|= 1;
+    return packet;
+}
+
+fn enqueueSoftwarePacket(queue: *SoftwarePacketQueue, frame: ReceivedFrame) bool {
+    if (frame.frame_length == 0 or frame.frame_length > maximum_software_packet_bytes) {
+        queue.dropped +|= 1;
+        return false;
+    }
+    const next: u16 = @intCast((queue.head + 1) % software_packet_queue_capacity);
+    if (next == queue.tail) {
+        queue.dropped +|= 1;
+        return false;
+    }
+    var packet = &queue.entries[queue.head];
+    @memset(packet.bytes[0..], 0);
+    @memcpy(packet.bytes[0..frame.frame_length], frame.bytes);
+    packet.length = frame.frame_length;
+    packet.source_descriptor = frame.descriptor_index;
+    packet.interrupt_count = frame.interrupt_count;
+    packet.interrupt_cause = frame.interrupt_cause;
+    queue.head = next;
+    queue.enqueued +|= 1;
+    const depth: u16 = @intCast((queue.head + software_packet_queue_capacity - queue.tail) % software_packet_queue_capacity);
+    if (depth > queue.high_water) queue.high_water = depth;
+    return true;
+}
+
 fn verifyPersistentQueueOwner(device: *Device) ?PersistentQueueReport {
     var request = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
     buildIcmpEchoRequest(
@@ -1053,6 +1147,80 @@ fn verifyPersistentQueueOwner(device: *Device) ?PersistentQueueReport {
         .rx_queue_enqueues = rx_queue_enqueues,
         .rx_queue_dequeues = rx_queue_dequeues,
         .queue_overflows = queue_overflows,
+        .tx_pending_mask = final_tx_pending,
+        .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifySoftwarePacketQueue(device: *Device) ?SoftwarePacketQueueReport {
+    var request = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+    buildIcmpEchoRequest(
+        &request,
+        device.local_mac,
+        device.gateway_mac,
+        device.local_ipv4,
+        device.gateway_ipv4,
+        queued_icmp_identifier,
+        queued_icmp_sequence,
+    );
+    const tx = submitFrame(device, &request) orelse return null;
+    if (!pumpReceive(device)) return null;
+    const packet = dequeuePacket(device) orelse return null;
+    const parsed = parseIcmpEchoReply(
+        packet.bytes[0..packet.length],
+        device.local_mac,
+        device.gateway_mac,
+        device.local_ipv4,
+        device.gateway_ipv4,
+        queued_icmp_identifier,
+        queued_icmp_sequence,
+    ) orelse return null;
+
+    const tx_queue_enqueues = completionQueueEnqueued(&tx_completion_queue);
+    const tx_queue_dequeues = completionQueueDequeued(&tx_completion_queue);
+    const rx_queue_enqueues = completionQueueEnqueued(&rx_completion_queue);
+    const rx_queue_dequeues = completionQueueDequeued(&rx_completion_queue);
+    const completion_queue_overflows = completionQueueOverflow(&tx_completion_queue) +
+        completionQueueOverflow(&rx_completion_queue);
+    const final_tx_pending = @atomicLoad(u32, &tx_pending_mask, .acquire);
+    const final_rx_pending = @atomicLoad(u32, &rx_pending_mask, .acquire);
+    if (tx.descriptor_index != 3 or tx.next_cursor != 4 or
+        packet.source_descriptor != 2 or device.rx_consumer != 3 or
+        device.software_rx_queue.enqueued != 1 or
+        device.software_rx_queue.dequeued != 1 or
+        device.software_rx_queue.high_water != 1 or
+        device.software_rx_queue.dropped != 0 or
+        device.software_rx_queue.head != device.software_rx_queue.tail or
+        device.rx_recycled_descriptors != 2 or
+        tx_queue_enqueues != 12 or tx_queue_dequeues != 12 or
+        rx_queue_enqueues != 11 or rx_queue_dequeues != 11 or
+        completion_queue_overflows != 0 or final_tx_pending != 0 or
+        final_rx_pending != all_rx_descriptors_pending or
+        tx_ready_mask != 0 or rx_ready_mask != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .tx = tx,
+        .dma_rx_descriptor = packet.source_descriptor,
+        .rx_next_cursor = device.rx_consumer,
+        .packet_length = packet.length,
+        .identifier = parsed.identifier,
+        .sequence = parsed.sequence,
+        .ttl = parsed.ttl,
+        .payload_length = parsed.payload_length,
+        .queue_enqueued = device.software_rx_queue.enqueued,
+        .queue_dequeued = device.software_rx_queue.dequeued,
+        .queue_high_water = device.software_rx_queue.high_water,
+        .queue_dropped = device.software_rx_queue.dropped,
+        .device_tx_cursor = device.tx_producer,
+        .device_rx_cursor = device.rx_consumer,
+        .tx_queue_enqueues = tx_queue_enqueues,
+        .tx_queue_dequeues = tx_queue_dequeues,
+        .rx_queue_enqueues = rx_queue_enqueues,
+        .rx_queue_dequeues = rx_queue_dequeues,
+        .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
     };
@@ -1657,6 +1825,8 @@ comptime {
     if (ring_bytes != 128) @compileError("e1000e test rings must be exactly 128 bytes");
     if (completion_queue_capacity < ring_descriptor_count * 2) @compileError("e1000e completion queues are too small");
     if (completion_queue_capacity > std.math.maxInt(u8)) @compileError("e1000e completion queue indices must fit in u8");
+    if (software_packet_queue_capacity < 2) @compileError("e1000e software packet queue is too small");
+    if (maximum_software_packet_bytes < 1518) @compileError("e1000e software packet entries must hold a full Ethernet frame");
     if (icmp_payload.len != 16) @compileError("ICMP payload must remain deterministic");
     if (icmp_ipv4_total_bytes != 44) @compileError("ICMP IPv4 packet must remain 44 bytes");
     if (icmp_ethernet_frame_bytes != 58) @compileError("ICMP Ethernet payload must fit one padded frame");

@@ -8,9 +8,9 @@ The project deliberately uses the canonical Zig builds published by [`adybag14-c
 
 > ZigOs is a research and learning operating system. It is not ready for production use or general physical-hardware support.
 
-## Current milestone: 3.6
+## Current milestone: 3.7
 
-The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, and a persistent queue owner with reusable frame APIs.
+The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, a persistent queue owner, and a bounded software RX packet queue.
 
 The deterministic networking sequence is:
 
@@ -123,8 +123,9 @@ Assembly is used where exact instruction, register, descriptor, interrupt-entry,
 - DMA RX/TX rings with eight descriptors, writeback checks, recycling, and wrap.
 - Independent 32-entry ISR-to-kernel TX/RX completion queues with atomic pending masks, coalesced-completion ready masks, high-water tracking, and overflow detection.
 - A retained `Device` owner exposes reusable frame submission, receive, and release operations with persistent TX/RX cursors and DMA addresses.
-- After DHCP/ARP/ICMP/TFTP bootstrap, a second ICMP exchange uses TX descriptor 2 and RX descriptor 1 through the generic queue APIs, advancing cursors to 3 and 2.
-- The complete flow produces eleven TX and ten RX completion records, each dequeued once with zero overflow.
+- A bounded eight-entry software RX queue copies frames out of DMA before immediately recycling their hardware descriptors; later protocol code dequeues stable packet copies.
+- After DHCP/ARP/ICMP/TFTP bootstrap, a second ICMP exchange exercises the generic owner APIs and a third ICMP exchange exercises DMA-to-software queuing.
+- The complete flow produces twelve TX and eleven RX completion records, each dequeued once with zero overflow; the software packet queue reports one enqueue/dequeue and zero drops.
 - MSI-X vector `0x49` routed to a valid BSP or application-processor destination.
 - DHCP Discover/Offer/Request/ACK with BOOTP identity and option validation.
 - Runtime lease fields for local address, subnet mask, server, lease duration, and optional router/DNS data.

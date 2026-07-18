@@ -661,6 +661,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e persistent queue owner verified: TX descriptor 2 -> cursor 3, RX descriptor 1 -> cursor 2, ICMP 0x5A50/2, frames 60/60, interrupts [1-9][0-9]*/[1-9][0-9]*, submissions 1, deliveries 1, cursors wrapped 0/0, final queues TX 11/11, RX 10/10, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
         throw 'The persistent e1000e owner did not complete a second ICMP exchange through reusable queue APIs.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e software RX queue verified: TX descriptor 3 -> cursor 4, DMA RX descriptor 2 recycled -> cursor 3, packet 60 bytes, ICMP 0x5A51/3, queue 1/1, high-water 1, dropped 0, final completions TX 12/12, RX 11/11, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
+        throw 'The software packet queue did not copy, recycle, dequeue, and parse the third ICMP reply.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

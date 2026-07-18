@@ -391,3 +391,13 @@
 - After the scripted DHCP/ARP/ICMP/TFTP bootstrap, a second ICMP Echo (`identifier 0x5A50`, sequence `2`) runs solely through these reusable APIs.
 - The follow-up exchange reuses TX descriptor 2 and RX descriptor 1, advances cursors to 3 and 2, and leaves all pending/ready masks clean.
 - Final completion totals are eleven TX and ten RX records with matching dequeue counts and zero overflow across BSP-local, remote AP, legacy PCI, APIC-ID-256, and PIT-only modes.
+
+
+## 3.7 - Software RX packet queue
+
+- The persistent e1000e owner contains an eight-entry software packet queue whose 2,048-byte entries hold stable copies of received Ethernet frames.
+- `pumpReceive` consumes the next hardware completion, copies the bounded frame into software-owned memory, and recycles the DMA descriptor immediately.
+- `dequeuePacket` exposes the stable packet later, decoupling protocol parsing from hardware descriptor lifetime.
+- A third ICMP Echo (`identifier 0x5A51`, sequence `3`) uses TX descriptor 3 and RX descriptor 2; the reply is copied, descriptor 2 is returned to hardware, and only then is the packet parsed.
+- The software queue must report one enqueue, one dequeue, high-water one, zero drops, and an empty final queue.
+- Final hardware completion totals are twelve TX and eleven RX records with zero overflow and clean pending/ready masks across the full topology matrix.

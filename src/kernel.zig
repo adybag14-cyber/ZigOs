@@ -1748,6 +1748,44 @@ fn inspectE1000e(
     debugWrite(", RX 0x");
     debugWriteHex64(network.persistent.rx_pending_mask);
     debugWrite("\r\n");
+
+    debugWrite("e1000e software RX queue verified: TX descriptor ");
+    debugWriteU64Decimal(network.software_packet_queue.tx.descriptor_index);
+    debugWrite(" -> cursor ");
+    debugWriteU64Decimal(network.software_packet_queue.device_tx_cursor);
+    debugWrite(", DMA RX descriptor ");
+    debugWriteU64Decimal(network.software_packet_queue.dma_rx_descriptor);
+    debugWrite(" recycled -> cursor ");
+    debugWriteU64Decimal(network.software_packet_queue.device_rx_cursor);
+    debugWrite(", packet ");
+    debugWriteU64Decimal(network.software_packet_queue.packet_length);
+    debugWrite(" bytes, ICMP 0x");
+    debugWriteHex16(network.software_packet_queue.identifier);
+    debugWrite("/");
+    debugWriteU64Decimal(network.software_packet_queue.sequence);
+    debugWrite(", queue ");
+    debugWriteU64Decimal(network.software_packet_queue.queue_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.software_packet_queue.queue_dequeued);
+    debugWrite(", high-water ");
+    debugWriteU64Decimal(network.software_packet_queue.queue_high_water);
+    debugWrite(", dropped ");
+    debugWriteU64Decimal(network.software_packet_queue.queue_dropped);
+    debugWrite(", final completions TX ");
+    debugWriteU64Decimal(network.software_packet_queue.tx_queue_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.software_packet_queue.tx_queue_dequeues);
+    debugWrite(", RX ");
+    debugWriteU64Decimal(network.software_packet_queue.rx_queue_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.software_packet_queue.rx_queue_dequeues);
+    debugWrite(", overflow ");
+    debugWriteU64Decimal(network.software_packet_queue.completion_queue_overflows);
+    debugWrite(", pending TX 0x");
+    debugWriteHex64(network.software_packet_queue.tx_pending_mask);
+    debugWrite(", RX 0x");
+    debugWriteHex64(network.software_packet_queue.rx_pending_mask);
+    debugWrite("\r\n");
     return true;
 }
 
