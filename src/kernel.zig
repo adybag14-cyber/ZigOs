@@ -4640,6 +4640,109 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.ntp_service.udp_dispatched);
     debugWrite("\r\n");
+    debugWrite("NTP backoff verified: source ");
+    debugWriteReferenceKind(network.ntp_backoff.source_kind);
+    debugWrite(", frequency/bits ");
+    debugWriteU64Decimal(network.ntp_backoff.frequency_hz);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.counter_bits);
+    debugWrite(", invalid policy/state preserved ");
+    debugWrite(if (network.ntp_backoff.invalid_policy_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_backoff.invalid_policy_state_preserved) "yes" else "no");
+    debugWrite(", socket ");
+    debugWriteU64Decimal(network.ntp_backoff.socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.local_port);
+    debugWrite(", policy ");
+    debugWriteU64Decimal(network.ntp_backoff.initial_interval_ticks);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.maximum_interval_ticks);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.maximum_retries);
+    debugWrite(", initial ");
+    debugWriteU64Decimal(network.ntp_backoff.initial_identification);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.initial_descriptor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.initial_next_cursor);
+    debugWrite(" wait ");
+    debugWriteU64Decimal(network.ntp_backoff.initial_wait_ticks);
+    debugWrite(", early no-TX ");
+    debugWrite(if (network.ntp_backoff.early_no_tx) "yes" else "no");
+    debugWrite(", retries ");
+    var backoff_index: usize = 0;
+    while (backoff_index < network.ntp_backoff.retry_identifications.len) : (backoff_index += 1) {
+        if (backoff_index != 0) debugWrite(" -> ");
+        debugWriteU64Decimal(network.ntp_backoff.retry_identifications[backoff_index]);
+        debugWrite("/");
+        debugWriteU64Decimal(network.ntp_backoff.retry_descriptors[backoff_index]);
+        debugWrite("/");
+        debugWriteU64Decimal(network.ntp_backoff.retry_next_cursors[backoff_index]);
+        debugWrite(" wait ");
+        debugWriteU64Decimal(network.ntp_backoff.retry_wait_ticks[backoff_index]);
+    }
+    debugWrite(", timeout delta/state/reached/cancelled/exhausted ");
+    debugWriteU64Decimal(network.ntp_backoff.timeout_tick_delta);
+    debugWrite("/");
+    debugWriteNtpServiceState(network.ntp_backoff.timeout_state);
+    debugWrite("/");
+    debugWrite(if (network.ntp_backoff.timeout_reached) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_backoff.request_cancelled) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_backoff.retry_exhausted) "yes" else "no");
+    debugWrite(", latched/health ");
+    debugWrite(if (network.ntp_backoff.timeout_latched) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_backoff.health_reports_exhaustion) "yes" else "no");
+    debugWrite(", clear/duplicate ");
+    debugWrite(if (network.ntp_backoff.clear_succeeded) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_backoff.duplicate_clear_rejected) "yes" else "no");
+    debugWrite(", restart ");
+    debugWriteU64Decimal(network.ntp_backoff.restart_identification);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.restart_descriptor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.restart_next_cursor);
+    debugWrite(" wait ");
+    debugWriteU64Decimal(network.ntp_backoff.restart_wait_ticks);
+    debugWrite(", close ");
+    debugWrite(if (network.ntp_backoff.close_succeeded) "yes" else "no");
+    debugWrite(", counts ");
+    debugWriteU64Decimal(network.ntp_backoff.requests_started);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.retries);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.retry_limit_hits);
+    debugWrite(", final IP/TX ");
+    debugWriteU64Decimal(network.ntp_backoff.final_identification_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.final_tx_cursor);
+    debugWrite(", submissions ");
+    debugWriteU64Decimal(network.ntp_backoff.tx_submissions_delta);
+    debugWrite(", completions TX/RX ");
+    debugWriteU64Decimal(network.ntp_backoff.tx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.tx_completion_dequeues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.rx_completion_enqueues);
+    debugWrite(", endpoints/cursor ");
+    debugWriteU64Decimal(network.ntp_backoff.final_registered_endpoints);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.final_ephemeral_cursor);
+    debugWrite(", ingress ");
+    debugWriteU64Decimal(network.ntp_backoff.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.ingress_dequeued);
+    debugWrite(", dispatch ");
+    debugWriteU64Decimal(network.ntp_backoff.packets_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_backoff.udp_dispatched);
+    debugWrite("\r\n");
     debugWrite("NTP timestamp verified: base/anchor 0x");
     debugWriteHex64(network.ntp_timestamp.base_timestamp);
     debugWrite("/0x");
@@ -4756,6 +4859,14 @@ fn inspectE1000e(
     return true;
 }
 
+fn debugWriteNtpServiceState(state: e1000e.NtpServiceState) void {
+    debugWrite(switch (state) {
+        .inactive => "inactive",
+        .idle => "idle",
+        .awaiting => "awaiting",
+        .timed_out => "timed-out",
+    });
+}
 fn debugWriteNtpHealth(state: e1000e.NtpSynchronizationHealth) void {
     debugWrite(switch (state) {
         .inactive => "inactive",

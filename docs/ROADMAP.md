@@ -867,3 +867,12 @@
 - `retryIntervalForAttempt` doubles intervals by attempt, saturates exactly at the configured cap, and returns no interval after the retry limit.
 - Fixed-interval policies remain supported by setting the initial and maximum intervals equal.
 - Saturation near `u64` maximum is overflow-safe and reaches the exact configured maximum.
+
+## 3.61 - Live NTP retry backoff and timeout
+
+- `openNtpServiceWithPolicies` validates quality and retry policies before opening a socket while legacy constructors retain fixed-interval compatibility.
+- Each request owns an independent retry-attempt counter and schedules capped exponential deadlines from `ntp.RetryPolicy`.
+- After the final retry, the service waits one final capped interval, cancels the request, increments timeout accounting, and latches the `timed_out` state.
+- A timed-out service cannot silently restart; `clearNtpServiceTimeout` must explicitly clear exhaustion before another request cycle.
+- Synchronization-health snapshots expose retry attempts, exhaustion, timeout count, and last timeout tick without mutation.
+- The live verifier proves `1/2/4/4` waits, three retries, exact timeout at tick delta 11, latched inactivity, explicit clear, clean restart, active-request close, and exact ring/accounting deltas.
