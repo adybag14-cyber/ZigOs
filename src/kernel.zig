@@ -4726,6 +4726,33 @@ fn inspectE1000e(
     debugWrite("/");
     debugWrite(if (network.ntp_health.counters_preserved) "yes" else "no");
     debugWrite("\r\n");
+    debugWrite("NTP retry policy verified: invalid zero-initial/cap/zero-retries ");
+    debugWrite(if (network.ntp_retry_policy.invalid_zero_initial_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_retry_policy.invalid_cap_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_retry_policy.invalid_zero_retries_rejected) "yes" else "no");
+    debugWrite(", intervals ");
+    debugWriteU64Decimal(network.ntp_retry_policy.intervals[0]);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_retry_policy.intervals[1]);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_retry_policy.intervals[2]);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_retry_policy.intervals[3]);
+    debugWrite(", limit rejected ");
+    debugWrite(if (network.ntp_retry_policy.limit_rejected) "yes" else "no");
+    debugWrite(", fixed ");
+    debugWriteU64Decimal(network.ntp_retry_policy.fixed_intervals[0]);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_retry_policy.fixed_intervals[1]);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_retry_policy.fixed_intervals[2]);
+    debugWrite(", overflow saturated ");
+    debugWrite(if (network.ntp_retry_policy.overflow_saturated) "yes" else "no");
+    debugWrite(" at ");
+    debugWriteU64Decimal(network.ntp_retry_policy.maximum_value);
+    debugWrite("\r\n");
     return true;
 }
 

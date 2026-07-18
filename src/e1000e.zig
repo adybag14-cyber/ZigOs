@@ -712,6 +712,16 @@ pub const NtpServiceStep = struct {
     retried: bool,
 };
 
+pub const NtpRetryPolicyReport = struct {
+    invalid_zero_initial_rejected: bool,
+    invalid_cap_rejected: bool,
+    invalid_zero_retries_rejected: bool,
+    intervals: [4]u64,
+    limit_rejected: bool,
+    fixed_intervals: [3]u64,
+    overflow_saturated: bool,
+    maximum_value: u64,
+};
 pub const NtpHealthReport = struct {
     invalid_zero_holdover_rejected: bool,
     invalid_equal_threshold_rejected: bool,
@@ -2256,6 +2266,7 @@ pub const NetworkResult = struct {
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
     ntp_health: NtpHealthReport,
+    ntp_retry_policy: NtpRetryPolicyReport,
 };
 
 var active_bar0: usize = 0;
@@ -2974,6 +2985,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_retry_policy = verifyNtpRetryPolicy() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -3113,6 +3128,7 @@ pub fn initializeAndTestNetwork(
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
         .ntp_health = ntp_health,
+        .ntp_retry_policy = ntp_retry_policy,
     };
 }
 
@@ -5384,6 +5400,70 @@ fn enqueueNtpServiceResponseWithQuality(
     if (!enqueueQueuedPacket(&device.software_rx_queue, packet)) return false;
     const dispatch = dispatchPacketBatch(device, 1);
     return dispatch.examined == 1 and dispatch.routed == 1 and dispatch.dropped == 0;
+}
+fn verifyNtpRetryPolicy() ?NtpRetryPolicyReport {
+    const invalid_zero_initial_rejected = !ntp.retryPolicyValid(.{
+        .initial_interval_ticks = 0,
+        .maximum_interval_ticks = 8,
+        .maximum_retries = 4,
+    });
+    const invalid_cap_rejected = !ntp.retryPolicyValid(.{
+        .initial_interval_ticks = 8,
+        .maximum_interval_ticks = 4,
+        .maximum_retries = 4,
+    });
+    const invalid_zero_retries_rejected = !ntp.retryPolicyValid(.{
+        .initial_interval_ticks = 1,
+        .maximum_interval_ticks = 8,
+        .maximum_retries = 0,
+    });
+    const exponential = ntp.RetryPolicy{
+        .initial_interval_ticks = 3,
+        .maximum_interval_ticks = 10,
+        .maximum_retries = 4,
+    };
+    const intervals = [4]u64{
+        ntp.retryIntervalForAttempt(exponential, 0) orelse return null,
+        ntp.retryIntervalForAttempt(exponential, 1) orelse return null,
+        ntp.retryIntervalForAttempt(exponential, 2) orelse return null,
+        ntp.retryIntervalForAttempt(exponential, 3) orelse return null,
+    };
+    const limit_rejected = ntp.retryIntervalForAttempt(exponential, 4) == null;
+    const fixed = ntp.RetryPolicy{
+        .initial_interval_ticks = 5,
+        .maximum_interval_ticks = 5,
+        .maximum_retries = 3,
+    };
+    const fixed_intervals = [3]u64{
+        ntp.retryIntervalForAttempt(fixed, 0) orelse return null,
+        ntp.retryIntervalForAttempt(fixed, 1) orelse return null,
+        ntp.retryIntervalForAttempt(fixed, 2) orelse return null,
+    };
+    const maximum_value = std.math.maxInt(u64);
+    const overflow_policy = ntp.RetryPolicy{
+        .initial_interval_ticks = maximum_value - 1,
+        .maximum_interval_ticks = maximum_value,
+        .maximum_retries = 2,
+    };
+    const overflow_saturated = ntp.retryIntervalForAttempt(overflow_policy, 1) == maximum_value;
+    if (!invalid_zero_initial_rejected or !invalid_cap_rejected or
+        !invalid_zero_retries_rejected or intervals[0] != 3 or intervals[1] != 6 or
+        intervals[2] != 10 or intervals[3] != 10 or !limit_rejected or
+        fixed_intervals[0] != 5 or fixed_intervals[1] != 5 or fixed_intervals[2] != 5 or
+        !overflow_saturated)
+    {
+        return null;
+    }
+    return .{
+        .invalid_zero_initial_rejected = invalid_zero_initial_rejected,
+        .invalid_cap_rejected = invalid_cap_rejected,
+        .invalid_zero_retries_rejected = invalid_zero_retries_rejected,
+        .intervals = intervals,
+        .limit_rejected = limit_rejected,
+        .fixed_intervals = fixed_intervals,
+        .overflow_saturated = overflow_saturated,
+        .maximum_value = maximum_value,
+    };
 }
 fn verifyNtpHealth() ?NtpHealthReport {
     var service = std.mem.zeroes(NtpService);

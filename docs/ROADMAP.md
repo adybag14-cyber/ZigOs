@@ -860,3 +860,10 @@
 - Synchronized and holdover snapshots expose projected Unix time and sample age. Expired snapshots explicitly withhold wall time.
 - Reads before the projected-clock anchor are rejected instead of underflowing sample age.
 - Snapshot metadata includes request activity, retry/refresh deadlines, request/retry/response counters, and quality acceptance/rejection totals.
+## 3.60 - Capped exponential NTP retry policy
+
+- `ntp.RetryPolicy` defines an initial interval, maximum interval, and explicit maximum retry count.
+- Invalid zero initial intervals, caps below the initial interval, and zero retry limits are rejected.
+- `retryIntervalForAttempt` doubles intervals by attempt, saturates exactly at the configured cap, and returns no interval after the retry limit.
+- Fixed-interval policies remain supported by setting the initial and maximum intervals equal.
+- Saturation near `u64` maximum is overflow-safe and reaches the exact configured maximum.

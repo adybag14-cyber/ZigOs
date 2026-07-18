@@ -54,6 +54,31 @@ pub const Response = struct {
     unix_fraction: u32,
 };
 
+pub const RetryPolicy = struct {
+    initial_interval_ticks: u64,
+    maximum_interval_ticks: u64,
+    maximum_retries: u8,
+};
+
+pub fn retryPolicyValid(policy: RetryPolicy) bool {
+    return policy.initial_interval_ticks > 0 and
+        policy.maximum_interval_ticks >= policy.initial_interval_ticks and
+        policy.maximum_retries > 0;
+}
+
+pub fn retryIntervalForAttempt(policy: RetryPolicy, attempt_index: u8) ?u64 {
+    if (!retryPolicyValid(policy) or attempt_index >= policy.maximum_retries) return null;
+    var interval = policy.initial_interval_ticks;
+    var remaining = attempt_index;
+    while (remaining > 0 and interval < policy.maximum_interval_ticks) : (remaining -= 1) {
+        if (interval > policy.maximum_interval_ticks / 2) {
+            interval = policy.maximum_interval_ticks;
+        } else {
+            interval *= 2;
+        }
+    }
+    return interval;
+}
 pub const QualityPolicy = struct {
     max_stratum: u8,
     max_root_delay: u32,
