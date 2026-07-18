@@ -843,6 +843,8 @@ if ($Network) {
         throw 'The live reference-backed NTP clock did not sample hardware ticks, advance after a real delay, reject a repeated timestamp, and remain inert after close.'
     }    if (-not [regex]::IsMatch($output, 'NTP service verified: source (HPET|ACPI PM timer), frequency/bits [1-9][0-9]*/(24|32|64), socket 2/45/49186, intervals 1/2, initial TX 34/5/6, early no-TX yes, retry TX 35/6/7 transmissions 2, first sample [1-9][0-9]* time 1800000000/0x80000000 deadline [1-9][0-9]*, before refresh no-TX yes, refresh TX 36/7/0, second sample [1-9][0-9]* time 1800000002/0x80000000, counts 2/1/2, close/inactive preserved yes/yes, final IP/TX 37/0, submissions 3, completions TX/RX 64/64/22, endpoints/cursor 2/49187, ingress 82/82, dispatch 71/70')) {
         throw 'The owned NTP service did not enforce retry and refresh deadlines, accept two forward samples, and shut down transactionally.'
+    }    if (-not $output.Contains('NTP timestamp verified: base/anchor 0xEEF4508080000000/0xEEF4508080000000, quarter/rollover 0xEEF45080C0000000/0xEEF4508140000000, maximum 0xFFFFFFFFFFFFFFFF, rejects unsynchronized/backward/overflow yes/yes/yes')) {
+        throw 'Projected Unix time did not convert into exact NTP timestamps or enforce the supported NTP-era boundary.'
     }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {

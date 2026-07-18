@@ -4598,6 +4598,23 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.ntp_service.udp_dispatched);
     debugWrite("\r\n");
+    debugWrite("NTP timestamp verified: base/anchor 0x");
+    debugWriteHex64(network.ntp_timestamp.base_timestamp);
+    debugWrite("/0x");
+    debugWriteHex64(network.ntp_timestamp.anchor_timestamp);
+    debugWrite(", quarter/rollover 0x");
+    debugWriteHex64(network.ntp_timestamp.quarter_timestamp);
+    debugWrite("/0x");
+    debugWriteHex64(network.ntp_timestamp.rollover_timestamp);
+    debugWrite(", maximum 0x");
+    debugWriteHex64(network.ntp_timestamp.maximum_timestamp);
+    debugWrite(", rejects unsynchronized/backward/overflow ");
+    debugWrite(if (network.ntp_timestamp.unsynchronized_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_timestamp.backward_tick_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_timestamp.overflow_rejected) "yes" else "no");
+    debugWrite("\r\n");
     return true;
 }
 

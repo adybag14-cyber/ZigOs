@@ -683,6 +683,16 @@ pub const NtpServiceStep = struct {
     retried: bool,
 };
 
+pub const NtpTimestampReport = struct {
+    base_timestamp: u64,
+    anchor_timestamp: u64,
+    quarter_timestamp: u64,
+    rollover_timestamp: u64,
+    maximum_timestamp: u64,
+    unsynchronized_rejected: bool,
+    backward_tick_rejected: bool,
+    overflow_rejected: bool,
+};
 pub const NtpServiceReport = struct {
     source_kind: time_reference.Kind,
     frequency_hz: u64,
@@ -2152,6 +2162,7 @@ pub const NetworkResult = struct {
     ntp_projected_clock: NtpProjectedClockReport,
     ntp_reference_clock: NtpReferenceClockReport,
     ntp_service: NtpServiceReport,
+    ntp_timestamp: NtpTimestampReport,
 };
 
 var active_bar0: usize = 0;
@@ -2854,6 +2865,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_timestamp = verifyNtpTimestamp() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -2989,6 +3004,7 @@ pub fn initializeAndTestNetwork(
         .ntp_projected_clock = ntp_projected_clock,
         .ntp_reference_clock = ntp_reference_clock,
         .ntp_service = ntp_service,
+        .ntp_timestamp = ntp_timestamp,
     };
 }
 
@@ -5022,6 +5038,37 @@ fn enqueueNtpServiceResponse(device: *Device, socket: UdpSocket, server_ipv4: [4
     return dispatch.examined == 1 and dispatch.routed == 1 and dispatch.dropped == 0;
 }
 
+fn verifyNtpTimestamp() ?NtpTimestampReport {
+    const base = ntp.UnixTime{ .seconds = ntp.fixture_unix_seconds, .fraction = 0x80000000 };
+    const base_timestamp = ntp.unixTimeToTimestamp(base) orelse return null;
+    if (base_timestamp != ntp.fixture_server_timestamp) return null;
+    var projected = std.mem.zeroes(ntp.ProjectedClock);
+    const unsynchronized_rejected = ntp.projectedTimestampAt(&projected, 1000) == null;
+    projected.clock.synchronized = true;
+    projected.clock.unix_seconds = base.seconds;
+    projected.clock.unix_fraction = base.fraction;
+    projected.anchor_tick = 1000;
+    projected.ticks_per_second = 1000;
+    const anchor = ntp.projectedTimestampAt(&projected, 1000) orelse return null;
+    const quarter = ntp.projectedTimestampAt(&projected, 1250) orelse return null;
+    const rollover = ntp.projectedTimestampAt(&projected, 1750) orelse return null;
+    const expected_quarter = (@as(u64, ntp.fixture_server_seconds) << 32) | 0xC0000000;
+    const expected_rollover = (@as(u64, ntp.fixture_server_seconds + 1) << 32) | 0x40000000;
+    const backward_tick_rejected = ntp.projectedTimestampAt(&projected, 999) == null;
+    const maximum_unix_seconds = std.math.maxInt(u32) - ntp.unix_epoch_offset_seconds;
+    const maximum = ntp.unixTimeToTimestamp(.{
+        .seconds = maximum_unix_seconds,
+        .fraction = 0xFFFFFFFF,
+    }) orelse return null;
+    const overflow_rejected = ntp.unixTimeToTimestamp(.{
+        .seconds = maximum_unix_seconds + 1,
+        .fraction = 0,
+    }) == null;
+    if (!unsynchronized_rejected or anchor != base_timestamp or quarter != expected_quarter or
+        rollover != expected_rollover or !backward_tick_rejected or
+        maximum != std.math.maxInt(u64) or !overflow_rejected) return null;
+    return .{ .base_timestamp = base_timestamp, .anchor_timestamp = anchor, .quarter_timestamp = quarter, .rollover_timestamp = rollover, .maximum_timestamp = maximum, .unsynchronized_rejected = unsynchronized_rejected, .backward_tick_rejected = backward_tick_rejected, .overflow_rejected = overflow_rejected };
+}
 fn verifyNtpService(device: *Device, counter: *time_reference.ContinuousCounter) ?NtpServiceReport {
     if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_186 or
         device.next_udp_generation != 45 or device.tx_producer != 5 or

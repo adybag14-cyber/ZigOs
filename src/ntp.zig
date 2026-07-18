@@ -140,6 +140,17 @@ pub fn applyResponseAt(
     return .accepted;
 }
 
+pub fn unixTimeToTimestamp(time: UnixTime) ?u64 {
+    const maximum_unix_seconds = std.math.maxInt(u32) - unix_epoch_offset_seconds;
+    if (time.seconds > maximum_unix_seconds) return null;
+    const ntp_seconds = time.seconds + unix_epoch_offset_seconds;
+    return (ntp_seconds << 32) | time.fraction;
+}
+
+pub fn projectedTimestampAt(projected: *const ProjectedClock, current_tick: u64) ?u64 {
+    const time = readProjectedClockAt(projected, current_tick) orelse return null;
+    return unixTimeToTimestamp(time);
+}
 pub fn buildClientRequest(buffer: []u8, transmit_timestamp: u64) ?[]const u8 {
     if (buffer.len < packet_bytes or transmit_timestamp == 0) return null;
     @memset(buffer[0..packet_bytes], 0);

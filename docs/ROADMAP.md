@@ -814,3 +814,11 @@
 - A valid response samples the live HPET or ACPI PM counter, synchronizes wall time, and schedules a refresh deadline.
 - Before refresh no packet is sent; at the deadline a fresh request crosses TX descriptor 7 to cursor 0 and a newer response advances time to Unix second 1800000002.
 - Closing invalidates the owned socket and makes later service steps inactive without sampling time or consuming network state.
+
+## 3.54 - Projected-time NTP timestamp generation
+
+- `unixTimeToTimestamp` converts Unix seconds plus the 32-bit fraction into NTP's 64-bit seconds/fraction representation without floating point.
+- `projectedTimestampAt` reads the synchronized monotonic projection and produces a client transmit timestamp at a caller-selected tick.
+- The fixture anchor maps exactly to `0xEEF4508080000000`; quarter-second and fractional-carry reads map to `0xEEF45080C0000000` and `0xEEF4508140000000`.
+- Unsynchronized clocks, ticks before the projection anchor, and Unix times outside the supported 32-bit NTP seconds era are rejected.
+- The maximum supported Unix time with fraction `0xFFFFFFFF` maps exactly to `0xFFFFFFFFFFFFFFFF`.
