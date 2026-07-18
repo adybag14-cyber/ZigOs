@@ -19,6 +19,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$testMutex = [System.Threading.Mutex]::new($false, 'Local\ZigOsQemuTestHarness')
+$testMutexAcquired = $false
+try {
+    try {
+        $testMutexAcquired = $testMutex.WaitOne([TimeSpan]::FromMinutes(15))
+    } catch [System.Threading.AbandonedMutexException] {
+        $testMutexAcquired = $true
+    }
+    if (-not $testMutexAcquired) {
+        throw 'Timed out waiting for another ZigOs QEMU test to release the shared harness artifacts.'
+    }
+
 if ($LegacyAhci) { $LegacyPci = $true }
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $efiRoot = Join-Path $repoRoot 'zig-out'
@@ -676,6 +688,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e UDP endpoint lifecycle verified: table 4, usable queue 7, duplicate slot 2, full-table rejection yes, queue slot 2 7/7 high-water 7 dropped 1, busy unregister rejected yes, reuse slot 2, final endpoints 2, ingress 21/21 dropped 0, dispatch total/UDP 18/17, unmatched 1, completions TX 25/25 RX 22/22, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
         throw 'The UDP endpoint lifecycle did not preserve FIFO order, enforce capacity, or safely reuse a drained slot.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e UDP socket handles verified: TFTP slot 1 generation 2, lifecycle slot 2 generation 3, duplicate handle yes, reuse slot 2 generation 5, stale active/receive/send/close rejected yes/yes/yes/yes')) {
+        throw 'Generation-tagged UDP sockets did not reject stale lookup, receive, send, and close operations after slot reuse.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
@@ -706,7 +721,7 @@ if (-not $output.Contains('xHCI MSI-X descriptor: vectors 16, table BAR 0 +0x000
     throw 'The xHCI MSI-X table and pending-bit-array descriptor was not decoded.'
 }
 
-if ($NoGraphics) {
+if ($NoGraphics -and -not $NoUsbKeyboard) {
     if (-not $output.Contains('USB keyboard attachment visible: 1 connected xHCI port(s); read-only discovery complete')) {
         throw 'The connected keyboard was not visible during serial-only xHCI discovery.'
     }
@@ -1161,3 +1176,9 @@ if ($NoGraphics) {
 }
 
 Write-Host 'QEMU boot test passed.'
+} finally {
+    if ($testMutexAcquired) {
+        $testMutex.ReleaseMutex()
+    }
+    $testMutex.Dispose()
+}

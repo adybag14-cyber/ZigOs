@@ -2038,6 +2038,30 @@ fn inspectE1000e(
     debugWrite(", RX 0x");
     debugWriteHex64(network.udp_endpoint_lifecycle.rx_pending_mask);
     debugWrite("\r\n");
+
+    debugWrite("e1000e UDP socket handles verified: TFTP slot ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.endpoint_index);
+    debugWrite(" generation ");
+    debugWriteU64Decimal(network.udp_endpoint_demux.socket_generation);
+    debugWrite(", lifecycle slot ");
+    debugWriteU64Decimal(network.udp_endpoint_lifecycle.queue_slot);
+    debugWrite(" generation ");
+    debugWriteU64Decimal(network.udp_endpoint_lifecycle.queue_generation);
+    debugWrite(", duplicate handle ");
+    debugWrite(if (network.udp_endpoint_lifecycle.duplicate_handle_match) "yes" else "no");
+    debugWrite(", reuse slot ");
+    debugWriteU64Decimal(network.udp_endpoint_lifecycle.reuse_slot);
+    debugWrite(" generation ");
+    debugWriteU64Decimal(network.udp_endpoint_lifecycle.reuse_generation);
+    debugWrite(", stale active/receive/send/close rejected ");
+    debugWrite(if (network.udp_endpoint_lifecycle.stale_active_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.udp_endpoint_lifecycle.stale_receive_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.udp_endpoint_lifecycle.stale_send_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.udp_endpoint_lifecycle.stale_close_rejected) "yes" else "no");
+    debugWrite("\r\n");
     return true;
 }
 

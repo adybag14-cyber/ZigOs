@@ -441,3 +441,13 @@
 - Unregistering a non-empty endpoint is rejected; after all packets are dequeued, the endpoint can be removed safely.
 - The freed slot is reused by a new port, then temporary endpoints are removed so the original ports 40001 and 40002 remain active.
 - Hardware completion totals remain twenty-five TX and twenty-two RX because the lifecycle proof operates entirely on stable software-owned packet copies.
+
+## 3.12 - Generation-tagged UDP sockets
+
+- Raw endpoint slots are wrapped in `UdpSocket` handles containing the slot, local port, and a monotonically allocated nonzero generation.
+- The second live TFTP transfer uses `openUdpSocket`, `sendUdpSocket`, and `receiveUdpSocket` for its RRQ, five DATA packets, and five ACKs while preserving the existing descriptor and completion totals.
+- Duplicate opens of the same port return the same live handle without consuming another endpoint slot.
+- Closing and reusing slot 2 advances its generation from 3 to 5; the stale generation-3 handle is rejected by active lookup, receive, send, and close.
+- A rejected stale send must not arm a TX descriptor or change the device submission count.
+- The topology matrix continues to require twenty-five TX and twenty-two RX completions, zero completion overflow, and clean pending masks.
+- The QEMU harness serializes its shared OVMF, NVMe, serial, and debug artifacts across concurrent invocations, and combined no-graphics/no-keyboard runs follow the zero-device assertion path.

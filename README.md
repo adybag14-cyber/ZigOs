@@ -8,9 +8,9 @@ The project deliberately uses the canonical Zig builds published by [`adybag14-c
 
 > ZigOs is a research and learning operating system. It is not ready for production use or general physical-hardware support.
 
-## Current milestone: 3.11
+## Current milestone: 3.12
 
-The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, a persistent queue owner, a bounded software RX packet queue, protocol-specific packet dispatch, retained UDP/TFTP transfers, destination-port UDP endpoint demultiplexing, and bounded endpoint lifecycle management.
+The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, a persistent queue owner, a bounded software RX packet queue, protocol-specific packet dispatch, retained UDP/TFTP transfers, destination-port UDP endpoint demultiplexing, bounded endpoint lifecycle management, and generation-tagged UDP socket handles with reusable send/receive operations.
 
 The deterministic networking sequence is:
 
