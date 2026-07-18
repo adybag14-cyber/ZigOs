@@ -1066,3 +1066,13 @@
 - Refresh and all three recovery originate timestamps are projected from holdover and strictly increase.
 - A valid response after wraparound synchronizes on source zero, clears pending/failure state, records one recovery success, and exposes source zero with three rotations through health.
 - The verifier proves eight transmissions, two accepted replies, three retry-limit hits, three silent cooldowns, live `0→1→2→0` wraparound, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
+
+## 3.83 - Successful samples reset the NTP source-failure chain
+
+- A two-source service with rotation threshold two experiences one complete request timeout and remains on source zero with one consecutive failure.
+- Same-source recovery uses projected time, accepts a valid sample, and resets the consecutive source-failure count to zero without rotating.
+- Health immediately reports source zero, no pending source, zero failures, zero rotations, and one recovery success.
+- A later independent request timeout again records exactly one failure rather than accumulating to two, so source zero is retained and no pending rotation is selected.
+- The second same-source recovery also succeeds and resets the chain, proving successful samples separate outages into independent failure sequences.
+- Both cooldowns remain silent, all requests use the same socket, and refresh/recovery originate timestamps increase monotonically.
+- The verifier proves seven transmissions, three accepted replies, two retry-limit hits, two recovery successes, zero rotations, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
