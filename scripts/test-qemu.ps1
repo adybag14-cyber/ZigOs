@@ -881,6 +881,9 @@ if ($Network) {
     if (-not $output.Contains('NTP client server switch verified: socket 2/57/49198, servers 10.0.2.4 -> 10.0.2.5 -> 10.0.2.4, invalid/idempotent/forward/reverse yes/yes/yes/yes, state invalid/idempotent/forward/reverse yes/yes/yes/yes, socket/MAC/port preserved yes/yes/123, close/inactive/stale yes/yes/yes state yes/yes, no traffic yes, final endpoints/cursor/generation 2/49199/58, IP/TX 79/2, completions TX/RX 106/106/22, ingress 111/111, dispatch 100/99')) {
         throw 'The NTP client server switch did not reject invalid/stale/inactive state transactionally, preserve idempotent state, switch and restore the peer on the same socket, avoid packet traffic, and preserve exact accounting.'
     }
+    if (-not $output.Contains('NTP service source pool verified: invalid pool/state yes/yes, mismatch/state yes/yes, socket 2/58/49199, pool/threshold 2/2 servers 10.0.2.4/10.0.2.5, client/peer/state yes/yes/yes, health pool/policy/source/failures/rotations yes/yes/yes/yes/yes, close/no-traffic yes/yes, final endpoints/cursor/generation 2/49200/59, IP/TX 79/2, completions TX/RX 106/106/22, ingress 111/111, dispatch 100/99')) {
+        throw 'The NTP service source-pool constructor did not reject invalid/mismatched configuration transactionally, select source zero, expose source state through health, close cleanly, and preserve zero-traffic accounting.'
+    }
     if (-not $output.Contains('NTP timestamp verified: base/anchor 0xEEF4508080000000/0xEEF4508080000000, quarter/rollover 0xEEF45080C0000000/0xEEF4508140000000, maximum 0xFFFFFFFFFFFFFFFF, rejects unsynchronized/backward/overflow yes/yes/yes')) {
         throw 'Projected Unix time did not convert into exact NTP timestamps or enforce the supported NTP-era boundary.'
     }

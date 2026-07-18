@@ -1026,3 +1026,13 @@
 - `sourcePoolServer` validates the entire pool before returning an indexed source and rejects out-of-range indices.
 - Invalid pools cannot yield a source even when the requested index would otherwise be in range.
 - The verifier proves zero/single/too-many count rejection, zero-address and duplicate rejection, valid two- and four-source pools, exact indexed selection, unused-slot semantics, and out-of-range behavior.
+
+## 3.79 - NTP service source-pool ownership
+
+- `NtpService` can now own an optional validated source pool and matching source-rotation policy while all existing constructors retain single-source compatibility.
+- `openNtpServiceWithSourcePoolPolicies` validates the pool, rotation policy, and exact source-count match before opening a socket.
+- Source-pool services open the existing NTP client on source index zero and initialize consecutive failure and rotation counters to zero.
+- `NtpServiceHealth` exposes the pool, rotation policy, current source index/server, consecutive source failures, and total source rotations.
+- Every accepted synchronization sample resets consecutive source failures; automatic source switching remains intentionally deferred to the next milestone.
+- Invalid pools and source-count mismatches are rejected transactionally without endpoint, generation, cursor, ID, TX, or submission mutation.
+- The packet-free verifier proves initial peer selection, service-state initialization, health projection, clean close, one socket-lifetime cursor changes, and otherwise unchanged completion, ingress, dispatch, IP-ID, and TX-ring accounting.

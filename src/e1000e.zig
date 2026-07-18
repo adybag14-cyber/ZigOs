@@ -697,6 +697,12 @@ pub const NtpServiceHealth = struct {
     recovery_exhausted: bool,
     recovery_limit_hits: u64,
     recovery_successes: u64,
+    source_pool: ?ntp.SourcePool,
+    source_rotation_policy: ?ntp.SourceRotationPolicy,
+    current_source_index: u8,
+    current_server_ipv4: [4]u8,
+    consecutive_source_failures: u8,
+    source_rotations: u64,
 };
 
 pub const NtpService = struct {
@@ -726,6 +732,11 @@ pub const NtpService = struct {
     recovery_exhausted: bool,
     recovery_limit_hits: u64,
     recovery_successes: u64,
+    source_pool: ?ntp.SourcePool,
+    source_rotation_policy: ?ntp.SourceRotationPolicy,
+    current_source_index: u8,
+    consecutive_source_failures: u8,
+    source_rotations: u64,
     responses: u64,
     quality_accepted: u64,
     quality_rejected: u64,
@@ -764,6 +775,42 @@ pub const NtpServiceStep = struct {
     retried: bool,
     timeout_reached: bool,
     recovery_started: bool,
+};
+
+pub const NtpServiceSourcePoolReport = struct {
+    invalid_pool_rejected: bool,
+    invalid_pool_state_preserved: bool,
+    mismatched_policy_rejected: bool,
+    mismatched_policy_state_preserved: bool,
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    pool_count: u8,
+    rotation_threshold: u8,
+    first_server: [4]u8,
+    second_server: [4]u8,
+    client_server_matches_first: bool,
+    peer_matches_first: bool,
+    source_state_initialized: bool,
+    health_reports_pool: bool,
+    health_reports_policy: bool,
+    health_reports_current_source: bool,
+    health_reports_failure_count: bool,
+    health_reports_rotations: bool,
+    close_succeeded: bool,
+    no_packet_traffic: bool,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    final_generation_cursor: u32,
+    final_identification_cursor: u16,
+    final_tx_cursor: u16,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
 };
 
 pub const NtpClientServerSwitchReport = struct {
@@ -3158,6 +3205,7 @@ pub const NetworkResult = struct {
     ntp_quality_rejection_exhaustion: NtpQualityRejectionExhaustionReport,
     ntp_quality_recovery: NtpQualityRecoveryReport,
     ntp_client_server_switch: NtpClientServerSwitchReport,
+    ntp_service_source_pool: NtpServiceSourcePoolReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -3919,6 +3967,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_service_source_pool = verifyNtpServiceSourcePool(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -4110,6 +4162,7 @@ pub fn initializeAndTestNetwork(
         .ntp_quality_rejection_exhaustion = ntp_quality_rejection_exhaustion,
         .ntp_quality_recovery = ntp_quality_recovery,
         .ntp_client_server_switch = ntp_client_server_switch,
+        .ntp_service_source_pool = ntp_service_source_pool,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -5020,6 +5073,11 @@ pub fn openNtpServiceWithResponseRejectionPolicies(
         .recovery_exhausted = false,
         .recovery_limit_hits = 0,
         .recovery_successes = 0,
+        .source_pool = null,
+        .source_rotation_policy = null,
+        .current_source_index = 0,
+        .consecutive_source_failures = 0,
+        .source_rotations = 0,
         .responses = 0,
         .quality_accepted = 0,
         .quality_rejected = 0,
@@ -5037,6 +5095,44 @@ pub fn openNtpServiceWithResponseRejectionPolicies(
         .step_stale_rejected = 0,
         .step_excessive_forward_rejected = 0,
     };
+}
+
+pub fn openNtpServiceWithSourcePoolPolicies(
+    device: *Device,
+    source_pool: ntp.SourcePool,
+    source_rotation_policy: ntp.SourceRotationPolicy,
+    refresh_ticks: u64,
+    quality_policy: ntp.QualityPolicy,
+    quality_rejection_policy: ntp.QualityRejectionPolicy,
+    step_policy: ntp.ClockStepPolicy,
+    step_rejection_policy: ntp.StepRejectionPolicy,
+    retry_policy: ntp.RetryPolicy,
+    recovery_policy: ?ntp.RecoveryPolicy,
+) ?NtpService {
+    if (!ntp.sourcePoolValid(source_pool) or
+        !ntp.sourceRotationPolicyValid(source_rotation_policy) or
+        source_rotation_policy.source_count != source_pool.count)
+    {
+        return null;
+    }
+    const initial_server = ntp.sourcePoolServer(source_pool, 0) orelse return null;
+    var service = openNtpServiceWithResponseRejectionPolicies(
+        device,
+        initial_server,
+        refresh_ticks,
+        quality_policy,
+        quality_rejection_policy,
+        step_policy,
+        step_rejection_policy,
+        retry_policy,
+        recovery_policy,
+    ) orelse return null;
+    service.source_pool = source_pool;
+    service.source_rotation_policy = source_rotation_policy;
+    service.current_source_index = 0;
+    service.consecutive_source_failures = 0;
+    service.source_rotations = 0;
+    return service;
 }
 
 pub fn closeNtpService(device: *Device, service: *NtpService) bool {
@@ -5101,6 +5197,12 @@ pub fn readNtpServiceHealth(
         .recovery_exhausted = service.recovery_exhausted,
         .recovery_limit_hits = service.recovery_limit_hits,
         .recovery_successes = service.recovery_successes,
+        .source_pool = service.source_pool,
+        .source_rotation_policy = service.source_rotation_policy,
+        .current_source_index = service.current_source_index,
+        .current_server_ipv4 = service.client.server_ipv4,
+        .consecutive_source_failures = service.consecutive_source_failures,
+        .source_rotations = service.source_rotations,
     };
     if (!service.active or !service.client.active) return base;
     if (!service.clock.clock.synchronized) {
@@ -5342,6 +5444,7 @@ pub fn stepNtpService(
                     if (service.automatic_recoveries > 0) service.recovery_successes +|= 1;
                     service.automatic_recoveries = 0;
                     service.recovery_exhausted = false;
+                    service.consecutive_source_failures = 0;
                     service.responses +|= 1;
                     service.refresh_deadline_tick = sample_tick +| service.refresh_interval_ticks;
                     out.state = .idle;
@@ -7118,6 +7221,176 @@ fn verifyNtpRejectionExhaustion(
         .rx_completion_enqueues = rxe,
         .final_registered_endpoints = device.udp_endpoint_count,
         .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+
+fn verifyNtpServiceSourcePool(device: *Device) ?NtpServiceSourcePoolReport {
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_199 or
+        device.next_udp_generation != 58 or device.tx_producer != 2 or
+        device.next_udp_identification != 79 or device.next_dns_transaction_id != 8 or
+        completionQueueEnqueued(&tx_completion_queue) != 106 or
+        completionQueueDequeued(&tx_completion_queue) != 106 or
+        completionQueueEnqueued(&rx_completion_queue) != 22 or
+        device.software_rx_queue.enqueued != 111 or device.software_rx_queue.dequeued != 111 or
+        device.packets_dispatched != 100 or device.udp_packets_dispatched != 99)
+    {
+        return null;
+    }
+
+    var valid_pool = ntp.SourcePool{
+        .count = 2,
+        .servers = std.mem.zeroes([ntp.maximum_source_pool_entries][4]u8),
+    };
+    valid_pool.servers[0] = .{ 10, 0, 2, 4 };
+    valid_pool.servers[1] = .{ 10, 0, 2, 5 };
+    const rotation_policy = ntp.SourceRotationPolicy{
+        .source_count = 2,
+        .failures_before_rotation = 2,
+    };
+    const retry_policy = ntp.RetryPolicy{
+        .initial_interval_ticks = 4,
+        .maximum_interval_ticks = 4,
+        .maximum_retries = 2,
+    };
+
+    const endpoints_before_invalid = device.udp_endpoint_count;
+    const port_before_invalid = device.next_ephemeral_udp_port;
+    const generation_before_invalid = device.next_udp_generation;
+    const id_before_invalid = device.next_udp_identification;
+    const tx_before_invalid = device.tx_producer;
+    const submissions_before_invalid = device.tx_submissions;
+
+    var invalid_pool = valid_pool;
+    invalid_pool.count = 1;
+    const invalid_pool_rejected = openNtpServiceWithSourcePoolPolicies(
+        device,
+        invalid_pool,
+        .{ .source_count = 1, .failures_before_rotation = 2 },
+        20,
+        ntp.default_quality_policy,
+        ntp.default_quality_rejection_policy,
+        ntp.default_clock_step_policy,
+        ntp.default_step_rejection_policy,
+        retry_policy,
+        null,
+    ) == null;
+    const invalid_pool_state_preserved = device.udp_endpoint_count == endpoints_before_invalid and
+        device.next_ephemeral_udp_port == port_before_invalid and
+        device.next_udp_generation == generation_before_invalid and
+        device.next_udp_identification == id_before_invalid and
+        device.tx_producer == tx_before_invalid and device.tx_submissions == submissions_before_invalid;
+    if (!invalid_pool_rejected or !invalid_pool_state_preserved) return null;
+
+    const mismatched_policy_rejected = openNtpServiceWithSourcePoolPolicies(
+        device,
+        valid_pool,
+        .{ .source_count = 3, .failures_before_rotation = 2 },
+        20,
+        ntp.default_quality_policy,
+        ntp.default_quality_rejection_policy,
+        ntp.default_clock_step_policy,
+        ntp.default_step_rejection_policy,
+        retry_policy,
+        null,
+    ) == null;
+    const mismatched_policy_state_preserved = device.udp_endpoint_count == endpoints_before_invalid and
+        device.next_ephemeral_udp_port == port_before_invalid and
+        device.next_udp_generation == generation_before_invalid and
+        device.next_udp_identification == id_before_invalid and
+        device.tx_producer == tx_before_invalid and device.tx_submissions == submissions_before_invalid;
+    if (!mismatched_policy_rejected or !mismatched_policy_state_preserved) return null;
+
+    var service = openNtpServiceWithSourcePoolPolicies(
+        device,
+        valid_pool,
+        rotation_policy,
+        20,
+        ntp.default_quality_policy,
+        ntp.default_quality_rejection_policy,
+        ntp.default_clock_step_policy,
+        ntp.default_step_rejection_policy,
+        retry_policy,
+        null,
+    ) orelse return null;
+    const socket = service.client.socket;
+    if (socket.endpoint_index != 2 or socket.generation != 58 or socket.local_port != 49_199 or
+        device.udp_endpoint_count != 3 or device.next_ephemeral_udp_port != 49_200 or
+        device.next_udp_generation != 59)
+        return null;
+
+    const peer = udpSocketPeer(device, socket) orelse return null;
+    const client_server_matches_first = std.meta.eql(service.client.server_ipv4, valid_pool.servers[0]);
+    const peer_matches_first = std.meta.eql(peer.ipv4, valid_pool.servers[0]) and
+        std.meta.eql(peer.mac, device.gateway_mac) and peer.port == ntp.server_port;
+    const source_state_initialized = service.source_pool != null and
+        std.meta.eql(service.source_pool.?, valid_pool) and service.source_rotation_policy != null and
+        std.meta.eql(service.source_rotation_policy.?, rotation_policy) and
+        service.current_source_index == 0 and service.consecutive_source_failures == 0 and
+        service.source_rotations == 0;
+    if (!client_server_matches_first or !peer_matches_first or !source_state_initialized) return null;
+
+    service.consecutive_source_failures = 1;
+    service.source_rotations = 3;
+    const health = readNtpServiceHealth(&service, 0, 1, 2) orelse return null;
+    const health_reports_pool = health.source_pool != null and std.meta.eql(health.source_pool.?, valid_pool);
+    const health_reports_policy = health.source_rotation_policy != null and
+        std.meta.eql(health.source_rotation_policy.?, rotation_policy);
+    const health_reports_current_source = health.state == .unsynchronized and
+        health.current_source_index == 0 and std.meta.eql(health.current_server_ipv4, valid_pool.servers[0]);
+    const health_reports_failure_count = health.consecutive_source_failures == 1;
+    const health_reports_rotations = health.source_rotations == 3;
+    if (!health_reports_pool or !health_reports_policy or !health_reports_current_source or
+        !health_reports_failure_count or !health_reports_rotations)
+        return null;
+
+    const close_succeeded = closeNtpService(device, &service);
+    if (!close_succeeded or service.active or service.client.active or service.request_active) return null;
+
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const no_packet_traffic = device.next_udp_identification == 79 and device.tx_producer == 2 and
+        device.tx_submissions == submissions_before_invalid and txe == 106 and txd == 106 and rxe == 22 and
+        device.software_rx_queue.enqueued == 111 and device.software_rx_queue.dequeued == 111 and
+        device.packets_dispatched == 100 and device.udp_packets_dispatched == 99;
+    if (!no_packet_traffic or device.udp_endpoint_count != 2 or
+        device.next_ephemeral_udp_port != 49_200 or device.next_udp_generation != 59)
+        return null;
+
+    return .{
+        .invalid_pool_rejected = invalid_pool_rejected,
+        .invalid_pool_state_preserved = invalid_pool_state_preserved,
+        .mismatched_policy_rejected = mismatched_policy_rejected,
+        .mismatched_policy_state_preserved = mismatched_policy_state_preserved,
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .pool_count = valid_pool.count,
+        .rotation_threshold = rotation_policy.failures_before_rotation,
+        .first_server = valid_pool.servers[0],
+        .second_server = valid_pool.servers[1],
+        .client_server_matches_first = client_server_matches_first,
+        .peer_matches_first = peer_matches_first,
+        .source_state_initialized = source_state_initialized,
+        .health_reports_pool = health_reports_pool,
+        .health_reports_policy = health_reports_policy,
+        .health_reports_current_source = health_reports_current_source,
+        .health_reports_failure_count = health_reports_failure_count,
+        .health_reports_rotations = health_reports_rotations,
+        .close_succeeded = close_succeeded,
+        .no_packet_traffic = no_packet_traffic,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .final_generation_cursor = device.next_udp_generation,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_tx_cursor = device.tx_producer,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
         .ingress_enqueued = device.software_rx_queue.enqueued,
         .ingress_dequeued = device.software_rx_queue.dequeued,
         .packets_dispatched = device.packets_dispatched,
