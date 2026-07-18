@@ -79,6 +79,75 @@ pub fn retryIntervalForAttempt(policy: RetryPolicy, attempt_index: u8) ?u64 {
     }
     return interval;
 }
+pub const TimeDelta = struct {
+    seconds: u64,
+    fraction: u32,
+};
+
+pub const ClockStepPolicy = struct {
+    maximum_forward_seconds: u64,
+    maximum_forward_fraction: u32,
+};
+
+pub const ClockStepResult = enum(u8) {
+    accepted,
+    invalid_policy,
+    stale,
+    excessive_forward_step,
+};
+
+pub fn clockStepPolicyValid(policy: ClockStepPolicy) bool {
+    return policy.maximum_forward_seconds > 0 or policy.maximum_forward_fraction > 0;
+}
+
+pub fn forwardTimeDelta(current: UnixTime, candidate: UnixTime) ?TimeDelta {
+    if (!timeAfter(candidate.seconds, candidate.fraction, current.seconds, current.fraction)) {
+        return null;
+    }
+    var seconds = candidate.seconds - current.seconds;
+    const fraction: u32 = if (candidate.fraction >= current.fraction)
+        candidate.fraction - current.fraction
+    else blk: {
+        if (seconds == 0) return null;
+        seconds -= 1;
+        const borrowed = (@as(u64, 1) << 32) +
+            @as(u64, candidate.fraction) - @as(u64, current.fraction);
+        break :blk @intCast(borrowed);
+    };
+    return .{ .seconds = seconds, .fraction = fraction };
+}
+
+pub fn evaluateClockStep(
+    current: UnixTime,
+    candidate: UnixTime,
+    policy: ClockStepPolicy,
+) ClockStepResult {
+    if (!clockStepPolicyValid(policy)) return .invalid_policy;
+    const delta = forwardTimeDelta(current, candidate) orelse return .stale;
+    if (delta.seconds > policy.maximum_forward_seconds or
+        (delta.seconds == policy.maximum_forward_seconds and
+            delta.fraction > policy.maximum_forward_fraction))
+    {
+        return .excessive_forward_step;
+    }
+    return .accepted;
+}
+
+pub fn evaluateResponseStepAt(
+    projected: *const ProjectedClock,
+    response: Response,
+    monotonic_tick: u64,
+    policy: ClockStepPolicy,
+) ?ClockStepResult {
+    if (!clockStepPolicyValid(policy)) return .invalid_policy;
+    if (!projected.clock.synchronized) return .accepted;
+    const current = readProjectedClockAt(projected, monotonic_tick) orelse return null;
+    return evaluateClockStep(
+        current,
+        .{ .seconds = response.unix_seconds, .fraction = response.unix_fraction },
+        policy,
+    );
+}
 pub const RecoveryPolicy = struct {
     cooldown_ticks: u64,
     maximum_recoveries: u8,

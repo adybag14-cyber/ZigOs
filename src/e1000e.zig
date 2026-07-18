@@ -899,6 +899,20 @@ pub const NtpBackoffReport = struct {
     packets_dispatched: u64,
     udp_dispatched: u64,
 };
+pub const NtpStepPolicyReport = struct {
+    invalid_zero_rejected: bool,
+    unsynchronized_initial_accepted: bool,
+    stale_equal_rejected: bool,
+    stale_behind_rejected: bool,
+    exact_borrow_accepted: bool,
+    exact_no_borrow_accepted: bool,
+    excessive_fraction_rejected: bool,
+    excessive_seconds_rejected: bool,
+    borrow_delta_seconds: u64,
+    borrow_delta_fraction: u32,
+    no_borrow_delta_seconds: u64,
+    no_borrow_delta_fraction: u32,
+};
 pub const NtpRecoveryPolicyReport = struct {
     invalid_zero_cooldown_rejected: bool,
     invalid_zero_recoveries_rejected: bool,
@@ -2470,6 +2484,7 @@ pub const NetworkResult = struct {
     ntp_health: NtpHealthReport,
     ntp_retry_policy: NtpRetryPolicyReport,
     ntp_recovery_policy: NtpRecoveryPolicyReport,
+    ntp_step_policy: NtpStepPolicyReport,
 };
 
 var active_bar0: usize = 0;
@@ -3208,6 +3223,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_step_policy = verifyNtpStepPolicy() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -3352,6 +3371,7 @@ pub fn initializeAndTestNetwork(
         .ntp_health = ntp_health,
         .ntp_retry_policy = ntp_retry_policy,
         .ntp_recovery_policy = ntp_recovery_policy,
+        .ntp_step_policy = ntp_step_policy,
     };
 }
 
@@ -6700,6 +6720,92 @@ fn verifyNtpServiceBackoff(
         .ingress_dequeued = device.software_rx_queue.dequeued,
         .packets_dispatched = device.packets_dispatched,
         .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+fn verifyNtpStepPolicy() ?NtpStepPolicyReport {
+    const policy = ntp.ClockStepPolicy{
+        .maximum_forward_seconds = 1,
+        .maximum_forward_fraction = 0x80000000,
+    };
+    const invalid_zero_rejected = ntp.evaluateClockStep(
+        .{ .seconds = 100, .fraction = 0 },
+        .{ .seconds = 101, .fraction = 0 },
+        .{ .maximum_forward_seconds = 0, .maximum_forward_fraction = 0 },
+    ) == .invalid_policy;
+
+    var unsynchronized = std.mem.zeroes(ntp.ProjectedClock);
+    const initial_response = ntp.Response{
+        .leap_indicator = 0,
+        .version = 4,
+        .stratum = 2,
+        .poll = 6,
+        .precision = -20,
+        .root_delay = 0,
+        .root_dispersion = 0,
+        .reference_id = .{ 'S', 'T', 'E', 'P' },
+        .receive_timestamp = ntp.fixture_server_timestamp,
+        .transmit_timestamp = ntp.fixture_server_timestamp,
+        .unix_seconds = ntp.fixture_unix_seconds,
+        .unix_fraction = 0x80000000,
+    };
+    const unsynchronized_initial_accepted =
+        ntp.evaluateResponseStepAt(&unsynchronized, initial_response, 100, policy) == .accepted;
+
+    const current_borrow = ntp.UnixTime{ .seconds = 1_800_000_000, .fraction = 0xC0000000 };
+    const exact_borrow = ntp.UnixTime{ .seconds = 1_800_000_002, .fraction = 0x40000000 };
+    const excessive_fraction = ntp.UnixTime{ .seconds = 1_800_000_002, .fraction = 0x40000001 };
+    const excessive_seconds = ntp.UnixTime{ .seconds = 1_800_000_002, .fraction = 0xC0000000 };
+    const borrow_delta = ntp.forwardTimeDelta(current_borrow, exact_borrow) orelse return null;
+
+    const current_no_borrow = ntp.UnixTime{ .seconds = 1_800_000_000, .fraction = 0x20000000 };
+    const exact_no_borrow = ntp.UnixTime{ .seconds = 1_800_000_001, .fraction = 0xA0000000 };
+    const no_borrow_delta = ntp.forwardTimeDelta(current_no_borrow, exact_no_borrow) orelse return null;
+
+    const stale_equal_rejected = ntp.evaluateClockStep(current_borrow, current_borrow, policy) == .stale;
+    const stale_behind_rejected = ntp.evaluateClockStep(
+        current_borrow,
+        .{ .seconds = current_borrow.seconds, .fraction = current_borrow.fraction - 1 },
+        policy,
+    ) == .stale;
+    const exact_borrow_accepted = ntp.evaluateClockStep(current_borrow, exact_borrow, policy) == .accepted;
+    const exact_no_borrow_accepted = ntp.evaluateClockStep(
+        current_no_borrow,
+        exact_no_borrow,
+        policy,
+    ) == .accepted;
+    const excessive_fraction_rejected = ntp.evaluateClockStep(
+        current_borrow,
+        excessive_fraction,
+        policy,
+    ) == .excessive_forward_step;
+    const excessive_seconds_rejected = ntp.evaluateClockStep(
+        current_borrow,
+        excessive_seconds,
+        policy,
+    ) == .excessive_forward_step;
+
+    if (!invalid_zero_rejected or !unsynchronized_initial_accepted or
+        !stale_equal_rejected or !stale_behind_rejected or !exact_borrow_accepted or
+        !exact_no_borrow_accepted or !excessive_fraction_rejected or
+        !excessive_seconds_rejected or borrow_delta.seconds != 1 or
+        borrow_delta.fraction != 0x80000000 or no_borrow_delta.seconds != 1 or
+        no_borrow_delta.fraction != 0x80000000)
+    {
+        return null;
+    }
+    return .{
+        .invalid_zero_rejected = invalid_zero_rejected,
+        .unsynchronized_initial_accepted = unsynchronized_initial_accepted,
+        .stale_equal_rejected = stale_equal_rejected,
+        .stale_behind_rejected = stale_behind_rejected,
+        .exact_borrow_accepted = exact_borrow_accepted,
+        .exact_no_borrow_accepted = exact_no_borrow_accepted,
+        .excessive_fraction_rejected = excessive_fraction_rejected,
+        .excessive_seconds_rejected = excessive_seconds_rejected,
+        .borrow_delta_seconds = borrow_delta.seconds,
+        .borrow_delta_fraction = borrow_delta.fraction,
+        .no_borrow_delta_seconds = no_borrow_delta.seconds,
+        .no_borrow_delta_fraction = no_borrow_delta.fraction,
     };
 }
 fn verifyNtpRecoveryPolicy() ?NtpRecoveryPolicyReport {

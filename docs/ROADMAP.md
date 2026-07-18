@@ -900,3 +900,11 @@
 - An accepted recovery sample clears timeout/recovery state, resets the consecutive automatic-recovery allowance, and preserves monotonic wall time.
 - A subsequent outage receives the full recovery budget again, proving recovery success is a circuit-breaker reset rather than a lifetime allowance consumption.
 - The live verifier proves two accepted samples, visible holdover, projected recovery timestamps, success accounting, a second allowed recovery, clean close, and exact seven-transmission/two-response accounting.
+## 3.65 - Bounded NTP forward clock-step policy
+
+- `ntp.ClockStepPolicy` expresses the maximum accepted forward correction as exact seconds plus a 32-bit fraction.
+- `forwardTimeDelta` subtracts synchronized timestamps without floating point and handles fractional borrow exactly.
+- Equal and backward candidates are stale; an unsynchronized clock may accept its initial sample.
+- Exact policy equality is accepted. One fractional unit or one whole-second excess is rejected as an excessive forward step.
+- `evaluateResponseStepAt` applies the same policy against projected wall time at a caller-supplied monotonic tick.
+- The verifier proves invalid zero policy, initial acceptance, stale equality/backward behavior, borrow/no-borrow equality, and exact over-boundary rejection.

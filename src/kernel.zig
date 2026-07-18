@@ -5103,6 +5103,31 @@ fn inspectE1000e(
     debugWrite("/");
     debugWrite(if (network.ntp_recovery_policy.overflow_ready) "yes" else "no");
     debugWrite("\r\n");
+    debugWrite("NTP step policy verified: invalid zero rejected ");
+    debugWrite(if (network.ntp_step_policy.invalid_zero_rejected) "yes" else "no");
+    debugWrite(", initial accepted ");
+    debugWrite(if (network.ntp_step_policy.unsynchronized_initial_accepted) "yes" else "no");
+    debugWrite(", stale equal/behind ");
+    debugWrite(if (network.ntp_step_policy.stale_equal_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_step_policy.stale_behind_rejected) "yes" else "no");
+    debugWrite(", exact borrow/no-borrow ");
+    debugWrite(if (network.ntp_step_policy.exact_borrow_accepted) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_step_policy.exact_no_borrow_accepted) "yes" else "no");
+    debugWrite(", excessive fraction/seconds ");
+    debugWrite(if (network.ntp_step_policy.excessive_fraction_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_step_policy.excessive_seconds_rejected) "yes" else "no");
+    debugWrite(", deltas borrow ");
+    debugWriteU64Decimal(network.ntp_step_policy.borrow_delta_seconds);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_step_policy.borrow_delta_fraction);
+    debugWrite(" no-borrow ");
+    debugWriteU64Decimal(network.ntp_step_policy.no_borrow_delta_seconds);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_step_policy.no_borrow_delta_fraction);
+    debugWrite("\r\n");
     return true;
 }
 

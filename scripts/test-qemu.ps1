@@ -871,6 +871,9 @@ if ($Network) {
     if (-not $output.Contains('NTP recovery policy verified: invalid zero-cooldown/zero-recoveries yes/yes, deadline 110, before/at/second/exhausted yes/yes/yes/yes, overflow deadline 18446744073709551615 waiting/ready yes/yes')) {
         throw 'The NTP recovery policy did not enforce validation, exact cooldown boundaries, recovery limits, and overflow-safe deadline saturation.'
     }
+    if (-not $output.Contains('NTP step policy verified: invalid zero rejected yes, initial accepted yes, stale equal/behind yes/yes, exact borrow/no-borrow yes/yes, excessive fraction/seconds yes/yes, deltas borrow 1/0x80000000 no-borrow 1/0x80000000')) {
+        throw 'The NTP clock-step policy did not enforce exact fixed-point stale, borrow, no-borrow, boundary, and excessive-forward-step behavior.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'
