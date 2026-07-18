@@ -104,6 +104,11 @@ const dispatched_tftp_identification: u16 = 0x5A60;
 const endpoint_tftp_client_port: u16 = 40_002;
 const endpoint_tftp_identification: u16 = 0x5A70;
 const unmatched_udp_port: u16 = 49_999;
+const lifecycle_udp_port: u16 = 41_000;
+const lifecycle_second_udp_port: u16 = 41_001;
+const lifecycle_overflow_udp_port: u16 = 41_002;
+const lifecycle_reuse_udp_port: u16 = 41_003;
+const lifecycle_source_port: u16 = 12_345;
 const icmp_payload = "ZigOs-ICMP-ECHO!";
 const icmp_ipv4_total_bytes: usize = ipv4_header_bytes + icmp_header_bytes + icmp_payload.len;
 const icmp_ethernet_frame_bytes: usize = 14 + icmp_ipv4_total_bytes;
@@ -401,6 +406,34 @@ pub const UdpEndpointDemuxReport = struct {
     rx_pending_mask: u32,
 };
 
+pub const UdpEndpointLifecycleReport = struct {
+    table_capacity: u16,
+    usable_queue_capacity: u16,
+    duplicate_slot: u16,
+    full_table_rejected: bool,
+    queue_slot: u16,
+    queue_enqueued: u64,
+    queue_dequeued: u64,
+    queue_high_water: u16,
+    queue_dropped: u64,
+    busy_unregister_rejected: bool,
+    reuse_slot: u16,
+    final_registered_endpoints: u16,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    ingress_dropped: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+    unmatched_dropped: u64,
+    tx_queue_enqueues: u64,
+    tx_queue_dequeues: u64,
+    rx_queue_enqueues: u64,
+    rx_queue_dequeues: u64,
+    completion_queue_overflows: u64,
+    tx_pending_mask: u32,
+    rx_pending_mask: u32,
+};
+
 pub const NetworkResult = struct {
     rx_ring_address: usize,
     tx_ring_address: usize,
@@ -496,6 +529,7 @@ pub const NetworkResult = struct {
     protocol_dispatch: ProtocolDispatchReport,
     udp_tftp_dispatch: UdpTftpDispatchReport,
     udp_endpoint_demux: UdpEndpointDemuxReport,
+    udp_endpoint_lifecycle: UdpEndpointLifecycleReport,
 };
 
 var active_bar0: usize = 0;
@@ -1034,6 +1068,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const udp_endpoint_lifecycle = verifyUdpEndpointLifecycle(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -1130,6 +1168,7 @@ pub fn initializeAndTestNetwork(
         .protocol_dispatch = protocol_dispatch,
         .udp_tftp_dispatch = udp_tftp_dispatch,
         .udp_endpoint_demux = udp_endpoint_demux,
+        .udp_endpoint_lifecycle = udp_endpoint_lifecycle,
     };
 }
 
@@ -1982,6 +2021,140 @@ fn verifyUdpEndpointDemux(device: *Device) ?UdpEndpointDemuxReport {
         .endpoint_queue_dequeued = endpoint.queue.dequeued,
         .endpoint_queue_high_water = endpoint.queue.high_water,
         .endpoint_queue_dropped = endpoint.queue.dropped,
+        .tx_queue_enqueues = tx_queue_enqueues,
+        .tx_queue_dequeues = tx_queue_dequeues,
+        .rx_queue_enqueues = rx_queue_enqueues,
+        .rx_queue_dequeues = rx_queue_dequeues,
+        .completion_queue_overflows = completion_queue_overflows,
+        .tx_pending_mask = final_tx_pending,
+        .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
+    if (registerUdpEndpoint(device, 0) != null) return null;
+    if (unregisterUdpEndpoint(device, udp_endpoint_capacity)) return null;
+
+    const queue_slot = registerUdpEndpoint(device, lifecycle_udp_port) orelse return null;
+    if (queue_slot != 2 or device.udp_endpoint_count != 3) return null;
+    const duplicate_slot = registerUdpEndpoint(device, lifecycle_udp_port) orelse return null;
+    if (duplicate_slot != queue_slot or device.udp_endpoint_count != 3) return null;
+    const second_slot = registerUdpEndpoint(device, lifecycle_second_udp_port) orelse return null;
+    if (second_slot != 3 or device.udp_endpoint_count != udp_endpoint_capacity) return null;
+    const full_table_rejected = registerUdpEndpoint(device, lifecycle_overflow_udp_port) == null;
+    if (!full_table_rejected) return null;
+
+    const usable_queue_capacity: usize = software_packet_queue_capacity - 1;
+    var packet_index: usize = 0;
+    while (packet_index < software_packet_queue_capacity) : (packet_index += 1) {
+        var frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+        const payload = [_]u8{ 0xA5, @intCast(packet_index) };
+        const frame_length = udp.buildFrame(&frame, .{
+            .source_mac = device.gateway_mac,
+            .destination_mac = device.local_mac,
+            .source_ipv4 = device.gateway_ipv4,
+            .destination_ipv4 = device.local_ipv4,
+            .source_port = lifecycle_source_port,
+            .destination_port = lifecycle_udp_port,
+            .identification = @intCast(0x5B00 + packet_index),
+            .payload = &payload,
+        }) orelse return null;
+        var packet = std.mem.zeroes(Packet);
+        packet.length = frame_length;
+        packet.source_descriptor = @intCast(0xFF00 + packet_index);
+        @memcpy(packet.bytes[0..frame_length], frame[0..frame_length]);
+        if (!enqueueQueuedPacket(&device.software_rx_queue, packet)) return null;
+        const dispatched = dispatchNextPacket(device);
+        if (dispatched != (packet_index < usable_queue_capacity)) return null;
+    }
+
+    const endpoint = &device.udp_endpoints[queue_slot];
+    const queue_enqueued = endpoint.queue.enqueued;
+    const queue_high_water = endpoint.queue.high_water;
+    const queue_dropped = endpoint.queue.dropped;
+    if (queue_enqueued != usable_queue_capacity or
+        queue_high_water != usable_queue_capacity or queue_dropped != 1)
+    {
+        return null;
+    }
+
+    const busy_unregister_rejected = !unregisterUdpEndpoint(device, queue_slot);
+    if (!busy_unregister_rejected) return null;
+
+    packet_index = 0;
+    while (packet_index < usable_queue_capacity) : (packet_index += 1) {
+        const packet = dequeueUdpEndpointPacket(device, queue_slot) orelse return null;
+        const datagram = udp.parseFrame(packet.bytes[0..packet.length], .{
+            .destination_mac = device.local_mac,
+            .source_mac = device.gateway_mac,
+            .destination_ipv4 = device.local_ipv4,
+            .source_ipv4 = device.gateway_ipv4,
+            .destination_port = lifecycle_udp_port,
+            .source_port = lifecycle_source_port,
+        }) orelse return null;
+        if (datagram.payload.len != 2 or datagram.payload[0] != 0xA5 or
+            datagram.payload[1] != packet_index)
+        {
+            return null;
+        }
+    }
+    const queue_dequeued = endpoint.queue.dequeued;
+    if (queue_dequeued != usable_queue_capacity or endpoint.queue.head != endpoint.queue.tail) return null;
+    if (!unregisterUdpEndpoint(device, queue_slot)) return null;
+
+    const reuse_slot = registerUdpEndpoint(device, lifecycle_reuse_udp_port) orelse return null;
+    if (reuse_slot != queue_slot or device.udp_endpoint_count != udp_endpoint_capacity) return null;
+    if (!unregisterUdpEndpoint(device, reuse_slot)) return null;
+    if (!unregisterUdpEndpoint(device, second_slot)) return null;
+
+    const tx_queue_enqueues = completionQueueEnqueued(&tx_completion_queue);
+    const tx_queue_dequeues = completionQueueDequeued(&tx_completion_queue);
+    const rx_queue_enqueues = completionQueueEnqueued(&rx_completion_queue);
+    const rx_queue_dequeues = completionQueueDequeued(&rx_completion_queue);
+    const completion_queue_overflows = completionQueueOverflow(&tx_completion_queue) +
+        completionQueueOverflow(&rx_completion_queue);
+    const final_tx_pending = @atomicLoad(u32, &tx_pending_mask, .acquire);
+    const final_rx_pending = @atomicLoad(u32, &rx_pending_mask, .acquire);
+    if (device.udp_endpoint_count != 2 or
+        !device.udp_endpoints[0].active or !device.udp_endpoints[1].active or
+        device.udp_endpoints[2].active or device.udp_endpoints[3].active or
+        device.software_rx_queue.enqueued != 21 or
+        device.software_rx_queue.dequeued != 21 or
+        device.software_rx_queue.dropped != 0 or
+        device.software_rx_queue.head != device.software_rx_queue.tail or
+        device.packets_dispatched != 18 or
+        device.udp_packets_dispatched != 17 or
+        device.unmatched_udp_packets_dropped != 1 or
+        device.unknown_packets_dropped != 0 or
+        device.tx_producer != 1 or device.rx_consumer != 6 or
+        tx_queue_enqueues != 25 or tx_queue_dequeues != 25 or
+        rx_queue_enqueues != 22 or rx_queue_dequeues != 22 or
+        completion_queue_overflows != 0 or final_tx_pending != 0 or
+        final_rx_pending != all_rx_descriptors_pending or
+        tx_ready_mask != 0 or rx_ready_mask != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .table_capacity = udp_endpoint_capacity,
+        .usable_queue_capacity = usable_queue_capacity,
+        .duplicate_slot = duplicate_slot,
+        .full_table_rejected = full_table_rejected,
+        .queue_slot = queue_slot,
+        .queue_enqueued = queue_enqueued,
+        .queue_dequeued = queue_dequeued,
+        .queue_high_water = queue_high_water,
+        .queue_dropped = queue_dropped,
+        .busy_unregister_rejected = busy_unregister_rejected,
+        .reuse_slot = reuse_slot,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .ingress_dropped = device.software_rx_queue.dropped,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+        .unmatched_dropped = device.unmatched_udp_packets_dropped,
         .tx_queue_enqueues = tx_queue_enqueues,
         .tx_queue_dequeues = tx_queue_dequeues,
         .rx_queue_enqueues = rx_queue_enqueues,

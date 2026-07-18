@@ -673,6 +673,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'e1000e UDP endpoint demux verified: endpoints 2, miss port 49999 dropped 1, TFTP port 40002 slot 1, RRQ TX descriptor 3, DATA RX descriptors 1/2/3/4/5, ACK TX descriptors 4/5/6/7/0, blocks 5, payload 2304 bytes, FNV-1a64 0x6175986CBBAB5125, endpoint queue 5/5 high-water 1 dropped 0, final cursors TX/RX 1/6, wraps 2/1, ingress 13/13 dropped 0, dispatch ARP/ICMP/UDP 0/1/10, completions TX 25/25 RX 22/22, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
         throw 'The UDP endpoint table did not isolate port 40002 or account for the unmatched destination port.'
     }
+    if (-not [regex]::IsMatch($output, 'e1000e UDP endpoint lifecycle verified: table 4, usable queue 7, duplicate slot 2, full-table rejection yes, queue slot 2 7/7 high-water 7 dropped 1, busy unregister rejected yes, reuse slot 2, final endpoints 2, ingress 21/21 dropped 0, dispatch total/UDP 18/17, unmatched 1, completions TX 25/25 RX 22/22, overflow 0, pending TX 0x0000000000000000, RX 0x00000000000000FF')) {
+        throw 'The UDP endpoint lifecycle did not preserve FIFO order, enforce capacity, or safely reuse a drained slot.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

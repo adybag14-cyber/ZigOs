@@ -8,9 +8,9 @@ The project deliberately uses the canonical Zig builds published by [`adybag14-c
 
 > ZigOs is a research and learning operating system. It is not ready for production use or general physical-hardware support.
 
-## Current milestone: 3.10
+## Current milestone: 3.11
 
-The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, a persistent queue owner, a bounded software RX packet queue, protocol-specific packet dispatch, retained UDP/TFTP transfers, and destination-port UDP endpoint demultiplexing.
+The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, a persistent queue owner, a bounded software RX packet queue, protocol-specific packet dispatch, retained UDP/TFTP transfers, destination-port UDP endpoint demultiplexing, and bounded endpoint lifecycle management.
 
 The deterministic networking sequence is:
 
@@ -136,6 +136,7 @@ Assembly is used where exact instruction, register, descriptor, interrupt-entry,
 - Bounded software ingress queue with ARP/ICMP/UDP classification and independent protocol queues.
 - Retained five-block TFTP transfer routed through the UDP packet queue with TX/RX wrap.
 - Four-slot UDP endpoint table with destination-port routing and unmatched-port accounting.
+- Duplicate-safe endpoint registration, bounded FIFO saturation, guarded removal, and slot reuse.
 - Deterministic 2,304-byte fixture validation, cumulative hash, TX descriptor reuse, and RX descriptor recycling.
 
 ## Requirements

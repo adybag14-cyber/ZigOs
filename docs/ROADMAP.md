@@ -431,3 +431,13 @@
 - Existing TFTP client port 40001 occupies slot 0; a second endpoint on port 40002 occupies slot 1 and completes another five-block transfer.
 - Port 40002 receives DATA descriptors `1/2/3/4/5`, sends ACK descriptors `4/5/6/7/0`, and validates the same 2,304-byte deterministic payload.
 - Final hardware completion totals are twenty-five TX and twenty-two RX records with two TX wraps, one RX wrap, one unmatched drop, zero queue drops, and clean descriptor masks.
+
+
+## 3.11 - UDP endpoint lifecycle and capacity
+
+- Duplicate registration is idempotent, port zero is rejected, all four endpoint slots can be occupied, and a fifth registration is refused.
+- An endpoint queue is filled to its seven-packet usable ring capacity with valid UDP datagrams and preserves FIFO payload order while draining.
+- The eighth packet is dropped deterministically, raising the queue high-water mark to seven without corrupting ingress or other endpoints.
+- Unregistering a non-empty endpoint is rejected; after all packets are dequeued, the endpoint can be removed safely.
+- The freed slot is reused by a new port, then temporary endpoints are removed so the original ports 40001 and 40002 remain active.
+- Hardware completion totals remain twenty-five TX and twenty-two RX because the lifecycle proof operates entirely on stable software-owned packet copies.
