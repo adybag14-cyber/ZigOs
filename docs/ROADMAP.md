@@ -958,3 +958,12 @@
 - A bounded, quality-valid recovery sample applies at one hardware reference tick, increments recovery success, and resets consecutive recovery, retry, and discipline-rejection budgets.
 - Health returns to synchronized state with monotonic wall time and exposes the completed recovery without losing timeout or forced-retry accounting.
 - The live verifier proves four transmissions, four consumed replies, no hidden cooldown traffic, exact HPET/ACPI PM timer behavior, clean close, and exact ring/accounting deltas.
+
+## 3.72 - Bounded NTP quality-rejection budget
+
+- `ntp.QualityRejectionPolicy` defines a nonzero maximum number of quality rejections allowed for one active request.
+- `evaluateQualityRejectionBudget` is side-effect free and returns invalid policy, retain request, or retry now plus the exact remaining allowance.
+- Counts strictly below the limit retain the request; equality and all larger counts transition deterministically to immediate retry.
+- Zero current rejections report the full allowance, making the decision usable before and after each quality rejection.
+- Arithmetic remains safe at the `u8` maximum: count 254 retains one allowance and count 255 retries immediately.
+- The verifier proves invalid zero policy, zero/first/penultimate retention, exact boundary/beyond retry, remaining allowance, and maximum-count behavior.

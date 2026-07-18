@@ -153,6 +153,45 @@ pub fn evaluateResponseStepAt(
         policy,
     );
 }
+pub const QualityRejectionPolicy = struct {
+    maximum_rejections_per_request: u8,
+};
+
+pub const default_quality_rejection_policy = QualityRejectionPolicy{
+    .maximum_rejections_per_request = std.math.maxInt(u8),
+};
+
+pub const QualityRejectionAction = enum(u8) {
+    invalid_policy,
+    retain_request,
+    retry_now,
+};
+
+pub const QualityRejectionDecision = struct {
+    action: QualityRejectionAction,
+    remaining_before_retry: u8,
+};
+
+pub fn qualityRejectionPolicyValid(policy: QualityRejectionPolicy) bool {
+    return policy.maximum_rejections_per_request > 0;
+}
+
+pub fn evaluateQualityRejectionBudget(
+    policy: QualityRejectionPolicy,
+    current_rejections: u8,
+) QualityRejectionDecision {
+    if (!qualityRejectionPolicyValid(policy)) {
+        return .{ .action = .invalid_policy, .remaining_before_retry = 0 };
+    }
+    if (current_rejections >= policy.maximum_rejections_per_request) {
+        return .{ .action = .retry_now, .remaining_before_retry = 0 };
+    }
+    return .{
+        .action = .retain_request,
+        .remaining_before_retry = policy.maximum_rejections_per_request - current_rejections,
+    };
+}
+
 pub const StepRejectionPolicy = struct {
     maximum_rejections_per_request: u8,
 };
