@@ -4521,6 +4521,12 @@ fn inspectE1000e(
     debugWriteU64Decimal(network.ntp_service.socket_generation);
     debugWrite("/");
     debugWriteU64Decimal(network.ntp_service.local_port);
+    debugWrite(", bootstrap rejected/state preserved ");
+    debugWrite(if (network.ntp_service.bootstrap_zero_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_service.bootstrap_state_preserved) "yes" else "no");
+    debugWrite(", initial timestamp 0x");
+    debugWriteHex64(network.ntp_service.initial_client_timestamp);
     debugWrite(", intervals ");
     debugWriteU64Decimal(network.ntp_service.retry_interval_ticks);
     debugWrite("/");
@@ -4541,6 +4547,8 @@ fn inspectE1000e(
     debugWriteU64Decimal(network.ntp_service.retry_next_cursor);
     debugWrite(" transmissions ");
     debugWriteU64Decimal(network.ntp_service.retry_transmissions);
+    debugWrite(" timestamp preserved ");
+    debugWrite(if (network.ntp_service.retry_timestamp_preserved) "yes" else "no");
     debugWrite(", first sample ");
     debugWriteU64Decimal(network.ntp_service.first_sample_tick);
     debugWrite(" time ");
@@ -4549,8 +4557,14 @@ fn inspectE1000e(
     debugWriteHex32(network.ntp_service.first_fraction);
     debugWrite(" deadline ");
     debugWriteU64Decimal(network.ntp_service.first_refresh_deadline);
+    debugWrite(", pre-anchor idle preserved ");
+    debugWrite(if (network.ntp_service.pre_anchor_idle_preserved) "yes" else "no");
     debugWrite(", before refresh no-TX ");
     debugWrite(if (network.ntp_service.before_refresh_no_tx) "yes" else "no");
+    debugWrite(", refresh timestamp 0x");
+    debugWriteHex64(network.ntp_service.refresh_client_timestamp);
+    debugWrite(" automatic ");
+    debugWrite(if (network.ntp_service.refresh_timestamp_automatic) "yes" else "no");
     debugWrite(", refresh TX ");
     debugWriteU64Decimal(network.ntp_service.refresh_identification);
     debugWrite("/");

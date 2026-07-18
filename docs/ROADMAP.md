@@ -830,3 +830,10 @@
 - `stepNtpServiceAutomatic` reuses an in-flight request's retained originate timestamp and selects a fresh projected timestamp only when starting a new transaction.
 - Zero bootstrap and ticks before the projection anchor are rejected without producing a timestamp.
 - The deterministic proof maps bootstrap, anchor, and quarter-second selection to `0xEEF4507F40000000`, `0xEEF4508080000000`, and `0xEEF45080C0000000`.
+## 3.56 - Live automatic NTP service timestamps
+
+- `stepNtpServiceAutomatic` now selects a timestamp only when a new request is actually due, so idle calls before the projected-clock anchor remain valid and non-consuming.
+- An unsynchronized service rejects a zero bootstrap timestamp without consuming an IPv4 identification, TX descriptor, completion, or submission.
+- The initial request uses the explicit bootstrap timestamp; retries preserve that request's original originate timestamp exactly.
+- Once synchronized, a refresh request ignores the bootstrap argument and derives its originate timestamp from projected wall time at the refresh deadline.
+- The live e1000e verifier proves bootstrap rejection, retry preservation, pre-anchor idle behavior, projected-time refresh, two accepted samples, exact accounting, and inert shutdown.

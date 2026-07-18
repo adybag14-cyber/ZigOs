@@ -707,6 +707,13 @@ pub const NtpServiceReport = struct {
     socket_slot: u16,
     socket_generation: u32,
     local_port: u16,
+    bootstrap_zero_rejected: bool,
+    bootstrap_state_preserved: bool,
+    pre_anchor_idle_preserved: bool,
+    initial_client_timestamp: u64,
+    retry_timestamp_preserved: bool,
+    refresh_client_timestamp: u64,
+    refresh_timestamp_automatic: bool,
     retry_interval_ticks: u64,
     refresh_interval_ticks: u64,
     initial_identification: u16,
@@ -3767,6 +3774,10 @@ pub fn stepNtpServiceAutomatic(
     if (service.request_active) {
         return stepNtpService(device, service, counter, now_tick, service.request.client_timestamp, budget);
     }
+    const start_due = !service.clock.clock.synchronized or now_tick >= service.refresh_deadline_tick;
+    if (!start_due) {
+        return stepNtpService(device, service, counter, now_tick, 0, budget);
+    }
     const timestamp = selectNtpServiceTimestamp(service, now_tick, bootstrap_timestamp) orelse return null;
     return stepNtpService(device, service, counter, now_tick, timestamp, budget);
 }
@@ -5151,42 +5162,124 @@ fn verifyNtpService(device: *Device, counter: *time_reference.ContinuousCounter)
         device.udp_endpoint_count != 3) return null;
     const submissions_before = device.tx_submissions;
     const start_tick = counter.read();
-    const initial = stepNtpService(device, &service, counter, start_tick, ntp.fixture_client_timestamp, 0) orelse return null;
+
+    const bootstrap_snapshot = service;
+    const bootstrap_identification = device.next_udp_identification;
+    const bootstrap_tx_cursor = device.tx_producer;
+    const bootstrap_submissions = device.tx_submissions;
+    const bootstrap_zero_rejected = stepNtpServiceAutomatic(
+        device,
+        &service,
+        counter,
+        start_tick,
+        0,
+        0,
+    ) == null;
+    const bootstrap_state_preserved = std.meta.eql(service, bootstrap_snapshot) and
+        device.next_udp_identification == bootstrap_identification and
+        device.tx_producer == bootstrap_tx_cursor and
+        device.tx_submissions == bootstrap_submissions;
+    if (!bootstrap_zero_rejected or !bootstrap_state_preserved) return null;
+
+    const initial = stepNtpServiceAutomatic(
+        device,
+        &service,
+        counter,
+        start_tick,
+        ntp.fixture_client_timestamp,
+        0,
+    ) orelse return null;
     const initial_tx = initial.transmit orelse return null;
+    const initial_client_timestamp = service.request.client_timestamp;
     if (initial.state != .awaiting or initial.start_reason != .initial or
+        initial_client_timestamp != ntp.fixture_client_timestamp or
         initial_tx.identification != 34 or initial_tx.completion.descriptor_index != 5 or
         initial_tx.completion.next_cursor != 6 or service.requests_started != 1 or
         service.retry_deadline_tick != start_tick + 1) return null;
-    const early = stepNtpService(device, &service, counter, start_tick, ntp.fixture_client_timestamp, 0) orelse return null;
+
+    const early = stepNtpServiceAutomatic(device, &service, counter, start_tick, 0, 0) orelse return null;
     if (early.state != .awaiting or early.transmit != null or early.retried or
         service.retries != 0 or service.request.transmissions != 1) return null;
-    const retry = stepNtpService(device, &service, counter, start_tick + 1, ntp.fixture_client_timestamp, 0) orelse return null;
+
+    const retry = stepNtpServiceAutomatic(device, &service, counter, start_tick + 1, 0, 0) orelse return null;
     const retry_tx = retry.transmit orelse return null;
-    if (!retry.retried or retry_tx.identification != 35 or
+    const retry_timestamp_preserved = service.request.client_timestamp == initial_client_timestamp;
+    if (!retry.retried or !retry_timestamp_preserved or retry_tx.identification != 35 or
         retry_tx.completion.descriptor_index != 6 or retry_tx.completion.next_cursor != 7 or
         service.retries != 1 or service.request.transmissions != 2) return null;
     const retry_transmissions = service.request.transmissions;
-    if (!enqueueNtpServiceResponse(device, socket, server, service.request.client_timestamp, ntp.fixture_server_timestamp, 0x7700, 0xE800)) return null;
-    const first = stepNtpService(device, &service, counter, start_tick + 1, ntp.fixture_client_timestamp, 1) orelse return null;
+
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        server,
+        service.request.client_timestamp,
+        ntp.fixture_server_timestamp,
+        0x7700,
+        0xE800,
+    )) return null;
+    const first = stepNtpServiceAutomatic(device, &service, counter, start_tick + 1, 0, 1) orelse return null;
     const first_tick = first.sample_tick orelse return null;
     const first_time = ntp.readProjectedClockAt(&service.clock, first_tick) orelse return null;
     if (first.state != .idle or first.poll.state != .resolved or first.apply_result != .accepted or
         first_time.seconds != ntp.fixture_unix_seconds or first_time.fraction != 0x80000000 or
         service.request_active or service.responses != 1 or service.refresh_deadline_tick != first_tick + 2)
         return null;
-    const before = stepNtpService(device, &service, counter, service.refresh_deadline_tick - 1, ntp.fixture_client_timestamp + (@as(u64, 1) << 32), 0) orelse return null;
+
+    const pre_anchor_snapshot = service;
+    const pre_anchor_identification = device.next_udp_identification;
+    const pre_anchor_tx_cursor = device.tx_producer;
+    const pre_anchor_submissions = device.tx_submissions;
+    const pre_anchor_tick = if (first_tick == 0) 0 else first_tick - 1;
+    const pre_anchor = stepNtpServiceAutomatic(device, &service, counter, pre_anchor_tick, 0, 0) orelse return null;
+    const pre_anchor_idle_preserved = pre_anchor.state == .idle and pre_anchor.transmit == null and
+        std.meta.eql(service, pre_anchor_snapshot) and
+        device.next_udp_identification == pre_anchor_identification and
+        device.tx_producer == pre_anchor_tx_cursor and
+        device.tx_submissions == pre_anchor_submissions;
+    if (!pre_anchor_idle_preserved) return null;
+
+    const before = stepNtpServiceAutomatic(
+        device,
+        &service,
+        counter,
+        service.refresh_deadline_tick - 1,
+        0,
+        0,
+    ) orelse return null;
     if (before.state != .idle or before.transmit != null or service.request_active or
         service.requests_started != 1) return null;
-    const refresh_timestamp = ntp.fixture_client_timestamp + (@as(u64, 1) << 32);
-    const refresh = stepNtpService(device, &service, counter, service.refresh_deadline_tick, refresh_timestamp, 0) orelse return null;
+
+    const refresh_tick = service.refresh_deadline_tick;
+    const expected_refresh_timestamp = ntp.projectedTimestampAt(&service.clock, refresh_tick) orelse return null;
+    const refresh = stepNtpServiceAutomatic(device, &service, counter, refresh_tick, 0, 0) orelse return null;
     const refresh_tx = refresh.transmit orelse return null;
+    const refresh_client_timestamp = service.request.client_timestamp;
+    const refresh_timestamp_automatic = refresh_client_timestamp == expected_refresh_timestamp and
+        refresh_client_timestamp != ntp.fixture_client_timestamp;
     if (refresh.state != .awaiting or refresh.start_reason != .refresh or
-        refresh_tx.identification != 36 or refresh_tx.completion.descriptor_index != 7 or
-        refresh_tx.completion.next_cursor != 0 or service.requests_started != 2 or
-        service.request.transmissions != 1) return null;
+        !refresh_timestamp_automatic or refresh_tx.identification != 36 or
+        refresh_tx.completion.descriptor_index != 7 or refresh_tx.completion.next_cursor != 0 or
+        service.requests_started != 2 or service.request.transmissions != 1) return null;
+
     const refreshed_server = ntp.fixture_server_timestamp + (@as(u64, 2) << 32);
-    if (!enqueueNtpServiceResponse(device, socket, server, service.request.client_timestamp, refreshed_server, 0x7701, 0xE801)) return null;
-    const second = stepNtpService(device, &service, counter, service.retry_deadline_tick - 1, refresh_timestamp, 1) orelse return null;
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        server,
+        service.request.client_timestamp,
+        refreshed_server,
+        0x7701,
+        0xE801,
+    )) return null;
+    const second = stepNtpServiceAutomatic(
+        device,
+        &service,
+        counter,
+        service.retry_deadline_tick - 1,
+        0,
+        1,
+    ) orelse return null;
     const second_tick = second.sample_tick orelse return null;
     const second_time = ntp.readProjectedClockAt(&service.clock, second_tick) orelse return null;
     if (second.state != .idle or second.poll.state != .resolved or second.apply_result != .accepted or
@@ -5194,17 +5287,19 @@ fn verifyNtpService(device: *Device, counter: *time_reference.ContinuousCounter)
         service.request_active or service.requests_started != 2 or service.retries != 1 or
         service.responses != 2 or service.clock.clock.accepted_samples != 2 or
         service.clock.clock.stale_samples != 0) return null;
+
     const snapshot = service;
     const close_ok = closeNtpService(device, &service);
     const id_before = device.next_udp_identification;
     const tx_before = device.tx_producer;
     const submissions_at_close = device.tx_submissions;
-    const inactive = stepNtpService(device, &service, counter, second_tick, refresh_timestamp, 1) orelse return null;
+    const inactive = stepNtpServiceAutomatic(device, &service, counter, second_tick, 0, 1) orelse return null;
     const inactive_preserved = inactive.state == .inactive and inactive.transmit == null and
         inactive.sample_tick == null and inactive.apply_result == null and
         std.meta.eql(service.clock, snapshot.clock) and device.next_udp_identification == id_before and
         device.tx_producer == tx_before and device.tx_submissions == submissions_at_close;
     if (!close_ok or service.active or service.client.active or !inactive_preserved) return null;
+
     const txe = completionQueueEnqueued(&tx_completion_queue);
     const txd = completionQueueDequeued(&tx_completion_queue);
     const rxe = completionQueueEnqueued(&rx_completion_queue);
@@ -5216,7 +5311,60 @@ fn verifyNtpService(device: *Device, counter: *time_reference.ContinuousCounter)
         device.software_rx_queue.enqueued != 82 or device.software_rx_queue.dequeued != 82 or
         device.packets_dispatched != 71 or device.udp_packets_dispatched != 70 or
         txe != 64 or txd != 64 or rxe != 22 or overflow != 0) return null;
-    return .{ .source_kind = counter.reference.kind, .frequency_hz = counter.frequency_hz, .counter_bits = counter.counter_bits, .socket_slot = socket.endpoint_index, .socket_generation = socket.generation, .local_port = socket.local_port, .retry_interval_ticks = 1, .refresh_interval_ticks = 2, .initial_identification = initial_tx.identification, .initial_descriptor = initial_tx.completion.descriptor_index, .initial_next_cursor = initial_tx.completion.next_cursor, .early_no_tx = early.transmit == null, .retry_identification = retry_tx.identification, .retry_descriptor = retry_tx.completion.descriptor_index, .retry_next_cursor = retry_tx.completion.next_cursor, .retry_transmissions = retry_transmissions, .first_sample_tick = first_tick, .first_seconds = first_time.seconds, .first_fraction = first_time.fraction, .first_refresh_deadline = first_tick + 2, .before_refresh_no_tx = before.transmit == null, .refresh_identification = refresh_tx.identification, .refresh_descriptor = refresh_tx.completion.descriptor_index, .refresh_next_cursor = refresh_tx.completion.next_cursor, .second_sample_tick = second_tick, .second_seconds = second_time.seconds, .second_fraction = second_time.fraction, .requests_started = snapshot.requests_started, .retries = snapshot.retries, .responses = snapshot.responses, .close_succeeded = close_ok, .inactive_preserved = inactive_preserved, .final_identification_cursor = device.next_udp_identification, .final_tx_cursor = device.tx_producer, .tx_submissions_delta = device.tx_submissions - submissions_before, .tx_completion_enqueues = txe, .tx_completion_dequeues = txd, .rx_completion_enqueues = rxe, .final_registered_endpoints = device.udp_endpoint_count, .final_ephemeral_cursor = device.next_ephemeral_udp_port, .ingress_enqueued = device.software_rx_queue.enqueued, .ingress_dequeued = device.software_rx_queue.dequeued, .packets_dispatched = device.packets_dispatched, .udp_dispatched = device.udp_packets_dispatched };
+
+    return .{
+        .source_kind = counter.reference.kind,
+        .frequency_hz = counter.frequency_hz,
+        .counter_bits = counter.counter_bits,
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .bootstrap_zero_rejected = bootstrap_zero_rejected,
+        .bootstrap_state_preserved = bootstrap_state_preserved,
+        .pre_anchor_idle_preserved = pre_anchor_idle_preserved,
+        .initial_client_timestamp = initial_client_timestamp,
+        .retry_timestamp_preserved = retry_timestamp_preserved,
+        .refresh_client_timestamp = refresh_client_timestamp,
+        .refresh_timestamp_automatic = refresh_timestamp_automatic,
+        .retry_interval_ticks = 1,
+        .refresh_interval_ticks = 2,
+        .initial_identification = initial_tx.identification,
+        .initial_descriptor = initial_tx.completion.descriptor_index,
+        .initial_next_cursor = initial_tx.completion.next_cursor,
+        .early_no_tx = early.transmit == null,
+        .retry_identification = retry_tx.identification,
+        .retry_descriptor = retry_tx.completion.descriptor_index,
+        .retry_next_cursor = retry_tx.completion.next_cursor,
+        .retry_transmissions = retry_transmissions,
+        .first_sample_tick = first_tick,
+        .first_seconds = first_time.seconds,
+        .first_fraction = first_time.fraction,
+        .first_refresh_deadline = first_tick + 2,
+        .before_refresh_no_tx = before.transmit == null,
+        .refresh_identification = refresh_tx.identification,
+        .refresh_descriptor = refresh_tx.completion.descriptor_index,
+        .refresh_next_cursor = refresh_tx.completion.next_cursor,
+        .second_sample_tick = second_tick,
+        .second_seconds = second_time.seconds,
+        .second_fraction = second_time.fraction,
+        .requests_started = snapshot.requests_started,
+        .retries = snapshot.retries,
+        .responses = snapshot.responses,
+        .close_succeeded = close_ok,
+        .inactive_preserved = inactive_preserved,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_tx_cursor = device.tx_producer,
+        .tx_submissions_delta = device.tx_submissions - submissions_before,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+    };
 }
 fn verifyNtpReferenceClock(
     device: *Device,
