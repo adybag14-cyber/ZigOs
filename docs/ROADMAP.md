@@ -522,3 +522,12 @@
 - Two sockets each receive two datagrams; successive one-handle service cycles select slots `2,3,2,3` with cursor states `3,0,3,0`.
 - Payload delivery order becomes `0,2,1,3`, demonstrating inter-socket fairness while retaining FIFO order within each socket.
 - A zero-ready cycle leaves the cursor stable, and closing the temporary sockets preserves the original endpoint table and all prior drop accounting.
+
+## 3.21 - Transactional automatic UDP identification
+
+- The retained device owns a nonzero IPv4 identification cursor for application-level connected UDP sends.
+- `sendConnectedUdpDatagram` chooses the current identification, delegates to the connected socket path, and advances the cursor only after a completed hardware transmission.
+- Unconnected sockets and zero-TTL requests are rejected without arming a TX descriptor, changing submission totals, or consuming an identification.
+- Two normal sends emit IDs `0x7000` and `0x7001`; forcing the cursor to `0xFFFF` proves wrap to `0x0001` while zero remains reserved.
+- The four frames use TX descriptors `1/2/3/4`, advance cursors `2/3/4/5`, and each retain the Ethernet minimum length of 60 bytes.
+- Completion totals advance from 25 to 29 with zero overflow, clean TX pending state, unchanged RX ownership, and the original two UDP endpoints preserved.

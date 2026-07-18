@@ -2428,6 +2428,63 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.udp_fair_service.udp_dispatched);
     debugWrite("\r\n");
+
+    debugWrite("e1000e UDP automatic identification verified: socket ");
+    debugWriteU64Decimal(network.udp_automatic_identification.socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_automatic_identification.socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_automatic_identification.local_port);
+    debugWrite(", peer port ");
+    debugWriteU64Decimal(network.udp_automatic_identification.peer_port);
+    debugWrite(", unconnected/zero-TTL rejected ");
+    debugWrite(if (network.udp_automatic_identification.unconnected_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.udp_automatic_identification.zero_ttl_rejected) "yes" else "no");
+    debugWrite(", cursor preserved ");
+    debugWrite(if (network.udp_automatic_identification.cursor_preserved_on_failure) "yes" else "no");
+    debugWrite(", IDs ");
+    for (network.udp_automatic_identification.identifications, 0..) |identification, index| {
+        if (index != 0) debugWrite("/");
+        debugWrite("0x");
+        debugWriteHex16(identification);
+    }
+    debugWrite(", descriptors ");
+    for (network.udp_automatic_identification.descriptors, 0..) |value, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(value);
+    }
+    debugWrite(", cursors ");
+    for (network.udp_automatic_identification.next_cursors, 0..) |value, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(value);
+    }
+    debugWrite(", frames ");
+    for (network.udp_automatic_identification.frame_lengths, 0..) |value, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(value);
+    }
+    debugWrite(", final ID/TX cursor ");
+    debugWriteU64Decimal(network.udp_automatic_identification.final_identification_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_automatic_identification.final_tx_cursor);
+    debugWrite(", submissions ");
+    debugWriteU64Decimal(network.udp_automatic_identification.tx_submissions_delta);
+    debugWrite(", completions ");
+    debugWriteU64Decimal(network.udp_automatic_identification.tx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_automatic_identification.tx_completion_dequeues);
+    debugWrite(", overflow ");
+    debugWriteU64Decimal(network.udp_automatic_identification.completion_overflow);
+    debugWrite(", pending TX/RX 0x");
+    debugWriteHex64(network.udp_automatic_identification.tx_pending_mask);
+    debugWrite("/0x");
+    debugWriteHex64(network.udp_automatic_identification.rx_pending_mask);
+    debugWrite(", endpoints/ephemeral cursor ");
+    debugWriteU64Decimal(network.udp_automatic_identification.final_registered_endpoints);
+    debugWrite("/");
+    debugWriteU64Decimal(network.udp_automatic_identification.final_ephemeral_cursor);
+    debugWrite("\r\n");
     return true;
 }
 

@@ -715,6 +715,9 @@ if ($Network) {
     if (-not $output.Contains('e1000e UDP fair service verified: sockets 2/18/49159 and 3/19/49160, initial dispatch/ready/pending 4/4/0/4, selections slot/gen/payload/cursor 2/18/0/3 -> 3/19/2/0 -> 2/18/1/3 -> 3/19/3/0, empty/final cursor 0/0, endpoints/ephemeral cursor 2/49161, ingress 46/46, dispatch total/UDP 35/34')) {
         throw 'Round-robin readable socket selection did not alternate endpoints while preserving per-socket FIFO order.'
     }
+    if (-not $output.Contains('e1000e UDP automatic identification verified: socket 2/20/49161, peer port 9, unconnected/zero-TTL rejected yes/yes, cursor preserved yes, IDs 0x7000/0x7001/0xFFFF/0x0001, descriptors 1/2/3/4, cursors 2/3/4/5, frames 60/60/60/60, final ID/TX cursor 2/5, submissions 4, completions 29/29, overflow 0, pending TX/RX 0x0000000000000000/0x00000000000000FF, endpoints/ephemeral cursor 2/49162')) {
+        throw 'Automatic UDP IPv4 identification did not preserve cursor state on failure or wrap without emitting zero.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

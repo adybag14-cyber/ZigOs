@@ -8,9 +8,9 @@ The project deliberately uses the canonical Zig builds published by [`adybag14-c
 
 > ZigOs is a research and learning operating system. It is not ready for production use or general physical-hardware support.
 
-## Current milestone: 3.20
+## Current milestone: 3.21
 
-The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, a persistent queue owner, a bounded software RX packet queue, protocol-specific packet dispatch, retained UDP/TFTP transfers, destination-port UDP endpoint demultiplexing, bounded endpoint lifecycle management, generation-tagged UDP socket handles, checksum-validating UDP dispatch, peer-connected socket filtering, structured datagram receive metadata, connected UDP transmission, deterministic ephemeral-port allocation, nonblocking socket readiness/queue control, bounded multi-packet dispatch, endpoint-wide readiness polling, generation-safe UDP service cycles, and round-robin readable-socket fairness.
+The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, a persistent queue owner, a bounded software RX packet queue, protocol-specific packet dispatch, retained UDP/TFTP transfers, destination-port UDP endpoint demultiplexing, bounded endpoint lifecycle management, generation-tagged UDP socket handles, checksum-validating UDP dispatch, peer-connected socket filtering, structured datagram receive metadata, connected UDP transmission, deterministic ephemeral-port allocation, nonblocking socket readiness/queue control, bounded multi-packet dispatch, endpoint-wide readiness polling, generation-safe UDP service cycles, round-robin readable-socket fairness, and transactional automatic IPv4 identification.
 
 The deterministic networking sequence is:
 

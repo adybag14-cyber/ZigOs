@@ -244,6 +244,11 @@ pub const ConnectedUdpSendOptions = struct {
     payload: []const u8,
 };
 
+pub const UdpTransmitResult = struct {
+    completion: TxCompletion,
+    identification: u16,
+};
+
 pub const UdpReadySockets = struct {
     sockets: [udp_endpoint_capacity]UdpSocket,
     count: u8,
@@ -330,6 +335,7 @@ pub const Device = struct {
     next_udp_generation: u32,
     next_ephemeral_udp_port: u16,
     next_udp_ready_index: u8,
+    next_udp_identification: u16,
     unmatched_udp_packets_dropped: u64,
     invalid_udp_packets_dropped: u64,
     peer_mismatch_udp_packets_dropped: u64,
@@ -518,6 +524,30 @@ pub const UdpEndpointDemuxReport = struct {
     completion_queue_overflows: u64,
     tx_pending_mask: u32,
     rx_pending_mask: u32,
+};
+
+pub const UdpAutomaticIdentificationReport = struct {
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    peer_port: u16,
+    unconnected_rejected: bool,
+    zero_ttl_rejected: bool,
+    cursor_preserved_on_failure: bool,
+    identifications: [4]u16,
+    descriptors: [4]u16,
+    next_cursors: [4]u16,
+    frame_lengths: [4]u16,
+    final_identification_cursor: u16,
+    tx_submissions_delta: u64,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    completion_overflow: u64,
+    tx_pending_mask: u32,
+    rx_pending_mask: u32,
+    final_tx_cursor: u16,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
 };
 
 pub const UdpFairServiceReport = struct {
@@ -850,6 +880,7 @@ pub const NetworkResult = struct {
     udp_endpoint_poll: UdpEndpointPollReport,
     udp_service_cycle: UdpServiceCycleReport,
     udp_fair_service: UdpFairServiceReport,
+    udp_automatic_identification: UdpAutomaticIdentificationReport,
 };
 
 var active_bar0: usize = 0;
@@ -1363,6 +1394,7 @@ pub fn initializeAndTestNetwork(
         .next_udp_generation = 1,
         .next_ephemeral_udp_port = ephemeral_udp_port_first,
         .next_udp_ready_index = 0,
+        .next_udp_identification = 0x7000,
         .unmatched_udp_packets_dropped = 0,
         .invalid_udp_packets_dropped = 0,
         .peer_mismatch_udp_packets_dropped = 0,
@@ -1422,6 +1454,10 @@ pub fn initializeAndTestNetwork(
         return null;
     };
     const udp_fair_service = verifyUdpFairService(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
+    const udp_automatic_identification = verifyUdpAutomaticIdentification(device) orelse {
         active_device_storage = null;
         return null;
     };
@@ -1529,6 +1565,7 @@ pub fn initializeAndTestNetwork(
         .udp_endpoint_poll = udp_endpoint_poll,
         .udp_service_cycle = udp_service_cycle,
         .udp_fair_service = udp_fair_service,
+        .udp_automatic_identification = udp_automatic_identification,
     };
 }
 
@@ -1981,6 +2018,26 @@ pub fn sendConnectedUdpSocket(
     });
 }
 
+pub fn sendConnectedUdpDatagram(
+    device: *Device,
+    socket: UdpSocket,
+    ttl: u8,
+    payload: []const u8,
+) ?UdpTransmitResult {
+    var identification = device.next_udp_identification;
+    if (identification == 0) identification = 1;
+    const completion = sendConnectedUdpSocket(device, socket, .{
+        .identification = identification,
+        .ttl = ttl,
+        .payload = payload,
+    }) orelse return null;
+    device.next_udp_identification = nextUdpIdentification(identification);
+    return .{
+        .completion = completion,
+        .identification = identification,
+    };
+}
+
 pub fn closeUdpSocket(device: *Device, socket: UdpSocket) bool {
     _ = udpSocketEndpoint(device, socket) orelse return false;
     return unregisterUdpEndpoint(device, socket.endpoint_index);
@@ -2015,6 +2072,11 @@ fn validUdpPeer(peer: UdpPeer) bool {
 
 fn nextEphemeralUdpPort(port: u16) u16 {
     return if (port >= ephemeral_udp_port_last) ephemeral_udp_port_first else port + 1;
+}
+
+fn nextUdpIdentification(identification: u16) u16 {
+    const next = identification +% 1;
+    return if (next == 0) 1 else next;
 }
 
 fn allocateUdpGeneration(device: *Device) u32 {
@@ -2863,6 +2925,108 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyUdpAutomaticIdentification(device: *Device) ?UdpAutomaticIdentificationReport {
+    const socket = openEphemeralUdpSocket(device) orelse return null;
+    if (socket.endpoint_index != 2 or socket.generation != 20 or socket.local_port != 49_161 or
+        device.next_ephemeral_udp_port != 49_162 or device.next_udp_generation != 21 or
+        device.next_udp_identification != 0x7000 or device.udp_endpoint_count != 3 or
+        device.tx_producer != 1)
+    {
+        return null;
+    }
+
+    const payload = [_]u8{ 0x49, 0x44, 0x21 };
+    const initial_identification = device.next_udp_identification;
+    const submissions_before = device.tx_submissions;
+    const unconnected_rejected = sendConnectedUdpDatagram(device, socket, 64, &payload) == null;
+    const cursor_after_unconnected = device.next_udp_identification;
+    const peer = UdpPeer{
+        .mac = device.gateway_mac,
+        .ipv4 = device.gateway_ipv4,
+        .port = 9,
+    };
+    if (!connectUdpSocket(device, socket, peer)) return null;
+    const zero_ttl_rejected = sendConnectedUdpDatagram(device, socket, 0, &payload) == null;
+    const cursor_preserved_on_failure = unconnected_rejected and zero_ttl_rejected and
+        cursor_after_unconnected == initial_identification and
+        device.next_udp_identification == initial_identification and
+        device.tx_submissions == submissions_before and device.tx_producer == 1;
+    if (!cursor_preserved_on_failure) return null;
+
+    var identifications = std.mem.zeroes([4]u16);
+    var descriptors = std.mem.zeroes([4]u16);
+    var next_cursors = std.mem.zeroes([4]u16);
+    var frame_lengths = std.mem.zeroes([4]u16);
+
+    const first = sendConnectedUdpDatagram(device, socket, 64, &payload) orelse return null;
+    const second = sendConnectedUdpDatagram(device, socket, 64, &payload) orelse return null;
+    device.next_udp_identification = 0xFFFF;
+    const wrap = sendConnectedUdpDatagram(device, socket, 64, &payload) orelse return null;
+    const post_wrap = sendConnectedUdpDatagram(device, socket, 64, &payload) orelse return null;
+    const sends = [_]UdpTransmitResult{ first, second, wrap, post_wrap };
+    for (sends, 0..) |send, index| {
+        identifications[index] = send.identification;
+        descriptors[index] = send.completion.descriptor_index;
+        next_cursors[index] = send.completion.next_cursor;
+        frame_lengths[index] = send.completion.frame_length;
+    }
+    if (!std.mem.eql(u16, &identifications, &[_]u16{ 0x7000, 0x7001, 0xFFFF, 1 }) or
+        !std.mem.eql(u16, &descriptors, &[_]u16{ 1, 2, 3, 4 }) or
+        !std.mem.eql(u16, &next_cursors, &[_]u16{ 2, 3, 4, 5 }) or
+        !std.mem.eql(u16, &frame_lengths, &[_]u16{ 60, 60, 60, 60 }) or
+        device.next_udp_identification != 2 or device.tx_producer != 5 or
+        device.tx_submissions != submissions_before + 4)
+    {
+        return null;
+    }
+
+    const tx_completion_enqueues = completionQueueEnqueued(&tx_completion_queue);
+    const tx_completion_dequeues = completionQueueDequeued(&tx_completion_queue);
+    const completion_overflow = completionQueueOverflow(&tx_completion_queue) +
+        completionQueueOverflow(&rx_completion_queue);
+    const final_tx_pending = @atomicLoad(u32, &tx_pending_mask, .acquire);
+    const final_rx_pending = @atomicLoad(u32, &rx_pending_mask, .acquire);
+    if (tx_completion_enqueues != 29 or tx_completion_dequeues != 29 or
+        completion_overflow != 0 or final_tx_pending != 0 or
+        final_rx_pending != all_rx_descriptors_pending or tx_ready_mask != 0 or rx_ready_mask != 0)
+    {
+        return null;
+    }
+    if (!closeUdpSocket(device, socket)) return null;
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_162 or
+        device.software_rx_queue.enqueued != 46 or device.software_rx_queue.dequeued != 46 or
+        device.packets_dispatched != 35 or device.udp_packets_dispatched != 34 or
+        device.unmatched_udp_packets_dropped != 3 or device.invalid_udp_packets_dropped != 3 or
+        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .peer_port = peer.port,
+        .unconnected_rejected = unconnected_rejected,
+        .zero_ttl_rejected = zero_ttl_rejected,
+        .cursor_preserved_on_failure = cursor_preserved_on_failure,
+        .identifications = identifications,
+        .descriptors = descriptors,
+        .next_cursors = next_cursors,
+        .frame_lengths = frame_lengths,
+        .final_identification_cursor = device.next_udp_identification,
+        .tx_submissions_delta = device.tx_submissions - submissions_before,
+        .tx_completion_enqueues = tx_completion_enqueues,
+        .tx_completion_dequeues = tx_completion_dequeues,
+        .completion_overflow = completion_overflow,
+        .tx_pending_mask = final_tx_pending,
+        .rx_pending_mask = final_rx_pending,
+        .final_tx_cursor = device.tx_producer,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
     };
 }
 
