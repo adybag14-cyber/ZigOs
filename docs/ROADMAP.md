@@ -1076,3 +1076,13 @@
 - The second same-source recovery also succeeds and resets the chain, proving successful samples separate outages into independent failure sequences.
 - Both cooldowns remain silent, all requests use the same socket, and refresh/recovery originate timestamps increase monotonically.
 - The verifier proves seven transmissions, three accepted replies, two retry-limit hits, two recovery successes, zero rotations, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
+
+## 3.84 - Terminal multi-source NTP recovery exhaustion
+
+- A three-source service permits exactly two automatic recoveries, rotating source zero to one and one to two on the same UDP socket.
+- Each failed request includes one bounded retry, records one source failure, selects the next source, and preserves the current peer through a silent two-tick cooldown.
+- After the source-two request exhausts its retry allowance, the recovery budget is already spent, so the timeout returns terminal `exhausted` state immediately with no wraparound transmission.
+- Terminal state preserves source two as the connected peer, pending source zero as the diagnostic wrap target, one current-source failure, two completed rotations, and the original socket handle.
+- Repeated service steps remain exhausted without incrementing the recovery-limit counter again or mutating IP-ID, TX-ring, or submission cursors.
+- The synchronized clock remains visible as advancing holdover while health reports source, pending target, failure count, rotation count, retry exhaustion, recovery exhaustion, and the single recovery-limit hit.
+- The verifier proves seven transmissions, one accepted sample, three retry-limit hits, two source rotations, zero recovery successes, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
