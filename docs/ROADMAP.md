@@ -796,3 +796,12 @@
 - A second protocol-valid response with the original server timestamp is stale relative to the advanced hardware-backed clock and cannot reanchor it.
 - Closing the NTP client makes later reference-clock polling inactive without sampling the counter or changing synchronized time.
 - The proof completes at IPv4 ID 33, TX cursor 5, 61 TX completions, and ingress/UDP dispatch totals `80/80` and `69/68` on both HPET and ACPI PM timer paths.
+
+## 3.52 - Fail-fast resource-safe QEMU harness
+
+- The shared QEMU mutex now rejects duplicate launchers immediately by default instead of allowing PowerShell or Python parents to queue for fifteen minutes.
+- `-HarnessWaitSeconds` permits a bounded intentional wait while retaining fail-fast behavior for normal local and automated runs.
+- After exclusive ownership is obtained, the harness removes only stale QEMU or NVMe-image-builder processes whose command line is rooted in this ZigOs checkout; unrelated Android emulator processes are never selected.
+- QEMU runs at below-normal Windows process priority and its process object is disposed after forced or normal shutdown.
+- `scripts/cleanup-zigos-tests.ps1` provides inspection-first manual recovery and requires `-Terminate` before stopping repository-owned QEMU, test-harness PowerShell, or bounded build-helper Python processes.
+- The cleanup and mutex rules prevent the duplicate process trees that previously exhausted host memory while preserving the single-test shared artifact model.

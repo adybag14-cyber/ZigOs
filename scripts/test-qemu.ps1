@@ -15,6 +15,8 @@ param(
     [switch]$SparseApicIds,
     [switch]$NoX2Apic,
     [switch]$HighApicId,
+    [ValidateRange(0, 900)]
+    [int]$HarnessWaitSeconds = 0,
     [switch]$Network
 )
 
@@ -23,12 +25,12 @@ $testMutex = [System.Threading.Mutex]::new($false, 'Local\ZigOsQemuTestHarness')
 $testMutexAcquired = $false
 try {
     try {
-        $testMutexAcquired = $testMutex.WaitOne([TimeSpan]::FromMinutes(15))
+        $testMutexAcquired = $testMutex.WaitOne([TimeSpan]::FromSeconds($HarnessWaitSeconds))
     } catch [System.Threading.AbandonedMutexException] {
         $testMutexAcquired = $true
     }
     if (-not $testMutexAcquired) {
-        throw 'Timed out waiting for another ZigOs QEMU test to release the shared harness artifacts.'
+        throw "Another ZigOs QEMU test already owns the shared harness artifacts. Refusing to queue another launcher; pass -HarnessWaitSeconds N only when an intentional wait is required."
     }
 
 if ($LegacyAhci) { $LegacyPci = $true }
@@ -54,6 +56,31 @@ $qemuCandidates = @(
 $qemu = $qemuCandidates | Select-Object -First 1
 if (-not $qemu) {
     throw 'qemu-system-x86_64 was not found.'
+}
+$repoRootSlash = $repoRoot.Replace('\', '/')
+$staleProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+    if ($_.ProcessId -eq $PID -or [string]::IsNullOrWhiteSpace($_.CommandLine)) { return $false }
+    $ownedByRepo = $_.CommandLine.IndexOf($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $_.CommandLine.IndexOf($repoRootSlash, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    if (-not $ownedByRepo) { return $false }
+    if ($_.Name -eq 'qemu-system-x86_64.exe') { return $true }
+    return $_.Name -in @('python.exe', 'pythonw.exe', 'py.exe') -and
+        $_.CommandLine -match 'create-nvme-test-image\.py'
+})
+foreach ($staleProcess in $staleProcesses) {
+    Write-Warning "Terminating stale ZigOs-owned $($staleProcess.Name) process $($staleProcess.ProcessId) before using shared test artifacts."
+    Stop-Process -Id $staleProcess.ProcessId -Force -ErrorAction SilentlyContinue
+}
+if ($staleProcesses.Count -ne 0) {
+    $cleanupDeadline = (Get-Date).AddSeconds(5)
+    do {
+        $remainingStale = @($staleProcesses | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+        if ($remainingStale.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $cleanupDeadline)
+    if ($remainingStale.Count -ne 0) {
+        throw "Unable to terminate $($remainingStale.Count) stale ZigOs-owned process(es)."
+    }
 }
 
 $shareDir = Join-Path (Split-Path -Parent $qemu) 'share'
@@ -244,6 +271,12 @@ if ($NoGraphics) {
 
 Write-Host "Booting ZigOs in QEMU with $codeSource (machine: $machineType, CPU: $cpuArgument, CPUs: $CpuCount, SMP: $smpArgument, NVMe-only: $NvmeOnly, no USB keyboard: $NoUsbKeyboard, mouse-only: $UsbMouseOnly, no graphics: $NoGraphics, legacy PCI: $LegacyPci, legacy AHCI: $LegacyAhci, NVMe block size: $nvmeBlockSize, no PS/2: $NoPs2, no HPET: $NoHpet, sparse APIC IDs: $SparseApicIds, no x2APIC: $NoX2Apic, high APIC ID: $HighApicId, network: $Network)"
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -RedirectStandardOutput $qemuStdout -RedirectStandardError $qemuStderr -PassThru -WindowStyle Hidden
+try {
+    $process.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+    Write-Host "QEMU process $($process.Id) running at below-normal priority."
+} catch {
+    Write-Warning "Could not lower QEMU process priority: $($_.Exception.Message)"
+}
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
 $captured = $false
@@ -281,6 +314,7 @@ finally {
         Stop-Process -Id $process.Id -Force
         $process.WaitForExit()
     }
+    $process.Dispose()
 }
 
 if (-not (Test-Path $debugLog)) {
