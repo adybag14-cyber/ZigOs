@@ -916,3 +916,10 @@
 - A quality-accepted but stale or excessive response is consumed and counted while the request remains active; wall time and recovery state remain unchanged.
 - Health snapshots expose accepted and per-reason step rejection counters alongside quality and retry state.
 - The live verifier injects an excessive 100-second reply, proves sampled-but-unapplied transactional rejection, then accepts a bounded two-second reply on the retained request with exact two-TX/three-RX accounting.
+## 3.67 - Stale NTP sample retention and retry
+
+- A syntactically valid and quality-accepted stale response is sampled and classified by the live clock-step gate without applying wall time.
+- Stale rejection increments the dedicated discipline counter while leaving the projected clock, active request, originate timestamp, and retry deadline intact.
+- The retained request follows the normal deadline-driven retry path rather than opening a new socket or transaction.
+- A later bounded response on the same request may synchronize successfully and closes the rejection/retry cycle.
+- The live verifier proves stale transactional rejection, exact retry timing, retry timestamp preservation, two transmissions plus one retry, three consumed replies, clean close, and exact ring/accounting deltas.
