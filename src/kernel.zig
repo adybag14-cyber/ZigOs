@@ -3193,6 +3193,42 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.dns_retry.udp_dispatched);
     debugWrite("\r\n");
+
+    debugWrite("DNS cache verified: capacity/active ");
+    debugWriteU64Decimal(network.dns_cache.capacity);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_cache.active_entries);
+    debugWrite(", invalid/zero-TTL rejected ");
+    debugWrite(if (network.dns_cache.invalid_store_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_cache.zero_ttl_rejected) "yes" else "no");
+    debugWrite(", case hit/TTL ");
+    debugWrite(if (network.dns_cache.case_insensitive_hit) "yes" else "no");
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_cache.first_ttl_remaining);
+    debugWrite(", eviction/expiration/refresh ");
+    debugWrite(if (network.dns_cache.eviction_verified) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_cache.expiration_verified) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_cache.refresh_verified) "yes" else "no");
+    debugWrite(", refreshed A ");
+    debugWriteIpv4(network.dns_cache.refreshed_address);
+    debugWrite(" TTL ");
+    debugWriteU64Decimal(network.dns_cache.refreshed_ttl_remaining);
+    debugWrite(", stats hits/misses/stores/refreshes/evictions/expirations ");
+    debugWriteU64Decimal(network.dns_cache.hits);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_cache.misses);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_cache.stores);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_cache.refreshes);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_cache.evictions);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_cache.expirations);
+    debugWrite("\r\n");
     return true;
 }
 

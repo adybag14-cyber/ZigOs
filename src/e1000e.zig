@@ -593,6 +593,26 @@ pub const DnsAQueryPoll = struct {
     response: ?DnsAResponse,
 };
 
+pub const DnsCacheReport = struct {
+    capacity: u8,
+    active_entries: u8,
+    invalid_store_rejected: bool,
+    zero_ttl_rejected: bool,
+    case_insensitive_hit: bool,
+    first_ttl_remaining: u32,
+    eviction_verified: bool,
+    expiration_verified: bool,
+    refresh_verified: bool,
+    refreshed_address: [4]u8,
+    refreshed_ttl_remaining: u32,
+    hits: u64,
+    misses: u64,
+    stores: u64,
+    refreshes: u64,
+    evictions: u64,
+    expirations: u64,
+};
+
 pub const DnsRetryReport = struct {
     socket_slot: u16,
     socket_generation: u32,
@@ -1334,6 +1354,7 @@ pub const NetworkResult = struct {
     dns_alias: DnsAliasReport,
     dns_alias_transaction: DnsAliasTransactionReport,
     dns_retry: DnsRetryReport,
+    dns_cache: DnsCacheReport,
 };
 
 var active_bar0: usize = 0;
@@ -1962,6 +1983,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const dns_cache = verifyDnsCache() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -2079,6 +2104,7 @@ pub fn initializeAndTestNetwork(
         .dns_alias = dns_alias,
         .dns_alias_transaction = dns_alias_transaction,
         .dns_retry = dns_retry,
+        .dns_cache = dns_cache,
     };
 }
 
@@ -3660,6 +3686,73 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyDnsCache() ?DnsCacheReport {
+    var cache = std.mem.zeroes(dns.Cache);
+    const invalid_store_rejected = !dns.storeCachedA(&cache, "bad..name", .{ 192, 0, 2, 1 }, 100, 0);
+    const zero_ttl_rejected = !dns.storeCachedA(&cache, "zero.test", .{ 192, 0, 2, 1 }, 0, 0);
+    if (!invalid_store_rejected or !zero_ttl_rejected or dns.cacheEntryCount(&cache) != 0 or
+        cache.stores != 0 or cache.clock != 0)
+    {
+        return null;
+    }
+
+    if (!dns.storeCachedA(&cache, "a.test", .{ 192, 0, 2, 1 }, 200, 0) or
+        !dns.storeCachedA(&cache, "b.test", .{ 192, 0, 2, 2 }, 200, 0) or
+        !dns.storeCachedA(&cache, "c.test", .{ 192, 0, 2, 3 }, 50, 0) or
+        !dns.storeCachedA(&cache, "d.test", .{ 192, 0, 2, 4 }, 200, 0))
+    {
+        return null;
+    }
+    const case_hit = dns.lookupCachedA(&cache, "B.TEST", 1) orelse return null;
+    const case_insensitive_hit = std.mem.eql(u8, &case_hit.address, &[_]u8{ 192, 0, 2, 2 }) and
+        case_hit.ttl_remaining == 199;
+    if (!case_insensitive_hit) return null;
+
+    if (!dns.storeCachedA(&cache, "e.test", .{ 192, 0, 2, 5 }, 200, 2)) return null;
+    const eviction_verified = dns.lookupCachedA(&cache, "a.test", 2) == null;
+    if (!eviction_verified) return null;
+    _ = dns.lookupCachedA(&cache, "b.test", 2) orelse return null;
+    _ = dns.lookupCachedA(&cache, "c.test", 2) orelse return null;
+    _ = dns.lookupCachedA(&cache, "d.test", 2) orelse return null;
+    _ = dns.lookupCachedA(&cache, "e.test", 2) orelse return null;
+
+    const expiration_verified = dns.lookupCachedA(&cache, "c.test", 101) == null;
+    if (!expiration_verified or !dns.storeCachedA(&cache, "f.test", .{ 192, 0, 2, 6 }, 200, 101)) return null;
+    _ = dns.lookupCachedA(&cache, "d.test", 101) orelse return null;
+    _ = dns.lookupCachedA(&cache, "e.test", 101) orelse return null;
+    _ = dns.lookupCachedA(&cache, "f.test", 101) orelse return null;
+
+    if (!dns.storeCachedA(&cache, "B.Test", .{ 192, 0, 2, 99 }, 300, 110)) return null;
+    const refreshed = dns.lookupCachedA(&cache, "b.test", 110) orelse return null;
+    const refresh_verified = std.mem.eql(u8, &refreshed.address, &[_]u8{ 192, 0, 2, 99 }) and
+        refreshed.ttl_remaining == 300 and dns.cacheEntryCount(&cache) == dns.cache_capacity;
+    if (!refresh_verified or cache.hits != 9 or cache.misses != 2 or cache.stores != 7 or
+        cache.refreshes != 1 or cache.evictions != 1 or cache.expirations != 1)
+    {
+        return null;
+    }
+
+    return .{
+        .capacity = dns.cache_capacity,
+        .active_entries = dns.cacheEntryCount(&cache),
+        .invalid_store_rejected = invalid_store_rejected,
+        .zero_ttl_rejected = zero_ttl_rejected,
+        .case_insensitive_hit = case_insensitive_hit,
+        .first_ttl_remaining = case_hit.ttl_remaining,
+        .eviction_verified = eviction_verified,
+        .expiration_verified = expiration_verified,
+        .refresh_verified = refresh_verified,
+        .refreshed_address = refreshed.address,
+        .refreshed_ttl_remaining = refreshed.ttl_remaining,
+        .hits = cache.hits,
+        .misses = cache.misses,
+        .stores = cache.stores,
+        .refreshes = cache.refreshes,
+        .evictions = cache.evictions,
+        .expirations = cache.expirations,
     };
 }
 

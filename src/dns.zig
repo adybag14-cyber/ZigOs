@@ -4,6 +4,7 @@ const header_bytes: usize = 12;
 const question_tail_bytes: usize = 4;
 const resource_record_fixed_bytes: usize = 10;
 pub const maximum_name_bytes: usize = 253;
+pub const cache_capacity: usize = 4;
 const maximum_compression_jumps: usize = 16;
 const maximum_alias_hops: usize = 8;
 const flag_response: u16 = 1 << 15;
@@ -32,10 +33,118 @@ pub const AResponse = struct {
     alias_hops: u8,
 };
 
+pub const CachedA = struct {
+    address: [4]u8,
+    ttl_remaining: u32,
+};
+
+pub const CacheEntry = struct {
+    active: bool,
+    name_length: u8,
+    name: [maximum_name_bytes]u8,
+    address: [4]u8,
+    expires_at: u64,
+    last_used: u64,
+};
+
+pub const Cache = struct {
+    entries: [cache_capacity]CacheEntry,
+    clock: u64,
+    hits: u64,
+    misses: u64,
+    stores: u64,
+    refreshes: u64,
+    evictions: u64,
+    expirations: u64,
+};
+
 const DecodedName = struct {
     next_offset: usize,
     length: usize,
 };
+
+pub fn cacheEntryCount(cache: *const Cache) u8 {
+    var count: u8 = 0;
+    for (&cache.entries) |*entry| {
+        if (entry.active) count +|= 1;
+    }
+    return count;
+}
+
+pub fn lookupCachedA(cache: *Cache, name: []const u8, now: u64) ?CachedA {
+    _ = encodedNameLength(name) orelse return null;
+    for (&cache.entries) |*entry| {
+        if (!entry.active) continue;
+        if (entry.expires_at <= now) {
+            entry.* = std.mem.zeroes(CacheEntry);
+            cache.expirations +|= 1;
+            continue;
+        }
+        if (!equalName(entry.name[0..entry.name_length], name)) continue;
+        cache.clock +|= 1;
+        entry.last_used = cache.clock;
+        cache.hits +|= 1;
+        const remaining = entry.expires_at - now;
+        return .{
+            .address = entry.address,
+            .ttl_remaining = @intCast(@min(remaining, std.math.maxInt(u32))),
+        };
+    }
+    cache.misses +|= 1;
+    return null;
+}
+
+pub fn storeCachedA(
+    cache: *Cache,
+    name: []const u8,
+    address: [4]u8,
+    ttl: u32,
+    now: u64,
+) bool {
+    _ = encodedNameLength(name) orelse return false;
+    if (ttl == 0) return false;
+
+    var free_index: ?usize = null;
+    var oldest_index: ?usize = null;
+    var oldest_use = std.math.maxInt(u64);
+    for (&cache.entries, 0..) |*entry, index| {
+        if (entry.active and entry.expires_at <= now) {
+            entry.* = std.mem.zeroes(CacheEntry);
+            cache.expirations +|= 1;
+        }
+        if (!entry.active) {
+            if (free_index == null) free_index = index;
+            continue;
+        }
+        if (equalName(entry.name[0..entry.name_length], name)) {
+            cache.clock +|= 1;
+            entry.address = address;
+            entry.expires_at = now +| ttl;
+            entry.last_used = cache.clock;
+            cache.stores +|= 1;
+            cache.refreshes +|= 1;
+            return true;
+        }
+        if (entry.last_used < oldest_use) {
+            oldest_use = entry.last_used;
+            oldest_index = index;
+        }
+    }
+
+    const index = free_index orelse oldest_index orelse return false;
+    if (free_index == null) cache.evictions +|= 1;
+    cache.clock +|= 1;
+    var entry = std.mem.zeroes(CacheEntry);
+    entry.active = true;
+    entry.name_length = @intCast(name.len);
+    @memcpy(entry.name[0..name.len], name);
+    entry.address = address;
+    entry.expires_at = now +| ttl;
+    entry.last_used = cache.clock;
+    cache.entries[index] = entry;
+    cache.stores +|= 1;
+    return true;
+}
 
 pub fn buildAQuery(buffer: []u8, transaction_id: u16, name: []const u8) ?[]const u8 {
     const encoded_name_bytes = encodedNameLength(name) orelse return null;
@@ -346,4 +455,5 @@ comptime {
     if (fixture_name.len != 10) @compileError("DNS fixture name changed unexpectedly");
     if (fixture_alias_name.len != 16) @compileError("DNS alias fixture name changed unexpectedly");
     if (maximum_name_bytes != 253) @compileError("DNS maximum domain length changed unexpectedly");
+    if (cache_capacity != 4) @compileError("DNS cache capacity changed unexpectedly");
 }

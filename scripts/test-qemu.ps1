@@ -754,6 +754,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'DNS retry verified: socket 2/30/49171, server 10\.0\.2\.3:53, transaction 0x4457, name length/hash 10/0x[0-9A-F]{16}, initial ID/descriptor/cursor/frame 0x000B/6/7/70, pending pending/0/0, retry 0x000C/7/0/70, transmissions 2, wraps 3->4, resolved resolved/1/0, A 192\.0\.2\.42 TTL 300, stale retry/cursor preserved yes/yes, final ID/TX cursor 13/0, submissions 2, completions TX/RX 40/40/22, overflow 0, endpoints/cursor 2/49172, ingress 62/62, dispatch total/UDP 51/50')) {
         throw 'DNS retry did not preserve the application transaction, allocate fresh packet IDs, cross the TX ring, and reject stale requests transactionally.'
     }
+    if (-not $output.Contains('DNS cache verified: capacity/active 4/4, invalid/zero-TTL rejected yes/yes, case hit/TTL yes/199, eviction/expiration/refresh yes/yes/yes, refreshed A 192.0.2.99 TTL 300, stats hits/misses/stores/refreshes/evictions/expirations 9/2/7/1/1/1')) {
+        throw 'The bounded DNS cache did not enforce TTL expiry, case-insensitive refresh, and least-recently-used replacement.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

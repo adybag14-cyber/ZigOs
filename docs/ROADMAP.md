@@ -635,3 +635,12 @@
 - The retry emits ID `0x000C` through descriptor 7, wraps the TX producer to zero, and advances the device TX-wrap counter from 3 to 4.
 - A subsequent matching response resolves normally, while retrying the request after socket close is rejected without consuming identification, descriptor, completion, or transmission-count state.
 - Two transmissions raise TX completions to 40; ingress/UDP dispatch advance by one response to `62/62` and `51/50`.
+
+## 3.34 - Fixed-capacity TTL-aware DNS cache
+
+- `dns.Cache` stores four allocator-free A-record entries with bounded name copies, absolute caller-supplied expiry ticks, and usage ordering.
+- Lookups are case-insensitive, refresh recency, return remaining TTL, and lazily remove expired entries.
+- Stores reject invalid names and zero TTL without mutating cache state or statistics.
+- Existing names refresh in place; new names use inactive or expired slots before evicting the least-recently-used live entry.
+- The deterministic proof fills all four entries, protects a recently used record, evicts the oldest, expires a short-TTL record, reuses its slot, and refreshes `b.test` to `192.0.2.99`.
+- Final statistics are nine hits, two misses, seven stores, one refresh, one eviction, and one expiration with all four slots active.
