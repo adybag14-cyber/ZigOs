@@ -3313,6 +3313,83 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.dns_cached_resolve.udp_dispatched);
     debugWrite("\r\n");
+
+    debugWrite("DNS automatic transactions verified: socket ");
+    debugWriteU64Decimal(network.dns_automatic_transaction.socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_automatic_transaction.socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_automatic_transaction.local_port);
+    debugWrite(", invalid/cursors preserved ");
+    debugWrite(if (network.dns_automatic_transaction.invalid_name_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_automatic_transaction.invalid_name_cursors_preserved) "yes" else "no");
+    debugWrite(", DNS IDs ");
+    for (network.dns_automatic_transaction.transaction_ids, 0..) |value, index| {
+        if (index != 0) debugWrite("/");
+        debugWrite("0x");
+        debugWriteHex16(value);
+    }
+    debugWrite(", packet IDs ");
+    for (network.dns_automatic_transaction.packet_identifications, 0..) |value, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(value);
+    }
+    debugWrite(", descriptors ");
+    for (network.dns_automatic_transaction.descriptors, 0..) |value, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(value);
+    }
+    debugWrite(", cursors ");
+    for (network.dns_automatic_transaction.next_cursors, 0..) |value, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(value);
+    }
+    debugWrite(", frames ");
+    for (network.dns_automatic_transaction.frame_lengths, 0..) |value, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(value);
+    }
+    debugWrite(", transmissions ");
+    for (network.dns_automatic_transaction.transmission_counts, 0..) |value, index| {
+        if (index != 0) debugWrite("/");
+        debugWriteU64Decimal(value);
+    }
+    debugWrite(", stale/cursors preserved ");
+    debugWrite(if (network.dns_automatic_transaction.stale_socket_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.dns_automatic_transaction.stale_socket_cursors_preserved) "yes" else "no");
+    debugWrite(", final DNS/IP/TX cursors ");
+    debugWriteU64Decimal(network.dns_automatic_transaction.final_dns_transaction_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_automatic_transaction.final_identification_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_automatic_transaction.final_tx_cursor);
+    debugWrite(", submissions ");
+    debugWriteU64Decimal(network.dns_automatic_transaction.tx_submissions_delta);
+    debugWrite(", completions TX/RX ");
+    debugWriteU64Decimal(network.dns_automatic_transaction.tx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_automatic_transaction.tx_completion_dequeues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_automatic_transaction.rx_completion_enqueues);
+    debugWrite(", overflow ");
+    debugWriteU64Decimal(network.dns_automatic_transaction.completion_overflow);
+    debugWrite(", wraps unchanged ");
+    debugWrite(if (network.dns_automatic_transaction.tx_wraps_unchanged) "yes" else "no");
+    debugWrite(", endpoints/cursor ");
+    debugWriteU64Decimal(network.dns_automatic_transaction.final_registered_endpoints);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_automatic_transaction.final_ephemeral_cursor);
+    debugWrite(", ingress ");
+    debugWriteU64Decimal(network.dns_automatic_transaction.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_automatic_transaction.ingress_dequeued);
+    debugWrite(", dispatch total/UDP ");
+    debugWriteU64Decimal(network.dns_automatic_transaction.packets_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.dns_automatic_transaction.udp_dispatched);
+    debugWrite("\r\n");
     return true;
 }
 

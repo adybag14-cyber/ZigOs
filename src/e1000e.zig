@@ -379,6 +379,7 @@ pub const Device = struct {
     next_ephemeral_udp_port: u16,
     next_udp_ready_index: u8,
     next_udp_identification: u16,
+    next_dns_transaction_id: u16,
     unmatched_udp_packets_dropped: u64,
     invalid_udp_packets_dropped: u64,
     peer_mismatch_udp_packets_dropped: u64,
@@ -596,6 +597,37 @@ pub const DnsAQueryPoll = struct {
 pub const DnsResolveStart = union(enum) {
     cached: dns.CachedA,
     pending: DnsARequest,
+};
+
+pub const DnsAutomaticTransactionReport = struct {
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    invalid_name_rejected: bool,
+    invalid_name_cursors_preserved: bool,
+    transaction_ids: [3]u16,
+    packet_identifications: [3]u16,
+    descriptors: [3]u16,
+    next_cursors: [3]u16,
+    frame_lengths: [3]u16,
+    transmission_counts: [3]u16,
+    stale_socket_rejected: bool,
+    stale_socket_cursors_preserved: bool,
+    final_dns_transaction_cursor: u16,
+    final_identification_cursor: u16,
+    final_tx_cursor: u16,
+    tx_submissions_delta: u64,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    completion_overflow: u64,
+    tx_wraps_unchanged: bool,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
 };
 
 pub const DnsCachedResolveReport = struct {
@@ -1405,6 +1437,7 @@ pub const NetworkResult = struct {
     dns_retry: DnsRetryReport,
     dns_cache: DnsCacheReport,
     dns_cached_resolve: DnsCachedResolveReport,
+    dns_automatic_transaction: DnsAutomaticTransactionReport,
 };
 
 var active_bar0: usize = 0;
@@ -1919,6 +1952,7 @@ pub fn initializeAndTestNetwork(
         .next_ephemeral_udp_port = ephemeral_udp_port_first,
         .next_udp_ready_index = 0,
         .next_udp_identification = 0x7000,
+        .next_dns_transaction_id = 0x5000,
         .unmatched_udp_packets_dropped = 0,
         .invalid_udp_packets_dropped = 0,
         .peer_mismatch_udp_packets_dropped = 0,
@@ -2041,6 +2075,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const dns_automatic_transaction = verifyDnsAutomaticTransaction(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -2160,6 +2198,7 @@ pub fn initializeAndTestNetwork(
         .dns_retry = dns_retry,
         .dns_cache = dns_cache,
         .dns_cached_resolve = dns_cached_resolve,
+        .dns_automatic_transaction = dns_automatic_transaction,
     };
 }
 
@@ -2754,6 +2793,18 @@ pub fn startDnsAQuery(
     return request;
 }
 
+pub fn startAutomaticDnsAQuery(
+    device: *Device,
+    socket: UdpSocket,
+    name: []const u8,
+) ?DnsARequest {
+    var transaction_id = device.next_dns_transaction_id;
+    if (transaction_id == 0) transaction_id = 1;
+    const request = startDnsAQuery(device, socket, transaction_id, name) orelse return null;
+    device.next_dns_transaction_id = nextDnsTransactionId(transaction_id);
+    return request;
+}
+
 pub fn startDnsAResolve(
     device: *Device,
     socket: UdpSocket,
@@ -2912,6 +2963,11 @@ fn nextEphemeralUdpPort(port: u16) u16 {
 
 fn nextUdpIdentification(identification: u16) u16 {
     const next = identification +% 1;
+    return if (next == 0) 1 else next;
+}
+
+fn nextDnsTransactionId(transaction_id: u16) u16 {
+    const next = transaction_id +% 1;
     return if (next == 0) 1 else next;
 }
 
@@ -3774,6 +3830,139 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyDnsAutomaticTransaction(device: *Device) ?DnsAutomaticTransactionReport {
+    const socket = openEphemeralUdpSocket(device) orelse return null;
+    if (socket.endpoint_index != 2 or socket.generation != 32 or socket.local_port != 49_173 or
+        device.next_ephemeral_udp_port != 49_174 or device.next_udp_generation != 33 or
+        device.udp_endpoint_count != 3 or device.tx_producer != 2 or
+        device.next_udp_identification != 15 or device.next_dns_transaction_id != 0x5000)
+    {
+        return null;
+    }
+    const peer = UdpPeer{
+        .mac = device.gateway_mac,
+        .ipv4 = .{ 10, 0, 2, 3 },
+        .port = dns.server_port,
+    };
+    if (!connectUdpSocket(device, socket, peer)) return null;
+
+    const submissions_before = device.tx_submissions;
+    const wraps_before = device.tx_cursor_wraps;
+    const invalid_dns_before = device.next_dns_transaction_id;
+    const invalid_ip_before = device.next_udp_identification;
+    const invalid_producer_before = device.tx_producer;
+    const invalid_completions_before = completionQueueEnqueued(&tx_completion_queue);
+    const invalid_name_rejected = startAutomaticDnsAQuery(device, socket, "bad..name") == null;
+    const invalid_name_cursors_preserved = invalid_name_rejected and
+        device.next_dns_transaction_id == invalid_dns_before and
+        device.next_udp_identification == invalid_ip_before and
+        device.tx_producer == invalid_producer_before and
+        device.tx_submissions == submissions_before and
+        completionQueueEnqueued(&tx_completion_queue) == invalid_completions_before;
+    if (!invalid_name_cursors_preserved) return null;
+
+    const first = startAutomaticDnsAQuery(device, socket, dns.fixture_name) orelse return null;
+    device.next_dns_transaction_id = 0xFFFF;
+    const second = startAutomaticDnsAQuery(device, socket, dns.fixture_name) orelse return null;
+    const third = startAutomaticDnsAQuery(device, socket, dns.fixture_alias_name) orelse return null;
+    const transaction_ids = [_]u16{ first.transaction_id, second.transaction_id, third.transaction_id };
+    const packet_identifications = [_]u16{
+        first.transmit.identification,
+        second.transmit.identification,
+        third.transmit.identification,
+    };
+    const descriptors = [_]u16{
+        first.transmit.completion.descriptor_index,
+        second.transmit.completion.descriptor_index,
+        third.transmit.completion.descriptor_index,
+    };
+    const next_cursors = [_]u16{
+        first.transmit.completion.next_cursor,
+        second.transmit.completion.next_cursor,
+        third.transmit.completion.next_cursor,
+    };
+    const frame_lengths = [_]u16{
+        first.transmit.completion.frame_length,
+        second.transmit.completion.frame_length,
+        third.transmit.completion.frame_length,
+    };
+    const transmission_counts = [_]u16{ first.transmissions, second.transmissions, third.transmissions };
+    if (!std.mem.eql(u16, &transaction_ids, &[_]u16{ 0x5000, 0xFFFF, 1 }) or
+        !std.mem.eql(u16, &packet_identifications, &[_]u16{ 15, 16, 17 }) or
+        !std.mem.eql(u16, &descriptors, &[_]u16{ 2, 3, 4 }) or
+        !std.mem.eql(u16, &next_cursors, &[_]u16{ 3, 4, 5 }) or
+        !std.mem.eql(u16, &frame_lengths, &[_]u16{ 70, 70, 76 }) or
+        !std.mem.eql(u16, &transmission_counts, &[_]u16{ 1, 1, 1 }) or
+        device.next_dns_transaction_id != 2 or device.next_udp_identification != 18 or
+        device.tx_producer != 5 or device.tx_cursor_wraps != wraps_before or
+        device.tx_submissions != submissions_before + 3)
+    {
+        return null;
+    }
+
+    if (!closeUdpSocket(device, socket)) return null;
+    const stale_dns_before = device.next_dns_transaction_id;
+    const stale_ip_before = device.next_udp_identification;
+    const stale_producer_before = device.tx_producer;
+    const stale_submissions_before = device.tx_submissions;
+    const stale_completions_before = completionQueueEnqueued(&tx_completion_queue);
+    const stale_socket_rejected = startAutomaticDnsAQuery(device, socket, dns.fixture_name) == null;
+    const stale_socket_cursors_preserved = stale_socket_rejected and
+        device.next_dns_transaction_id == stale_dns_before and
+        device.next_udp_identification == stale_ip_before and
+        device.tx_producer == stale_producer_before and
+        device.tx_submissions == stale_submissions_before and
+        completionQueueEnqueued(&tx_completion_queue) == stale_completions_before;
+    if (!stale_socket_cursors_preserved) return null;
+
+    const tx_completion_enqueues = completionQueueEnqueued(&tx_completion_queue);
+    const tx_completion_dequeues = completionQueueDequeued(&tx_completion_queue);
+    const rx_completion_enqueues = completionQueueEnqueued(&rx_completion_queue);
+    const completion_overflow = completionQueueOverflow(&tx_completion_queue) + completionQueueOverflow(&rx_completion_queue);
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_174 or
+        device.software_rx_queue.enqueued != 63 or device.software_rx_queue.dequeued != 63 or
+        device.software_rx_queue.dropped != 0 or device.software_rx_queue.head != device.software_rx_queue.tail or
+        device.packets_dispatched != 52 or device.udp_packets_dispatched != 51 or
+        device.unmatched_udp_packets_dropped != 3 or device.invalid_udp_packets_dropped != 3 or
+        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0 or
+        tx_completion_enqueues != 45 or tx_completion_dequeues != 45 or rx_completion_enqueues != 22 or
+        completion_overflow != 0 or @atomicLoad(u32, &tx_pending_mask, .acquire) != 0 or
+        @atomicLoad(u32, &rx_pending_mask, .acquire) != all_rx_descriptors_pending)
+    {
+        return null;
+    }
+    return .{
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .invalid_name_rejected = invalid_name_rejected,
+        .invalid_name_cursors_preserved = invalid_name_cursors_preserved,
+        .transaction_ids = transaction_ids,
+        .packet_identifications = packet_identifications,
+        .descriptors = descriptors,
+        .next_cursors = next_cursors,
+        .frame_lengths = frame_lengths,
+        .transmission_counts = transmission_counts,
+        .stale_socket_rejected = stale_socket_rejected,
+        .stale_socket_cursors_preserved = stale_socket_cursors_preserved,
+        .final_dns_transaction_cursor = device.next_dns_transaction_id,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_tx_cursor = device.tx_producer,
+        .tx_submissions_delta = device.tx_submissions - submissions_before,
+        .tx_completion_enqueues = tx_completion_enqueues,
+        .tx_completion_dequeues = tx_completion_dequeues,
+        .rx_completion_enqueues = rx_completion_enqueues,
+        .completion_overflow = completion_overflow,
+        .tx_wraps_unchanged = device.tx_cursor_wraps == wraps_before,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
     };
 }
 

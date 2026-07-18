@@ -760,6 +760,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'DNS cached resolve verified: socket 2/31/49172, server 10\.0\.2\.3:53, transaction 0x4458, miss TX 0x000D/0/1/70, resolved resolved/1 A 192\.0\.2\.42 TTL 300 stores 1, cached hit/no-TX yes/yes A 192\.0\.2\.42 TTL 200, expiry requery 0x000E/1/2/70, stale pending inactive, final ID/TX cursor 15/2, submissions 2, completions TX/RX 42/42/22, overflow 0, cache hits/misses/expirations/active 1/2/1/0, endpoints/cursor 2/49173, ingress 63/63, dispatch total/UDP 52/51')) {
         throw 'The cached DNS resolver did not avoid TX on a live hit, expire by TTL, requery, and reject the stale pending request.'
     }
+    if (-not $output.Contains('DNS automatic transactions verified: socket 2/32/49173, invalid/cursors preserved yes/yes, DNS IDs 0x5000/0xFFFF/0x0001, packet IDs 15/16/17, descriptors 2/3/4, cursors 3/4/5, frames 70/70/76, transmissions 1/1/1, stale/cursors preserved yes/yes, final DNS/IP/TX cursors 2/18/5, submissions 3, completions TX/RX 45/45/22, overflow 0, wraps unchanged yes, endpoints/cursor 2/49174, ingress 63/63, dispatch total/UDP 52/51')) {
+        throw 'Automatic DNS transaction allocation did not reject failures transactionally or wrap from 0xFFFF to 0x0001.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

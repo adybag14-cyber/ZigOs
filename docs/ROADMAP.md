@@ -653,3 +653,12 @@
 - A mixed-case lookup at tick 1100 returns the cached address with 200 ticks remaining and does not change identification, TX producer, submissions, or completion totals.
 - At expiry tick 1300 the cache entry is removed and a new request transmits ID `0x000E` through descriptor 1.
 - Closing the socket makes that pending request inactive; final cache statistics are one hit, two misses, one expiration, and zero active entries.
+
+## 3.36 - Transactional automatic DNS transaction IDs
+
+- The retained network device owns a nonzero DNS transaction-ID cursor independent of IPv4 packet identification.
+- `startAutomaticDnsAQuery` allocates the current DNS transaction ID, starts the bounded query, and advances the cursor only after a completed transmission.
+- Invalid names and stale socket handles are rejected without consuming DNS ID, IPv4 ID, TX descriptor, submission, or completion state.
+- Three successful queries use DNS IDs `0x5000`, `0xFFFF`, and `0x0001`, proving zero-skipping wraparound.
+- Their IPv4 IDs are 15/16/17 and descriptors are 2/3/4, with frame lengths 70/70/76 for direct and alias names.
+- Final DNS, IPv4, and TX cursors are 2, 18, and 5; TX completions reach 45 with no ring wrap or network receive changes.
