@@ -739,6 +739,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'DNS codec verified: transaction 0x4453, query length/hash 28/0x[0-9A-F]{16}, response length/hash 44/0x[0-9A-F]{16}, A 192\.0\.2\.42, TTL 300, authoritative/recursion yes/yes, rejects names/small/ID/truncated/loop/error/type yes/yes/yes/yes/yes/yes/yes, case-insensitive yes')) {
         throw 'The DNS wire codec did not validate names, compressed responses, transaction identity, and malformed-message rejection.'
     }
+    if (-not [regex]::IsMatch($output, 'DNS transaction verified: socket 2/27/49168, server 10\.0\.2\.3:53, transaction 0x4453, invalid name/cursor preserved yes/yes, query length/hash 28/0x[0-9A-F]{16}, TX ID/descriptor/cursor/frame 0x0008/3/4/70, wrong transaction rejected yes, A 192\.0\.2\.42 TTL 300 authoritative/recursion yes/yes, endpoint queue 2/2 high-water 2 dropped 0, final ID/TX cursor 9/4, submissions 1, completions TX/RX 36/36/22, overflow 0, endpoints/cursor 2/49169, ingress 57/57, dispatch total/UDP 46/45')) {
+        throw 'The DNS client transaction did not use connected UDP, reject a mismatched transaction, and return the validated A record.'
+    }
 } else {
     if (-not $output.Contains('Intel 82574L network controller not present; continuing without networking')) {
         throw 'The network-absent fallback marker was not observed.'

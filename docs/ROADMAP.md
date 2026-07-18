@@ -591,3 +591,12 @@
 - DNS compression pointers are decoded with a strict jump budget, rejecting self-referential loops and out-of-range pointers.
 - The deterministic `zigos.test` query is 28 bytes; its compressed response is 44 bytes and resolves to `192.0.2.42` with TTL 300.
 - Wrong transaction IDs, truncation, NXDOMAIN, wrong answer type, insufficient buffers, malformed names, and compression loops are rejected; matching is case-insensitive.
+
+## 3.29 - Connected UDP DNS transaction
+
+- `sendDnsAQuery` validates a connected port-53 socket, builds the bounded query, and transmits it through transactional automatic IPv4 identification.
+- `receiveDnsAResponse` consumes one connected datagram and applies the DNS transaction/name/A-record validator.
+- Invalid query names are rejected without consuming identification, descriptor, completion, or submission state.
+- A 28-byte `zigos.test` query uses IPv4 identification `0x0008`, TX descriptor 3, cursor 4, and a 70-byte Ethernet frame.
+- Two synthetic server responses are routed through the endpoint queue: the wrong transaction is consumed and rejected, then the matching response resolves `192.0.2.42` with TTL 300.
+- Endpoint accounting balances at `2/2`, TX completions reach 36, and ingress/UDP dispatch totals advance exactly by the two responses.
