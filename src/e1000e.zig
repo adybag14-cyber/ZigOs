@@ -244,6 +244,17 @@ pub const ConnectedUdpSendOptions = struct {
     payload: []const u8,
 };
 
+pub const UdpReadySockets = struct {
+    sockets: [udp_endpoint_capacity]UdpSocket,
+    count: u8,
+    total_pending: u16,
+};
+
+pub const UdpServiceCycle = struct {
+    dispatch: PacketDispatchBatch,
+    ready: UdpReadySockets,
+};
+
 pub const UdpEndpointPoll = struct {
     active_mask: u8,
     readable_mask: u8,
@@ -506,6 +517,40 @@ pub const UdpEndpointDemuxReport = struct {
     completion_queue_overflows: u64,
     tx_pending_mask: u32,
     rx_pending_mask: u32,
+};
+
+pub const UdpServiceCycleReport = struct {
+    first_slot: u16,
+    first_generation: u32,
+    first_port: u16,
+    second_slot: u16,
+    second_generation: u32,
+    second_port: u16,
+    first_examined: u16,
+    first_routed: u16,
+    first_dropped: u16,
+    first_remaining: u16,
+    first_ready_count: u8,
+    first_total_pending: u16,
+    second_examined: u16,
+    second_routed: u16,
+    second_dropped: u16,
+    second_remaining: u16,
+    second_ready_count: u8,
+    second_total_pending: u16,
+    drained_examined: u16,
+    drained_ready_count: u8,
+    delivered_datagrams: u16,
+    stale_first_rejected: bool,
+    stale_second_rejected: bool,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+    unmatched_dropped: u64,
+    invalid_udp_dropped: u64,
 };
 
 pub const UdpEndpointPollReport = struct {
@@ -777,6 +822,7 @@ pub const NetworkResult = struct {
     udp_socket_queue: UdpSocketQueueReport,
     udp_dispatch_batch: UdpDispatchBatchReport,
     udp_endpoint_poll: UdpEndpointPollReport,
+    udp_service_cycle: UdpServiceCycleReport,
 };
 
 var active_bar0: usize = 0;
@@ -1343,6 +1389,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const udp_service_cycle = verifyUdpServiceCycle(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -1445,6 +1495,7 @@ pub fn initializeAndTestNetwork(
         .udp_socket_queue = udp_socket_queue,
         .udp_dispatch_batch = udp_dispatch_batch,
         .udp_endpoint_poll = udp_endpoint_poll,
+        .udp_service_cycle = udp_service_cycle,
     };
 }
 
@@ -1688,6 +1739,31 @@ pub fn openEphemeralUdpSocket(device: *Device) ?UdpSocket {
 
 pub fn udpSocketActive(device: *Device, socket: UdpSocket) bool {
     return udpSocketEndpoint(device, socket) != null;
+}
+
+pub fn collectReadableUdpSockets(device: *const Device) UdpReadySockets {
+    var ready = std.mem.zeroes(UdpReadySockets);
+    for (&device.udp_endpoints, 0..) |*endpoint, index| {
+        if (!endpoint.active) continue;
+        const pending = queueDepth(&endpoint.queue);
+        if (pending == 0) continue;
+        const ready_index: usize = ready.count;
+        ready.sockets[ready_index] = .{
+            .endpoint_index = @intCast(index),
+            .generation = endpoint.generation,
+            .local_port = endpoint.port,
+        };
+        ready.count +|= 1;
+        ready.total_pending +|= pending;
+    }
+    return ready;
+}
+
+pub fn serviceUdpSockets(device: *Device, dispatch_budget: u16) UdpServiceCycle {
+    return .{
+        .dispatch = dispatchPacketBatch(device, dispatch_budget),
+        .ready = collectReadableUdpSockets(device),
+    };
 }
 
 pub fn pollUdpEndpoints(device: *const Device) UdpEndpointPoll {
@@ -2714,6 +2790,135 @@ fn verifyUdpEndpointLifecycle(device: *Device) ?UdpEndpointLifecycleReport {
         .completion_queue_overflows = completion_queue_overflows,
         .tx_pending_mask = final_tx_pending,
         .rx_pending_mask = final_rx_pending,
+    };
+}
+
+fn verifyUdpServiceCycle(device: *Device) ?UdpServiceCycleReport {
+    const first = openEphemeralUdpSocket(device) orelse return null;
+    const second = openEphemeralUdpSocket(device) orelse return null;
+    if (first.endpoint_index != 2 or first.generation != 16 or first.local_port != 49_157 or
+        second.endpoint_index != 3 or second.generation != 17 or second.local_port != 49_158 or
+        device.next_ephemeral_udp_port != 49_159 or device.udp_endpoint_count != 4)
+    {
+        return null;
+    }
+
+    var packet_index: u16 = 0;
+    while (packet_index < 4) : (packet_index += 1) {
+        const destination_port: u16 = switch (packet_index) {
+            0, 1 => first.local_port,
+            2 => second.local_port,
+            else => unmatched_udp_port - 2,
+        };
+        var frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+        const payload = [_]u8{ 0x53, @intCast(packet_index) };
+        const frame_length = udp.buildFrame(&frame, .{
+            .source_mac = device.gateway_mac,
+            .destination_mac = device.local_mac,
+            .source_ipv4 = device.gateway_ipv4,
+            .destination_ipv4 = device.local_ipv4,
+            .source_port = peer_filter_source_port,
+            .destination_port = destination_port,
+            .identification = 0x6000 + packet_index,
+            .payload = &payload,
+        }) orelse return null;
+        if (packet_index == 1) frame[14 + ipv4_header_bytes + 8] ^= 0x01;
+        var packet = std.mem.zeroes(Packet);
+        packet.length = frame_length;
+        packet.source_descriptor = 0xF900 + packet_index;
+        @memcpy(packet.bytes[0..frame_length], frame[0..frame_length]);
+        if (!enqueueQueuedPacket(&device.software_rx_queue, packet)) return null;
+    }
+
+    const first_cycle = serviceUdpSockets(device, 3);
+    if (first_cycle.dispatch.examined != 3 or first_cycle.dispatch.routed != 2 or
+        first_cycle.dispatch.dropped != 1 or first_cycle.dispatch.remaining != 1 or
+        first_cycle.ready.count != 2 or first_cycle.ready.total_pending != 2)
+    {
+        return null;
+    }
+    const ready_first = first_cycle.ready.sockets[0];
+    const ready_second = first_cycle.ready.sockets[1];
+    if (!std.meta.eql(ready_first, first) or !std.meta.eql(ready_second, second)) return null;
+
+    const second_cycle = serviceUdpSockets(device, 4);
+    if (second_cycle.dispatch.examined != 1 or second_cycle.dispatch.routed != 0 or
+        second_cycle.dispatch.dropped != 1 or second_cycle.dispatch.remaining != 0 or
+        second_cycle.ready.count != 2 or second_cycle.ready.total_pending != 2 or
+        !std.meta.eql(second_cycle.ready.sockets[0], first) or
+        !std.meta.eql(second_cycle.ready.sockets[1], second))
+    {
+        return null;
+    }
+
+    const first_datagram = receiveUdpDatagram(device, ready_first) orelse return null;
+    const second_datagram = receiveUdpDatagram(device, ready_second) orelse return null;
+    const first_payload = first_datagram.payload();
+    const second_payload = second_datagram.payload();
+    if (first_payload.len != 2 or first_payload[0] != 0x53 or first_payload[1] != 0 or
+        second_payload.len != 2 or second_payload[0] != 0x53 or second_payload[1] != 2)
+    {
+        return null;
+    }
+
+    const drained_cycle = serviceUdpSockets(device, 4);
+    if (drained_cycle.dispatch.examined != 0 or drained_cycle.dispatch.routed != 0 or
+        drained_cycle.dispatch.dropped != 0 or drained_cycle.dispatch.remaining != 0 or
+        drained_cycle.ready.count != 0 or drained_cycle.ready.total_pending != 0)
+    {
+        return null;
+    }
+    if (!closeUdpSocket(device, second) or !closeUdpSocket(device, first)) return null;
+    const stale_first_rejected = !udpSocketActive(device, ready_first) and
+        receiveUdpDatagram(device, ready_first) == null;
+    const stale_second_rejected = !udpSocketActive(device, ready_second) and
+        receiveUdpDatagram(device, ready_second) == null;
+    if (!stale_first_rejected or !stale_second_rejected) return null;
+    const final_cycle = serviceUdpSockets(device, 4);
+    if (final_cycle.dispatch.examined != 0 or final_cycle.ready.count != 0 or
+        device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_159 or
+        device.next_udp_generation != 18 or
+        device.software_rx_queue.enqueued != 42 or device.software_rx_queue.dequeued != 42 or
+        device.software_rx_queue.dropped != 0 or device.software_rx_queue.head != device.software_rx_queue.tail or
+        device.packets_dispatched != 31 or device.udp_packets_dispatched != 30 or
+        device.unmatched_udp_packets_dropped != 3 or device.invalid_udp_packets_dropped != 3 or
+        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0)
+    {
+        return null;
+    }
+
+    return .{
+        .first_slot = first.endpoint_index,
+        .first_generation = first.generation,
+        .first_port = first.local_port,
+        .second_slot = second.endpoint_index,
+        .second_generation = second.generation,
+        .second_port = second.local_port,
+        .first_examined = first_cycle.dispatch.examined,
+        .first_routed = first_cycle.dispatch.routed,
+        .first_dropped = first_cycle.dispatch.dropped,
+        .first_remaining = first_cycle.dispatch.remaining,
+        .first_ready_count = first_cycle.ready.count,
+        .first_total_pending = first_cycle.ready.total_pending,
+        .second_examined = second_cycle.dispatch.examined,
+        .second_routed = second_cycle.dispatch.routed,
+        .second_dropped = second_cycle.dispatch.dropped,
+        .second_remaining = second_cycle.dispatch.remaining,
+        .second_ready_count = second_cycle.ready.count,
+        .second_total_pending = second_cycle.ready.total_pending,
+        .drained_examined = drained_cycle.dispatch.examined,
+        .drained_ready_count = drained_cycle.ready.count,
+        .delivered_datagrams = 2,
+        .stale_first_rejected = stale_first_rejected,
+        .stale_second_rejected = stale_second_rejected,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+        .unmatched_dropped = device.unmatched_udp_packets_dropped,
+        .invalid_udp_dropped = device.invalid_udp_packets_dropped,
     };
 }
 

@@ -504,3 +504,12 @@
 - Consuming one packet preserves both readable bits with total pending two; draining both sockets clears the readable mask while active and connected state remain unchanged.
 - Closing both temporary sockets returns masks to `active=0x03`, `readable=0x00`, and `connected=0x02`, leaving the original endpoints and their peer state intact.
 - Ingress and UDP dispatch totals advance exactly by three, with no new drops or hardware completions.
+
+## 3.19 - Generation-safe UDP service cycles
+
+- `collectReadableUdpSockets` converts readable endpoint slots into generation-tagged `UdpSocket` handles ordered by endpoint slot, with total pending depth.
+- `serviceUdpSockets` performs one bounded ingress-dispatch batch and then returns the current readable handles in a single nonblocking cycle.
+- Two ephemeral sockets receive a mixed four-packet workload containing two valid datagrams, one corrupted checksum, and one unmatched destination.
+- A budget-three service cycle reports `3/2/1/1` and two readable handles; a second cycle consumes the unmatched packet as `1/0/1/0` while preserving the same ready set.
+- The returned handles receive the two valid datagrams with stable payload metadata; a drained cycle reports no dispatch work and no readable sockets.
+- Closing the endpoints invalidates both previously returned handles by generation, while ingress/drop accounting advances deterministically to 42 packets examined.
