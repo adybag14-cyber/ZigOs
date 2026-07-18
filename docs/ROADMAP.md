@@ -1046,3 +1046,13 @@
 - Rotation clears the pending index and per-source failure count; an accepted synchronization sample also clears any remaining pending/failure state.
 - Health exposes current and pending source indices, current server, consecutive failures, total rotations, and recovery success.
 - The live verifier proves initial synchronization on `10.0.2.4`, one refresh retry, timeout selection of `10.0.2.5`, no cooldown traffic, projected recovery on the same socket, accepted alternate-server response, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
+
+## 3.81 - Consecutive-failure threshold before NTP rotation
+
+- A two-source service configured with threshold two remains on source zero after the first complete request timeout.
+- The first recovery request uses projected time on the same server and socket while preserving one consecutive source failure and zero rotations.
+- If that recovery request also exhausts its retry allowance, the second source failure selects source one as pending while retaining source zero throughout the next cooldown.
+- Only the second recovery deadline switches the existing socket to source one; endpoint index, generation, local port, gateway MAC, and NTP port remain unchanged.
+- Both cooldowns emit no traffic, and both recovery requests derive monotonically increasing originate timestamps from holdover time.
+- A valid fallback response resets pending/failure state, records one source rotation and one recovery success, and returns health to synchronized source one.
+- The verifier proves six transmissions, two accepted replies, two retry-limit hits, exact threshold behavior, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
