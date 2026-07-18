@@ -157,6 +157,10 @@ pub const StepRejectionPolicy = struct {
     maximum_rejections_per_request: u8,
 };
 
+pub const default_step_rejection_policy = StepRejectionPolicy{
+    .maximum_rejections_per_request = std.math.maxInt(u8),
+};
+
 pub const StepRejectionAction = enum(u8) {
     invalid_policy,
     retain_request,

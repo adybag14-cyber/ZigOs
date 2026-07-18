@@ -931,3 +931,21 @@
 - Zero current rejections report the full allowance, making the decision usable before and after each rejection.
 - Arithmetic remains safe at the `u8` maximum: count 254 retains one allowance and count 255 retries immediately.
 - The verifier proves invalid zero policy, zero/first/penultimate retention, exact boundary/beyond retry, remaining allowance, and maximum-count behavior.
+
+## 3.69 - Live NTP rejection-budget retry
+
+- `NtpService` owns a validated step-rejection policy, the current per-transmission rejection count, and total discipline-forced retries.
+- Legacy constructors use a maximum budget of 255, preserving prior retain-until-deadline behavior.
+- Each stale or excessive high-quality response increments the current count and exposes retain/retry action plus remaining allowance in `NtpServiceStep`.
+- Below the boundary the request, originate timestamp, clock, and normal retry deadline remain unchanged.
+- At the exact boundary the service retries immediately, before the normal deadline, using the same request and originate timestamp while remaining bounded by the existing retry policy.
+- A forced retry resets the per-transmission rejection count; an accepted response also resets it and completes normally.
+- The live verifier proves one retained stale response, one excessive boundary response, immediate forced retry, timestamp preservation, accepted follow-up, clean close, and exact three-TX/four-RX accounting.
+
+## 3.70 - Discipline-forced retry exhaustion
+
+- A discipline boundary may request immediate retry only while the ordinary retry policy still has an available attempt.
+- When a later rejection reaches the same boundary after retry allowance is exhausted, the service cancels the request, latches `timed_out`, increments the retry-limit counter, and sends no hidden packet.
+- The projected clock remains unchanged and readable in holdover; health reports the active rejection count, forced-retry total, and retry exhaustion.
+- The timed-out state is inert until `clearNtpServiceTimeout`; clearing now also resets the per-request discipline-rejection count.
+- The live verifier proves one forced retry, second-boundary exhaustion, request cancellation, latched timeout, health exposure, explicit clear, duplicate-clear rejection, clean close, and exact three-TX/three-RX accounting.
