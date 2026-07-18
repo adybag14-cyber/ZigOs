@@ -766,6 +766,43 @@ pub const NtpServiceStep = struct {
     recovery_started: bool,
 };
 
+pub const NtpClientServerSwitchReport = struct {
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    original_server: [4]u8,
+    alternate_server: [4]u8,
+    invalid_rejected: bool,
+    invalid_state_preserved: bool,
+    idempotent_succeeded: bool,
+    idempotent_state_preserved: bool,
+    forward_succeeded: bool,
+    forward_peer_updated: bool,
+    reverse_succeeded: bool,
+    reverse_peer_restored: bool,
+    socket_preserved: bool,
+    gateway_mac_preserved: bool,
+    peer_port: u16,
+    close_succeeded: bool,
+    inactive_rejected: bool,
+    inactive_state_preserved: bool,
+    stale_rejected: bool,
+    stale_state_preserved: bool,
+    no_packet_traffic: bool,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    final_generation_cursor: u32,
+    final_identification_cursor: u16,
+    final_tx_cursor: u16,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+};
+
 pub const NtpQualityRecoveryReport = struct {
     source_kind: time_reference.Kind,
     frequency_hz: u64,
@@ -3105,6 +3142,7 @@ pub const NetworkResult = struct {
     ntp_live_quality_rejection_budget: NtpLiveQualityRejectionBudgetReport,
     ntp_quality_rejection_exhaustion: NtpQualityRejectionExhaustionReport,
     ntp_quality_recovery: NtpQualityRecoveryReport,
+    ntp_client_server_switch: NtpClientServerSwitchReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -3861,6 +3899,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_client_server_switch = verifyNtpClientServerSwitch(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -4047,6 +4089,7 @@ pub fn initializeAndTestNetwork(
         .ntp_live_quality_rejection_budget = ntp_live_quality_rejection_budget,
         .ntp_quality_rejection_exhaustion = ntp_quality_rejection_exhaustion,
         .ntp_quality_recovery = ntp_quality_recovery,
+        .ntp_client_server_switch = ntp_client_server_switch,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -4677,6 +4720,37 @@ pub fn openNtpClient(device: *Device, server_ipv4: [4]u8) ?NtpClient {
         return null;
     }
     return .{ .active = true, .socket = socket, .server_ipv4 = server_ipv4 };
+}
+
+pub fn switchNtpClientServer(
+    device: *Device,
+    client: *NtpClient,
+    server_ipv4: [4]u8,
+) bool {
+    if (!client.active or !udpSocketActive(device, client.socket)) return false;
+    const old_peer = udpSocketPeer(device, client.socket) orelse return false;
+    if (old_peer.port != ntp.server_port or
+        !std.meta.eql(old_peer.mac, device.gateway_mac) or
+        !std.meta.eql(old_peer.ipv4, client.server_ipv4))
+    {
+        return false;
+    }
+    const new_peer = UdpPeer{
+        .mac = device.gateway_mac,
+        .ipv4 = server_ipv4,
+        .port = ntp.server_port,
+    };
+    if (!validUdpPeer(new_peer)) return false;
+    if (std.meta.eql(old_peer, new_peer)) {
+        return std.meta.eql(client.server_ipv4, server_ipv4);
+    }
+    if (!disconnectUdpSocket(device, client.socket)) return false;
+    if (!connectUdpSocket(device, client.socket, new_peer)) {
+        _ = connectUdpSocket(device, client.socket, old_peer);
+        return false;
+    }
+    client.server_ipv4 = server_ipv4;
+    return true;
 }
 
 pub fn closeNtpClient(device: *Device, client: *NtpClient) bool {
@@ -7023,6 +7097,160 @@ fn verifyNtpRejectionExhaustion(
         .rx_completion_enqueues = rxe,
         .final_registered_endpoints = device.udp_endpoint_count,
         .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+
+fn verifyNtpClientServerSwitch(device: *Device) ?NtpClientServerSwitchReport {
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_198 or
+        device.next_udp_generation != 57 or device.tx_producer != 2 or
+        device.next_udp_identification != 79 or device.next_dns_transaction_id != 8 or
+        completionQueueEnqueued(&tx_completion_queue) != 106 or
+        completionQueueDequeued(&tx_completion_queue) != 106 or
+        completionQueueEnqueued(&rx_completion_queue) != 22 or
+        device.software_rx_queue.enqueued != 111 or device.software_rx_queue.dequeued != 111 or
+        device.packets_dispatched != 100 or device.udp_packets_dispatched != 99)
+    {
+        return null;
+    }
+
+    const original_server = [4]u8{ 10, 0, 2, 4 };
+    const alternate_server = [4]u8{ 10, 0, 2, 5 };
+    var client = openNtpClient(device, original_server) orelse return null;
+    const socket = client.socket;
+    if (socket.endpoint_index != 2 or socket.generation != 57 or socket.local_port != 49_198 or
+        device.udp_endpoint_count != 3 or device.next_ephemeral_udp_port != 49_199 or
+        device.next_udp_generation != 58)
+        return null;
+
+    const initial_peer = udpSocketPeer(device, socket) orelse return null;
+    if (!std.meta.eql(initial_peer.ipv4, original_server) or
+        !std.meta.eql(initial_peer.mac, device.gateway_mac) or initial_peer.port != ntp.server_port)
+        return null;
+
+    const client_before_invalid = client;
+    const peer_before_invalid = initial_peer;
+    const endpoints_before_invalid = device.udp_endpoint_count;
+    const port_before_invalid = device.next_ephemeral_udp_port;
+    const generation_before_invalid = device.next_udp_generation;
+    const identification_before_invalid = device.next_udp_identification;
+    const tx_before_invalid = device.tx_producer;
+    const submissions_before_invalid = device.tx_submissions;
+    const invalid_rejected = !switchNtpClientServer(device, &client, .{ 0, 0, 0, 0 });
+    const peer_after_invalid = udpSocketPeer(device, socket) orelse return null;
+    const invalid_state_preserved = std.meta.eql(client, client_before_invalid) and
+        std.meta.eql(peer_after_invalid, peer_before_invalid) and
+        device.udp_endpoint_count == endpoints_before_invalid and
+        device.next_ephemeral_udp_port == port_before_invalid and
+        device.next_udp_generation == generation_before_invalid and
+        device.next_udp_identification == identification_before_invalid and
+        device.tx_producer == tx_before_invalid and device.tx_submissions == submissions_before_invalid;
+    if (!invalid_rejected or !invalid_state_preserved) return null;
+
+    const client_before_idempotent = client;
+    const peer_before_idempotent = peer_after_invalid;
+    const idempotent_succeeded = switchNtpClientServer(device, &client, original_server);
+    const peer_after_idempotent = udpSocketPeer(device, socket) orelse return null;
+    const idempotent_state_preserved = std.meta.eql(client, client_before_idempotent) and
+        std.meta.eql(peer_after_idempotent, peer_before_idempotent);
+    if (!idempotent_succeeded or !idempotent_state_preserved) return null;
+
+    const forward_succeeded = switchNtpClientServer(device, &client, alternate_server);
+    const forward_peer = udpSocketPeer(device, socket) orelse return null;
+    const forward_peer_updated = std.meta.eql(client.server_ipv4, alternate_server) and
+        std.meta.eql(forward_peer.ipv4, alternate_server) and
+        std.meta.eql(forward_peer.mac, device.gateway_mac) and forward_peer.port == ntp.server_port;
+    if (!forward_succeeded or !forward_peer_updated) return null;
+
+    const reverse_succeeded = switchNtpClientServer(device, &client, original_server);
+    const reverse_peer = udpSocketPeer(device, socket) orelse return null;
+    const reverse_peer_restored = std.meta.eql(client.server_ipv4, original_server) and
+        std.meta.eql(reverse_peer, initial_peer);
+    const socket_preserved = std.meta.eql(client.socket, socket) and
+        socket.endpoint_index == 2 and socket.generation == 57 and socket.local_port == 49_198;
+    const gateway_mac_preserved = std.meta.eql(reverse_peer.mac, device.gateway_mac);
+    if (!reverse_succeeded or !reverse_peer_restored or !socket_preserved or !gateway_mac_preserved)
+        return null;
+
+    var stale_client = client;
+    const close_succeeded = closeNtpClient(device, &client);
+    if (!close_succeeded or client.active or udpSocketActive(device, socket)) return null;
+
+    const inactive_before = client;
+    const state_before_inactive = .{
+        device.udp_endpoint_count,
+        device.next_ephemeral_udp_port,
+        device.next_udp_generation,
+        device.next_udp_identification,
+        device.tx_producer,
+        device.tx_submissions,
+    };
+    const inactive_rejected = !switchNtpClientServer(device, &client, alternate_server);
+    const inactive_state_preserved = std.meta.eql(client, inactive_before) and
+        device.udp_endpoint_count == state_before_inactive[0] and
+        device.next_ephemeral_udp_port == state_before_inactive[1] and
+        device.next_udp_generation == state_before_inactive[2] and
+        device.next_udp_identification == state_before_inactive[3] and
+        device.tx_producer == state_before_inactive[4] and
+        device.tx_submissions == state_before_inactive[5];
+    if (!inactive_rejected or !inactive_state_preserved) return null;
+
+    const stale_before = stale_client;
+    const stale_rejected = !switchNtpClientServer(device, &stale_client, alternate_server);
+    const stale_state_preserved = std.meta.eql(stale_client, stale_before) and
+        device.udp_endpoint_count == state_before_inactive[0] and
+        device.next_ephemeral_udp_port == state_before_inactive[1] and
+        device.next_udp_generation == state_before_inactive[2] and
+        device.next_udp_identification == state_before_inactive[3] and
+        device.tx_producer == state_before_inactive[4] and
+        device.tx_submissions == state_before_inactive[5];
+    if (!stale_rejected or !stale_state_preserved) return null;
+
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const no_packet_traffic = device.next_udp_identification == 79 and device.tx_producer == 2 and
+        device.tx_submissions == submissions_before_invalid and txe == 106 and txd == 106 and rxe == 22 and
+        device.software_rx_queue.enqueued == 111 and device.software_rx_queue.dequeued == 111 and
+        device.packets_dispatched == 100 and device.udp_packets_dispatched == 99;
+    if (!no_packet_traffic or device.udp_endpoint_count != 2 or
+        device.next_ephemeral_udp_port != 49_199 or device.next_udp_generation != 58)
+        return null;
+
+    return .{
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .original_server = original_server,
+        .alternate_server = alternate_server,
+        .invalid_rejected = invalid_rejected,
+        .invalid_state_preserved = invalid_state_preserved,
+        .idempotent_succeeded = idempotent_succeeded,
+        .idempotent_state_preserved = idempotent_state_preserved,
+        .forward_succeeded = forward_succeeded,
+        .forward_peer_updated = forward_peer_updated,
+        .reverse_succeeded = reverse_succeeded,
+        .reverse_peer_restored = reverse_peer_restored,
+        .socket_preserved = socket_preserved,
+        .gateway_mac_preserved = gateway_mac_preserved,
+        .peer_port = reverse_peer.port,
+        .close_succeeded = close_succeeded,
+        .inactive_rejected = inactive_rejected,
+        .inactive_state_preserved = inactive_state_preserved,
+        .stale_rejected = stale_rejected,
+        .stale_state_preserved = stale_state_preserved,
+        .no_packet_traffic = no_packet_traffic,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .final_generation_cursor = device.next_udp_generation,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_tx_cursor = device.tx_producer,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
         .ingress_enqueued = device.software_rx_queue.enqueued,
         .ingress_dequeued = device.software_rx_queue.dequeued,
         .packets_dispatched = device.packets_dispatched,

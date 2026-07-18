@@ -1007,3 +1007,13 @@
 - Out-of-range current source indices are rejected without yielding a usable selection.
 - Arithmetic remains safe at the `u8` maximum: source 254 with 254 failures stays with one allowance, while failure 255 rotates to source zero.
 - The verifier proves zero/single-source and zero-threshold rejection, invalid-index handling, exact stay/rotate boundaries, wraparound, and maximum-count behavior.
+
+## 3.77 - Transactional NTP client server switch
+
+- `switchNtpClientServer` changes an active NTP client's connected server without closing or replacing its UDP socket.
+- The current peer must match the client's recorded server, gateway MAC, and NTP port before mutation begins.
+- Invalid zero addresses, inactive clients, and stale socket handles are rejected without changing client, endpoint, cursor, generation, or packet state.
+- Selecting the current server is an idempotent success with byte-for-byte client and peer preservation.
+- A real switch disconnects only an empty endpoint, binds the new peer, and updates `server_ipv4` only after connection succeeds; failed connection attempts restore the original peer.
+- Forward and reverse switches preserve endpoint index, socket generation, local ephemeral port, gateway MAC, and port 123.
+- The verifier proves zero transmissions and receives, clean close, exact endpoint/generation cursor changes from one socket lifetime, and unchanged completion, ingress, dispatch, IP-ID, and TX-ring accounting.
