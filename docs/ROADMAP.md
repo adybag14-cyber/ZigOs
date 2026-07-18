@@ -883,3 +883,12 @@
 - Readiness changes exactly at the cooldown boundary; recovery count equality is terminal exhaustion.
 - Deadline addition is saturating, so recovery scheduling near `u64` maximum cannot wrap into the past.
 - The verifier proves invalid-policy rejection, first and second recovery readiness, terminal exhaustion, exact boundary behavior, and overflow-safe waiting/readiness.
+## 3.63 - Live bounded NTP automatic recovery
+
+- `openNtpServiceWithRecoveryPolicies` validates quality, retry, and optional recovery policies transactionally before opening a socket.
+- Services without a recovery policy retain the explicit-clear timeout behavior from 3.61.
+- Recovery-enabled services remain inert until the saturated cooldown deadline, then start exactly one new request with start reason `recovery`.
+- Each automatic restart consumes one recovery allowance. Consecutive success resets the recovery budget; repeated outage eventually latches terminal recovery exhaustion.
+- Unsynchronized recovery preserves the original bootstrap originate timestamp; synchronized recovery derives a fresh projected timestamp.
+- Synchronization-health snapshots expose recovery deadline, automatic recovery count, exhaustion, and terminal limit hits.
+- The live verifier proves two cooldown-gated restarts, three retry timeouts, terminal exhaustion after the second recovery, no hidden fourth request, clean close, and exact six-transmission ring/accounting deltas.

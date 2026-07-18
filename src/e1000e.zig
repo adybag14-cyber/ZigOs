@@ -656,7 +656,7 @@ pub const NtpReferenceClockPoll = struct {
     apply_result: ?ntp.ClockApplyResult,
 };
 pub const NtpServiceState = enum(u8) { inactive, idle, awaiting, timed_out };
-pub const NtpServiceStartReason = enum(u8) { none, initial, refresh };
+pub const NtpServiceStartReason = enum(u8) { none, initial, refresh, recovery };
 pub const NtpSynchronizationHealth = enum(u8) {
     inactive,
     unsynchronized,
@@ -681,6 +681,10 @@ pub const NtpServiceHealth = struct {
     retry_exhausted: bool,
     retry_limit_hits: u64,
     last_timeout_tick: u64,
+    recovery_deadline_tick: u64,
+    automatic_recoveries: u8,
+    recovery_exhausted: bool,
+    recovery_limit_hits: u64,
 };
 
 pub const NtpService = struct {
@@ -691,6 +695,7 @@ pub const NtpService = struct {
     request_active: bool,
     quality_policy: ntp.QualityPolicy,
     retry_policy: ntp.RetryPolicy,
+    recovery_policy: ?ntp.RecoveryPolicy,
     retry_interval_ticks: u64,
     refresh_interval_ticks: u64,
     retry_deadline_tick: u64,
@@ -701,6 +706,10 @@ pub const NtpService = struct {
     retries: u64,
     retry_limit_hits: u64,
     last_timeout_tick: u64,
+    recovery_deadline_tick: u64,
+    automatic_recoveries: u8,
+    recovery_exhausted: bool,
+    recovery_limit_hits: u64,
     responses: u64,
     quality_accepted: u64,
     quality_rejected: u64,
@@ -718,11 +727,65 @@ pub const NtpServiceStep = struct {
     apply_result: ?ntp.ClockApplyResult,
     quality_result: ?ntp.QualityResult,
     next_retry_interval_ticks: ?u64,
+    recovery_state: ?ntp.RecoveryState,
     start_reason: NtpServiceStartReason,
     retried: bool,
     timeout_reached: bool,
+    recovery_started: bool,
 };
 
+pub const NtpAutomaticRecoveryReport = struct {
+    source_kind: time_reference.Kind,
+    frequency_hz: u64,
+    counter_bits: u8,
+    invalid_policy_rejected: bool,
+    invalid_policy_state_preserved: bool,
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    retry_initial_ticks: u64,
+    retry_maximum_ticks: u64,
+    retry_maximum_retries: u8,
+    recovery_cooldown_ticks: u64,
+    recovery_maximum_recoveries: u8,
+    transmit_identifications: [6]u16,
+    transmit_descriptors: [6]u16,
+    transmit_next_cursors: [6]u16,
+    first_timeout_delta: u64,
+    first_recovery_deadline_delta: u64,
+    first_wait_no_tx: bool,
+    first_recovery_delta: u64,
+    first_recovery_started: bool,
+    second_timeout_delta: u64,
+    second_recovery_deadline_delta: u64,
+    second_wait_no_tx: bool,
+    second_recovery_delta: u64,
+    second_recovery_started: bool,
+    terminal_timeout_delta: u64,
+    terminal_recovery_deadline_delta: u64,
+    terminal_exhausted: bool,
+    timeout_latched: bool,
+    health_reports_exhaustion: bool,
+    bootstrap_timestamp_preserved: bool,
+    requests_started: u64,
+    retries: u64,
+    retry_limit_hits: u64,
+    automatic_recoveries: u8,
+    recovery_limit_hits: u64,
+    close_succeeded: bool,
+    final_identification_cursor: u16,
+    final_tx_cursor: u16,
+    tx_submissions_delta: u64,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+};
 pub const NtpBackoffReport = struct {
     source_kind: time_reference.Kind,
     frequency_hz: u64,
@@ -2337,6 +2400,7 @@ pub const NetworkResult = struct {
     ntp_reference_clock: NtpReferenceClockReport,
     ntp_service: NtpServiceReport,
     ntp_backoff: NtpBackoffReport,
+    ntp_automatic_recovery: NtpAutomaticRecoveryReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -3049,6 +3113,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_automatic_recovery = verifyNtpAutomaticRecovery(device, continuous_counter) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -3209,6 +3277,7 @@ pub fn initializeAndTestNetwork(
         .ntp_reference_clock = ntp_reference_clock,
         .ntp_service = ntp_service,
         .ntp_backoff = ntp_backoff,
+        .ntp_automatic_recovery = ntp_automatic_recovery,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -3963,8 +4032,29 @@ pub fn openNtpServiceWithPolicies(
     quality_policy: ntp.QualityPolicy,
     retry_policy: ntp.RetryPolicy,
 ) ?NtpService {
+    return openNtpServiceWithRecoveryPolicies(
+        device,
+        server_ipv4,
+        refresh_ticks,
+        quality_policy,
+        retry_policy,
+        null,
+    );
+}
+
+pub fn openNtpServiceWithRecoveryPolicies(
+    device: *Device,
+    server_ipv4: [4]u8,
+    refresh_ticks: u64,
+    quality_policy: ntp.QualityPolicy,
+    retry_policy: ntp.RetryPolicy,
+    recovery_policy: ?ntp.RecoveryPolicy,
+) ?NtpService {
     if (refresh_ticks == 0 or !ntp.qualityPolicyValid(quality_policy) or
         !ntp.retryPolicyValid(retry_policy)) return null;
+    if (recovery_policy) |policy| {
+        if (!ntp.recoveryPolicyValid(policy)) return null;
+    }
     const client = openNtpClient(device, server_ipv4) orelse return null;
     return .{
         .active = true,
@@ -3974,6 +4064,7 @@ pub fn openNtpServiceWithPolicies(
         .request_active = false,
         .quality_policy = quality_policy,
         .retry_policy = retry_policy,
+        .recovery_policy = recovery_policy,
         .retry_interval_ticks = retry_policy.initial_interval_ticks,
         .refresh_interval_ticks = refresh_ticks,
         .retry_deadline_tick = 0,
@@ -3984,6 +4075,10 @@ pub fn openNtpServiceWithPolicies(
         .retries = 0,
         .retry_limit_hits = 0,
         .last_timeout_tick = 0,
+        .recovery_deadline_tick = 0,
+        .automatic_recoveries = 0,
+        .recovery_exhausted = false,
+        .recovery_limit_hits = 0,
         .responses = 0,
         .quality_accepted = 0,
         .quality_rejected = 0,
@@ -4009,6 +4104,9 @@ pub fn clearNtpServiceTimeout(service: *NtpService) bool {
     if (!service.active or service.request_active or !service.retry_exhausted) return false;
     service.retry_exhausted = false;
     service.request_retry_attempts = 0;
+    service.recovery_deadline_tick = 0;
+    service.automatic_recoveries = 0;
+    service.recovery_exhausted = false;
     return true;
 }
 
@@ -4035,6 +4133,10 @@ pub fn readNtpServiceHealth(
         .retry_exhausted = service.retry_exhausted,
         .retry_limit_hits = service.retry_limit_hits,
         .last_timeout_tick = service.last_timeout_tick,
+        .recovery_deadline_tick = service.recovery_deadline_tick,
+        .automatic_recoveries = service.automatic_recoveries,
+        .recovery_exhausted = service.recovery_exhausted,
+        .recovery_limit_hits = service.recovery_limit_hits,
     };
     if (!service.active or !service.client.active) return base;
     if (!service.clock.clock.synchronized) {
@@ -4078,8 +4180,15 @@ pub fn stepNtpServiceAutomatic(
     if (!service.active or !service.client.active or !udpSocketActive(device, service.client.socket)) {
         return stepNtpService(device, service, counter, now_tick, bootstrap_timestamp, budget);
     }
-    if (service.request_active or service.retry_exhausted) {
+    if (service.request_active) {
         return stepNtpService(device, service, counter, now_tick, service.request.client_timestamp, budget);
+    }
+    if (service.retry_exhausted) {
+        const recovery_timestamp = if (service.clock.clock.synchronized)
+            ntp.projectedTimestampAt(&service.clock, now_tick) orelse return null
+        else
+            service.request.client_timestamp;
+        return stepNtpService(device, service, counter, now_tick, recovery_timestamp, budget);
     }
     const start_due = !service.clock.clock.synchronized or now_tick >= service.refresh_deadline_tick;
     if (!start_due) {
@@ -4110,6 +4219,23 @@ fn retryWaitAfterTransmission(service: *const NtpService) ?u64 {
     );
 }
 
+fn timedOutServiceStep(recovery_state: ?ntp.RecoveryState) NtpServiceStep {
+    return .{
+        .state = .timed_out,
+        .poll = .{ .state = .pending, .examined = 0, .rejected = 0, .response = null },
+        .transmit = null,
+        .sample_tick = null,
+        .apply_result = null,
+        .quality_result = null,
+        .next_retry_interval_ticks = null,
+        .recovery_state = recovery_state,
+        .start_reason = .none,
+        .retried = false,
+        .timeout_reached = false,
+        .recovery_started = false,
+    };
+}
+
 pub fn stepNtpService(
     device: *Device,
     service: *NtpService,
@@ -4128,25 +4254,44 @@ pub fn stepNtpService(
             .apply_result = null,
             .quality_result = null,
             .next_retry_interval_ticks = null,
+            .recovery_state = null,
             .start_reason = .none,
             .retried = false,
             .timeout_reached = false,
+            .recovery_started = false,
         };
     }
+
+    var recovery_started = false;
     if (service.retry_exhausted and !service.request_active) {
-        return .{
-            .state = .timed_out,
-            .poll = .{ .state = .pending, .examined = 0, .rejected = 0, .response = null },
-            .transmit = null,
-            .sample_tick = null,
-            .apply_result = null,
-            .quality_result = null,
-            .next_retry_interval_ticks = null,
-            .start_reason = .none,
-            .retried = false,
-            .timeout_reached = false,
-        };
+        const policy = service.recovery_policy orelse return timedOutServiceStep(null);
+        const decision = ntp.evaluateRecovery(
+            policy,
+            service.last_timeout_tick,
+            service.automatic_recoveries,
+            now_tick,
+        );
+        service.recovery_deadline_tick = decision.deadline_tick;
+        switch (decision.state) {
+            .invalid_policy => return null,
+            .waiting => return timedOutServiceStep(.waiting),
+            .exhausted => {
+                if (!service.recovery_exhausted) {
+                    service.recovery_exhausted = true;
+                    service.recovery_limit_hits +|= 1;
+                }
+                return timedOutServiceStep(.exhausted);
+            },
+            .ready => {
+                service.retry_exhausted = false;
+                service.request_retry_attempts = 0;
+                service.recovery_exhausted = false;
+                service.automatic_recoveries += 1;
+                recovery_started = true;
+            },
+        }
     }
+
     if (service.request_active) {
         const poll = pollNtpClientRequest(device, &service.client, &service.request, budget);
         var out = NtpServiceStep{
@@ -4157,9 +4302,11 @@ pub fn stepNtpService(
             .apply_result = null,
             .quality_result = null,
             .next_retry_interval_ticks = null,
+            .recovery_state = null,
             .start_reason = .none,
             .retried = false,
             .timeout_reached = false,
+            .recovery_started = false,
         };
         if (poll.state == .inactive) {
             out.state = .inactive;
@@ -4182,6 +4329,9 @@ pub fn stepNtpService(
                 service.request_active = false;
                 service.request_retry_attempts = 0;
                 service.retry_exhausted = false;
+                service.recovery_deadline_tick = 0;
+                service.automatic_recoveries = 0;
+                service.recovery_exhausted = false;
                 service.responses +|= 1;
                 service.refresh_deadline_tick = sample_tick +| service.refresh_interval_ticks;
                 out.state = .idle;
@@ -4202,6 +4352,20 @@ pub fn stepNtpService(
                 service.last_timeout_tick = now_tick;
                 out.state = .timed_out;
                 out.timeout_reached = true;
+                if (service.recovery_policy) |policy| {
+                    const decision = ntp.evaluateRecovery(
+                        policy,
+                        now_tick,
+                        service.automatic_recoveries,
+                        now_tick,
+                    );
+                    service.recovery_deadline_tick = decision.deadline_tick;
+                    out.recovery_state = decision.state;
+                    if (decision.state == .exhausted and !service.recovery_exhausted) {
+                        service.recovery_exhausted = true;
+                        service.recovery_limit_hits +|= 1;
+                    }
+                }
                 return out;
             }
             out.transmit = retryNtpClientRequest(device, &service.client, &service.request) orelse return null;
@@ -4214,7 +4378,10 @@ pub fn stepNtpService(
         }
         return out;
     }
-    const why: NtpServiceStartReason = if (!service.clock.clock.synchronized)
+
+    const why: NtpServiceStartReason = if (recovery_started)
+        .recovery
+    else if (!service.clock.clock.synchronized)
         .initial
     else if (now_tick >= service.refresh_deadline_tick)
         .refresh
@@ -4229,9 +4396,11 @@ pub fn stepNtpService(
             .apply_result = null,
             .quality_result = null,
             .next_retry_interval_ticks = null,
+            .recovery_state = null,
             .start_reason = .none,
             .retried = false,
             .timeout_reached = false,
+            .recovery_started = false,
         };
     }
     const initial_wait = ntp.retryIntervalForAttempt(service.retry_policy, 0) orelse return null;
@@ -4250,9 +4419,11 @@ pub fn stepNtpService(
         .apply_result = null,
         .quality_result = null,
         .next_retry_interval_ticks = initial_wait,
+        .recovery_state = if (recovery_started) .ready else null,
         .start_reason = why,
         .retried = false,
         .timeout_reached = false,
+        .recovery_started = recovery_started,
     };
 }
 pub fn retryNtpClientRequest(
@@ -5578,6 +5749,275 @@ fn enqueueNtpServiceResponseWithQuality(
     if (!enqueueQueuedPacket(&device.software_rx_queue, packet)) return false;
     const dispatch = dispatchPacketBatch(device, 1);
     return dispatch.examined == 1 and dispatch.routed == 1 and dispatch.dropped == 0;
+}
+fn verifyNtpAutomaticRecovery(
+    device: *Device,
+    counter: *time_reference.ContinuousCounter,
+) ?NtpAutomaticRecoveryReport {
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_188 or
+        device.next_udp_generation != 47 or device.tx_producer != 5 or
+        device.next_udp_identification != 42 or device.next_dns_transaction_id != 8 or
+        completionQueueEnqueued(&tx_completion_queue) != 69 or
+        completionQueueDequeued(&tx_completion_queue) != 69 or
+        completionQueueEnqueued(&rx_completion_queue) != 22 or
+        device.software_rx_queue.enqueued != 83 or device.software_rx_queue.dequeued != 83 or
+        device.packets_dispatched != 72 or device.udp_packets_dispatched != 71 or
+        counter.frequency_hz == 0 or counter.counter_bits == 0)
+    {
+        return null;
+    }
+    const server = [4]u8{ 10, 0, 2, 4 };
+    const invalid_endpoint_count = device.udp_endpoint_count;
+    const invalid_ephemeral_cursor = device.next_ephemeral_udp_port;
+    const invalid_generation = device.next_udp_generation;
+    const invalid_identification = device.next_udp_identification;
+    const invalid_tx_cursor = device.tx_producer;
+    const invalid_submissions = device.tx_submissions;
+    const invalid_policy_rejected = openNtpServiceWithRecoveryPolicies(
+        device,
+        server,
+        20,
+        ntp.default_quality_policy,
+        .{ .initial_interval_ticks = 1, .maximum_interval_ticks = 1, .maximum_retries = 1 },
+        .{ .cooldown_ticks = 0, .maximum_recoveries = 2 },
+    ) == null;
+    const invalid_policy_state_preserved = device.udp_endpoint_count == invalid_endpoint_count and
+        device.next_ephemeral_udp_port == invalid_ephemeral_cursor and
+        device.next_udp_generation == invalid_generation and
+        device.next_udp_identification == invalid_identification and
+        device.tx_producer == invalid_tx_cursor and device.tx_submissions == invalid_submissions;
+    if (!invalid_policy_rejected or !invalid_policy_state_preserved) return null;
+
+    const retry_policy = ntp.RetryPolicy{
+        .initial_interval_ticks = 1,
+        .maximum_interval_ticks = 1,
+        .maximum_retries = 1,
+    };
+    const recovery_policy = ntp.RecoveryPolicy{
+        .cooldown_ticks = 2,
+        .maximum_recoveries = 2,
+    };
+    var service = openNtpServiceWithRecoveryPolicies(
+        device,
+        server,
+        20,
+        ntp.default_quality_policy,
+        retry_policy,
+        recovery_policy,
+    ) orelse return null;
+    const socket = service.client.socket;
+    if (socket.endpoint_index != 2 or socket.generation != 47 or socket.local_port != 49_188 or
+        device.next_ephemeral_udp_port != 49_189 or device.next_udp_generation != 48 or
+        device.udp_endpoint_count != 3 or !std.meta.eql(service.retry_policy, retry_policy) or
+        service.recovery_policy == null or
+        !std.meta.eql(service.recovery_policy.?, recovery_policy)) return null;
+
+    const submissions_before = device.tx_submissions;
+    const start_tick = counter.read();
+    var transmit_identifications = [6]u16{ 0, 0, 0, 0, 0, 0 };
+    var transmit_descriptors = [6]u16{ 0, 0, 0, 0, 0, 0 };
+    var transmit_next_cursors = [6]u16{ 0, 0, 0, 0, 0, 0 };
+
+    const initial = stepNtpServiceAutomatic(
+        device,
+        &service,
+        counter,
+        start_tick,
+        ntp.fixture_client_timestamp,
+        0,
+    ) orelse return null;
+    const initial_tx = initial.transmit orelse return null;
+    transmit_identifications[0] = initial_tx.identification;
+    transmit_descriptors[0] = initial_tx.completion.descriptor_index;
+    transmit_next_cursors[0] = initial_tx.completion.next_cursor;
+    if (initial.state != .awaiting or initial.start_reason != .initial or initial.recovery_started or
+        initial.recovery_state != null or initial.next_retry_interval_ticks != 1 or
+        initial_tx.identification != 42 or initial_tx.completion.descriptor_index != 5 or
+        initial_tx.completion.next_cursor != 6) return null;
+
+    const first_retry = stepNtpServiceAutomatic(device, &service, counter, start_tick + 1, 0, 0) orelse return null;
+    const first_retry_tx = first_retry.transmit orelse return null;
+    transmit_identifications[1] = first_retry_tx.identification;
+    transmit_descriptors[1] = first_retry_tx.completion.descriptor_index;
+    transmit_next_cursors[1] = first_retry_tx.completion.next_cursor;
+    if (!first_retry.retried or first_retry.next_retry_interval_ticks != 1 or
+        first_retry_tx.identification != 43 or first_retry_tx.completion.descriptor_index != 6 or
+        first_retry_tx.completion.next_cursor != 7) return null;
+
+    const first_timeout = stepNtpServiceAutomatic(device, &service, counter, start_tick + 2, 0, 0) orelse return null;
+    const first_timeout_delta = service.last_timeout_tick - start_tick;
+    const first_recovery_deadline_delta = service.recovery_deadline_tick - start_tick;
+    if (first_timeout.state != .timed_out or !first_timeout.timeout_reached or
+        first_timeout.recovery_state != .waiting or first_timeout_delta != 2 or
+        first_recovery_deadline_delta != 4 or !service.retry_exhausted or
+        service.automatic_recoveries != 0 or service.recovery_exhausted)
+    {
+        return null;
+    }
+
+    const first_wait = stepNtpServiceAutomatic(device, &service, counter, start_tick + 3, 0, 0) orelse return null;
+    const first_wait_no_tx = first_wait.state == .timed_out and first_wait.recovery_state == .waiting and
+        first_wait.transmit == null and !first_wait.recovery_started and
+        device.next_udp_identification == 44 and device.tx_producer == 7;
+    if (!first_wait_no_tx) return null;
+
+    const first_recovery = stepNtpServiceAutomatic(device, &service, counter, start_tick + 4, 0, 0) orelse return null;
+    const first_recovery_tx = first_recovery.transmit orelse return null;
+    transmit_identifications[2] = first_recovery_tx.identification;
+    transmit_descriptors[2] = first_recovery_tx.completion.descriptor_index;
+    transmit_next_cursors[2] = first_recovery_tx.completion.next_cursor;
+    const first_recovery_started = first_recovery.state == .awaiting and
+        first_recovery.start_reason == .recovery and first_recovery.recovery_state == .ready and
+        first_recovery.recovery_started and first_recovery.next_retry_interval_ticks == 1 and
+        first_recovery_tx.identification == 44 and first_recovery_tx.completion.descriptor_index == 7 and
+        first_recovery_tx.completion.next_cursor == 0 and service.automatic_recoveries == 1;
+    if (!first_recovery_started) return null;
+
+    const second_retry = stepNtpServiceAutomatic(device, &service, counter, start_tick + 5, 0, 0) orelse return null;
+    const second_retry_tx = second_retry.transmit orelse return null;
+    transmit_identifications[3] = second_retry_tx.identification;
+    transmit_descriptors[3] = second_retry_tx.completion.descriptor_index;
+    transmit_next_cursors[3] = second_retry_tx.completion.next_cursor;
+    if (!second_retry.retried or second_retry.next_retry_interval_ticks != 1 or
+        second_retry_tx.identification != 45 or second_retry_tx.completion.descriptor_index != 0 or
+        second_retry_tx.completion.next_cursor != 1) return null;
+
+    const second_timeout = stepNtpServiceAutomatic(device, &service, counter, start_tick + 6, 0, 0) orelse return null;
+    const second_timeout_delta = service.last_timeout_tick - start_tick;
+    const second_recovery_deadline_delta = service.recovery_deadline_tick - start_tick;
+    if (second_timeout.state != .timed_out or !second_timeout.timeout_reached or
+        second_timeout.recovery_state != .waiting or second_timeout_delta != 6 or
+        second_recovery_deadline_delta != 8 or service.automatic_recoveries != 1 or
+        service.recovery_exhausted)
+    {
+        return null;
+    }
+
+    const second_wait = stepNtpServiceAutomatic(device, &service, counter, start_tick + 7, 0, 0) orelse return null;
+    const second_wait_no_tx = second_wait.state == .timed_out and second_wait.recovery_state == .waiting and
+        second_wait.transmit == null and !second_wait.recovery_started and
+        device.next_udp_identification == 46 and device.tx_producer == 1;
+    if (!second_wait_no_tx) return null;
+
+    const second_recovery = stepNtpServiceAutomatic(device, &service, counter, start_tick + 8, 0, 0) orelse return null;
+    const second_recovery_tx = second_recovery.transmit orelse return null;
+    transmit_identifications[4] = second_recovery_tx.identification;
+    transmit_descriptors[4] = second_recovery_tx.completion.descriptor_index;
+    transmit_next_cursors[4] = second_recovery_tx.completion.next_cursor;
+    const second_recovery_started = second_recovery.state == .awaiting and
+        second_recovery.start_reason == .recovery and second_recovery.recovery_state == .ready and
+        second_recovery.recovery_started and second_recovery.next_retry_interval_ticks == 1 and
+        second_recovery_tx.identification == 46 and second_recovery_tx.completion.descriptor_index == 1 and
+        second_recovery_tx.completion.next_cursor == 2 and service.automatic_recoveries == 2;
+    if (!second_recovery_started) return null;
+
+    const third_retry = stepNtpServiceAutomatic(device, &service, counter, start_tick + 9, 0, 0) orelse return null;
+    const third_retry_tx = third_retry.transmit orelse return null;
+    transmit_identifications[5] = third_retry_tx.identification;
+    transmit_descriptors[5] = third_retry_tx.completion.descriptor_index;
+    transmit_next_cursors[5] = third_retry_tx.completion.next_cursor;
+    if (!third_retry.retried or third_retry.next_retry_interval_ticks != 1 or
+        third_retry_tx.identification != 47 or third_retry_tx.completion.descriptor_index != 2 or
+        third_retry_tx.completion.next_cursor != 3) return null;
+
+    const terminal_timeout = stepNtpServiceAutomatic(device, &service, counter, start_tick + 10, 0, 0) orelse return null;
+    const terminal_timeout_delta = service.last_timeout_tick - start_tick;
+    const terminal_recovery_deadline_delta = service.recovery_deadline_tick - start_tick;
+    const terminal_exhausted = terminal_timeout.state == .timed_out and terminal_timeout.timeout_reached and
+        terminal_timeout.recovery_state == .exhausted and terminal_timeout.transmit == null and
+        terminal_timeout_delta == 10 and terminal_recovery_deadline_delta == 12 and
+        service.retry_exhausted and service.recovery_exhausted and
+        service.automatic_recoveries == 2 and service.recovery_limit_hits == 1;
+    if (!terminal_exhausted) return null;
+
+    const terminal_snapshot = service;
+    const id_at_terminal = device.next_udp_identification;
+    const tx_at_terminal = device.tx_producer;
+    const submissions_at_terminal = device.tx_submissions;
+    const latched = stepNtpServiceAutomatic(device, &service, counter, start_tick + 11, 0, 0) orelse return null;
+    const timeout_latched = latched.state == .timed_out and latched.recovery_state == .exhausted and
+        !latched.timeout_reached and !latched.recovery_started and latched.transmit == null and
+        std.meta.eql(service, terminal_snapshot) and device.next_udp_identification == id_at_terminal and
+        device.tx_producer == tx_at_terminal and device.tx_submissions == submissions_at_terminal;
+    if (!timeout_latched) return null;
+
+    const health = readNtpServiceHealth(&service, start_tick + 11, 4, 8) orelse return null;
+    const health_reports_exhaustion = health.state == .unsynchronized and health.current_time == null and
+        !health.awaiting_response and health.retry_exhausted and health.retry_limit_hits == 3 and
+        health.recovery_deadline_tick == start_tick + 12 and health.automatic_recoveries == 2 and
+        health.recovery_exhausted and health.recovery_limit_hits == 1 and
+        health.last_timeout_tick == start_tick + 10;
+    if (!health_reports_exhaustion) return null;
+
+    const bootstrap_timestamp_preserved = service.request.client_timestamp == ntp.fixture_client_timestamp;
+    const close_succeeded = closeNtpService(device, &service);
+    if (!bootstrap_timestamp_preserved or !close_succeeded or service.active or service.client.active or
+        service.request_active or !service.request.cancelled) return null;
+
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const overflow = completionQueueOverflow(&tx_completion_queue) + completionQueueOverflow(&rx_completion_queue);
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_189 or
+        device.next_udp_generation != 48 or device.next_udp_identification != 48 or
+        device.next_dns_transaction_id != 8 or device.tx_producer != 3 or
+        device.tx_submissions != submissions_before + 6 or txe != 75 or txd != 75 or rxe != 22 or
+        overflow != 0 or device.software_rx_queue.enqueued != 83 or
+        device.software_rx_queue.dequeued != 83 or device.packets_dispatched != 72 or
+        device.udp_packets_dispatched != 71) return null;
+
+    return .{
+        .source_kind = counter.reference.kind,
+        .frequency_hz = counter.frequency_hz,
+        .counter_bits = counter.counter_bits,
+        .invalid_policy_rejected = invalid_policy_rejected,
+        .invalid_policy_state_preserved = invalid_policy_state_preserved,
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .retry_initial_ticks = retry_policy.initial_interval_ticks,
+        .retry_maximum_ticks = retry_policy.maximum_interval_ticks,
+        .retry_maximum_retries = retry_policy.maximum_retries,
+        .recovery_cooldown_ticks = recovery_policy.cooldown_ticks,
+        .recovery_maximum_recoveries = recovery_policy.maximum_recoveries,
+        .transmit_identifications = transmit_identifications,
+        .transmit_descriptors = transmit_descriptors,
+        .transmit_next_cursors = transmit_next_cursors,
+        .first_timeout_delta = first_timeout_delta,
+        .first_recovery_deadline_delta = first_recovery_deadline_delta,
+        .first_wait_no_tx = first_wait_no_tx,
+        .first_recovery_delta = 4,
+        .first_recovery_started = first_recovery_started,
+        .second_timeout_delta = second_timeout_delta,
+        .second_recovery_deadline_delta = second_recovery_deadline_delta,
+        .second_wait_no_tx = second_wait_no_tx,
+        .second_recovery_delta = 8,
+        .second_recovery_started = second_recovery_started,
+        .terminal_timeout_delta = terminal_timeout_delta,
+        .terminal_recovery_deadline_delta = terminal_recovery_deadline_delta,
+        .terminal_exhausted = terminal_exhausted,
+        .timeout_latched = timeout_latched,
+        .health_reports_exhaustion = health_reports_exhaustion,
+        .bootstrap_timestamp_preserved = bootstrap_timestamp_preserved,
+        .requests_started = service.requests_started,
+        .retries = service.retries,
+        .retry_limit_hits = service.retry_limit_hits,
+        .automatic_recoveries = service.automatic_recoveries,
+        .recovery_limit_hits = service.recovery_limit_hits,
+        .close_succeeded = close_succeeded,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_tx_cursor = device.tx_producer,
+        .tx_submissions_delta = device.tx_submissions - submissions_before,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+    };
 }
 fn verifyNtpServiceBackoff(
     device: *Device,
