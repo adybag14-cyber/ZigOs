@@ -153,6 +153,35 @@ pub fn evaluateResponseStepAt(
         policy,
     );
 }
+pub const maximum_source_pool_entries: usize = 4;
+
+pub const SourcePool = struct {
+    count: u8,
+    servers: [maximum_source_pool_entries][4]u8,
+};
+
+fn sourceAddressValid(server: [4]u8) bool {
+    return server[0] != 0 or server[1] != 0 or server[2] != 0 or server[3] != 0;
+}
+
+pub fn sourcePoolValid(pool: SourcePool) bool {
+    if (pool.count < 2 or @as(usize, pool.count) > maximum_source_pool_entries) return false;
+    var index: usize = 0;
+    while (index < pool.count) : (index += 1) {
+        if (!sourceAddressValid(pool.servers[index])) return false;
+        var previous: usize = 0;
+        while (previous < index) : (previous += 1) {
+            if (std.meta.eql(pool.servers[previous], pool.servers[index])) return false;
+        }
+    }
+    return true;
+}
+
+pub fn sourcePoolServer(pool: SourcePool, source_index: u8) ?[4]u8 {
+    if (!sourcePoolValid(pool) or source_index >= pool.count) return null;
+    return pool.servers[source_index];
+}
+
 pub const SourceRotationPolicy = struct {
     source_count: u8,
     failures_before_rotation: u8,

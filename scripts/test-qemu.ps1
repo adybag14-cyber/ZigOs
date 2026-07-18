@@ -902,6 +902,9 @@ if ($Network) {
     if (-not $output.Contains('NTP step policy verified: invalid zero rejected yes, initial accepted yes, stale equal/behind yes/yes, exact borrow/no-borrow yes/yes, excessive fraction/seconds yes/yes, deltas borrow 1/0x80000000 no-borrow 1/0x80000000')) {
         throw 'The NTP clock-step policy did not enforce exact fixed-point stale, borrow, no-borrow, boundary, and excessive-forward-step behavior.'
     }
+    if (-not $output.Contains('NTP source pool verified: invalid count zero/single/too-many yes/yes/yes, invalid zero/duplicate yes/yes, valid two/max yes/yes, sources 10.0.2.4/10.0.2.5/10.0.2.7, lookup range/invalid/unused yes/yes/yes')) {
+        throw 'The bounded NTP source pool did not enforce count, nonzero, uniqueness, indexed selection, out-of-range rejection, invalid-pool rejection, and unused-slot semantics.'
+    }
     if (-not $output.Contains('NTP source rotation policy verified: invalid sources/single/threshold/index yes/yes/yes/yes, stay zero/first yes/yes remaining 2/1, rotate boundary/beyond yes/yes next 2/2, wrap 2->0 yes, maximum stay/rotate yes/yes next 0')) {
         throw 'The NTP source-rotation policy did not enforce validation, exact stay/rotate boundaries, wraparound, invalid-index handling, and u8-maximum behavior.'
     }

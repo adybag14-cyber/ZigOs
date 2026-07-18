@@ -1017,3 +1017,12 @@
 - A real switch disconnects only an empty endpoint, binds the new peer, and updates `server_ipv4` only after connection succeeds; failed connection attempts restore the original peer.
 - Forward and reverse switches preserve endpoint index, socket generation, local ephemeral port, gateway MAC, and port 123.
 - The verifier proves zero transmissions and receives, clean close, exact endpoint/generation cursor changes from one socket lifetime, and unchanged completion, ingress, dispatch, IP-ID, and TX-ring accounting.
+
+## 3.78 - Validated bounded NTP source pool
+
+- `ntp.SourcePool` stores two to four active IPv4 NTP servers in a fixed-size allocation-free array.
+- Active source addresses must be nonzero and pairwise unique; unused slots outside `count` are ignored.
+- Counts below two or above four are rejected.
+- `sourcePoolServer` validates the entire pool before returning an indexed source and rejects out-of-range indices.
+- Invalid pools cannot yield a source even when the requested index would otherwise be in range.
+- The verifier proves zero/single/too-many count rejection, zero-address and duplicate rejection, valid two- and four-source pools, exact indexed selection, unused-slot semantics, and out-of-range behavior.

@@ -1508,6 +1508,21 @@ pub const NtpBackoffReport = struct {
     packets_dispatched: u64,
     udp_dispatched: u64,
 };
+pub const NtpSourcePoolReport = struct {
+    invalid_zero_count_rejected: bool,
+    invalid_single_count_rejected: bool,
+    invalid_too_many_rejected: bool,
+    invalid_zero_address_rejected: bool,
+    invalid_duplicate_rejected: bool,
+    valid_two_sources: bool,
+    valid_maximum_sources: bool,
+    first_source: [4]u8,
+    second_source: [4]u8,
+    maximum_last_source: [4]u8,
+    out_of_range_rejected: bool,
+    invalid_pool_lookup_rejected: bool,
+    unused_slots_ignored: bool,
+};
 pub const NtpSourceRotationPolicyReport = struct {
     invalid_zero_sources_rejected: bool,
     invalid_single_source_rejected: bool,
@@ -3152,6 +3167,7 @@ pub const NetworkResult = struct {
     ntp_step_policy: NtpStepPolicyReport,
     ntp_step_rejection_policy: NtpStepRejectionPolicyReport,
     ntp_quality_rejection_policy: NtpQualityRejectionPolicyReport,
+    ntp_source_pool: NtpSourcePoolReport,
     ntp_source_rotation_policy: NtpSourceRotationPolicyReport,
 };
 
@@ -3939,6 +3955,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_source_pool = verifyNtpSourcePool() orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_source_rotation_policy = verifyNtpSourceRotationPolicy() orelse {
         active_device_storage = null;
         return null;
@@ -4099,6 +4119,7 @@ pub fn initializeAndTestNetwork(
         .ntp_step_policy = ntp_step_policy,
         .ntp_step_rejection_policy = ntp_step_rejection_policy,
         .ntp_quality_rejection_policy = ntp_quality_rejection_policy,
+        .ntp_source_pool = ntp_source_pool,
         .ntp_source_rotation_policy = ntp_source_rotation_policy,
     };
 }
@@ -10025,6 +10046,80 @@ fn verifyNtpServiceBackoff(
         .udp_dispatched = device.udp_packets_dispatched,
     };
 }
+fn verifyNtpSourcePool() ?NtpSourcePoolReport {
+    const zero_pool = ntp.SourcePool{
+        .count = 0,
+        .servers = std.mem.zeroes([ntp.maximum_source_pool_entries][4]u8),
+    };
+    var single_pool = zero_pool;
+    single_pool.count = 1;
+    single_pool.servers[0] = .{ 10, 0, 2, 4 };
+    var too_many_pool = single_pool;
+    too_many_pool.count = ntp.maximum_source_pool_entries + 1;
+
+    var zero_address_pool = zero_pool;
+    zero_address_pool.count = 2;
+    zero_address_pool.servers[0] = .{ 10, 0, 2, 4 };
+    zero_address_pool.servers[1] = .{ 0, 0, 0, 0 };
+
+    var duplicate_pool = zero_pool;
+    duplicate_pool.count = 2;
+    duplicate_pool.servers[0] = .{ 10, 0, 2, 4 };
+    duplicate_pool.servers[1] = .{ 10, 0, 2, 4 };
+
+    var two_pool = zero_pool;
+    two_pool.count = 2;
+    two_pool.servers[0] = .{ 10, 0, 2, 4 };
+    two_pool.servers[1] = .{ 10, 0, 2, 5 };
+    const first = ntp.sourcePoolServer(two_pool, 0) orelse return null;
+    const second = ntp.sourcePoolServer(two_pool, 1) orelse return null;
+
+    var maximum_pool = zero_pool;
+    maximum_pool.count = ntp.maximum_source_pool_entries;
+    maximum_pool.servers[0] = .{ 10, 0, 2, 4 };
+    maximum_pool.servers[1] = .{ 10, 0, 2, 5 };
+    maximum_pool.servers[2] = .{ 10, 0, 2, 6 };
+    maximum_pool.servers[3] = .{ 10, 0, 2, 7 };
+    const maximum_last = ntp.sourcePoolServer(maximum_pool, 3) orelse return null;
+
+    const invalid_zero_count_rejected = !ntp.sourcePoolValid(zero_pool);
+    const invalid_single_count_rejected = !ntp.sourcePoolValid(single_pool);
+    const invalid_too_many_rejected = !ntp.sourcePoolValid(too_many_pool);
+    const invalid_zero_address_rejected = !ntp.sourcePoolValid(zero_address_pool);
+    const invalid_duplicate_rejected = !ntp.sourcePoolValid(duplicate_pool);
+    const valid_two_sources = ntp.sourcePoolValid(two_pool) and
+        std.meta.eql(first, two_pool.servers[0]) and std.meta.eql(second, two_pool.servers[1]);
+    const valid_maximum_sources = ntp.sourcePoolValid(maximum_pool) and
+        std.meta.eql(maximum_last, maximum_pool.servers[3]);
+    const out_of_range_rejected = ntp.sourcePoolServer(two_pool, 2) == null;
+    const invalid_pool_lookup_rejected = ntp.sourcePoolServer(duplicate_pool, 0) == null;
+    const unused_slots_ignored = std.meta.eql(two_pool.servers[2], [4]u8{ 0, 0, 0, 0 }) and
+        std.meta.eql(two_pool.servers[3], [4]u8{ 0, 0, 0, 0 }) and ntp.sourcePoolValid(two_pool);
+
+    if (!invalid_zero_count_rejected or !invalid_single_count_rejected or
+        !invalid_too_many_rejected or !invalid_zero_address_rejected or
+        !invalid_duplicate_rejected or !valid_two_sources or !valid_maximum_sources or
+        !out_of_range_rejected or !invalid_pool_lookup_rejected or !unused_slots_ignored)
+    {
+        return null;
+    }
+    return .{
+        .invalid_zero_count_rejected = invalid_zero_count_rejected,
+        .invalid_single_count_rejected = invalid_single_count_rejected,
+        .invalid_too_many_rejected = invalid_too_many_rejected,
+        .invalid_zero_address_rejected = invalid_zero_address_rejected,
+        .invalid_duplicate_rejected = invalid_duplicate_rejected,
+        .valid_two_sources = valid_two_sources,
+        .valid_maximum_sources = valid_maximum_sources,
+        .first_source = first,
+        .second_source = second,
+        .maximum_last_source = maximum_last,
+        .out_of_range_rejected = out_of_range_rejected,
+        .invalid_pool_lookup_rejected = invalid_pool_lookup_rejected,
+        .unused_slots_ignored = unused_slots_ignored,
+    };
+}
+
 fn verifyNtpSourceRotationPolicy() ?NtpSourceRotationPolicyReport {
     const invalid_zero_sources = ntp.evaluateSourceRotation(
         .{ .source_count = 0, .failures_before_rotation = 2 },
