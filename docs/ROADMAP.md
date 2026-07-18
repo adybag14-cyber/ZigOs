@@ -1086,3 +1086,12 @@
 - Repeated service steps remain exhausted without incrementing the recovery-limit counter again or mutating IP-ID, TX-ring, or submission cursors.
 - The synchronized clock remains visible as advancing holdover while health reports source, pending target, failure count, rotation count, retry exhaustion, recovery exhaustion, and the single recovery-limit hit.
 - The verifier proves seven transmissions, one accepted sample, three retry-limit hits, two source rotations, zero recovery successes, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
+
+## 3.85 - Explicit reset from terminal NTP source exhaustion
+
+- `clearNtpServiceTimeout` now clears the consecutive source-failure count in addition to retry, rejection, recovery, and pending-source transient state.
+- A successful clear preserves the current source, connected UDP peer, socket handle, synchronized projected clock, source-rotation count, timeout history, and cumulative retry/recovery limit counters.
+- Duplicate clears remain rejected because the service is no longer timeout-latched after the first successful clear.
+- The next automatic step uses projected holdover time to start a normal refresh on the retained current source rather than switching, reopening, or reverting to bootstrap time.
+- A valid response from the current source returns the service to synchronized health with zero transient outage state while cumulative diagnostics remain visible.
+- The verifier isolates reset semantics by seeding the terminal state already proven in 3.84, then proves two transmissions, two accepted samples, source-two/socket/clock preservation, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
