@@ -774,6 +774,18 @@ pub const NtpBackoffReport = struct {
     packets_dispatched: u64,
     udp_dispatched: u64,
 };
+pub const NtpRecoveryPolicyReport = struct {
+    invalid_zero_cooldown_rejected: bool,
+    invalid_zero_recoveries_rejected: bool,
+    deadline_tick: u64,
+    waiting_before_deadline: bool,
+    ready_at_deadline: bool,
+    second_recovery_ready: bool,
+    exhausted_at_limit: bool,
+    overflow_deadline_tick: u64,
+    overflow_waiting: bool,
+    overflow_ready: bool,
+};
 pub const NtpRetryPolicyReport = struct {
     invalid_zero_initial_rejected: bool,
     invalid_cap_rejected: bool,
@@ -2330,6 +2342,7 @@ pub const NetworkResult = struct {
     ntp_quality: NtpQualityReport,
     ntp_health: NtpHealthReport,
     ntp_retry_policy: NtpRetryPolicyReport,
+    ntp_recovery_policy: NtpRecoveryPolicyReport,
 };
 
 var active_bar0: usize = 0;
@@ -3056,6 +3069,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_recovery_policy = verifyNtpRecoveryPolicy() orelse {
+        active_device_storage = null;
+        return null;
+    };
 
     return .{
         .rx_ring_address = rx_ring_address,
@@ -3197,6 +3214,7 @@ pub fn initializeAndTestNetwork(
         .ntp_quality = ntp_quality,
         .ntp_health = ntp_health,
         .ntp_retry_policy = ntp_retry_policy,
+        .ntp_recovery_policy = ntp_recovery_policy,
     };
 }
 
@@ -5816,6 +5834,66 @@ fn verifyNtpServiceBackoff(
         .ingress_dequeued = device.software_rx_queue.dequeued,
         .packets_dispatched = device.packets_dispatched,
         .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+fn verifyNtpRecoveryPolicy() ?NtpRecoveryPolicyReport {
+    const invalid_zero_cooldown = ntp.evaluateRecovery(
+        .{ .cooldown_ticks = 0, .maximum_recoveries = 2 },
+        100,
+        0,
+        100,
+    );
+    const invalid_zero_recoveries = ntp.evaluateRecovery(
+        .{ .cooldown_ticks = 10, .maximum_recoveries = 0 },
+        100,
+        0,
+        100,
+    );
+    const policy = ntp.RecoveryPolicy{
+        .cooldown_ticks = 10,
+        .maximum_recoveries = 2,
+    };
+    const waiting = ntp.evaluateRecovery(policy, 100, 0, 109);
+    const ready = ntp.evaluateRecovery(policy, 100, 0, 110);
+    const second_ready = ntp.evaluateRecovery(policy, 100, 1, 110);
+    const exhausted = ntp.evaluateRecovery(policy, 100, 2, 110);
+    const maximum = std.math.maxInt(u64);
+    const overflow_policy = ntp.RecoveryPolicy{
+        .cooldown_ticks = 10,
+        .maximum_recoveries = 1,
+    };
+    const overflow_wait = ntp.evaluateRecovery(overflow_policy, maximum - 4, 0, maximum - 1);
+    const overflow_ready_decision = ntp.evaluateRecovery(overflow_policy, maximum - 4, 0, maximum);
+
+    const invalid_zero_cooldown_rejected = invalid_zero_cooldown.state == .invalid_policy and
+        invalid_zero_cooldown.deadline_tick == 0;
+    const invalid_zero_recoveries_rejected = invalid_zero_recoveries.state == .invalid_policy and
+        invalid_zero_recoveries.deadline_tick == 0;
+    const waiting_before_deadline = waiting.state == .waiting and waiting.deadline_tick == 110;
+    const ready_at_deadline = ready.state == .ready and ready.deadline_tick == 110;
+    const second_recovery_ready = second_ready.state == .ready and second_ready.deadline_tick == 110;
+    const exhausted_at_limit = exhausted.state == .exhausted and exhausted.deadline_tick == 110;
+    const overflow_waiting = overflow_wait.state == .waiting and overflow_wait.deadline_tick == maximum;
+    const overflow_ready = overflow_ready_decision.state == .ready and
+        overflow_ready_decision.deadline_tick == maximum;
+
+    if (!invalid_zero_cooldown_rejected or !invalid_zero_recoveries_rejected or
+        !waiting_before_deadline or !ready_at_deadline or !second_recovery_ready or
+        !exhausted_at_limit or !overflow_waiting or !overflow_ready)
+    {
+        return null;
+    }
+    return .{
+        .invalid_zero_cooldown_rejected = invalid_zero_cooldown_rejected,
+        .invalid_zero_recoveries_rejected = invalid_zero_recoveries_rejected,
+        .deadline_tick = waiting.deadline_tick,
+        .waiting_before_deadline = waiting_before_deadline,
+        .ready_at_deadline = ready_at_deadline,
+        .second_recovery_ready = second_recovery_ready,
+        .exhausted_at_limit = exhausted_at_limit,
+        .overflow_deadline_tick = overflow_wait.deadline_tick,
+        .overflow_waiting = overflow_waiting,
+        .overflow_ready = overflow_ready,
     };
 }
 fn verifyNtpRetryPolicy() ?NtpRetryPolicyReport {

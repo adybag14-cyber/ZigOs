@@ -79,6 +79,45 @@ pub fn retryIntervalForAttempt(policy: RetryPolicy, attempt_index: u8) ?u64 {
     }
     return interval;
 }
+pub const RecoveryPolicy = struct {
+    cooldown_ticks: u64,
+    maximum_recoveries: u8,
+};
+
+pub const RecoveryState = enum(u8) {
+    invalid_policy,
+    waiting,
+    ready,
+    exhausted,
+};
+
+pub const RecoveryDecision = struct {
+    state: RecoveryState,
+    deadline_tick: u64,
+};
+
+pub fn recoveryPolicyValid(policy: RecoveryPolicy) bool {
+    return policy.cooldown_ticks > 0 and policy.maximum_recoveries > 0;
+}
+
+pub fn evaluateRecovery(
+    policy: RecoveryPolicy,
+    timeout_tick: u64,
+    completed_recoveries: u8,
+    current_tick: u64,
+) RecoveryDecision {
+    if (!recoveryPolicyValid(policy)) {
+        return .{ .state = .invalid_policy, .deadline_tick = 0 };
+    }
+    const deadline = timeout_tick +| policy.cooldown_ticks;
+    if (completed_recoveries >= policy.maximum_recoveries) {
+        return .{ .state = .exhausted, .deadline_tick = deadline };
+    }
+    return .{
+        .state = if (current_tick >= deadline) .ready else .waiting,
+        .deadline_tick = deadline,
+    };
+}
 pub const QualityPolicy = struct {
     max_stratum: u8,
     max_root_delay: u32,

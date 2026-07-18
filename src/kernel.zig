@@ -4856,6 +4856,27 @@ fn inspectE1000e(
     debugWrite(" at ");
     debugWriteU64Decimal(network.ntp_retry_policy.maximum_value);
     debugWrite("\r\n");
+    debugWrite("NTP recovery policy verified: invalid zero-cooldown/zero-recoveries ");
+    debugWrite(if (network.ntp_recovery_policy.invalid_zero_cooldown_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_recovery_policy.invalid_zero_recoveries_rejected) "yes" else "no");
+    debugWrite(", deadline ");
+    debugWriteU64Decimal(network.ntp_recovery_policy.deadline_tick);
+    debugWrite(", before/at/second/exhausted ");
+    debugWrite(if (network.ntp_recovery_policy.waiting_before_deadline) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_recovery_policy.ready_at_deadline) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_recovery_policy.second_recovery_ready) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_recovery_policy.exhausted_at_limit) "yes" else "no");
+    debugWrite(", overflow deadline ");
+    debugWriteU64Decimal(network.ntp_recovery_policy.overflow_deadline_tick);
+    debugWrite(" waiting/ready ");
+    debugWrite(if (network.ntp_recovery_policy.overflow_waiting) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_recovery_policy.overflow_ready) "yes" else "no");
+    debugWrite("\r\n");
     return true;
 }
 
