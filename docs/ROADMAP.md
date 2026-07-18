@@ -1036,3 +1036,13 @@
 - Every accepted synchronization sample resets consecutive source failures; automatic source switching remains intentionally deferred to the next milestone.
 - Invalid pools and source-count mismatches are rejected transactionally without endpoint, generation, cursor, ID, TX, or submission mutation.
 - The packet-free verifier proves initial peer selection, service-state initialization, health projection, clean close, one socket-lifetime cursor changes, and otherwise unchanged completion, ingress, dispatch, IP-ID, and TX-ring accounting.
+
+## 3.80 - Automatic same-socket NTP source failover
+
+- Every terminal request timeout records one consecutive failure for source-pool services and evaluates the configured source-rotation threshold.
+- A rotation decision stores a pending source index while the current UDP peer remains unchanged throughout the recovery cooldown.
+- Recovery readiness transactionally switches the existing NTP client socket to the pending source before the projected recovery request is transmitted.
+- Successful switching preserves endpoint index, socket generation, local ephemeral port, gateway MAC, and NTP port while incrementing total source rotations.
+- Rotation clears the pending index and per-source failure count; an accepted synchronization sample also clears any remaining pending/failure state.
+- Health exposes current and pending source indices, current server, consecutive failures, total rotations, and recovery success.
+- The live verifier proves initial synchronization on `10.0.2.4`, one refresh retry, timeout selection of `10.0.2.5`, no cooldown traffic, projected recovery on the same socket, accepted alternate-server response, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
