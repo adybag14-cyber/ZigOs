@@ -1056,3 +1056,13 @@
 - Both cooldowns emit no traffic, and both recovery requests derive monotonically increasing originate timestamps from holdover time.
 - A valid fallback response resets pending/failure state, records one source rotation and one recovery success, and returns health to synchronized source one.
 - The verifier proves six transmissions, two accepted replies, two retry-limit hits, exact threshold behavior, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
+
+## 3.82 - Live three-source NTP wraparound
+
+- A three-source service with threshold one rotates live from source zero to one, one to two, and two back to zero.
+- Each failed request includes one bounded retry, records exactly one source failure, and selects the next source while preserving the current peer through a silent two-tick cooldown.
+- Each recovery deadline transactionally switches the same socket to its pending source before transmitting a projected-time request.
+- All three switches preserve endpoint index, socket generation, local port, gateway MAC, and NTP port; total rotations advance exactly `1, 2, 3`.
+- Refresh and all three recovery originate timestamps are projected from holdover and strictly increase.
+- A valid response after wraparound synchronizes on source zero, clears pending/failure state, records one recovery success, and exposes source zero with three rotations through health.
+- The verifier proves eight transmissions, two accepted replies, three retry-limit hits, three silent cooldowns, live `0→1→2→0` wraparound, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
