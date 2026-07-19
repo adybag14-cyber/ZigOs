@@ -1565,3 +1565,16 @@
 - Reusing that refreshed plan at tick `225` reports original cause `stale_service_state`, rejects `service_active`, and preserves the active service.
 - Structured close leaves endpoint cursor/generation `49259/130`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
 - Full HPET and 24-bit ACPI PM timer boots validate transactional refresh/execute behavior through the complete regression harness.
+
+## 4.29 - Reject invalid NTP reopen peers before allocation
+
+- `invalid_transport_peer` distinguishes a valid service/preflight whose gateway MAC, server IPv4, or NTP port cannot form a usable connected UDP peer.
+- NTP peer construction is centralized and shared by preflight inspection and actual client opening.
+- Preflight inspection preserves `invalid_server` for a zero target address and returns `invalid_transport_peer` when a nonzero server cannot form a usable gateway-backed NTP peer.
+- The peer rejection occurs before a preflight record exists; refresh and transactional refresh-execute inherit the same typed rejection and produce neither a tagged plan nor a reopen result.
+- A packet-free verifier abandons `2/130/49259` and first creates a valid plan predicting `2/131/49260`.
+- Zeroing the gateway MAC makes direct preflight inspection reject `invalid_transport_peer` with no preflight record and no state mutation.
+- Transactional refresh at tick `235` reports original cause `stale_transport_state`, propagates `invalid_transport_peer`, and preserves service/device state.
+- Fixed-port churn opens and closes `2/131/55013`; restoring the gateway then yields a fresh plan predicting and opening exactly `2/132/49260`.
+- Active reuse reports original cause `stale_service_state` and rejects `service_active`; structured close leaves endpoint cursor/generation `49261/133`.
+- IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged on full HPET and 24-bit ACPI PM timer boots.
