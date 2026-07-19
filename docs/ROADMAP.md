@@ -1539,3 +1539,16 @@
 - Explicit consumption opens exactly `2/122/49254`; refreshing the consumed plan reports original cause `stale_service_state` and current lifecycle rejection `service_active`.
 - Structured close leaves endpoint cursor/generation `49255/123`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
 - Full HPET and 24-bit ACPI PM timer boots validate pure plan refresh/reissue through the complete regression harness.
+
+## 4.27 - Refresh NTP reopen plans at an explicit deadline
+
+- `refreshNtpServiceTransportReopenExecutionPlanAt` accepts a caller-selected refresh tick while retaining the 4.26 integrity, freshness, allocation, and purity guarantees.
+- The existing refresh API remains source-compatible and delegates using the plan's retained deadline.
+- A consumable plan refreshed at its existing deadline is returned byte-for-byte; a different deadline reruns complete current-service preflight validation and canonical retagging.
+- A packet-free verifier abandons `2/123/49255`, seeds a synchronized clock anchored at tick `175`, and creates a deadline-`180` plan predicting `2/124/49256`.
+- Same-tick refresh reuses the plan, while tick `174` rejects `backward_refresh_tick` without a preview or mutation.
+- Forward tick `185` produces a new tag and deadline while preserving the synchronized clock and exact predicted socket.
+- Real fixed-port churn opens and closes `2/124/55010`; refreshing at tick `190` reports original cause `stale_transport_state` and predicts `2/125/49256`.
+- Explicit consumption opens exactly that socket with synchronized clock state retained; a later tick-`195` refresh on the active service rejects `service_active`.
+- Structured close leaves endpoint cursor/generation `49257/126`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
+- Full HPET and 24-bit ACPI PM timer boots validate explicit-deadline refresh through the complete regression harness.
