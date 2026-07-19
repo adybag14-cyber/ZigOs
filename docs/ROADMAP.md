@@ -1452,3 +1452,15 @@
 - Fresh reinspection executes successfully on `2/102/49240`, exactly matches the inspected target, and advances final endpoint identity to cursor/generation `49241/103`.
 - Reusing the consumed plan returns `stale_service_state`, while the nullable compatibility wrapper still rejects the active service through normal preflight validation.
 - Full HPET and 24-bit ACPI PM timer boots retain IP/TX `166/1`, completions `193/193/22`, ingress/dispatch `211/211/199/198`, and zero transmission movement.
+
+## 4.20 - Reject altered NTP reopen plans before state checks
+
+- `NtpServiceTransportReopenPreflight` now carries a canonical FNV-1a64 integrity tag with a versioned domain separator.
+- The tag is encoded field-by-field rather than from raw struct memory, avoiding padding, alignment, and host-endianness dependence.
+- It covers the prior socket, target server, source index, clock flag, refresh deadline, every `NtpService` policy/transient/cumulative field, and the complete endpoint-allocation snapshot.
+- `executeNtpServiceTransportReopenPreflight` validates the tag before stale-service or stale-transport classification and returns `invalid_preflight_plan` without allocation or mutation on mismatch.
+- After freshness checks, execution performs a fresh inspection and requires the reconstructed plan to equal the supplied plan before opening transport.
+- A packet-free verifier alters the tag, prior socket, server, source index, clock flag, deadline, service snapshot, and transport snapshot independently; all eight copies return `invalid_preflight_plan` with exact service/device preservation.
+- The untouched plan executes on socket `2/104/49242`, matches its inspected metadata, and the consumed original still returns `stale_service_state` without mutation.
+- Structured close leaves endpoints/cursor/generation `2/49243/105` while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
+- Full HPET and 24-bit ACPI PM timer boots validate the integrity implementation through the complete regression harness.
