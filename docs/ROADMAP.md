@@ -1500,3 +1500,16 @@
 - Releasing the fillers makes the saturated plan reject `stale_transport_state`; fresh reinspection predicts `2/113/49248`, and execution opens exactly that socket.
 - Structured close leaves endpoint cursor/generation `49249/114`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
 - Full HPET and 24-bit ACPI PM timer boots validate exact preview/allocation parity through the complete regression harness.
+
+## 4.24 - Consume tagged NTP reopen execution previews
+
+- A ready `NtpServiceTransportReopenExecutionPreview` now contains an `NtpServiceTransportReopenExecutionPlan` with the protected preflight, exact ephemeral allocation, and a canonical FNV-1a64 tag.
+- `inspectNtpServiceTransportReopenExecutionPlanIntegrity` independently reports stored/expected tags, preflight integrity, allocation agreement with the captured transport snapshot, and overall validity.
+- `executeNtpServiceTransportReopenExecutionPreview` rejects altered plans as `invalid_execution_preview` before freshness or allocation checks.
+- Integrity-valid plans whose service or endpoint-allocation state changed reject as `stale_execution_preview` before socket allocation.
+- The source-compatible preflight executor now obtains a ready preview and delegates mutation to the explicit plan consumer while retaining its original typed preflight rejection reasons.
+- A packet-free verifier creates an initial plan predicting `2/115/49250`; independent allocation and tag alterations both reject invalid with exact state preservation.
+- Real fixed-port churn opens and closes `2/115/55007`, leaving the original plan byte-valid but runtime-stale.
+- Fresh reinspection produces a new tagged plan predicting `2/116/49250`; explicit consumption opens exactly that socket, while reuse and the compatibility wrapper both reject `stale_service_state` without mutation.
+- Structured close leaves endpoint cursor/generation `49251/117`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
+- Full HPET and 24-bit ACPI PM timer boots validate tagged preview consumption through the complete regression harness.
