@@ -811,6 +811,60 @@ pub const NtpDiscardSaturationReport = struct {
     independent_results: [3]u64,
 };
 
+pub const NtpLiveDiscardSaturationReport = struct {
+    source_kind: time_reference.Kind,
+    frequency_hz: u64,
+    counter_bits: u8,
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    server: [4]u8,
+    saturation_start: u64,
+    saturation_result: u64,
+    stale_before_start: u16,
+    pre_request_saturated: bool,
+    initial_identification: u16,
+    initial_descriptor: u16,
+    initial_next_cursor: u16,
+    request_timestamp: u64,
+    response_batch_pending: u16,
+    post_response_saturated: bool,
+    accepted_sample_tick: u64,
+    accepted_seconds: u64,
+    accepted_fraction: u32,
+    accepted_clean: bool,
+    idle_before_close: u16,
+    close_discarded_packets: u16,
+    close_queue_enqueued: u64,
+    close_queue_dequeued: u64,
+    close_queue_high_water: u16,
+    close_queue_dropped: u64,
+    close_discard_saturated: bool,
+    clock_preserved_after_close: bool,
+    projected_time_preserved: bool,
+    service_inactive: bool,
+    health_reports_saturated_discards: bool,
+    health_reports_lifecycle: bool,
+    duplicate_close_rejected: bool,
+    duplicate_state_preserved: bool,
+    requests_started: u64,
+    retries: u64,
+    responses: u64,
+    final_identification_cursor: u16,
+    final_tx_cursor: u16,
+    tx_submissions_delta: u64,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    final_generation_cursor: u32,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+};
+
 pub const NtpCloseDiscardCounterReport = struct {
     source_kind: time_reference.Kind,
     frequency_hz: u64,
@@ -4961,6 +5015,7 @@ pub const NetworkResult = struct {
     ntp_service_close_discard: NtpServiceCloseDiscardReport,
     ntp_close_discard_counter: NtpCloseDiscardCounterReport,
     ntp_discard_saturation: NtpDiscardSaturationReport,
+    ntp_live_discard_saturation: NtpLiveDiscardSaturationReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -5842,6 +5897,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_live_discard_saturation = verifyNtpLiveDiscardSaturation(device, continuous_counter) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -6063,6 +6122,7 @@ pub fn initializeAndTestNetwork(
         .ntp_service_close_discard = ntp_service_close_discard,
         .ntp_close_discard_counter = ntp_close_discard_counter,
         .ntp_discard_saturation = ntp_discard_saturation,
+        .ntp_live_discard_saturation = ntp_live_discard_saturation,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -9241,6 +9301,279 @@ fn verifyNtpRejectionExhaustion(
         .rx_completion_enqueues = rxe,
         .final_registered_endpoints = device.udp_endpoint_count,
         .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+
+fn verifyNtpLiveDiscardSaturation(
+    device: *Device,
+    counter: *time_reference.ContinuousCounter,
+) ?NtpLiveDiscardSaturationReport {
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_228 or
+        device.next_udp_generation != 87 or device.tx_producer != 6 or
+        device.next_udp_identification != 155 or device.next_dns_transaction_id != 8 or
+        completionQueueEnqueued(&tx_completion_queue) != 182 or
+        completionQueueDequeued(&tx_completion_queue) != 182 or
+        completionQueueEnqueued(&rx_completion_queue) != 22 or
+        device.software_rx_queue.enqueued != 191 or device.software_rx_queue.dequeued != 191 or
+        device.packets_dispatched != 179 or device.udp_packets_dispatched != 178 or
+        device.peer_mismatch_udp_packets_dropped != 4 or counter.frequency_hz == 0 or
+        counter.counter_bits == 0)
+    {
+        return null;
+    }
+
+    const server = [4]u8{ 10, 0, 2, 4 };
+    var service = openNtpService(device, server, 1, 2) orelse return null;
+    const socket = service.client.socket;
+    const saturation_start = std.math.maxInt(u64) - 1;
+    const saturation_result = std.math.maxInt(u64);
+    if (socket.endpoint_index != 2 or socket.generation != 87 or socket.local_port != 49_228 or
+        device.udp_endpoint_count != 3 or device.next_ephemeral_udp_port != 49_229 or
+        device.next_udp_generation != 88 or service.request_active or
+        service.pre_request_discards != 0 or service.post_response_discards != 0 or
+        service.close_discards != 0)
+        return null;
+
+    service.pre_request_discards = saturation_start;
+    service.post_response_discards = saturation_start;
+    service.close_discards = saturation_start;
+    const submissions_before = device.tx_submissions;
+
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        server,
+        ntp.fixture_client_timestamp,
+        ntp.fixture_server_timestamp,
+        0xA800,
+        0xD800,
+    )) return null;
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        server,
+        ntp.fixture_client_timestamp + 1,
+        ntp.fixture_server_timestamp + 1,
+        0xA801,
+        0xD801,
+    )) return null;
+    const before_start = inspectUdpSocket(device, socket) orelse return null;
+    if (before_start.pending_packets != 2 or before_start.enqueued != 2 or
+        before_start.dequeued != 0 or before_start.high_water != 2 or before_start.dropped != 0 or
+        !udpSocketReadable(device, socket) or service.pre_request_discards != saturation_start or
+        service.post_response_discards != saturation_start or service.close_discards != saturation_start)
+        return null;
+
+    const start_tick = counter.read();
+    const initial = stepNtpServiceAutomatic(
+        device,
+        &service,
+        counter,
+        start_tick,
+        ntp.fixture_client_timestamp,
+        0,
+    ) orelse return null;
+    const initial_tx = initial.transmit orelse return null;
+    const request_timestamp = service.request.client_timestamp;
+    const after_start = inspectUdpSocket(device, socket) orelse return null;
+    const pre_request_saturated = service.pre_request_discards == saturation_result and
+        service.post_response_discards == saturation_start and service.close_discards == saturation_start;
+    if (initial.state != .awaiting or initial.start_reason != .initial or
+        initial_tx.identification != 155 or initial_tx.completion.descriptor_index != 6 or
+        initial_tx.completion.next_cursor != 7 or request_timestamp != ntp.fixture_client_timestamp or
+        !service.request_active or service.requests_started != 1 or service.retries != 0 or
+        service.responses != 0 or !pre_request_saturated or after_start.pending_packets != 0 or
+        after_start.enqueued != 2 or after_start.dequeued != 2 or after_start.high_water != 2 or
+        after_start.dropped != 0 or udpSocketReadable(device, socket))
+        return null;
+
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        server,
+        request_timestamp,
+        ntp.fixture_server_timestamp,
+        0xA802,
+        0xD802,
+    )) return null;
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        server,
+        request_timestamp,
+        ntp.fixture_server_timestamp + 1,
+        0xA803,
+        0xD803,
+    )) return null;
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        server,
+        request_timestamp + 1,
+        ntp.fixture_server_timestamp + 2,
+        0xA804,
+        0xD804,
+    )) return null;
+    const before_accept = inspectUdpSocket(device, socket) orelse return null;
+    if (before_accept.pending_packets != 3 or before_accept.enqueued != 5 or
+        before_accept.dequeued != 2 or before_accept.high_water != 3 or before_accept.dropped != 0)
+        return null;
+
+    const accepted = stepNtpServiceAutomatic(device, &service, counter, start_tick, 0, 1) orelse return null;
+    const accepted_quality = accepted.quality_result orelse return null;
+    const accepted_step = accepted.step_result orelse return null;
+    const accepted_sample_tick = accepted.sample_tick orelse return null;
+    const accepted_time = ntp.readProjectedClockAt(&service.clock, accepted_sample_tick) orelse return null;
+    const after_accept = inspectUdpSocket(device, socket) orelse return null;
+    const post_response_saturated = service.pre_request_discards == saturation_result and
+        service.post_response_discards == saturation_result and service.close_discards == saturation_start;
+    const accepted_clean = accepted.state == .idle and accepted.poll.state == .resolved and
+        accepted.poll.examined == 1 and accepted.poll.rejected == 0 and
+        accepted_quality == .accepted and accepted_step == .accepted and accepted.apply_result == .accepted and
+        accepted_time.seconds == ntp.fixture_unix_seconds and accepted_time.fraction == 0x80000000 and
+        !service.request_active and after_accept.pending_packets == 0 and after_accept.enqueued == 5 and
+        after_accept.dequeued == 5 and after_accept.high_water == 3 and after_accept.dropped == 0 and
+        !udpSocketReadable(device, socket);
+    if (!post_response_saturated or !accepted_clean) return null;
+
+    const active_health = readNtpServiceHealth(&service, accepted_sample_tick, 1, 100) orelse return null;
+    if (active_health.state != .synchronized or active_health.current_time == null or
+        active_health.pre_request_discards != saturation_result or
+        active_health.post_response_discards != saturation_result or
+        active_health.close_discards != saturation_start or active_health.requests_started != 1 or
+        active_health.retries != 0 or active_health.responses != 1 or
+        active_health.quality_accepted != 1 or active_health.step_accepted != 1)
+        return null;
+
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        server,
+        request_timestamp,
+        ntp.fixture_server_timestamp,
+        0xA805,
+        0xD805,
+    )) return null;
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        server,
+        request_timestamp + 1,
+        ntp.fixture_server_timestamp + 1,
+        0xA806,
+        0xD806,
+    )) return null;
+    const before_close = inspectUdpSocket(device, socket) orelse return null;
+    if (before_close.pending_packets != 2 or before_close.enqueued != 7 or
+        before_close.dequeued != 5 or before_close.high_water != 3 or before_close.dropped != 0 or
+        !udpSocketReadable(device, socket) or service.close_discards != saturation_start)
+        return null;
+
+    const clock_before_close = service.clock;
+    const close_result = closeNtpServiceDiscarding(device, &service) orelse return null;
+    const clock_preserved_after_close = std.meta.eql(service.clock, clock_before_close);
+    const projected_after_close = ntp.readProjectedClockAt(&service.clock, accepted_sample_tick) orelse return null;
+    const projected_time_preserved = projected_after_close.seconds == accepted_time.seconds and
+        projected_after_close.fraction == accepted_time.fraction;
+    const close_discard_saturated = close_result.pre_request_discards == saturation_result and
+        close_result.post_response_discards == saturation_result and
+        close_result.close_discards == saturation_result and
+        service.pre_request_discards == saturation_result and
+        service.post_response_discards == saturation_result and
+        service.close_discards == saturation_result;
+    const service_inactive = !service.active and !service.client.active and !service.request_active;
+    if (close_result.request_was_active or close_result.request_cancelled or
+        close_result.request_client_timestamp != 0 or close_result.request_transmissions != 0 or
+        close_result.socket_close.discarded_packets != 2 or
+        close_result.socket_close.queue_enqueued != 7 or close_result.socket_close.queue_dequeued != 7 or
+        close_result.socket_close.queue_high_water != 3 or close_result.socket_close.queue_dropped != 0 or
+        !close_discard_saturated or !clock_preserved_after_close or !projected_time_preserved or
+        !service_inactive)
+        return null;
+
+    const health = readNtpServiceHealth(&service, accepted_sample_tick, 1, 100) orelse return null;
+    const health_reports_saturated_discards = health.state == .inactive and health.current_time == null and
+        !health.awaiting_response and health.pre_request_discards == saturation_result and
+        health.post_response_discards == saturation_result and health.close_discards == saturation_result;
+    const health_reports_lifecycle = health.requests_started == 1 and health.retries == 0 and
+        health.responses == 1 and health.quality_accepted == 1 and health.quality_rejected == 0 and
+        health.step_accepted == 1 and health.step_rejected == 0;
+    if (!health_reports_saturated_discards or !health_reports_lifecycle) return null;
+
+    const state_before_duplicate = service;
+    const duplicate_close_rejected = closeNtpServiceDiscarding(device, &service) == null and
+        !closeNtpService(device, &service);
+    const duplicate_state_preserved = std.meta.eql(service, state_before_duplicate);
+    if (!duplicate_close_rejected or !duplicate_state_preserved) return null;
+
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const overflow = completionQueueOverflow(&tx_completion_queue) + completionQueueOverflow(&rx_completion_queue);
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_229 or
+        device.next_udp_generation != 88 or device.next_udp_identification != 156 or
+        device.next_dns_transaction_id != 8 or device.tx_producer != 7 or
+        device.tx_submissions != submissions_before + 1 or txe != 183 or txd != 183 or rxe != 22 or
+        overflow != 0 or device.software_rx_queue.enqueued != 198 or
+        device.software_rx_queue.dequeued != 198 or device.packets_dispatched != 186 or
+        device.udp_packets_dispatched != 185 or device.peer_mismatch_udp_packets_dropped != 4 or
+        service.requests_started != 1 or service.retries != 0 or service.responses != 1 or
+        service.pre_request_discards != saturation_result or
+        service.post_response_discards != saturation_result or service.close_discards != saturation_result)
+        return null;
+
+    return .{
+        .source_kind = counter.reference.kind,
+        .frequency_hz = counter.frequency_hz,
+        .counter_bits = counter.counter_bits,
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .server = server,
+        .saturation_start = saturation_start,
+        .saturation_result = saturation_result,
+        .stale_before_start = before_start.pending_packets,
+        .pre_request_saturated = pre_request_saturated,
+        .initial_identification = initial_tx.identification,
+        .initial_descriptor = initial_tx.completion.descriptor_index,
+        .initial_next_cursor = initial_tx.completion.next_cursor,
+        .request_timestamp = request_timestamp,
+        .response_batch_pending = before_accept.pending_packets,
+        .post_response_saturated = post_response_saturated,
+        .accepted_sample_tick = accepted_sample_tick,
+        .accepted_seconds = accepted_time.seconds,
+        .accepted_fraction = accepted_time.fraction,
+        .accepted_clean = accepted_clean,
+        .idle_before_close = before_close.pending_packets,
+        .close_discarded_packets = close_result.socket_close.discarded_packets,
+        .close_queue_enqueued = close_result.socket_close.queue_enqueued,
+        .close_queue_dequeued = close_result.socket_close.queue_dequeued,
+        .close_queue_high_water = close_result.socket_close.queue_high_water,
+        .close_queue_dropped = close_result.socket_close.queue_dropped,
+        .close_discard_saturated = close_discard_saturated,
+        .clock_preserved_after_close = clock_preserved_after_close,
+        .projected_time_preserved = projected_time_preserved,
+        .service_inactive = service_inactive,
+        .health_reports_saturated_discards = health_reports_saturated_discards,
+        .health_reports_lifecycle = health_reports_lifecycle,
+        .duplicate_close_rejected = duplicate_close_rejected,
+        .duplicate_state_preserved = duplicate_state_preserved,
+        .requests_started = service.requests_started,
+        .retries = service.retries,
+        .responses = service.responses,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_tx_cursor = device.tx_producer,
+        .tx_submissions_delta = device.tx_submissions - submissions_before,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .final_generation_cursor = device.next_udp_generation,
         .ingress_enqueued = device.software_rx_queue.enqueued,
         .ingress_dequeued = device.software_rx_queue.dequeued,
         .packets_dispatched = device.packets_dispatched,

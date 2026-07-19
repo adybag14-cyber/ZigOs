@@ -1333,3 +1333,14 @@
 - A pure verifier covers zero additions, normal additions, near-maximum overflow, already-maximum preservation, and three independent totals.
 - Near-maximum and already-maximum counters remain pinned at `18446744073709551615` instead of wrapping.
 - HPET and ACPI PM timer full boots retain every live purge/close verifier while asserting the shared saturation marker.
+
+## 4.09 - Verify live saturation across every NTP discard boundary
+
+- A single service seeds pre-request, post-response, and close-time discard totals at `18446744073709551614`.
+- Two stale packets before the bootstrap request drive only the pre-request counter to `18446744073709551615`.
+- One accepted response plus two residual packets drives only the post-response counter to the same maximum.
+- Two later idle packets are discarded by structured close and drive only the close-time counter to the maximum.
+- The endpoint queue closes at seven enqueues and seven dequeues with high-water three and zero drops.
+- Synchronized health before close and inactive health afterward preserve the independent saturated totals and lifecycle counts.
+- The projected clock survives transport shutdown; duplicate close rejects without mutation.
+- HPET and ACPI PM timer boots verify one transmission and exact completion, endpoint, ingress, and dispatch accounting.
