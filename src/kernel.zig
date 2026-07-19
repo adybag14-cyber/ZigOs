@@ -8171,6 +8171,127 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.ntp_post_response_purge.udp_dispatched);
     debugWrite("\r\n");
+    debugWrite("NTP quality rejection queue verified: source ");
+    debugWriteReferenceKind(network.ntp_quality_rejection_queue.source_kind);
+    debugWrite(", frequency/bits ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.frequency_hz);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.counter_bits);
+    debugWrite(", socket ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.local_port);
+    debugWrite(" server ");
+    debugWriteIpv4(network.ntp_quality_rejection_queue.server);
+    debugWrite(", initial ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.initial_identification);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.initial_descriptor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.initial_next_cursor);
+    debugWrite(", queued ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.queued_before);
+    debugWrite(" first ");
+    debugWriteNtpState(network.ntp_quality_rejection_queue.first_poll_state);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.first_examined);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.first_rejected);
+    debugWrite(" result/action/count/remaining ");
+    debugWriteNtpQuality(network.ntp_quality_rejection_queue.first_quality_result);
+    debugWrite("/");
+    debugWriteNtpQualityRejectionAction(network.ntp_quality_rejection_queue.first_rejection_action);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.first_rejection_count);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.first_remaining);
+    debugWrite(" no-sample/apply/clock/request/purge ");
+    debugWrite(if (network.ntp_quality_rejection_queue.first_no_sample) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality_rejection_queue.first_no_apply) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality_rejection_queue.first_clock_preserved) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality_rejection_queue.first_request_retained) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality_rejection_queue.purge_not_run) "yes" else "no");
+    debugWrite(" retained pending/readable/accounting ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.retained_pending);
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality_rejection_queue.retained_readable) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality_rejection_queue.retained_queue_accounting) "yes" else "no");
+    debugWrite(", accepted ");
+    debugWriteNtpState(network.ntp_quality_rejection_queue.accepted_poll_state);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.accepted_examined);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.accepted_rejected);
+    debugWrite(" result ");
+    debugWriteNtpQuality(network.ntp_quality_rejection_queue.accepted_quality_result);
+    debugWrite("/");
+    debugWriteNtpStep(network.ntp_quality_rejection_queue.accepted_step_result);
+    debugWrite(" sample/time ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.accepted_sample_tick);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.accepted_seconds);
+    debugWrite("/0x");
+    debugWriteHex32(network.ntp_quality_rejection_queue.accepted_fraction);
+    debugWrite(" clean/queue-empty/health-no-discards ");
+    debugWrite(if (network.ntp_quality_rejection_queue.accepted_state_clean) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality_rejection_queue.final_queue_empty) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_quality_rejection_queue.health_reports_no_discards) "yes" else "no");
+    debugWrite(", counts quality ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.quality_accepted);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.quality_rejected);
+    debugWrite("/dispersion ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.quality_root_dispersion_rejected);
+    debugWrite(" step ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.step_accepted);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.step_rejected);
+    debugWrite(" lifecycle/discards ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.requests_started);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.retries);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.responses);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.post_response_discards);
+    debugWrite(", close ");
+    debugWrite(if (network.ntp_quality_rejection_queue.close_succeeded) "yes" else "no");
+    debugWrite(", final IP/TX ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.final_identification_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.final_tx_cursor);
+    debugWrite(", submissions ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.tx_submissions_delta);
+    debugWrite(", completions TX/RX ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.tx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.tx_completion_dequeues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.rx_completion_enqueues);
+    debugWrite(", endpoints/cursor/generation ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.final_registered_endpoints);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.final_ephemeral_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.final_generation_cursor);
+    debugWrite(", ingress ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.ingress_dequeued);
+    debugWrite(", dispatch ");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.packets_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_quality_rejection_queue.udp_dispatched);
+    debugWrite("\r\n");
     debugWrite("NTP timestamp verified: base/anchor 0x");
     debugWriteHex64(network.ntp_timestamp.base_timestamp);
     debugWrite("/0x");
@@ -8467,6 +8588,14 @@ fn debugWriteReferenceKind(kind: time_reference.Kind) void {
         .hpet => "HPET",
         .acpi_pm_timer => "ACPI PM timer",
         .pit_channel2 => "PIT channel 2",
+    });
+}
+
+fn debugWriteNtpQualityRejectionAction(action: ntp.QualityRejectionAction) void {
+    debugWrite(switch (action) {
+        .invalid_policy => "invalid-policy",
+        .retain_request => "retain",
+        .retry_now => "retry-now",
     });
 }
 

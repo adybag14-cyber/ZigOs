@@ -1190,3 +1190,13 @@
 - The verifier queues three same-peer responses, accepts the first with budget one, purges exactly two residual datagrams, and proves endpoint depth `3 -> 0` with dequeue accounting `0 -> 3`.
 - Health reports two cumulative discards, a subsequent idle step emits no traffic and preserves state, and the socket closes normally.
 - The verifier proves one transmission, one accepted sample, two post-response discards, and exact HPET/ACPI PM timer packet/ring accounting.
+
+## 3.96 - Quality rejection preserves queued NTP responses
+
+- A root-dispersion-invalid response and a valid response are queued behind the same live NTP request.
+- Budget-one polling resolves the first datagram syntactically, rejects it through quality policy, and retains the request.
+- Quality rejection takes no hardware sample, performs no clock-step evaluation or apply, and does not run the post-response purge.
+- Endpoint depth and queue accounting prove the valid response remains queued and readable after the rejection.
+- A second budget-one step accepts the retained valid response, clears the request's quality-rejection count, and leaves the endpoint queue empty.
+- Because no datagram remains after acceptance, cumulative post-response discards remain zero and health reports zero.
+- The verifier proves one transmission, one quality rejection, one accepted sample, no purge, clean close, and exact HPET/ACPI PM timer accounting.
