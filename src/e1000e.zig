@@ -783,6 +783,19 @@ pub const NtpServiceTransportReopenAttempt = struct {
     rejection: ?NtpServiceTransportReopenError,
 };
 
+pub const NtpServiceTransportReopenPreflight = struct {
+    previous_socket: UdpSocket,
+    server_ipv4: [4]u8,
+    current_source_index: u8,
+    clock_was_synchronized: bool,
+    refresh_deadline_tick: u64,
+};
+
+pub const NtpServiceTransportReopenInspection = struct {
+    preflight: ?NtpServiceTransportReopenPreflight,
+    rejection: ?NtpServiceTransportReopenError,
+};
+
 pub const NtpService = struct {
     active: bool,
     client: NtpClient,
@@ -944,8 +957,13 @@ pub const NtpReopenReasonMatrixReport = struct {
     device_cursors_preserved: bool,
     failure_ephemeral_cursor: u16,
     failure_generation_cursor: u32,
+    inspection_ready: bool,
+    inspection_target_matches: bool,
+    inspection_state_preserved: bool,
+    inspection_device_preserved: bool,
     reopen_succeeded: bool,
     success_has_no_rejection: bool,
+    detailed_matches_inspection: bool,
     legacy_active_rejected: bool,
     legacy_state_preserved: bool,
     close_clean: bool,
@@ -7710,71 +7728,77 @@ fn rejectNtpServiceTransportReopen(
     return .{ .result = null, .rejection = reason };
 }
 
-pub fn reopenNtpServiceAfterTransportLossDetailed(
+fn rejectNtpServiceTransportReopenInspection(
+    reason: NtpServiceTransportReopenError,
+) NtpServiceTransportReopenInspection {
+    return .{ .preflight = null, .rejection = reason };
+}
+
+pub fn inspectNtpServiceTransportReopen(
     device: *Device,
-    service: *NtpService,
+    service: *const NtpService,
     refresh_tick: u64,
-) NtpServiceTransportReopenAttempt {
-    if (service.active) return rejectNtpServiceTransportReopen(.service_active);
-    if (service.client.active) return rejectNtpServiceTransportReopen(.client_active);
-    if (service.request_active) return rejectNtpServiceTransportReopen(.request_active);
+) NtpServiceTransportReopenInspection {
+    if (service.active) return rejectNtpServiceTransportReopenInspection(.service_active);
+    if (service.client.active) return rejectNtpServiceTransportReopenInspection(.client_active);
+    if (service.request_active) return rejectNtpServiceTransportReopenInspection(.request_active);
     if (udpSocketActive(device, service.client.socket)) {
-        return rejectNtpServiceTransportReopen(.transport_still_active);
+        return rejectNtpServiceTransportReopenInspection(.transport_still_active);
     }
     if (service.refresh_interval_ticks == 0) {
-        return rejectNtpServiceTransportReopen(.invalid_refresh_interval);
+        return rejectNtpServiceTransportReopenInspection(.invalid_refresh_interval);
     }
     if (!ntp.qualityPolicyValid(service.quality_policy)) {
-        return rejectNtpServiceTransportReopen(.invalid_quality_policy);
+        return rejectNtpServiceTransportReopenInspection(.invalid_quality_policy);
     }
     if (!ntp.qualityRejectionPolicyValid(service.quality_rejection_policy)) {
-        return rejectNtpServiceTransportReopen(.invalid_quality_rejection_policy);
+        return rejectNtpServiceTransportReopenInspection(.invalid_quality_rejection_policy);
     }
     if (!ntp.clockStepPolicyValid(service.step_policy)) {
-        return rejectNtpServiceTransportReopen(.invalid_step_policy);
+        return rejectNtpServiceTransportReopenInspection(.invalid_step_policy);
     }
     if (!ntp.stepRejectionPolicyValid(service.step_rejection_policy)) {
-        return rejectNtpServiceTransportReopen(.invalid_step_rejection_policy);
+        return rejectNtpServiceTransportReopenInspection(.invalid_step_rejection_policy);
     }
     if (!ntp.retryPolicyValid(service.retry_policy)) {
-        return rejectNtpServiceTransportReopen(.invalid_retry_policy);
+        return rejectNtpServiceTransportReopenInspection(.invalid_retry_policy);
     }
     if (service.recovery_policy) |policy| {
         if (!ntp.recoveryPolicyValid(policy)) {
-            return rejectNtpServiceTransportReopen(.invalid_recovery_policy);
+            return rejectNtpServiceTransportReopenInspection(.invalid_recovery_policy);
         }
     }
     if (service.clock.clock.synchronized and refresh_tick < service.clock.anchor_tick) {
-        return rejectNtpServiceTransportReopen(.backward_refresh_tick);
+        return rejectNtpServiceTransportReopenInspection(.backward_refresh_tick);
     }
 
     var target_server = service.client.server_ipv4;
     if (service.source_pool) |pool| {
         const rotation_policy = service.source_rotation_policy orelse
-            return rejectNtpServiceTransportReopen(.missing_source_rotation_policy);
+            return rejectNtpServiceTransportReopenInspection(.missing_source_rotation_policy);
         if (!ntp.sourcePoolValid(pool)) {
-            return rejectNtpServiceTransportReopen(.invalid_source_pool);
+            return rejectNtpServiceTransportReopenInspection(.invalid_source_pool);
         }
         if (!ntp.sourceRotationPolicyValid(rotation_policy)) {
-            return rejectNtpServiceTransportReopen(.invalid_source_rotation_policy);
+            return rejectNtpServiceTransportReopenInspection(.invalid_source_rotation_policy);
         }
         if (rotation_policy.source_count != pool.count) {
-            return rejectNtpServiceTransportReopen(.source_count_mismatch);
+            return rejectNtpServiceTransportReopenInspection(.source_count_mismatch);
         }
         if (service.current_source_index >= pool.count) {
-            return rejectNtpServiceTransportReopen(.source_index_out_of_range);
+            return rejectNtpServiceTransportReopenInspection(.source_index_out_of_range);
         }
         target_server = ntp.sourcePoolServer(pool, service.current_source_index) orelse
-            return rejectNtpServiceTransportReopen(.source_index_out_of_range);
+            return rejectNtpServiceTransportReopenInspection(.source_index_out_of_range);
         if (!std.meta.eql(target_server, service.client.server_ipv4)) {
-            return rejectNtpServiceTransportReopen(.retained_server_mismatch);
+            return rejectNtpServiceTransportReopenInspection(.retained_server_mismatch);
         }
     } else {
         if (service.source_rotation_policy != null) {
-            return rejectNtpServiceTransportReopen(.unexpected_source_rotation_policy);
+            return rejectNtpServiceTransportReopenInspection(.unexpected_source_rotation_policy);
         }
         if (service.current_source_index != 0) {
-            return rejectNtpServiceTransportReopen(.unexpected_source_index);
+            return rejectNtpServiceTransportReopenInspection(.unexpected_source_index);
         }
     }
 
@@ -7783,18 +7807,39 @@ pub fn reopenNtpServiceAfterTransportLossDetailed(
         .ipv4 = target_server,
         .port = ntp.server_port,
     };
-    if (!validUdpPeer(target_peer)) return rejectNtpServiceTransportReopen(.invalid_server);
+    if (!validUdpPeer(target_peer)) {
+        return rejectNtpServiceTransportReopenInspection(.invalid_server);
+    }
+    return .{
+        .preflight = .{
+            .previous_socket = service.client.socket,
+            .server_ipv4 = target_server,
+            .current_source_index = service.current_source_index,
+            .clock_was_synchronized = service.clock.clock.synchronized,
+            .refresh_deadline_tick = refresh_tick,
+        },
+        .rejection = null,
+    };
+}
 
-    const previous_socket = service.client.socket;
-    const replacement_client = openNtpClient(device, target_server) orelse
+pub fn reopenNtpServiceAfterTransportLossDetailed(
+    device: *Device,
+    service: *NtpService,
+    refresh_tick: u64,
+) NtpServiceTransportReopenAttempt {
+    const inspection = inspectNtpServiceTransportReopen(device, service, refresh_tick);
+    if (inspection.rejection) |reason| return rejectNtpServiceTransportReopen(reason);
+    const preflight = inspection.preflight orelse unreachable;
+
+    const replacement_client = openNtpClient(device, preflight.server_ipv4) orelse
         return rejectNtpServiceTransportReopen(.transport_unavailable);
     const result = NtpServiceTransportReopenResult{
-        .previous_socket = previous_socket,
+        .previous_socket = preflight.previous_socket,
         .socket = replacement_client.socket,
-        .server_ipv4 = target_server,
-        .current_source_index = service.current_source_index,
-        .clock_was_synchronized = service.clock.clock.synchronized,
-        .refresh_deadline_tick = refresh_tick,
+        .server_ipv4 = preflight.server_ipv4,
+        .current_source_index = preflight.current_source_index,
+        .clock_was_synchronized = preflight.clock_was_synchronized,
+        .refresh_deadline_tick = preflight.refresh_deadline_tick,
         .pre_request_discards = service.pre_request_discards,
         .post_response_discards = service.post_response_discards,
         .close_discards = service.close_discards,
@@ -7810,7 +7855,7 @@ pub fn reopenNtpServiceAfterTransportLossDetailed(
     service.request_active = false;
     service.retry_interval_ticks = service.retry_policy.initial_interval_ticks;
     service.retry_deadline_tick = 0;
-    service.refresh_deadline_tick = refresh_tick;
+    service.refresh_deadline_tick = preflight.refresh_deadline_tick;
     service.request_retry_attempts = 0;
     service.retry_exhausted = false;
     service.recovery_deadline_tick = 0;
@@ -10435,11 +10480,37 @@ fn verifyNtpReopenReasonMatrix(device: *Device) ?NtpReopenReasonMatrixReport {
         return null;
     }
 
+    const inspection_service = service;
+    const inspection_endpoints = device.udp_endpoint_count;
+    const inspection_ephemeral = device.next_ephemeral_udp_port;
+    const inspection_generation = device.next_udp_generation;
+    const inspection_ready_state = inspectNtpServiceTransportReopen(device, &service, 0);
+    const preflight = inspection_ready_state.preflight orelse return null;
+    const inspection_ready = inspection_ready_state.rejection == null;
+    const inspection_target_matches = std.meta.eql(preflight.previous_socket, old_socket) and
+        std.meta.eql(preflight.server_ipv4, server) and preflight.current_source_index == 0 and
+        !preflight.clock_was_synchronized and preflight.refresh_deadline_tick == 0;
+    const inspection_state_preserved = std.meta.eql(service, inspection_service);
+    const inspection_device_preserved = device.udp_endpoint_count == inspection_endpoints and
+        device.next_ephemeral_udp_port == inspection_ephemeral and
+        device.next_udp_generation == inspection_generation;
+    if (!inspection_ready or !inspection_target_matches or !inspection_state_preserved or
+        !inspection_device_preserved)
+    {
+        return null;
+    }
+
     const success = reopenNtpServiceAfterTransportLossDetailed(device, &service, 0);
     const success_has_no_rejection = success.rejection == null;
     const reopened = success.result orelse return null;
+    const detailed_matches_inspection = std.meta.eql(reopened.previous_socket, preflight.previous_socket) and
+        std.meta.eql(reopened.server_ipv4, preflight.server_ipv4) and
+        reopened.current_source_index == preflight.current_source_index and
+        reopened.clock_was_synchronized == preflight.clock_was_synchronized and
+        reopened.refresh_deadline_tick == preflight.refresh_deadline_tick;
     const new_socket = service.client.socket;
-    const reopen_succeeded = success_has_no_rejection and std.meta.eql(reopened.previous_socket, old_socket) and
+    const reopen_succeeded = success_has_no_rejection and detailed_matches_inspection and
+        std.meta.eql(reopened.previous_socket, old_socket) and
         std.meta.eql(reopened.socket, new_socket) and new_socket.endpoint_index == 2 and
         new_socket.generation == 101 and new_socket.local_port == 49_240 and
         device.udp_endpoint_count == 3 and device.next_ephemeral_udp_port == 49_241 and
@@ -10496,8 +10567,13 @@ fn verifyNtpReopenReasonMatrix(device: *Device) ?NtpReopenReasonMatrixReport {
         .device_cursors_preserved = device_cursors_preserved,
         .failure_ephemeral_cursor = failure_ephemeral_cursor,
         .failure_generation_cursor = failure_generation_cursor,
+        .inspection_ready = inspection_ready,
+        .inspection_target_matches = inspection_target_matches,
+        .inspection_state_preserved = inspection_state_preserved,
+        .inspection_device_preserved = inspection_device_preserved,
         .reopen_succeeded = reopen_succeeded,
         .success_has_no_rejection = success_has_no_rejection,
+        .detailed_matches_inspection = detailed_matches_inspection,
         .legacy_active_rejected = legacy_active_rejected,
         .legacy_state_preserved = legacy_state_preserved,
         .close_clean = close_clean,

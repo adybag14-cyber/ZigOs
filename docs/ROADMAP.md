@@ -1429,3 +1429,14 @@
 - After all 21 failures, a valid detailed reopen succeeds on socket `2/101/49240` with no rejection reason.
 - The nullable compatibility wrapper rejects the now-active service without mutation, and structured close removes the replacement socket cleanly.
 - Full HPET and 24-bit ACPI PM timer boots verify zero transmissions and unchanged completion, ingress, and dispatch totals while endpoint identity advances exactly to cursor/generation `49241/102`.
+
+## 4.18 - Inspect NTP transport reopen readiness without allocation
+
+- `NtpServiceTransportReopenPreflight` records the prior socket, validated target server, selected source index, synchronized-clock flag, and requested refresh deadline.
+- `NtpServiceTransportReopenInspection` contains either that immutable preflight record or one typed rejection reason.
+- `inspectNtpServiceTransportReopen` performs the complete ordered lifecycle, policy, clock, source-pool, source-selection, and server validation without opening a socket or mutating service/device state.
+- `reopenNtpServiceAfterTransportLossDetailed` now delegates all validation to inspection and only performs replacement-client allocation after a successful preflight.
+- The packet-free reason matrix verifies a ready inspection targets the retained server and prior socket while preserving both service and device state.
+- The later detailed result must exactly match the inspected prior socket, target server, source index, clock state, and refresh tick.
+- The 21 typed rejection reasons, nullable compatibility wrapper, exact socket identities, and zero-traffic accounting remain unchanged.
+- Full HPET and 24-bit ACPI PM timer boots validate the refactor through the complete regression harness.
