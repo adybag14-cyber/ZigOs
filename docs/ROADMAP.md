@@ -1123,3 +1123,12 @@
 - At the recovery deadline the existing socket switches from source one to source two, increments automatic rotations exactly once, and transmits a projected recovery request.
 - A valid source-two response synchronizes the clock, clears pending/failure/recovery state, records one recovery success, and preserves cumulative pre-reset diagnostics.
 - The verifier proves five transmissions, three accepted replies, manual rotation preservation, one automatic fallback rotation, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
+
+## 3.89 - Reject delayed replies from the previous NTP source
+
+- A synchronized source-pool service enters recovery with source two pending while source one remains the previous peer.
+- At the recovery deadline the existing socket switches to source two and transmits a projected-time request without replacing its endpoint, generation, or local port.
+- A delayed, otherwise valid NTP response from source one is rejected by connected UDP peer filtering before endpoint delivery.
+- The rejected packet increments the peer-mismatch counter exactly once but produces no NTP poll examination, quality result, hardware sample, step evaluation, clock mutation, or request mutation.
+- The request remains active and accepts the valid source-two response normally, clearing recovery state and recording one recovery success.
+- The verifier proves two transmissions, two accepted samples, one peer-filtered ingress packet, unchanged NTP counters across rejection, clean close, and exact HPET/ACPI PM timer accounting.
