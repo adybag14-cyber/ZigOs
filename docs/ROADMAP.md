@@ -1258,3 +1258,13 @@
 - An invalid source index is rejected without changing service state, peer binding, queue depth, or queue counters.
 - A valid reset to source one purges both packets, increments `pre_request_discards` from three to five, preserves `post_response_discards = 4`, and emits no packet.
 - Health reports the selected source, additive discard counters, and all cumulative lifecycle diagnostics; duplicate reset is rejected and close accounting is exact.
+
+
+## 4.02 - Purge stale replies during same-source automatic recovery
+
+- A two-source pool with a failure threshold of two records one timeout without selecting a pending source.
+- Two delayed replies remain queued and readable throughout cooldown.
+- Recovery readiness purges both packets before starting the projected same-source request.
+- The source, connected peer, socket handle, failure count, and zero rotation count remain unchanged while recovery is active.
+- Acceptance resets the transient failure count, records one recovery success, and preserves `pre_request_discards = 2` / `post_response_discards = 0`.
+- HPET and ACPI PM timer boots verify four transmissions, two accepted samples, one retry-limit hit, zero rotations, clean close, and exact accounting.
