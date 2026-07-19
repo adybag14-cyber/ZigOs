@@ -1288,3 +1288,15 @@
 - Only transient timeout, recovery, and rejection counters are cleared.
 - A duplicate reset is rejected before any further queue or counter mutation.
 - Health reports source one, additive discard accounting, and preserved lifecycle diagnostics; close accounting is exact on HPET and ACPI PM timer boots.
+
+
+## 4.05 - Accumulate pre-request and post-response purges independently
+
+- One service lifecycle exercises both purge boundaries twice without resetting counters.
+- Two stale datagrams before the initial request increment only `pre_request_discards` to two.
+- A valid initial response followed by two residual datagrams increments only `post_response_discards` to two.
+- Two stale idle datagrams before refresh increment the pre-request total to four while preserving the post-response total.
+- A valid refresh response followed by one residual duplicate increments the post-response total to three while preserving the pre-request total.
+- Endpoint queue accounting closes exactly at nine enqueues and nine dequeues with high-water three and no drops.
+- Health reports synchronized time with independent `pre_request_discards = 4` and `post_response_discards = 3`.
+- HPET and ACPI PM timer boots verify two transmissions, two accepted samples, no retries, clean close, and exact accounting.
