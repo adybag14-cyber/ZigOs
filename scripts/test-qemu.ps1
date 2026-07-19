@@ -968,6 +968,9 @@ if ($Network) {
     if (-not [regex]::IsMatch($output, 'NTP close discard counter verified: source (HPET|ACPI PM timer), frequency/bits [1-9][0-9]*/(24|32|64), socket 2/86/49227 server 10.0.2.4, initial 154/5/6 accepted sample/time [1-9][0-9]*/1800000000/0x80000000 clean/post-before-close yes/2 idle pending/readable/accounting 2/yes/yes close active/cancelled/timestamp/transmissions no/no/0x0000000000000000/0 discarded 2 queue 5/5/3/0 discards pre/post/close 0/2/2 clock/projected/inactive yes/yes/yes health inactive/discards/lifecycle yes/yes/yes duplicate rejected/preserved yes/yes lifecycle 1/0/1 final IP/TX 155/6 submissions/completions 1/182/182/22 endpoints/cursor/generation 2/49228/87 ingress/dispatch 191/191/179/178')) {
         throw 'Close-time NTP discards were not accumulated independently from pre-request and post-response purges, synchronized clock state did not survive transport close, or exact HPET/ACPI PM timer accounting drifted.'
     }
+    if (-not $output.Contains('NTP discard saturation verified: zero yes, normal 0+3=3, near-maximum 18446744073709551614+2=18446744073709551615, maximum yes, independent 2/13/18446744073709551615')) {
+        throw 'NTP pre-request, post-response, or close discard totals did not use the shared saturating accumulator at zero, normal, near-maximum, maximum, and independent boundaries.'
+    }
     if (-not $output.Contains('NTP timestamp verified: base/anchor 0xEEF4508080000000/0xEEF4508080000000, quarter/rollover 0xEEF45080C0000000/0xEEF4508140000000, maximum 0xFFFFFFFFFFFFFFFF, rejects unsynchronized/backward/overflow yes/yes/yes')) {
         throw 'Projected Unix time did not convert into exact NTP timestamps or enforce the supported NTP-era boundary.'
     }

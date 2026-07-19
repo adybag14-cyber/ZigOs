@@ -1324,3 +1324,12 @@
 - The synchronized projected clock remains readable and unchanged after transport shutdown.
 - Inactive health preserves all three discard counters and the accepted lifecycle counts; duplicate close rejects without mutation.
 - HPET and ACPI PM timer boots verify one transmission, queue totals five/five with high-water three, and exact final accounting.
+
+
+## 4.08 - Saturate all NTP discard counters
+
+- All five production discard update sites now use one `recordNtpServiceDiscards` helper.
+- The helper applies saturating addition to pre-request, post-response, and close-time counters.
+- A pure verifier covers zero additions, normal additions, near-maximum overflow, already-maximum preservation, and three independent totals.
+- Near-maximum and already-maximum counters remain pinned at `18446744073709551615` instead of wrapping.
+- HPET and ACPI PM timer full boots retain every live purge/close verifier while asserting the shared saturation marker.

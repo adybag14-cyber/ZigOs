@@ -799,6 +799,18 @@ pub const NtpServiceStep = struct {
     recovery_started: bool,
 };
 
+pub const NtpDiscardSaturationReport = struct {
+    zero_preserved: bool,
+    normal_start: u64,
+    normal_added: u16,
+    normal_result: u64,
+    near_maximum_start: u64,
+    near_maximum_added: u16,
+    near_maximum_result: u64,
+    maximum_preserved: bool,
+    independent_results: [3]u64,
+};
+
 pub const NtpCloseDiscardCounterReport = struct {
     source_kind: time_reference.Kind,
     frequency_hz: u64,
@@ -4948,6 +4960,7 @@ pub const NetworkResult = struct {
     ntp_dual_purge_lifecycle: NtpDualPurgeLifecycleReport,
     ntp_service_close_discard: NtpServiceCloseDiscardReport,
     ntp_close_discard_counter: NtpCloseDiscardCounterReport,
+    ntp_discard_saturation: NtpDiscardSaturationReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -5825,6 +5838,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_discard_saturation = verifyNtpDiscardSaturation() orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -6045,6 +6062,7 @@ pub fn initializeAndTestNetwork(
         .ntp_dual_purge_lifecycle = ntp_dual_purge_lifecycle,
         .ntp_service_close_discard = ntp_service_close_discard,
         .ntp_close_discard_counter = ntp_close_discard_counter,
+        .ntp_discard_saturation = ntp_discard_saturation,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -7022,6 +7040,10 @@ pub fn openNtpServiceWithSourcePoolPolicies(
     return service;
 }
 
+fn recordNtpServiceDiscards(total: *u64, discarded: u16) void {
+    total.* +|= discarded;
+}
+
 pub fn closeNtpServiceDiscarding(
     device: *Device,
     service: *NtpService,
@@ -7038,7 +7060,7 @@ pub fn closeNtpServiceDiscarding(
         service.request_active = false;
     }
     const socket_close = closeNtpClientDiscarding(device, &service.client) orelse return null;
-    service.close_discards +|= socket_close.discarded_packets;
+    recordNtpServiceDiscards(&service.close_discards, socket_close.discarded_packets);
     const result = NtpServiceCloseResult{
         .request_was_active = request_was_active,
         .request_cancelled = request_cancelled,
@@ -7096,7 +7118,7 @@ pub fn resetNtpServiceTimeoutToSource(
         device,
         service.client.socket,
     ) orelse return false;
-    service.pre_request_discards +|= discarded_before_operator_switch;
+    recordNtpServiceDiscards(&service.pre_request_discards, discarded_before_operator_switch);
     if (!switchNtpClientServer(device, &service.client, target_server)) return false;
     service.current_source_index = source_index;
     clearNtpServiceTimeoutState(service);
@@ -7355,7 +7377,7 @@ pub fn stepNtpService(
                     device,
                     service.client.socket,
                 ) orelse return null;
-                service.pre_request_discards +|= discarded_before_recovery_switch;
+                recordNtpServiceDiscards(&service.pre_request_discards, discarded_before_recovery_switch);
                 if (!switchPendingNtpServiceSource(device, service)) return null;
                 service.retry_exhausted = false;
                 service.request_retry_attempts = 0;
@@ -7422,7 +7444,7 @@ pub fn stepNtpService(
                         device,
                         service.client.socket,
                     ) orelse return null;
-                    service.post_response_discards +|= discarded_after_response;
+                    recordNtpServiceDiscards(&service.post_response_discards, discarded_after_response);
                     service.step_accepted +|= 1;
                     service.request_active = false;
                     service.request_retry_attempts = 0;
@@ -7624,7 +7646,7 @@ pub fn stepNtpService(
         device,
         service.client.socket,
     ) orelse return null;
-    service.pre_request_discards +|= discarded_before_request;
+    recordNtpServiceDiscards(&service.pre_request_discards, discarded_before_request);
     const req = startNtpClientRequest(device, &service.client, client_timestamp) orelse return null;
     service.request = req;
     service.request_active = true;
@@ -9223,6 +9245,38 @@ fn verifyNtpRejectionExhaustion(
         .ingress_dequeued = device.software_rx_queue.dequeued,
         .packets_dispatched = device.packets_dispatched,
         .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+
+fn verifyNtpDiscardSaturation() ?NtpDiscardSaturationReport {
+    var zero: u64 = 7;
+    recordNtpServiceDiscards(&zero, 0);
+    var normal: u64 = 0;
+    recordNtpServiceDiscards(&normal, 3);
+    var near_maximum: u64 = std.math.maxInt(u64) - 1;
+    recordNtpServiceDiscards(&near_maximum, 2);
+    var maximum: u64 = std.math.maxInt(u64);
+    recordNtpServiceDiscards(&maximum, 7);
+    var independent = [3]u64{ 0, 10, std.math.maxInt(u64) - 2 };
+    recordNtpServiceDiscards(&independent[0], 2);
+    recordNtpServiceDiscards(&independent[1], 3);
+    recordNtpServiceDiscards(&independent[2], 5);
+    const zero_preserved = zero == 7;
+    const maximum_preserved = maximum == std.math.maxInt(u64);
+    if (!zero_preserved or normal != 3 or near_maximum != std.math.maxInt(u64) or
+        !maximum_preserved or independent[0] != 2 or independent[1] != 13 or
+        independent[2] != std.math.maxInt(u64))
+        return null;
+    return .{
+        .zero_preserved = zero_preserved,
+        .normal_start = 0,
+        .normal_added = 3,
+        .normal_result = normal,
+        .near_maximum_start = std.math.maxInt(u64) - 1,
+        .near_maximum_added = 2,
+        .near_maximum_result = near_maximum,
+        .maximum_preserved = maximum_preserved,
+        .independent_results = independent,
     };
 }
 
