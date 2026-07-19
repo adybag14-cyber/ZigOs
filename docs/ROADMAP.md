@@ -1364,3 +1364,14 @@
 - Duplicate abandonment and normal close reject without mutation; stale status, poll, and retry operations remain safe.
 - Inactive health retains discard totals `6/7/8` and one started request with no response.
 - HPET and ACPI PM timer boots verify one transmission, two routed packets, no residual endpoint, and exact final accounting.
+
+## 4.12 - Reopen abandoned NTP transport transactionally
+
+- `reopenNtpServiceAfterTransportLoss` validates retained quality, rejection, step, retry, recovery, source-pool, source-index, and clock-tick invariants before allocating transport.
+- The replacement `NtpClient` is opened and connected before any service field is mutated.
+- Reopen preserves the synchronized projected clock, source pool and rotation policy, selected source, discard totals, lifecycle totals, limit counters, recovery successes, and rotation history.
+- Per-request retry, rejection, timeout, recovery, pending-source, and consecutive-failure state is cleared, and an immediate refresh deadline is installed at the supplied tick.
+- The live verifier synchronizes on source zero, seeds cumulative diagnostics and dirty recovery transients, externally invalidates the old socket, abandons the idle service, and reopens on socket generation 91 / port 49232.
+- Duplicate reopen while active rejects without service or device mutation.
+- The new socket emits a projected refresh timestamp, accepts a source-zero response, and returns synchronized health with all cumulative diagnostics retained.
+- HPET and 24-bit ACPI PM timer boots verify two transmissions, two accepted samples, clean close, and exact final completion, endpoint, ingress, and dispatch accounting.
