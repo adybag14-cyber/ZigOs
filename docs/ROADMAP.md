@@ -1113,3 +1113,13 @@
 - A valid response from source one is quality-gated, step-gated, sampled from the active hardware reference, and applied to the projected clock.
 - Successful acceptance leaves synchronized health on source one with no pending source, no source-failure chain, no retry/recovery latch, and all cumulative limit counters preserved.
 - The verifier proves two transmissions, two accepted samples, source-two to source-one selection, same-socket projected refresh, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
+
+## 3.88 - Automatic failover after operator-selected NTP recovery
+
+- A terminal synchronized service is reset manually from source two to source one without incrementing automatic source rotations.
+- The manually selected source accepts a projected refresh and returns to ordinary synchronized service state with all transient outage state cleared.
+- Its next refresh uses projected time, performs one bounded retry with an unchanged originate timestamp, and times out without a hidden transmission.
+- Threshold-one source failure selects source two as pending while source one remains connected throughout the silent recovery cooldown.
+- At the recovery deadline the existing socket switches from source one to source two, increments automatic rotations exactly once, and transmits a projected recovery request.
+- A valid source-two response synchronizes the clock, clears pending/failure/recovery state, records one recovery success, and preserves cumulative pre-reset diagnostics.
+- The verifier proves five transmissions, three accepted replies, manual rotation preservation, one automatic fallback rotation, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
