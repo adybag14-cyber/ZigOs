@@ -1268,3 +1268,12 @@
 - The source, connected peer, socket handle, failure count, and zero rotation count remain unchanged while recovery is active.
 - Acceptance resets the transient failure count, records one recovery success, and preserves `pre_request_discards = 2` / `post_response_discards = 0`.
 - HPET and ACPI PM timer boots verify four transmissions, two accepted samples, one retry-limit hit, zero rotations, clean close, and exact accounting.
+
+
+## 4.03 - Purge stale replies before the initial NTP request
+
+- Two same-peer NTP datagrams are queued on a newly opened unsynchronized service before any request exists.
+- The shared request-start boundary purges both packets before transmitting the bootstrap initial request.
+- The bootstrap originate timestamp is preserved exactly and the endpoint queue is empty when the request becomes active.
+- A valid matching response is accepted normally, with `pre_request_discards = 2` and `post_response_discards = 0` exposed through health.
+- HPET and ACPI PM timer boots verify one transmission, one accepted sample, no retries, clean close, and exact accounting.
