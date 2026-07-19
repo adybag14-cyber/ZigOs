@@ -1513,3 +1513,16 @@
 - Fresh reinspection produces a new tagged plan predicting `2/116/49250`; explicit consumption opens exactly that socket, while reuse and the compatibility wrapper both reject `stale_service_state` without mutation.
 - Structured close leaves endpoint cursor/generation `49251/117`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
 - Full HPET and 24-bit ACPI PM timer boots validate tagged preview consumption through the complete regression harness.
+
+## 4.25 - Inspect NTP reopen execution-plan consumability
+
+- `NtpServiceTransportReopenExecutionPlanInspection` combines canonical plan integrity, optional preflight freshness, current allocation agreement, consumability, the public rejection, and an underlying stale cause.
+- `inspectNtpServiceTransportReopenExecutionPlan` is pure and short-circuits invalid plan bytes before service/device freshness inspection.
+- Integrity-valid stale plans return public `stale_execution_preview` while retaining the precise cause such as `stale_service_state` or `stale_transport_state`.
+- `executeNtpServiceTransportReopenExecutionPreview` now delegates every pre-allocation check to the public inspector, ensuring inspection and mutation paths share one decision.
+- A packet-free verifier abandons `2/117/49251` and proves the initial plan predicting `2/118/49252` is consumable without changing service, allocation, readiness, packet, or submission state.
+- A modified plan tag inspects and executes as `invalid_execution_preview` with no freshness result or stale cause.
+- Mutating the abandoned service reports `stale_execution_preview/stale_service_state`; real fixed-port churn through `2/118/55008` reports `stale_execution_preview/stale_transport_state`.
+- Fresh reinspection predicts and opens `2/119/49252`; inspection of the consumed plan remains integrity-valid but reports `stale_execution_preview/stale_service_state`, matching execution.
+- Structured close leaves endpoint cursor/generation `49253/120`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
+- Full HPET and 24-bit ACPI PM timer boots validate pure inspection/execution agreement through the complete regression harness.
