@@ -1141,3 +1141,12 @@
 - Rejection performs no hardware-reference read, sample, clock application, peer-mismatch drop, request mutation, retry, or transmission.
 - The unchanged request then accepts a correctly originated response from the same source and completes recovery normally.
 - The verifier proves two transmissions, two accepted samples, one transaction-layer rejection, preserved peer-drop accounting, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
+
+## 3.91 - Resolve a valid NTP reply behind a rejected reply in one batch
+
+- A recovery request on source two queues two current-peer responses: a wrong-originate datagram followed by a correctly originated response.
+- One service step with budget two examines both packets, rejects exactly the first, resolves the second, and leaves no response queued.
+- The transaction-layer rejection does not count as a quality, clock-step, or peer-mismatch rejection.
+- The valid response triggers exactly one hardware sample and one clock application in the same step.
+- Because the valid response is found within the bounded poll, no deadline retry or extra transmission occurs.
+- The verifier proves two transmissions, a `resolved/2/1` poll outcome, two accepted samples, preserved peer-drop and retry counts, clean close, and exact HPET/ACPI PM timer accounting.
