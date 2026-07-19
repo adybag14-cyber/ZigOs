@@ -1211,3 +1211,14 @@
 - A second budget-one step accepts the retained bounded response, resets the request's step-rejection count, and leaves the queue empty.
 - Because no residual datagram remains after acceptance, cumulative post-response discards stay zero.
 - The verifier proves two transmissions, three quality-accepted packets, one step rejection, two applied samples, clean close, and exact HPET/ACPI PM timer accounting.
+
+
+## 3.98 - Transaction rejection preserves queued NTP responses
+
+- A wrong-originate response and a valid response from the connected active peer are queued behind one live request.
+- Budget-one polling consumes and rejects the wrong-originate datagram at the NTP transaction layer while leaving the request pending.
+- Transaction rejection performs no hardware sample, quality evaluation, clock-step evaluation, clock application, retry, or post-response purge.
+- Endpoint depth and queue accounting prove the valid response remains queued and readable after the transaction rejection.
+- A second budget-one step accepts the retained valid response and leaves the endpoint queue empty.
+- Because no residual datagram remains after acceptance, cumulative post-response discards stay zero and health reports zero.
+- The verifier proves one transmission, one transaction rejection, one accepted sample, no purge, clean close, and exact HPET/ACPI PM timer accounting.
