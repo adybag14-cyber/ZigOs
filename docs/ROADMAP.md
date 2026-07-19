@@ -1386,3 +1386,14 @@
 - On the new socket, a same-peer response carrying the cancelled request's originate timestamp is consumed and rejected before the valid replacement response is accepted in the same bounded two-packet poll.
 - No retry transmission, quality rejection, clock-step rejection, or extra sample occurs.
 - HPET and 24-bit ACPI PM timer boots verify three transmissions, `resolved/2/1` mixed-response accounting, synchronized health, clean close, and exact final completion, endpoint, ingress, and dispatch counters.
+
+## 4.14 - Keep NTP transport reopen atomic under endpoint exhaustion
+
+- An unsynchronized service is externally detached and abandoned with seeded cumulative discard, lifecycle, limit, recovery, quality, and clock-step diagnostics.
+- Two fixed-port filler sockets occupy the only free UDP endpoint slots, saturating the four-entry endpoint table without changing the ephemeral-port cursor.
+- `reopenNtpServiceAfterTransportLoss` fails before service mutation when replacement socket allocation is impossible.
+- The failed attempt preserves the full service value, endpoint count, filler handles, ready cursor, ephemeral cursor `49236`, generation cursor `97`, identification cursor, TX cursor, and submission count.
+- Releasing both fillers restores capacity without rewinding generation history.
+- A second reopen succeeds on socket slot/generation/port `2/97/49236`, proving the failed attempt consumed neither an ephemeral port nor a generation.
+- The reopened service starts a bootstrap request, accepts one response, exposes synchronized health with all seeded cumulative diagnostics retained, and closes cleanly.
+- HPET and 24-bit ACPI PM timer boots verify one transmission and exact final completion, endpoint, cursor, ingress, and dispatch accounting.
