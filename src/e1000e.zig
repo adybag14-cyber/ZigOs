@@ -771,7 +771,6 @@ pub const NtpServiceTransportReopenError = enum {
     invalid_source_rotation_policy,
     source_count_mismatch,
     source_index_out_of_range,
-    source_lookup_failed,
     retained_server_mismatch,
     unexpected_source_rotation_policy,
     unexpected_source_index,
@@ -917,6 +916,42 @@ pub const NtpTransportLossAbandonReport = struct {
     final_identification_cursor: u16,
     final_tx_cursor: u16,
     tx_submissions_delta: u64,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    final_generation_cursor: u32,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+};
+
+pub const NtpReopenReasonMatrixReport = struct {
+    old_socket_slot: u16,
+    old_socket_generation: u32,
+    old_local_port: u16,
+    new_socket_slot: u16,
+    new_socket_generation: u32,
+    new_local_port: u16,
+    server: [4]u8,
+    live_reasons: [4]NtpServiceTransportReopenError,
+    policy_reasons: [8]NtpServiceTransportReopenError,
+    source_reasons: [9]NtpServiceTransportReopenError,
+    all_reasons_exact: bool,
+    snapshots_preserved: bool,
+    device_cursors_preserved: bool,
+    failure_ephemeral_cursor: u16,
+    failure_generation_cursor: u32,
+    reopen_succeeded: bool,
+    success_has_no_rejection: bool,
+    legacy_active_rejected: bool,
+    legacy_state_preserved: bool,
+    close_clean: bool,
+    final_identification_cursor: u16,
+    final_tx_cursor: u16,
+    tx_submissions_unchanged: bool,
     tx_completion_enqueues: u64,
     tx_completion_dequeues: u64,
     rx_completion_enqueues: u64,
@@ -5470,6 +5505,7 @@ pub const NetworkResult = struct {
     ntp_active_refresh_reopen: NtpActiveRefreshReopenReport,
     ntp_reopen_allocation_failure: NtpReopenAllocationFailureReport,
     ntp_reopen_validation_failure: NtpReopenValidationFailureReport,
+    ntp_reopen_reason_matrix: NtpReopenReasonMatrixReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -6379,6 +6415,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_reopen_reason_matrix = verifyNtpReopenReasonMatrix(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -6607,6 +6647,7 @@ pub fn initializeAndTestNetwork(
         .ntp_active_refresh_reopen = ntp_active_refresh_reopen,
         .ntp_reopen_allocation_failure = ntp_reopen_allocation_failure,
         .ntp_reopen_validation_failure = ntp_reopen_validation_failure,
+        .ntp_reopen_reason_matrix = ntp_reopen_reason_matrix,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -7724,7 +7765,7 @@ pub fn reopenNtpServiceAfterTransportLossDetailed(
             return rejectNtpServiceTransportReopen(.source_index_out_of_range);
         }
         target_server = ntp.sourcePoolServer(pool, service.current_source_index) orelse
-            return rejectNtpServiceTransportReopen(.source_lookup_failed);
+            return rejectNtpServiceTransportReopen(.source_index_out_of_range);
         if (!std.meta.eql(target_server, service.client.server_ipv4)) {
             return rejectNtpServiceTransportReopen(.retained_server_mismatch);
         }
@@ -10158,6 +10199,311 @@ fn verifyNtpTransportLossAbandon(
         .final_identification_cursor = device.next_udp_identification,
         .final_tx_cursor = device.tx_producer,
         .tx_submissions_delta = device.tx_submissions - submissions_before,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .final_generation_cursor = device.next_udp_generation,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+
+fn ntpReopenReasonPreservesState(
+    device: *Device,
+    candidate: *NtpService,
+    refresh_tick: u64,
+    expected: NtpServiceTransportReopenError,
+) bool {
+    const before = candidate.*;
+    const endpoints = device.udp_endpoint_count;
+    const ephemeral = device.next_ephemeral_udp_port;
+    const generation = device.next_udp_generation;
+    const ready = device.next_udp_ready_index;
+    const identification = device.next_udp_identification;
+    const tx_cursor = device.tx_producer;
+    const submissions = device.tx_submissions;
+    const attempt = reopenNtpServiceAfterTransportLossDetailed(device, candidate, refresh_tick);
+    return attempt.result == null and attempt.rejection == expected and
+        std.meta.eql(candidate.*, before) and device.udp_endpoint_count == endpoints and
+        device.next_ephemeral_udp_port == ephemeral and device.next_udp_generation == generation and
+        device.next_udp_ready_index == ready and device.next_udp_identification == identification and
+        device.tx_producer == tx_cursor and device.tx_submissions == submissions;
+}
+
+fn verifyNtpReopenReasonMatrix(device: *Device) ?NtpReopenReasonMatrixReport {
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_239 or
+        device.next_udp_generation != 100 or device.tx_producer != 1 or
+        device.next_udp_identification != 166 or device.next_dns_transaction_id != 8 or
+        completionQueueEnqueued(&tx_completion_queue) != 193 or
+        completionQueueDequeued(&tx_completion_queue) != 193 or
+        completionQueueEnqueued(&rx_completion_queue) != 22 or
+        device.software_rx_queue.enqueued != 211 or device.software_rx_queue.dequeued != 211 or
+        device.packets_dispatched != 199 or device.udp_packets_dispatched != 198 or
+        device.peer_mismatch_udp_packets_dropped != 4)
+    {
+        return null;
+    }
+
+    const server = [4]u8{ 10, 0, 2, 4 };
+    var service = openNtpService(device, server, 1, 2) orelse return null;
+    const old_socket = service.client.socket;
+    if (old_socket.endpoint_index != 2 or old_socket.generation != 100 or
+        old_socket.local_port != 49_239 or device.udp_endpoint_count != 3 or
+        device.next_ephemeral_udp_port != 49_240 or device.next_udp_generation != 101)
+    {
+        return null;
+    }
+
+    const live_reasons = [4]NtpServiceTransportReopenError{
+        .service_active,
+        .client_active,
+        .request_active,
+        .transport_still_active,
+    };
+    var live_exact = true;
+    var candidate = service;
+    live_exact = live_exact and ntpReopenReasonPreservesState(device, &candidate, 0, live_reasons[0]);
+    candidate = service;
+    candidate.active = false;
+    live_exact = live_exact and ntpReopenReasonPreservesState(device, &candidate, 0, live_reasons[1]);
+    candidate = service;
+    candidate.active = false;
+    candidate.client.active = false;
+    candidate.request_active = true;
+    live_exact = live_exact and ntpReopenReasonPreservesState(device, &candidate, 0, live_reasons[2]);
+    candidate = service;
+    candidate.active = false;
+    candidate.client.active = false;
+    candidate.request_active = false;
+    live_exact = live_exact and ntpReopenReasonPreservesState(device, &candidate, 0, live_reasons[3]);
+    if (!live_exact) return null;
+
+    const transport_close = closeUdpSocketDiscarding(device, old_socket) orelse return null;
+    if (transport_close.discarded_packets != 0 or transport_close.queue_enqueued != 0 or
+        transport_close.queue_dequeued != 0 or transport_close.queue_high_water != 0 or
+        transport_close.queue_dropped != 0 or device.udp_endpoint_count != 2)
+    {
+        return null;
+    }
+    const abandon = abandonNtpServiceAfterTransportLoss(device, &service) orelse return null;
+    if (abandon.request_was_active or abandon.request_cancelled or service.active or
+        service.client.active or service.request_active)
+    {
+        return null;
+    }
+    const abandoned = service;
+    const failure_ephemeral_cursor = device.next_ephemeral_udp_port;
+    const failure_generation_cursor = device.next_udp_generation;
+    const endpoints_before = device.udp_endpoint_count;
+    const ready_before = device.next_udp_ready_index;
+    const identification_before = device.next_udp_identification;
+    const tx_before = device.tx_producer;
+    const submissions_before = device.tx_submissions;
+
+    const policy_reasons = [8]NtpServiceTransportReopenError{
+        .invalid_refresh_interval,
+        .invalid_quality_policy,
+        .invalid_quality_rejection_policy,
+        .invalid_step_policy,
+        .invalid_step_rejection_policy,
+        .invalid_retry_policy,
+        .invalid_recovery_policy,
+        .backward_refresh_tick,
+    };
+    var policy_exact = true;
+    candidate = abandoned;
+    candidate.refresh_interval_ticks = 0;
+    policy_exact = policy_exact and ntpReopenReasonPreservesState(device, &candidate, 0, policy_reasons[0]);
+    candidate = abandoned;
+    candidate.quality_policy.max_stratum = 0;
+    policy_exact = policy_exact and ntpReopenReasonPreservesState(device, &candidate, 0, policy_reasons[1]);
+    candidate = abandoned;
+    candidate.quality_rejection_policy.maximum_rejections_per_request = 0;
+    policy_exact = policy_exact and ntpReopenReasonPreservesState(device, &candidate, 0, policy_reasons[2]);
+    candidate = abandoned;
+    candidate.step_policy = .{ .maximum_forward_seconds = 0, .maximum_forward_fraction = 0 };
+    policy_exact = policy_exact and ntpReopenReasonPreservesState(device, &candidate, 0, policy_reasons[3]);
+    candidate = abandoned;
+    candidate.step_rejection_policy.maximum_rejections_per_request = 0;
+    policy_exact = policy_exact and ntpReopenReasonPreservesState(device, &candidate, 0, policy_reasons[4]);
+    candidate = abandoned;
+    candidate.retry_policy.maximum_retries = 0;
+    policy_exact = policy_exact and ntpReopenReasonPreservesState(device, &candidate, 0, policy_reasons[5]);
+    candidate = abandoned;
+    candidate.recovery_policy = .{ .cooldown_ticks = 0, .maximum_recoveries = 1 };
+    policy_exact = policy_exact and ntpReopenReasonPreservesState(device, &candidate, 0, policy_reasons[6]);
+    candidate = abandoned;
+    candidate.clock.clock.synchronized = true;
+    candidate.clock.clock.unix_seconds = ntp.fixture_unix_seconds;
+    candidate.clock.clock.unix_fraction = 0;
+    candidate.clock.clock.stratum = 1;
+    candidate.clock.clock.reference_id = .{ 'T', 'E', 'S', 'T' };
+    candidate.clock.clock.accepted_samples = 1;
+    candidate.clock.anchor_tick = 10;
+    candidate.clock.ticks_per_second = 1;
+    policy_exact = policy_exact and ntpReopenReasonPreservesState(device, &candidate, 9, policy_reasons[7]);
+    if (!policy_exact) return null;
+
+    var pool = ntp.SourcePool{
+        .count = 2,
+        .servers = std.mem.zeroes([ntp.maximum_source_pool_entries][4]u8),
+    };
+    pool.servers[0] = server;
+    pool.servers[1] = .{ 10, 0, 2, 5 };
+    const rotation = ntp.SourceRotationPolicy{
+        .source_count = 2,
+        .failures_before_rotation = 1,
+    };
+    const source_reasons = [9]NtpServiceTransportReopenError{
+        .missing_source_rotation_policy,
+        .invalid_source_pool,
+        .invalid_source_rotation_policy,
+        .source_count_mismatch,
+        .source_index_out_of_range,
+        .retained_server_mismatch,
+        .unexpected_source_rotation_policy,
+        .unexpected_source_index,
+        .invalid_server,
+    };
+    var source_exact = true;
+    candidate = abandoned;
+    candidate.source_pool = pool;
+    candidate.source_rotation_policy = null;
+    candidate.current_source_index = 0;
+    source_exact = source_exact and ntpReopenReasonPreservesState(device, &candidate, 0, source_reasons[0]);
+    candidate = abandoned;
+    var invalid_pool = pool;
+    invalid_pool.servers[1] = invalid_pool.servers[0];
+    candidate.source_pool = invalid_pool;
+    candidate.source_rotation_policy = rotation;
+    candidate.current_source_index = 0;
+    source_exact = source_exact and ntpReopenReasonPreservesState(device, &candidate, 0, source_reasons[1]);
+    candidate = abandoned;
+    candidate.source_pool = pool;
+    candidate.source_rotation_policy = .{ .source_count = 2, .failures_before_rotation = 0 };
+    candidate.current_source_index = 0;
+    source_exact = source_exact and ntpReopenReasonPreservesState(device, &candidate, 0, source_reasons[2]);
+    candidate = abandoned;
+    candidate.source_pool = pool;
+    candidate.source_rotation_policy = .{ .source_count = 3, .failures_before_rotation = 1 };
+    candidate.current_source_index = 0;
+    source_exact = source_exact and ntpReopenReasonPreservesState(device, &candidate, 0, source_reasons[3]);
+    candidate = abandoned;
+    candidate.source_pool = pool;
+    candidate.source_rotation_policy = rotation;
+    candidate.current_source_index = 2;
+    source_exact = source_exact and ntpReopenReasonPreservesState(device, &candidate, 0, source_reasons[4]);
+    candidate = abandoned;
+    candidate.source_pool = pool;
+    candidate.source_rotation_policy = rotation;
+    candidate.current_source_index = 0;
+    candidate.client.server_ipv4 = pool.servers[1];
+    source_exact = source_exact and ntpReopenReasonPreservesState(device, &candidate, 0, source_reasons[5]);
+    candidate = abandoned;
+    candidate.source_pool = null;
+    candidate.source_rotation_policy = rotation;
+    candidate.current_source_index = 0;
+    source_exact = source_exact and ntpReopenReasonPreservesState(device, &candidate, 0, source_reasons[6]);
+    candidate = abandoned;
+    candidate.source_pool = null;
+    candidate.source_rotation_policy = null;
+    candidate.current_source_index = 1;
+    source_exact = source_exact and ntpReopenReasonPreservesState(device, &candidate, 0, source_reasons[7]);
+    candidate = abandoned;
+    candidate.source_pool = null;
+    candidate.source_rotation_policy = null;
+    candidate.current_source_index = 0;
+    candidate.client.server_ipv4 = .{ 0, 0, 0, 0 };
+    source_exact = source_exact and ntpReopenReasonPreservesState(device, &candidate, 0, source_reasons[8]);
+    if (!source_exact) return null;
+
+    const all_reasons_exact = live_exact and policy_exact and source_exact;
+    const snapshots_preserved = std.meta.eql(service, abandoned);
+    const device_cursors_preserved = device.udp_endpoint_count == endpoints_before and
+        device.next_ephemeral_udp_port == failure_ephemeral_cursor and
+        device.next_udp_generation == failure_generation_cursor and
+        device.next_udp_ready_index == ready_before and
+        device.next_udp_identification == identification_before and
+        device.tx_producer == tx_before and device.tx_submissions == submissions_before;
+    if (!all_reasons_exact or !snapshots_preserved or !device_cursors_preserved or
+        failure_ephemeral_cursor != 49_240 or failure_generation_cursor != 101)
+    {
+        return null;
+    }
+
+    const success = reopenNtpServiceAfterTransportLossDetailed(device, &service, 0);
+    const success_has_no_rejection = success.rejection == null;
+    const reopened = success.result orelse return null;
+    const new_socket = service.client.socket;
+    const reopen_succeeded = success_has_no_rejection and std.meta.eql(reopened.previous_socket, old_socket) and
+        std.meta.eql(reopened.socket, new_socket) and new_socket.endpoint_index == 2 and
+        new_socket.generation == 101 and new_socket.local_port == 49_240 and
+        device.udp_endpoint_count == 3 and device.next_ephemeral_udp_port == 49_241 and
+        device.next_udp_generation == 102 and std.meta.eql(reopened.server_ipv4, server);
+    if (!reopen_succeeded) return null;
+
+    const legacy_snapshot = service;
+    const legacy_endpoints = device.udp_endpoint_count;
+    const legacy_ephemeral = device.next_ephemeral_udp_port;
+    const legacy_generation = device.next_udp_generation;
+    const legacy_active_rejected = reopenNtpServiceAfterTransportLoss(device, &service, 0) == null;
+    const legacy_state_preserved = std.meta.eql(service, legacy_snapshot) and
+        device.udp_endpoint_count == legacy_endpoints and
+        device.next_ephemeral_udp_port == legacy_ephemeral and
+        device.next_udp_generation == legacy_generation;
+    if (!legacy_active_rejected or !legacy_state_preserved) return null;
+
+    const close_result = closeNtpServiceDiscarding(device, &service) orelse return null;
+    const close_clean = !close_result.request_was_active and !close_result.request_cancelled and
+        close_result.socket_close.discarded_packets == 0 and
+        close_result.socket_close.queue_enqueued == 0 and close_result.socket_close.queue_dequeued == 0 and
+        close_result.socket_close.queue_high_water == 0 and close_result.socket_close.queue_dropped == 0 and
+        !service.active and !service.client.active and !service.request_active;
+    if (!close_clean) return null;
+
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const tx_submissions_unchanged = device.tx_submissions == submissions_before;
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_241 or
+        device.next_udp_generation != 102 or device.next_udp_identification != 166 or
+        device.next_dns_transaction_id != 8 or device.tx_producer != 1 or
+        !tx_submissions_unchanged or txe != 193 or txd != 193 or rxe != 22 or
+        device.software_rx_queue.enqueued != 211 or device.software_rx_queue.dequeued != 211 or
+        device.packets_dispatched != 199 or device.udp_packets_dispatched != 198 or
+        device.peer_mismatch_udp_packets_dropped != 4)
+    {
+        return null;
+    }
+
+    return .{
+        .old_socket_slot = old_socket.endpoint_index,
+        .old_socket_generation = old_socket.generation,
+        .old_local_port = old_socket.local_port,
+        .new_socket_slot = new_socket.endpoint_index,
+        .new_socket_generation = new_socket.generation,
+        .new_local_port = new_socket.local_port,
+        .server = server,
+        .live_reasons = live_reasons,
+        .policy_reasons = policy_reasons,
+        .source_reasons = source_reasons,
+        .all_reasons_exact = all_reasons_exact,
+        .snapshots_preserved = snapshots_preserved,
+        .device_cursors_preserved = device_cursors_preserved,
+        .failure_ephemeral_cursor = failure_ephemeral_cursor,
+        .failure_generation_cursor = failure_generation_cursor,
+        .reopen_succeeded = reopen_succeeded,
+        .success_has_no_rejection = success_has_no_rejection,
+        .legacy_active_rejected = legacy_active_rejected,
+        .legacy_state_preserved = legacy_state_preserved,
+        .close_clean = close_clean,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_tx_cursor = device.tx_producer,
+        .tx_submissions_unchanged = tx_submissions_unchanged,
         .tx_completion_enqueues = txe,
         .tx_completion_dequeues = txd,
         .rx_completion_enqueues = rxe,

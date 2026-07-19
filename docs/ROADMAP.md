@@ -1418,3 +1418,14 @@
 - The validation verifier now requires `backward_refresh_tick`, `retained_server_mismatch`, `invalid_retry_policy`, and `invalid_source_rotation_policy` for its four independent failures.
 - Successful detailed attempts are required to have no rejection reason before their result is consumed.
 - HPET and 24-bit ACPI PM timer boots retain the exact 4.14 and 4.15 packet, clock, endpoint, completion, ingress, and dispatch accounting while asserting the typed reason names.
+
+## 4.17 - Exhaust every reachable NTP reopen preflight reason
+
+- The detailed reopen taxonomy removes the unreachable `source_lookup_failed` branch; a validated pool and in-range source index make lookup deterministic.
+- A packet-free matrix verifies four lifecycle reasons: `service_active`, `client_active`, `request_active`, and `transport_still_active`.
+- Eight policy/clock reasons are verified: invalid refresh interval, quality policy, quality-rejection policy, clock-step policy, step-rejection policy, retry policy, recovery policy, and backward refresh tick.
+- Nine source/server reasons are verified: missing rotation policy, invalid source pool, invalid rotation policy, source-count mismatch, out-of-range source index, retained-server mismatch, unexpected rotation policy, unexpected source index, and invalid server.
+- Every candidate retains its exact deliberately-invalid service snapshot and preserves endpoint count, readiness cursor, ephemeral port, generation, IP identification, TX cursor, and submission count.
+- After all 21 failures, a valid detailed reopen succeeds on socket `2/101/49240` with no rejection reason.
+- The nullable compatibility wrapper rejects the now-active service without mutation, and structured close removes the replacement socket cleanly.
+- Full HPET and 24-bit ACPI PM timer boots verify zero transmissions and unchanged completion, ingress, and dispatch totals while endpoint identity advances exactly to cursor/generation `49241/102`.
