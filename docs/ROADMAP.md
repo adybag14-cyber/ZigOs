@@ -1150,3 +1150,13 @@
 - The valid response triggers exactly one hardware sample and one clock application in the same step.
 - Because the valid response is found within the bounded poll, no deadline retry or extra transmission occurs.
 - The verifier proves two transmissions, a `resolved/2/1` poll outcome, two accepted samples, preserved peer-drop and retry counts, clean close, and exact HPET/ACPI PM timer accounting.
+
+## 3.92 - Rejected NTP traffic cannot postpone a due retry
+
+- A source-two recovery request receives a wrong-originate response at the exact retry deadline.
+- The current-peer packet is routed and examined once, rejected at the transaction layer, and leaves quality, clock-step, peer-drop, and rejection-budget counters unchanged.
+- Rejection performs no hardware sample or clock application and preserves the request's socket and originate timestamp.
+- Because the deadline is already due, the same service step transmits the normal retry rather than allowing invalid traffic to extend the request lifetime.
+- The retry preserves the originate timestamp, increments transmissions to two, resets no quality/discipline budget, and remains bounded by the configured retry limit.
+- A valid response after the retry completes recovery normally.
+- The verifier proves three transmissions, one transaction rejection at deadline, one exact retry, two accepted samples, clean close, and exact HPET/ACPI PM timer accounting.
