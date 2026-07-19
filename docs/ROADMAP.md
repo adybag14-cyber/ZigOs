@@ -1488,3 +1488,15 @@
 - Real fixed-port churn opens and closes `2/108/55004`; fresh reinspection then executes on `2/109/49246` and advances endpoint cursor/generation to `49247/110`.
 - The consumed plan remains integrity-valid but freshness-rejects as `stale_service_state`, preserving the distinction established in 4.21.
 - Full HPET and 24-bit ACPI PM timer boots retain IP/TX `166/1`, completions `193/193/22`, ingress/dispatch `211/211/199/198`, and zero transmission movement.
+
+## 4.23 - Preview exact NTP reopen transport allocation
+
+- `UdpEphemeralSocketAllocationPreview` records the exact first free endpoint slot, normalized generation, selected ephemeral port, and post-allocation cursors without mutating the device.
+- `previewEphemeralUdpSocketAllocation` and the internal plan consumer now share the complete ephemeral allocation decision; ordinary `openEphemeralUdpSocket` uses that same path.
+- `NtpServiceTransportReopenExecutionPreview` combines 4.22 freshness with transport availability, an exact predicted socket, readiness, and a typed rejection.
+- `previewNtpServiceTransportReopenExecution` returns freshness failures unchanged, returns `transport_unavailable` when no endpoint can be allocated, and remains non-mutating.
+- `executeNtpServiceTransportReopenPreflight` delegates to the execution preview and consumes the same allocation plan, requiring the opened NTP socket to match the prediction exactly.
+- A packet-free verifier abandons `2/110/49247`, fills the remaining slots with `2/111/55005` and `3/112/55006`, and proves both preview and execution reject `transport_unavailable` without cursor or service mutation.
+- Releasing the fillers makes the saturated plan reject `stale_transport_state`; fresh reinspection predicts `2/113/49248`, and execution opens exactly that socket.
+- Structured close leaves endpoint cursor/generation `49249/114`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
+- Full HPET and 24-bit ACPI PM timer boots validate exact preview/allocation parity through the complete regression harness.
