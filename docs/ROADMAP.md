@@ -1300,3 +1300,15 @@
 - Endpoint queue accounting closes exactly at nine enqueues and nine dequeues with high-water three and no drops.
 - Health reports synchronized time with independent `pre_request_discards = 4` and `post_response_discards = 3`.
 - HPET and ACPI PM timer boots verify two transmissions, two accepted samples, no retries, clean close, and exact accounting.
+
+
+## 4.06 - Expose structured NTP service close and discard results
+
+- `closeNtpServiceDiscarding` returns an `NtpServiceCloseResult` instead of hiding cancellation and queue disposal behind a boolean.
+- The result records whether a request was active and cancelled, its originate timestamp and transmission count, the complete UDP discard-close record, and the service pre/post purge and lifecycle counters.
+- The existing `closeNtpService` remains a compatibility wrapper over the structured API.
+- The live verifier starts one bootstrap request, queues three same-peer replies without polling, and closes the active service.
+- Close cancels the request, discards all three packets, unregisters the connected generation-tagged socket, and leaves service/client/request inactive.
+- Stale status, receive, poll, and retry operations reject; structured and boolean duplicate closes reject without state mutation.
+- Inactive health preserves `pre_request_discards = 4`, `post_response_discards = 3`, and lifecycle counts.
+- HPET and ACPI PM timer boots verify one transmission, exact close queue statistics, no residual endpoint, and exact completion/ingress/dispatch accounting.
