@@ -1354,3 +1354,13 @@
 - The active request remains uncancelled; stale socket status, poll, and retry operations reject safely.
 - Health continues to expose the preserved unsynchronized awaiting request, discard totals, and lifecycle counts.
 - HPET and ACPI PM timer boots verify one transmission, two routed packets, no residual endpoint, and exact final accounting.
+
+## 4.11 - Abandon an NTP service after irrecoverable transport loss
+
+- `abandonNtpServiceAfterTransportLoss` rejects while the generation-tagged UDP socket is still active.
+- After external socket loss, it returns a structured result with request, socket, discard, and lifecycle diagnostics.
+- An active request is cancelled exactly once; service, client, and request-active state become inactive while clock and cumulative counters are preserved.
+- The live verifier queues two replies, externally discard-closes the socket, and abandons the preserved service.
+- Duplicate abandonment and normal close reject without mutation; stale status, poll, and retry operations remain safe.
+- Inactive health retains discard totals `6/7/8` and one started request with no response.
+- HPET and ACPI PM timer boots verify one transmission, two routed packets, no residual endpoint, and exact final accounting.
