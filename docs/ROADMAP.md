@@ -1552,3 +1552,16 @@
 - Explicit consumption opens exactly that socket with synchronized clock state retained; a later tick-`195` refresh on the active service rejects `service_active`.
 - Structured close leaves endpoint cursor/generation `49257/126`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
 - Full HPET and 24-bit ACPI PM timer boots validate explicit-deadline refresh through the complete regression harness.
+
+## 4.28 - Refresh and execute NTP reopen plans transactionally
+
+- `NtpServiceTransportReopenRefreshExecutionAttempt` contains the complete pure refresh result, an optional reopen result, and the final typed rejection.
+- `refreshAndExecuteNtpServiceTransportReopenExecutionPlanAt` performs no execution when refresh rejects; only a ready refreshed preview is passed to the exact tagged-plan consumer.
+- The source-compatible no-deadline wrapper delegates using the retained plan deadline.
+- A packet-free verifier abandons `2/126/49257` and creates a deadline-`211` plan predicting `2/127/49258`.
+- A corrupted plan at tick `212` returns `invalid_execution_preview` with neither refreshed preview nor reopen result and no state mutation.
+- Fixed-port fillers `2/127/55011` and `3/128/55012` saturate the endpoint table; a tick-`215` combined attempt reports original cause `stale_transport_state`, rejects `transport_unavailable`, and never executes.
+- Releasing both fillers leaves generation `129`; a tick-`220` combined attempt refreshes and opens exactly `2/129/49258` in one transaction.
+- Reusing that refreshed plan at tick `225` reports original cause `stale_service_state`, rejects `service_active`, and preserves the active service.
+- Structured close leaves endpoint cursor/generation `49259/130`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
+- Full HPET and 24-bit ACPI PM timer boots validate transactional refresh/execute behavior through the complete regression harness.
