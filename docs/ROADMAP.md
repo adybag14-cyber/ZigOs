@@ -1170,3 +1170,13 @@
 - A second budget-one step at the same tick resolves the retained valid response, samples and applies the clock once, and emits no additional retry or transmission.
 - The endpoint queue is empty after acceptance and all peer, quality, discipline, retry, and recovery counters remain exact.
 - The verifier proves three transmissions, two accepted samples, one retained queued response, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
+
+## 3.94 - Zero-budget NTP polling preserves queued data and deadlines
+
+- A valid source-two response is already queued when the retry deadline becomes due.
+- A service step with receive budget zero examines and rejects no packets and returns no response.
+- Zero-budget polling performs no hardware sample, quality evaluation, clock-step evaluation, or clock mutation.
+- Deadline scheduling remains independent of receive budget, so the same step transmits the due retry with the unchanged originate timestamp.
+- Endpoint depth and enqueue/dequeue counters prove the valid response remains queued and readable after the retry.
+- A following budget-one step resolves and accepts the retained response without another retry, then leaves the endpoint queue empty.
+- The verifier proves three transmissions, two accepted samples, exact zero-budget queue preservation, clean close, and exact HPET/ACPI PM timer accounting.

@@ -779,6 +779,77 @@ pub const NtpServiceStep = struct {
     recovery_started: bool,
 };
 
+pub const NtpZeroBudgetDeadlineReport = struct {
+    source_kind: time_reference.Kind,
+    frequency_hz: u64,
+    counter_bits: u8,
+    socket_slot: u16,
+    socket_generation: u32,
+    local_port: u16,
+    source_count: u8,
+    source_index: u8,
+    server: [4]u8,
+    transmit_identifications: [3]u16,
+    transmit_descriptors: [3]u16,
+    transmit_next_cursors: [3]u16,
+    recovery_timestamp: u64,
+    recovery_started: bool,
+    recovery_switched: bool,
+    same_socket_preserved: bool,
+    valid_routed: bool,
+    zero_poll_state: NtpRequestState,
+    zero_examined: u16,
+    zero_rejected: u16,
+    zero_response_absent: bool,
+    zero_no_sample: bool,
+    zero_no_discipline: bool,
+    retry_sent: bool,
+    retry_timestamp_preserved: bool,
+    retry_transmissions: u16,
+    retained_pending_packets: u16,
+    retained_queue_counters_preserved: bool,
+    retained_readable: bool,
+    peer_drop_preserved: bool,
+    accepted_poll_state: NtpRequestState,
+    accepted_examined: u16,
+    accepted_rejected: u16,
+    accepted_resolved: bool,
+    no_extra_retry: bool,
+    accepted_quality_result: ntp.QualityResult,
+    accepted_step_result: ntp.ClockStepResult,
+    accepted_sample_tick: u64,
+    accepted_seconds: u64,
+    accepted_fraction: u32,
+    accepted_state_clean: bool,
+    final_queue_empty: bool,
+    health_reports_source: bool,
+    health_reports_recovery: bool,
+    quality_accepted: u64,
+    quality_rejected: u64,
+    step_accepted: u64,
+    step_rejected: u64,
+    requests_started: u64,
+    retries: u64,
+    responses: u64,
+    retry_limit_hits: u64,
+    recovery_limit_hits: u64,
+    recovery_successes: u64,
+    close_succeeded: bool,
+    final_identification_cursor: u16,
+    final_tx_cursor: u16,
+    tx_submissions_delta: u64,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    final_generation_cursor: u32,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+};
+
 pub const NtpBudgetedRetryQueueReport = struct {
     source_kind: time_reference.Kind,
     frequency_hz: u64,
@@ -4098,6 +4169,7 @@ pub const NetworkResult = struct {
     ntp_mixed_response_batch: NtpMixedResponseBatchReport,
     ntp_rejected_deadline_retry: NtpRejectedDeadlineRetryReport,
     ntp_budgeted_retry_queue: NtpBudgetedRetryQueueReport,
+    ntp_zero_budget_deadline: NtpZeroBudgetDeadlineReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -4919,6 +4991,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_zero_budget_deadline = verifyNtpZeroBudgetDeadline(device, continuous_counter) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -5125,6 +5201,7 @@ pub fn initializeAndTestNetwork(
         .ntp_mixed_response_batch = ntp_mixed_response_batch,
         .ntp_rejected_deadline_retry = ntp_rejected_deadline_retry,
         .ntp_budgeted_retry_queue = ntp_budgeted_retry_queue,
+        .ntp_zero_budget_deadline = ntp_zero_budget_deadline,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -8246,6 +8323,296 @@ fn verifyNtpRejectionExhaustion(
         .rx_completion_enqueues = rxe,
         .final_registered_endpoints = device.udp_endpoint_count,
         .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+
+fn verifyNtpZeroBudgetDeadline(
+    device: *Device,
+    counter: *time_reference.ContinuousCounter,
+) ?NtpZeroBudgetDeadlineReport {
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_214 or
+        device.next_udp_generation != 73 or device.tx_producer != 7 or
+        device.next_udp_identification != 132 or device.next_dns_transaction_id != 8 or
+        completionQueueEnqueued(&tx_completion_queue) != 159 or
+        completionQueueDequeued(&tx_completion_queue) != 159 or
+        completionQueueEnqueued(&rx_completion_queue) != 22 or
+        device.software_rx_queue.enqueued != 143 or device.software_rx_queue.dequeued != 143 or
+        device.packets_dispatched != 131 or device.udp_packets_dispatched != 130 or
+        device.peer_mismatch_udp_packets_dropped != 4 or
+        counter.frequency_hz == 0 or counter.counter_bits == 0)
+    {
+        return null;
+    }
+
+    var source_pool = ntp.SourcePool{
+        .count = 3,
+        .servers = std.mem.zeroes([ntp.maximum_source_pool_entries][4]u8),
+    };
+    source_pool.servers[0] = .{ 10, 0, 2, 4 };
+    source_pool.servers[1] = .{ 10, 0, 2, 5 };
+    source_pool.servers[2] = .{ 10, 0, 2, 6 };
+    var service = openNtpServiceWithSourcePoolPolicies(
+        device,
+        source_pool,
+        .{ .source_count = 3, .failures_before_rotation = 1 },
+        2,
+        ntp.default_quality_policy,
+        ntp.default_quality_rejection_policy,
+        .{ .maximum_forward_seconds = 4, .maximum_forward_fraction = 0 },
+        ntp.default_step_rejection_policy,
+        .{ .initial_interval_ticks = 1, .maximum_interval_ticks = 1, .maximum_retries = 1 },
+        .{ .cooldown_ticks = 2, .maximum_recoveries = 2 },
+    ) orelse return null;
+    const socket = service.client.socket;
+    if (socket.endpoint_index != 2 or socket.generation != 73 or socket.local_port != 49_214 or
+        device.udp_endpoint_count != 3 or device.next_ephemeral_udp_port != 49_215 or
+        device.next_udp_generation != 74)
+        return null;
+
+    const submissions_before = device.tx_submissions;
+    const start_tick = counter.read();
+    var transmit_identifications = [3]u16{ 0, 0, 0 };
+    var transmit_descriptors = [3]u16{ 0, 0, 0 };
+    var transmit_next_cursors = [3]u16{ 0, 0, 0 };
+
+    const initial = stepNtpServiceAutomatic(
+        device,
+        &service,
+        counter,
+        start_tick,
+        ntp.fixture_client_timestamp,
+        0,
+    ) orelse return null;
+    const initial_tx = initial.transmit orelse return null;
+    transmit_identifications[0] = initial_tx.identification;
+    transmit_descriptors[0] = initial_tx.completion.descriptor_index;
+    transmit_next_cursors[0] = initial_tx.completion.next_cursor;
+    if (initial.state != .awaiting or initial.start_reason != .initial or
+        initial_tx.identification != 132 or initial_tx.completion.descriptor_index != 7 or
+        initial_tx.completion.next_cursor != 0)
+        return null;
+
+    if (!enqueueNtpServiceResponse(
+        device,
+        socket,
+        source_pool.servers[0],
+        service.request.client_timestamp,
+        ntp.fixture_server_timestamp,
+        0x9200,
+        0xF200,
+    )) return null;
+    const initial_sync = stepNtpServiceAutomatic(device, &service, counter, start_tick, 0, 1) orelse return null;
+    const initial_sample_tick = initial_sync.sample_tick orelse return null;
+    if (initial_sync.state != .idle or initial_sync.quality_result != .accepted or
+        initial_sync.step_result != .accepted or initial_sync.apply_result != .accepted)
+        return null;
+
+    if (!switchNtpClientServer(device, &service.client, source_pool.servers[1])) return null;
+    service.current_source_index = 1;
+    service.pending_source_index = 2;
+    service.consecutive_source_failures = 1;
+    service.source_rotations = 2;
+    service.request_active = false;
+    service.request.cancelled = true;
+    service.request_retry_attempts = 1;
+    service.retry_exhausted = true;
+    service.requests_started = 6;
+    service.retries = 4;
+    service.responses = 1;
+    service.retry_limit_hits = 4;
+    service.last_timeout_tick = initial_sample_tick + 2;
+    service.recovery_deadline_tick = initial_sample_tick + 4;
+    service.automatic_recoveries = 0;
+    service.recovery_exhausted = false;
+    service.recovery_limit_hits = 1;
+    service.recovery_successes = 0;
+
+    const recovery_tick = service.recovery_deadline_tick;
+    const expected_recovery_timestamp = ntp.projectedTimestampAt(&service.clock, recovery_tick) orelse return null;
+    const recovery = stepNtpServiceAutomatic(device, &service, counter, recovery_tick, 0, 0) orelse return null;
+    const recovery_tx = recovery.transmit orelse return null;
+    transmit_identifications[1] = recovery_tx.identification;
+    transmit_descriptors[1] = recovery_tx.completion.descriptor_index;
+    transmit_next_cursors[1] = recovery_tx.completion.next_cursor;
+    const recovery_timestamp = service.request.client_timestamp;
+    const recovery_started = recovery.state == .awaiting and recovery.start_reason == .recovery and
+        recovery.recovery_state == .ready and recovery.recovery_started and
+        recovery_timestamp == expected_recovery_timestamp and service.automatic_recoveries == 1;
+    const recovery_switched = service.current_source_index == 2 and service.pending_source_index == null and
+        service.consecutive_source_failures == 0 and service.source_rotations == 3 and
+        std.meta.eql(service.client.server_ipv4, source_pool.servers[2]);
+    const same_socket_preserved = std.meta.eql(service.client.socket, socket);
+    if (!recovery_started or !recovery_switched or !same_socket_preserved or
+        recovery_tx.identification != 133 or recovery_tx.completion.descriptor_index != 0 or
+        recovery_tx.completion.next_cursor != 1 or service.retry_deadline_tick != recovery_tick + 1)
+        return null;
+
+    const peer_drops_before = device.peer_mismatch_udp_packets_dropped;
+    const request_timestamp = service.request.client_timestamp;
+    const valid_routed = enqueueNtpServiceResponse(
+        device,
+        socket,
+        source_pool.servers[2],
+        request_timestamp,
+        ntp.fixture_server_timestamp + (@as(u64, 2) << 32),
+        0x9201,
+        0xF201,
+    );
+    const queued_before = inspectUdpSocket(device, socket) orelse return null;
+    if (!valid_routed or queued_before.pending_packets != 1 or
+        device.packets_dispatched != 133 or device.udp_packets_dispatched != 132 or
+        device.peer_mismatch_udp_packets_dropped != peer_drops_before)
+        return null;
+
+    const clock_before_zero = service.clock;
+    const deadline_tick = service.retry_deadline_tick;
+    const zero = stepNtpServiceAutomatic(device, &service, counter, deadline_tick, 0, 0) orelse return null;
+    const retry_tx = zero.transmit orelse return null;
+    transmit_identifications[2] = retry_tx.identification;
+    transmit_descriptors[2] = retry_tx.completion.descriptor_index;
+    transmit_next_cursors[2] = retry_tx.completion.next_cursor;
+    const queued_after_zero = inspectUdpSocket(device, socket) orelse return null;
+    const zero_response_absent = zero.poll.response == null;
+    const zero_no_sample = zero.sample_tick == null;
+    const zero_no_discipline = zero.quality_result == null and zero.step_result == null and
+        zero.apply_result == null and std.meta.eql(service.clock, clock_before_zero) and
+        service.quality_accepted == 1 and service.quality_rejected == 0 and
+        service.step_accepted == 1 and service.step_rejected == 0;
+    const retry_sent = zero.state == .awaiting and zero.poll.state == .pending and
+        zero.poll.examined == 0 and zero.poll.rejected == 0 and zero_response_absent and
+        zero.retried and retry_tx.identification == 134 and retry_tx.completion.descriptor_index == 1 and
+        retry_tx.completion.next_cursor == 2 and service.retries == 5;
+    const retry_timestamp_preserved = service.request.client_timestamp == request_timestamp;
+    const retained_queue_counters_preserved = queued_after_zero.pending_packets == 1 and
+        queued_after_zero.enqueued == queued_before.enqueued and queued_after_zero.dequeued == queued_before.dequeued;
+    const retained_readable = udpSocketReadable(device, socket);
+    const peer_drop_preserved = device.peer_mismatch_udp_packets_dropped == peer_drops_before;
+    if (!zero_no_sample or !zero_no_discipline or !retry_sent or !retry_timestamp_preserved or
+        service.request.transmissions != 2 or !retained_queue_counters_preserved or
+        !retained_readable or !peer_drop_preserved)
+        return null;
+
+    const submissions_before_accept = device.tx_submissions;
+    const retries_before_accept = service.retries;
+    const accepted = stepNtpServiceAutomatic(device, &service, counter, deadline_tick, 0, 1) orelse return null;
+    const accepted_quality_result = accepted.quality_result orelse return null;
+    const accepted_step_result = accepted.step_result orelse return null;
+    const accepted_sample_tick = accepted.sample_tick orelse return null;
+    const accepted_time = ntp.readProjectedClockAt(&service.clock, accepted_sample_tick) orelse return null;
+    const accepted_resolved = accepted.poll.state == .resolved and accepted.poll.examined == 1 and
+        accepted.poll.rejected == 0 and accepted.poll.response != null;
+    const no_extra_retry = accepted.transmit == null and !accepted.retried and
+        device.tx_submissions == submissions_before_accept and service.retries == retries_before_accept;
+    const final_status = inspectUdpSocket(device, socket) orelse return null;
+    const final_queue_empty = final_status.pending_packets == 0 and !udpSocketReadable(device, socket);
+    const accepted_state_clean = accepted.state == .idle and accepted_quality_result == .accepted and
+        accepted_step_result == .accepted and accepted.apply_result == .accepted and accepted_resolved and
+        no_extra_retry and accepted_time.seconds == ntp.fixture_unix_seconds + 2 and
+        accepted_time.fraction == 0x80000000 and service.current_source_index == 2 and
+        std.meta.eql(service.client.server_ipv4, source_pool.servers[2]) and
+        service.pending_source_index == null and service.consecutive_source_failures == 0 and
+        !service.retry_exhausted and !service.recovery_exhausted and service.automatic_recoveries == 0 and
+        service.source_rotations == 3 and service.recovery_successes == 1 and final_queue_empty;
+    if (!accepted_state_clean) return null;
+
+    const health = readNtpServiceHealth(&service, accepted_sample_tick, 1, 100) orelse return null;
+    const health_reports_source = health.current_source_index == 2 and health.pending_source_index == null and
+        health.consecutive_source_failures == 0 and health.source_rotations == 3 and
+        std.meta.eql(health.current_server_ipv4, source_pool.servers[2]);
+    const health_reports_recovery = health.state == .synchronized and health.current_time != null and
+        !health.awaiting_response and !health.retry_exhausted and !health.recovery_exhausted and
+        health.recovery_successes == 1;
+    if (!health_reports_source or !health_reports_recovery) return null;
+
+    const close_succeeded = closeNtpService(device, &service);
+    if (!close_succeeded or service.active or service.client.active or service.request_active) return null;
+
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const overflow = completionQueueOverflow(&tx_completion_queue) + completionQueueOverflow(&rx_completion_queue);
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_215 or
+        device.next_udp_generation != 74 or device.next_udp_identification != 135 or
+        device.next_dns_transaction_id != 8 or device.tx_producer != 2 or
+        device.tx_submissions != submissions_before + 3 or txe != 162 or txd != 162 or rxe != 22 or
+        overflow != 0 or device.software_rx_queue.enqueued != 145 or
+        device.software_rx_queue.dequeued != 145 or device.packets_dispatched != 133 or
+        device.udp_packets_dispatched != 132 or device.peer_mismatch_udp_packets_dropped != 4 or
+        service.quality_accepted != 2 or service.quality_rejected != 0 or
+        service.step_accepted != 2 or service.step_rejected != 0 or service.requests_started != 7 or
+        service.retries != 5 or service.responses != 2 or service.retry_limit_hits != 4 or
+        service.recovery_limit_hits != 1 or service.recovery_successes != 1 or service.source_rotations != 3)
+        return null;
+
+    return .{
+        .source_kind = counter.reference.kind,
+        .frequency_hz = counter.frequency_hz,
+        .counter_bits = counter.counter_bits,
+        .socket_slot = socket.endpoint_index,
+        .socket_generation = socket.generation,
+        .local_port = socket.local_port,
+        .source_count = source_pool.count,
+        .source_index = 2,
+        .server = source_pool.servers[2],
+        .transmit_identifications = transmit_identifications,
+        .transmit_descriptors = transmit_descriptors,
+        .transmit_next_cursors = transmit_next_cursors,
+        .recovery_timestamp = recovery_timestamp,
+        .recovery_started = recovery_started,
+        .recovery_switched = recovery_switched,
+        .same_socket_preserved = same_socket_preserved,
+        .valid_routed = valid_routed,
+        .zero_poll_state = zero.poll.state,
+        .zero_examined = zero.poll.examined,
+        .zero_rejected = zero.poll.rejected,
+        .zero_response_absent = zero_response_absent,
+        .zero_no_sample = zero_no_sample,
+        .zero_no_discipline = zero_no_discipline,
+        .retry_sent = retry_sent,
+        .retry_timestamp_preserved = retry_timestamp_preserved,
+        .retry_transmissions = service.request.transmissions,
+        .retained_pending_packets = queued_after_zero.pending_packets,
+        .retained_queue_counters_preserved = retained_queue_counters_preserved,
+        .retained_readable = retained_readable,
+        .peer_drop_preserved = peer_drop_preserved,
+        .accepted_poll_state = accepted.poll.state,
+        .accepted_examined = accepted.poll.examined,
+        .accepted_rejected = accepted.poll.rejected,
+        .accepted_resolved = accepted_resolved,
+        .no_extra_retry = no_extra_retry,
+        .accepted_quality_result = accepted_quality_result,
+        .accepted_step_result = accepted_step_result,
+        .accepted_sample_tick = accepted_sample_tick,
+        .accepted_seconds = accepted_time.seconds,
+        .accepted_fraction = accepted_time.fraction,
+        .accepted_state_clean = accepted_state_clean,
+        .final_queue_empty = final_queue_empty,
+        .health_reports_source = health_reports_source,
+        .health_reports_recovery = health_reports_recovery,
+        .quality_accepted = service.quality_accepted,
+        .quality_rejected = service.quality_rejected,
+        .step_accepted = service.step_accepted,
+        .step_rejected = service.step_rejected,
+        .requests_started = service.requests_started,
+        .retries = service.retries,
+        .responses = service.responses,
+        .retry_limit_hits = service.retry_limit_hits,
+        .recovery_limit_hits = service.recovery_limit_hits,
+        .recovery_successes = service.recovery_successes,
+        .close_succeeded = close_succeeded,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_tx_cursor = device.tx_producer,
+        .tx_submissions_delta = device.tx_submissions - submissions_before,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .final_generation_cursor = device.next_udp_generation,
         .ingress_enqueued = device.software_rx_queue.enqueued,
         .ingress_dequeued = device.software_rx_queue.dequeued,
         .packets_dispatched = device.packets_dispatched,
