@@ -1375,3 +1375,14 @@
 - Duplicate reopen while active rejects without service or device mutation.
 - The new socket emits a projected refresh timestamp, accepts a source-zero response, and returns synchronized health with all cumulative diagnostics retained.
 - HPET and 24-bit ACPI PM timer boots verify two transmissions, two accepted samples, clean close, and exact final completion, endpoint, ingress, and dispatch accounting.
+
+## 4.13 - Replace an active refresh transaction after transport loss
+
+- A source-pool service synchronizes once, starts a projected refresh, and then loses transport while that refresh request is active.
+- One valid-looking delayed response remains queued on the old socket and is reported/discarded by external transport close.
+- Structured abandonment cancels the active refresh exactly once and preserves its old originate timestamp for diagnostics.
+- Transactional reopen creates a new generation-tagged socket, preserves the synchronized clock, source selection, policies, discard totals, limit counters, recovery successes, rotation history, and accepted lifecycle totals, while clearing request transients.
+- The immediate replacement refresh uses a strictly newer projected originate timestamp rather than retrying or reusing the cancelled request.
+- On the new socket, a same-peer response carrying the cancelled request's originate timestamp is consumed and rejected before the valid replacement response is accepted in the same bounded two-packet poll.
+- No retry transmission, quality rejection, clock-step rejection, or extra sample occurs.
+- HPET and 24-bit ACPI PM timer boots verify three transmissions, `resolved/2/1` mixed-response accounting, synchronized health, clean close, and exact final completion, endpoint, ingress, and dispatch counters.
