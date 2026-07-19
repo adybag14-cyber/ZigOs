@@ -1312,3 +1312,15 @@
 - Stale status, receive, poll, and retry operations reject; structured and boolean duplicate closes reject without state mutation.
 - Inactive health preserves `pre_request_discards = 4`, `post_response_discards = 3`, and lifecycle counts.
 - HPET and ACPI PM timer boots verify one transmission, exact close queue statistics, no residual endpoint, and exact completion/ingress/dispatch accounting.
+
+
+## 4.07 - Track close-time NTP discards independently
+
+- `NtpService`, `NtpServiceHealth`, and `NtpServiceCloseResult` expose cumulative `close_discards` separately from pre-request and post-response purges.
+- Structured close adds the exact UDP discard count with saturating arithmetic before marking the service inactive.
+- The live verifier synchronizes once and accepts a valid response while post-purging two residual datagrams.
+- Two later stale datagrams are queued while the synchronized service is idle.
+- Idle close requires no request cancellation, discards both packets, and yields independent totals `pre/post/close = 0/2/2`.
+- The synchronized projected clock remains readable and unchanged after transport shutdown.
+- Inactive health preserves all three discard counters and the accepted lifecycle counts; duplicate close rejects without mutation.
+- HPET and ACPI PM timer boots verify one transmission, queue totals five/five with high-water three, and exact final accounting.
