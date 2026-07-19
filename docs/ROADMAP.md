@@ -1222,3 +1222,15 @@
 - A second budget-one step accepts the retained valid response and leaves the endpoint queue empty.
 - Because no residual datagram remains after acceptance, cumulative post-response discards stay zero and health reports zero.
 - The verifier proves one transmission, one transaction rejection, one accepted sample, no purge, clean close, and exact HPET/ACPI PM timer accounting.
+
+
+## 3.99 - Purge stale idle NTP datagrams before new requests
+
+- The service and health snapshot expose cumulative `pre_request_discards` separately from accepted-response `post_response_discards`.
+- Every new initial, refresh, or recovery request uses one shared generation-safe socket purge immediately before transmission.
+- Retransmissions remain outside this purge boundary because they continue the same NTP transaction and preserve its originate timestamp.
+- The live verifier first synchronizes normally, then queues two late same-peer replies while the service is idle.
+- At the exact refresh deadline, both stale packets are discarded before the projected refresh request is transmitted.
+- Endpoint queue accounting proves the stale queue is empty when the new request becomes active.
+- The valid refresh response is accepted normally; health reports `pre_request_discards = 2` and `post_response_discards = 0`.
+- The verifier proves two transmissions, two accepted samples, no retries, clean close, and exact HPET/ACPI PM timer accounting.
