@@ -1344,3 +1344,13 @@
 - Synchronized health before close and inactive health afterward preserve the independent saturated totals and lifecycle counts.
 - The projected clock survives transport shutdown; duplicate close rejects without mutation.
 - HPET and ACPI PM timer boots verify one transmission and exact completion, endpoint, ingress, and dispatch accounting.
+
+## 4.10 - Verify atomic NTP close preflight after transport loss
+
+- The structured close path preflights service, client, and generation-tagged UDP socket activity before cancelling an active request.
+- The live verifier starts one bootstrap request and queues two same-peer replies.
+- The underlying UDP socket is then externally discard-closed, removing both packets and invalidating the endpoint while leaving the service object untouched.
+- Structured and boolean service close both reject before mutating service, client, request, clock, or diagnostics.
+- The active request remains uncancelled; stale socket status, poll, and retry operations reject safely.
+- Health continues to expose the preserved unsynchronized awaiting request, discard totals, and lifecycle counts.
+- HPET and ACPI PM timer boots verify one transmission, two routed packets, no residual endpoint, and exact final accounting.
