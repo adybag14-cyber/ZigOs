@@ -1180,3 +1180,13 @@
 - Endpoint depth and enqueue/dequeue counters prove the valid response remains queued and readable after the retry.
 - A following budget-one step resolves and accepts the retained response without another retry, then leaves the endpoint queue empty.
 - The verifier proves three transmissions, two accepted samples, exact zero-budget queue preservation, clean close, and exact HPET/ACPI PM timer accounting.
+
+## 3.95 - Purge residual NTP datagrams after an accepted response
+
+- `NtpService` now tracks cumulative `post_response_discards`, and health snapshots expose the same counter.
+- After a response passes transaction, quality, and clock-step validation and is applied, the service discards every residual datagram queued on the same NTP socket.
+- The accepted response itself is consumed by the bounded poll; only later queued duplicates or stale transaction packets count as post-response discards.
+- Purging occurs only in the accepted apply branch and therefore does not run for transaction, quality, or clock-step rejection.
+- The verifier queues three same-peer responses, accepts the first with budget one, purges exactly two residual datagrams, and proves endpoint depth `3 -> 0` with dequeue accounting `0 -> 3`.
+- Health reports two cumulative discards, a subsequent idle step emits no traffic and preserves state, and the socket closes normally.
+- The verifier proves one transmission, one accepted sample, two post-response discards, and exact HPET/ACPI PM timer packet/ring accounting.
