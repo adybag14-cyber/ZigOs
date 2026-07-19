@@ -1200,3 +1200,14 @@
 - A second budget-one step accepts the retained valid response, clears the request's quality-rejection count, and leaves the endpoint queue empty.
 - Because no datagram remains after acceptance, cumulative post-response discards remain zero and health reports zero.
 - The verifier proves one transmission, one quality rejection, one accepted sample, no purge, clean close, and exact HPET/ACPI PM timer accounting.
+
+## 3.97 - Clock-step rejection preserves queued NTP responses
+
+- A synchronized service starts a projected refresh with a strict four-second forward-step limit.
+- A quality-valid response that is one hundred seconds ahead is followed by a bounded valid response in the same endpoint queue.
+- Budget-one polling accepts the first packet's quality, samples the hardware reference once, rejects the excessive forward clock step, and retains the live request.
+- Clock-step rejection performs no clock application and does not run the post-response purge.
+- Endpoint depth and queue accounting prove the bounded response remains queued and readable after rejection.
+- A second budget-one step accepts the retained bounded response, resets the request's step-rejection count, and leaves the queue empty.
+- Because no residual datagram remains after acceptance, cumulative post-response discards stay zero.
+- The verifier proves two transmissions, three quality-accepted packets, one step rejection, two applied samples, clean close, and exact HPET/ACPI PM timer accounting.
