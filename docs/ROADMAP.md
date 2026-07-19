@@ -1160,3 +1160,13 @@
 - The retry preserves the originate timestamp, increments transmissions to two, resets no quality/discipline budget, and remains bounded by the configured retry limit.
 - A valid response after the retry completes recovery normally.
 - The verifier proves three transmissions, one transaction rejection at deadline, one exact retry, two accepted samples, clean close, and exact HPET/ACPI PM timer accounting.
+
+## 3.93 - Preserve a queued valid NTP reply across a deadline retry
+
+- A source-two recovery request queues a wrong-originate response followed by a correctly originated response.
+- At the exact retry deadline, a service step with budget one consumes and rejects only the first packet.
+- The same step performs the due retry with the unchanged originate timestamp and leaves the valid response queued and readable.
+- The endpoint status proves exactly one pending packet remains after the retry.
+- A second budget-one step at the same tick resolves the retained valid response, samples and applies the clock once, and emits no additional retry or transmission.
+- The endpoint queue is empty after acceptance and all peer, quality, discipline, retry, and recovery counters remain exact.
+- The verifier proves three transmissions, two accepted samples, one retained queued response, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
