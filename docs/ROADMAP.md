@@ -1440,3 +1440,15 @@
 - The later detailed result must exactly match the inspected prior socket, target server, source index, clock state, and refresh tick.
 - The 21 typed rejection reasons, nullable compatibility wrapper, exact socket identities, and zero-traffic accounting remain unchanged.
 - Full HPET and 24-bit ACPI PM timer boots validate the refactor through the complete regression harness.
+
+## 4.19 - Execute inspected NTP reopen plans only while fresh
+
+- `NtpServiceTransportReopenPreflight` now carries the exact abandoned `NtpService` snapshot plus an endpoint-allocation snapshot covering active slots, ports, generations, endpoint count, ephemeral cursor, generation cursor, and gateway MAC.
+- `executeNtpServiceTransportReopenPreflight` rejects `stale_service_state` before transport inspection when the supplied service no longer matches the inspected snapshot.
+- It then rejects `stale_transport_state` when endpoint allocation identity changed after inspection, before `openNtpClient` can allocate a replacement socket.
+- `reopenNtpServiceAfterTransportLossDetailed` remains compatible by performing inspection and immediate execution through the new two-phase API.
+- The packet-free verifier mutates one cumulative service diagnostic and proves stale-service rejection with exact service/device preservation, then restores the inspected service.
+- A real fixed-port socket opens at `2/101/55003` and closes, advancing only UDP generation state; executing the old plan then returns `stale_transport_state` without mutation.
+- Fresh reinspection executes successfully on `2/102/49240`, exactly matches the inspected target, and advances final endpoint identity to cursor/generation `49241/103`.
+- Reusing the consumed plan returns `stale_service_state`, while the nullable compatibility wrapper still rejects the active service through normal preflight validation.
+- Full HPET and 24-bit ACPI PM timer boots retain IP/TX `166/1`, completions `193/193/22`, ingress/dispatch `211/211/199/198`, and zero transmission movement.

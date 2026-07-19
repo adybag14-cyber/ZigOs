@@ -775,6 +775,8 @@ pub const NtpServiceTransportReopenError = enum {
     unexpected_source_rotation_policy,
     unexpected_source_index,
     invalid_server,
+    stale_service_state,
+    stale_transport_state,
     transport_unavailable,
 };
 
@@ -783,12 +785,24 @@ pub const NtpServiceTransportReopenAttempt = struct {
     rejection: ?NtpServiceTransportReopenError,
 };
 
+pub const NtpServiceTransportAllocationSnapshot = struct {
+    endpoint_count: u16,
+    active_mask: u8,
+    endpoint_ports: [udp_endpoint_capacity]u16,
+    endpoint_generations: [udp_endpoint_capacity]u32,
+    next_generation: u32,
+    next_ephemeral_port: u16,
+    gateway_mac: [6]u8,
+};
+
 pub const NtpServiceTransportReopenPreflight = struct {
     previous_socket: UdpSocket,
     server_ipv4: [4]u8,
     current_source_index: u8,
     clock_was_synchronized: bool,
     refresh_deadline_tick: u64,
+    service_snapshot: NtpService,
+    transport_snapshot: NtpServiceTransportAllocationSnapshot,
 };
 
 pub const NtpServiceTransportReopenInspection = struct {
@@ -961,9 +975,26 @@ pub const NtpReopenReasonMatrixReport = struct {
     inspection_target_matches: bool,
     inspection_state_preserved: bool,
     inspection_device_preserved: bool,
+    stale_service_rejected: bool,
+    stale_service_reason: NtpServiceTransportReopenError,
+    stale_service_preserved: bool,
+    stale_service_device_preserved: bool,
+    churn_socket_slot: u16,
+    churn_socket_generation: u32,
+    churn_socket_port: u16,
+    churn_closed: bool,
+    stale_transport_rejected: bool,
+    stale_transport_reason: NtpServiceTransportReopenError,
+    stale_transport_service_preserved: bool,
+    stale_transport_device_preserved: bool,
+    reinspection_ready: bool,
+    reinspection_matches: bool,
     reopen_succeeded: bool,
     success_has_no_rejection: bool,
     detailed_matches_inspection: bool,
+    single_use_rejected: bool,
+    single_use_reason: NtpServiceTransportReopenError,
+    single_use_state_preserved: bool,
     legacy_active_rejected: bool,
     legacy_state_preserved: bool,
     close_clean: bool,
@@ -7734,6 +7765,27 @@ fn rejectNtpServiceTransportReopenInspection(
     return .{ .preflight = null, .rejection = reason };
 }
 
+fn captureNtpServiceTransportAllocationSnapshot(
+    device: *const Device,
+) NtpServiceTransportAllocationSnapshot {
+    var snapshot = NtpServiceTransportAllocationSnapshot{
+        .endpoint_count = device.udp_endpoint_count,
+        .active_mask = 0,
+        .endpoint_ports = std.mem.zeroes([udp_endpoint_capacity]u16),
+        .endpoint_generations = std.mem.zeroes([udp_endpoint_capacity]u32),
+        .next_generation = device.next_udp_generation,
+        .next_ephemeral_port = device.next_ephemeral_udp_port,
+        .gateway_mac = device.gateway_mac,
+    };
+    for (device.udp_endpoints, 0..) |endpoint, index| {
+        if (!endpoint.active) continue;
+        snapshot.active_mask |= @as(u8, 1) << @intCast(index);
+        snapshot.endpoint_ports[index] = endpoint.port;
+        snapshot.endpoint_generations[index] = endpoint.generation;
+    }
+    return snapshot;
+}
+
 pub fn inspectNtpServiceTransportReopen(
     device: *Device,
     service: *const NtpService,
@@ -7817,19 +7869,25 @@ pub fn inspectNtpServiceTransportReopen(
             .current_source_index = service.current_source_index,
             .clock_was_synchronized = service.clock.clock.synchronized,
             .refresh_deadline_tick = refresh_tick,
+            .service_snapshot = service.*,
+            .transport_snapshot = captureNtpServiceTransportAllocationSnapshot(device),
         },
         .rejection = null,
     };
 }
 
-pub fn reopenNtpServiceAfterTransportLossDetailed(
+pub fn executeNtpServiceTransportReopenPreflight(
     device: *Device,
     service: *NtpService,
-    refresh_tick: u64,
+    preflight: NtpServiceTransportReopenPreflight,
 ) NtpServiceTransportReopenAttempt {
-    const inspection = inspectNtpServiceTransportReopen(device, service, refresh_tick);
-    if (inspection.rejection) |reason| return rejectNtpServiceTransportReopen(reason);
-    const preflight = inspection.preflight orelse unreachable;
+    if (!std.meta.eql(service.*, preflight.service_snapshot)) {
+        return rejectNtpServiceTransportReopen(.stale_service_state);
+    }
+    const current_transport = captureNtpServiceTransportAllocationSnapshot(device);
+    if (!std.meta.eql(current_transport, preflight.transport_snapshot)) {
+        return rejectNtpServiceTransportReopen(.stale_transport_state);
+    }
 
     const replacement_client = openNtpClient(device, preflight.server_ipv4) orelse
         return rejectNtpServiceTransportReopen(.transport_unavailable);
@@ -7866,6 +7924,17 @@ pub fn reopenNtpServiceAfterTransportLossDetailed(
     service.request_quality_rejections = 0;
     service.request_step_rejections = 0;
     return .{ .result = result, .rejection = null };
+}
+
+pub fn reopenNtpServiceAfterTransportLossDetailed(
+    device: *Device,
+    service: *NtpService,
+    refresh_tick: u64,
+) NtpServiceTransportReopenAttempt {
+    const inspection = inspectNtpServiceTransportReopen(device, service, refresh_tick);
+    if (inspection.rejection) |reason| return rejectNtpServiceTransportReopen(reason);
+    const preflight = inspection.preflight orelse unreachable;
+    return executeNtpServiceTransportReopenPreflight(device, service, preflight);
 }
 
 pub fn reopenNtpServiceAfterTransportLoss(
@@ -10500,22 +10569,112 @@ fn verifyNtpReopenReasonMatrix(device: *Device) ?NtpReopenReasonMatrixReport {
         return null;
     }
 
-    const success = reopenNtpServiceAfterTransportLossDetailed(device, &service, 0);
+    const original_abandoned_service = service;
+    service.pre_request_discards +|= 1;
+    const stale_service_snapshot = service;
+    const stale_service_endpoints = device.udp_endpoint_count;
+    const stale_service_ephemeral = device.next_ephemeral_udp_port;
+    const stale_service_generation = device.next_udp_generation;
+    const stale_service_ready = device.next_udp_ready_index;
+    const stale_service_identification = device.next_udp_identification;
+    const stale_service_tx = device.tx_producer;
+    const stale_service_submissions = device.tx_submissions;
+    const stale_service_attempt = executeNtpServiceTransportReopenPreflight(device, &service, preflight);
+    const stale_service_reason = stale_service_attempt.rejection orelse return null;
+    const stale_service_rejected = stale_service_attempt.result == null and
+        stale_service_reason == .stale_service_state;
+    const stale_service_preserved = std.meta.eql(service, stale_service_snapshot);
+    const stale_service_device_preserved = device.udp_endpoint_count == stale_service_endpoints and
+        device.next_ephemeral_udp_port == stale_service_ephemeral and
+        device.next_udp_generation == stale_service_generation and
+        device.next_udp_ready_index == stale_service_ready and
+        device.next_udp_identification == stale_service_identification and
+        device.tx_producer == stale_service_tx and device.tx_submissions == stale_service_submissions;
+    if (!stale_service_rejected or !stale_service_preserved or !stale_service_device_preserved) {
+        return null;
+    }
+    service = original_abandoned_service;
+
+    const churn_socket = openUdpSocket(device, 55_003) orelse return null;
+    const churn_socket_matches = churn_socket.endpoint_index == 2 and churn_socket.generation == 101 and
+        churn_socket.local_port == 55_003 and device.udp_endpoint_count == 3 and
+        device.next_ephemeral_udp_port == 49_240 and device.next_udp_generation == 102;
+    if (!churn_socket_matches) return null;
+    const churn_closed = closeUdpSocket(device, churn_socket) and device.udp_endpoint_count == 2 and
+        !udpSocketActive(device, churn_socket) and device.next_ephemeral_udp_port == 49_240 and
+        device.next_udp_generation == 102;
+    if (!churn_closed) return null;
+
+    const stale_transport_service_snapshot = service;
+    const stale_transport_endpoints = device.udp_endpoint_count;
+    const stale_transport_ephemeral = device.next_ephemeral_udp_port;
+    const stale_transport_generation = device.next_udp_generation;
+    const stale_transport_ready = device.next_udp_ready_index;
+    const stale_transport_identification = device.next_udp_identification;
+    const stale_transport_tx = device.tx_producer;
+    const stale_transport_submissions = device.tx_submissions;
+    const stale_transport_attempt = executeNtpServiceTransportReopenPreflight(device, &service, preflight);
+    const stale_transport_reason = stale_transport_attempt.rejection orelse return null;
+    const stale_transport_rejected = stale_transport_attempt.result == null and
+        stale_transport_reason == .stale_transport_state;
+    const stale_transport_service_preserved = std.meta.eql(service, stale_transport_service_snapshot);
+    const stale_transport_device_preserved = device.udp_endpoint_count == stale_transport_endpoints and
+        device.next_ephemeral_udp_port == stale_transport_ephemeral and
+        device.next_udp_generation == stale_transport_generation and
+        device.next_udp_ready_index == stale_transport_ready and
+        device.next_udp_identification == stale_transport_identification and
+        device.tx_producer == stale_transport_tx and device.tx_submissions == stale_transport_submissions;
+    if (!stale_transport_rejected or !stale_transport_service_preserved or
+        !stale_transport_device_preserved)
+    {
+        return null;
+    }
+
+    const reinspection = inspectNtpServiceTransportReopen(device, &service, 0);
+    const fresh_preflight = reinspection.preflight orelse return null;
+    const reinspection_ready = reinspection.rejection == null;
+    const reinspection_matches = std.meta.eql(fresh_preflight.previous_socket, preflight.previous_socket) and
+        std.meta.eql(fresh_preflight.server_ipv4, preflight.server_ipv4) and
+        fresh_preflight.current_source_index == preflight.current_source_index and
+        fresh_preflight.clock_was_synchronized == preflight.clock_was_synchronized and
+        fresh_preflight.refresh_deadline_tick == preflight.refresh_deadline_tick and
+        std.meta.eql(fresh_preflight.service_snapshot, service) and
+        fresh_preflight.transport_snapshot.endpoint_count == 2 and
+        fresh_preflight.transport_snapshot.active_mask == 0x03 and
+        fresh_preflight.transport_snapshot.next_ephemeral_port == 49_240 and
+        fresh_preflight.transport_snapshot.next_generation == 102;
+    if (!reinspection_ready or !reinspection_matches) return null;
+
+    const success = executeNtpServiceTransportReopenPreflight(device, &service, fresh_preflight);
     const success_has_no_rejection = success.rejection == null;
     const reopened = success.result orelse return null;
-    const detailed_matches_inspection = std.meta.eql(reopened.previous_socket, preflight.previous_socket) and
-        std.meta.eql(reopened.server_ipv4, preflight.server_ipv4) and
-        reopened.current_source_index == preflight.current_source_index and
-        reopened.clock_was_synchronized == preflight.clock_was_synchronized and
-        reopened.refresh_deadline_tick == preflight.refresh_deadline_tick;
+    const detailed_matches_inspection = std.meta.eql(reopened.previous_socket, fresh_preflight.previous_socket) and
+        std.meta.eql(reopened.server_ipv4, fresh_preflight.server_ipv4) and
+        reopened.current_source_index == fresh_preflight.current_source_index and
+        reopened.clock_was_synchronized == fresh_preflight.clock_was_synchronized and
+        reopened.refresh_deadline_tick == fresh_preflight.refresh_deadline_tick;
     const new_socket = service.client.socket;
     const reopen_succeeded = success_has_no_rejection and detailed_matches_inspection and
         std.meta.eql(reopened.previous_socket, old_socket) and
         std.meta.eql(reopened.socket, new_socket) and new_socket.endpoint_index == 2 and
-        new_socket.generation == 101 and new_socket.local_port == 49_240 and
+        new_socket.generation == 102 and new_socket.local_port == 49_240 and
         device.udp_endpoint_count == 3 and device.next_ephemeral_udp_port == 49_241 and
-        device.next_udp_generation == 102 and std.meta.eql(reopened.server_ipv4, server);
+        device.next_udp_generation == 103 and std.meta.eql(reopened.server_ipv4, server);
     if (!reopen_succeeded) return null;
+
+    const single_use_service_snapshot = service;
+    const single_use_endpoints = device.udp_endpoint_count;
+    const single_use_ephemeral = device.next_ephemeral_udp_port;
+    const single_use_generation = device.next_udp_generation;
+    const single_use_attempt = executeNtpServiceTransportReopenPreflight(device, &service, fresh_preflight);
+    const single_use_reason = single_use_attempt.rejection orelse return null;
+    const single_use_rejected = single_use_attempt.result == null and
+        single_use_reason == .stale_service_state;
+    const single_use_state_preserved = std.meta.eql(service, single_use_service_snapshot) and
+        device.udp_endpoint_count == single_use_endpoints and
+        device.next_ephemeral_udp_port == single_use_ephemeral and
+        device.next_udp_generation == single_use_generation;
+    if (!single_use_rejected or !single_use_state_preserved) return null;
 
     const legacy_snapshot = service;
     const legacy_endpoints = device.udp_endpoint_count;
@@ -10541,7 +10700,7 @@ fn verifyNtpReopenReasonMatrix(device: *Device) ?NtpReopenReasonMatrixReport {
     const rxe = completionQueueEnqueued(&rx_completion_queue);
     const tx_submissions_unchanged = device.tx_submissions == submissions_before;
     if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_241 or
-        device.next_udp_generation != 102 or device.next_udp_identification != 166 or
+        device.next_udp_generation != 103 or device.next_udp_identification != 166 or
         device.next_dns_transaction_id != 8 or device.tx_producer != 1 or
         !tx_submissions_unchanged or txe != 193 or txd != 193 or rxe != 22 or
         device.software_rx_queue.enqueued != 211 or device.software_rx_queue.dequeued != 211 or
@@ -10571,9 +10730,26 @@ fn verifyNtpReopenReasonMatrix(device: *Device) ?NtpReopenReasonMatrixReport {
         .inspection_target_matches = inspection_target_matches,
         .inspection_state_preserved = inspection_state_preserved,
         .inspection_device_preserved = inspection_device_preserved,
+        .stale_service_rejected = stale_service_rejected,
+        .stale_service_reason = stale_service_reason,
+        .stale_service_preserved = stale_service_preserved,
+        .stale_service_device_preserved = stale_service_device_preserved,
+        .churn_socket_slot = churn_socket.endpoint_index,
+        .churn_socket_generation = churn_socket.generation,
+        .churn_socket_port = churn_socket.local_port,
+        .churn_closed = churn_closed,
+        .stale_transport_rejected = stale_transport_rejected,
+        .stale_transport_reason = stale_transport_reason,
+        .stale_transport_service_preserved = stale_transport_service_preserved,
+        .stale_transport_device_preserved = stale_transport_device_preserved,
+        .reinspection_ready = reinspection_ready,
+        .reinspection_matches = reinspection_matches,
         .reopen_succeeded = reopen_succeeded,
         .success_has_no_rejection = success_has_no_rejection,
         .detailed_matches_inspection = detailed_matches_inspection,
+        .single_use_rejected = single_use_rejected,
+        .single_use_reason = single_use_reason,
+        .single_use_state_preserved = single_use_state_preserved,
         .legacy_active_rejected = legacy_active_rejected,
         .legacy_state_preserved = legacy_state_preserved,
         .close_clean = close_clean,
