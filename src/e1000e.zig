@@ -753,6 +753,37 @@ pub const NtpServiceTransportReopenResult = struct {
     source_rotations: u64,
 };
 
+pub const NtpServiceTransportReopenError = enum {
+    service_active,
+    client_active,
+    request_active,
+    transport_still_active,
+    invalid_refresh_interval,
+    invalid_quality_policy,
+    invalid_quality_rejection_policy,
+    invalid_step_policy,
+    invalid_step_rejection_policy,
+    invalid_retry_policy,
+    invalid_recovery_policy,
+    backward_refresh_tick,
+    missing_source_rotation_policy,
+    invalid_source_pool,
+    invalid_source_rotation_policy,
+    source_count_mismatch,
+    source_index_out_of_range,
+    source_lookup_failed,
+    retained_server_mismatch,
+    unexpected_source_rotation_policy,
+    unexpected_source_index,
+    invalid_server,
+    transport_unavailable,
+};
+
+pub const NtpServiceTransportReopenAttempt = struct {
+    result: ?NtpServiceTransportReopenResult,
+    rejection: ?NtpServiceTransportReopenError,
+};
+
 pub const NtpService = struct {
     active: bool,
     client: NtpClient,
@@ -921,9 +952,13 @@ pub const NtpReopenValidationFailureReport = struct {
     transport_queue_dropped: u64,
     abandon_idle: bool,
     backward_tick_rejected: bool,
+    backward_tick_reason: NtpServiceTransportReopenError,
     server_mismatch_rejected: bool,
+    server_mismatch_reason: NtpServiceTransportReopenError,
     invalid_retry_rejected: bool,
+    invalid_retry_reason: NtpServiceTransportReopenError,
     invalid_rotation_rejected: bool,
+    invalid_rotation_reason: NtpServiceTransportReopenError,
     service_snapshots_preserved: bool,
     device_cursors_preserved: bool,
     failure_ephemeral_cursor: u16,
@@ -986,6 +1021,7 @@ pub const NtpReopenAllocationFailureReport = struct {
     failure_ephemeral_cursor: u16,
     failure_generation_cursor: u32,
     reopen_failed: bool,
+    failure_reason: NtpServiceTransportReopenError,
     service_preserved: bool,
     device_preserved: bool,
     fillers_released: bool,
@@ -7627,42 +7663,90 @@ pub fn abandonNtpServiceAfterTransportLoss(
     return result;
 }
 
-pub fn reopenNtpServiceAfterTransportLoss(
+fn rejectNtpServiceTransportReopen(
+    reason: NtpServiceTransportReopenError,
+) NtpServiceTransportReopenAttempt {
+    return .{ .result = null, .rejection = reason };
+}
+
+pub fn reopenNtpServiceAfterTransportLossDetailed(
     device: *Device,
     service: *NtpService,
     refresh_tick: u64,
-) ?NtpServiceTransportReopenResult {
-    if (service.active or service.client.active or service.request_active or
-        udpSocketActive(device, service.client.socket) or service.refresh_interval_ticks == 0 or
-        !ntp.qualityPolicyValid(service.quality_policy) or
-        !ntp.qualityRejectionPolicyValid(service.quality_rejection_policy) or
-        !ntp.clockStepPolicyValid(service.step_policy) or
-        !ntp.stepRejectionPolicyValid(service.step_rejection_policy) or
-        !ntp.retryPolicyValid(service.retry_policy))
-    {
-        return null;
+) NtpServiceTransportReopenAttempt {
+    if (service.active) return rejectNtpServiceTransportReopen(.service_active);
+    if (service.client.active) return rejectNtpServiceTransportReopen(.client_active);
+    if (service.request_active) return rejectNtpServiceTransportReopen(.request_active);
+    if (udpSocketActive(device, service.client.socket)) {
+        return rejectNtpServiceTransportReopen(.transport_still_active);
+    }
+    if (service.refresh_interval_ticks == 0) {
+        return rejectNtpServiceTransportReopen(.invalid_refresh_interval);
+    }
+    if (!ntp.qualityPolicyValid(service.quality_policy)) {
+        return rejectNtpServiceTransportReopen(.invalid_quality_policy);
+    }
+    if (!ntp.qualityRejectionPolicyValid(service.quality_rejection_policy)) {
+        return rejectNtpServiceTransportReopen(.invalid_quality_rejection_policy);
+    }
+    if (!ntp.clockStepPolicyValid(service.step_policy)) {
+        return rejectNtpServiceTransportReopen(.invalid_step_policy);
+    }
+    if (!ntp.stepRejectionPolicyValid(service.step_rejection_policy)) {
+        return rejectNtpServiceTransportReopen(.invalid_step_rejection_policy);
+    }
+    if (!ntp.retryPolicyValid(service.retry_policy)) {
+        return rejectNtpServiceTransportReopen(.invalid_retry_policy);
     }
     if (service.recovery_policy) |policy| {
-        if (!ntp.recoveryPolicyValid(policy)) return null;
+        if (!ntp.recoveryPolicyValid(policy)) {
+            return rejectNtpServiceTransportReopen(.invalid_recovery_policy);
+        }
     }
-    if (service.clock.clock.synchronized and refresh_tick < service.clock.anchor_tick) return null;
+    if (service.clock.clock.synchronized and refresh_tick < service.clock.anchor_tick) {
+        return rejectNtpServiceTransportReopen(.backward_refresh_tick);
+    }
 
     var target_server = service.client.server_ipv4;
     if (service.source_pool) |pool| {
-        const rotation_policy = service.source_rotation_policy orelse return null;
-        if (!ntp.sourcePoolValid(pool) or !ntp.sourceRotationPolicyValid(rotation_policy) or
-            rotation_policy.source_count != pool.count or service.current_source_index >= pool.count)
-        {
-            return null;
+        const rotation_policy = service.source_rotation_policy orelse
+            return rejectNtpServiceTransportReopen(.missing_source_rotation_policy);
+        if (!ntp.sourcePoolValid(pool)) {
+            return rejectNtpServiceTransportReopen(.invalid_source_pool);
         }
-        target_server = ntp.sourcePoolServer(pool, service.current_source_index) orelse return null;
-        if (!std.meta.eql(target_server, service.client.server_ipv4)) return null;
-    } else if (service.source_rotation_policy != null or service.current_source_index != 0) {
-        return null;
+        if (!ntp.sourceRotationPolicyValid(rotation_policy)) {
+            return rejectNtpServiceTransportReopen(.invalid_source_rotation_policy);
+        }
+        if (rotation_policy.source_count != pool.count) {
+            return rejectNtpServiceTransportReopen(.source_count_mismatch);
+        }
+        if (service.current_source_index >= pool.count) {
+            return rejectNtpServiceTransportReopen(.source_index_out_of_range);
+        }
+        target_server = ntp.sourcePoolServer(pool, service.current_source_index) orelse
+            return rejectNtpServiceTransportReopen(.source_lookup_failed);
+        if (!std.meta.eql(target_server, service.client.server_ipv4)) {
+            return rejectNtpServiceTransportReopen(.retained_server_mismatch);
+        }
+    } else {
+        if (service.source_rotation_policy != null) {
+            return rejectNtpServiceTransportReopen(.unexpected_source_rotation_policy);
+        }
+        if (service.current_source_index != 0) {
+            return rejectNtpServiceTransportReopen(.unexpected_source_index);
+        }
     }
 
+    const target_peer = UdpPeer{
+        .mac = device.gateway_mac,
+        .ipv4 = target_server,
+        .port = ntp.server_port,
+    };
+    if (!validUdpPeer(target_peer)) return rejectNtpServiceTransportReopen(.invalid_server);
+
     const previous_socket = service.client.socket;
-    const replacement_client = openNtpClient(device, target_server) orelse return null;
+    const replacement_client = openNtpClient(device, target_server) orelse
+        return rejectNtpServiceTransportReopen(.transport_unavailable);
     const result = NtpServiceTransportReopenResult{
         .previous_socket = previous_socket,
         .socket = replacement_client.socket,
@@ -7695,7 +7779,15 @@ pub fn reopenNtpServiceAfterTransportLoss(
     service.consecutive_source_failures = 0;
     service.request_quality_rejections = 0;
     service.request_step_rejections = 0;
-    return result;
+    return .{ .result = result, .rejection = null };
+}
+
+pub fn reopenNtpServiceAfterTransportLoss(
+    device: *Device,
+    service: *NtpService,
+    refresh_tick: u64,
+) ?NtpServiceTransportReopenResult {
+    return reopenNtpServiceAfterTransportLossDetailed(device, service, refresh_tick).result;
 }
 
 pub fn clearNtpServiceTimeout(service: *NtpService) bool {
@@ -10199,39 +10291,52 @@ fn verifyNtpReopenValidationFailure(
     const submissions_before_failures = device.tx_submissions;
 
     const backward_snapshot = service;
-    const backward_tick_rejected = reopenNtpServiceAfterTransportLoss(
+    const backward_attempt = reopenNtpServiceAfterTransportLossDetailed(
         device,
         &service,
         service.clock.anchor_tick - 1,
-    ) == null and std.meta.eql(service, backward_snapshot);
+    );
+    const backward_tick_reason = backward_attempt.rejection orelse return null;
+    const backward_tick_rejected = backward_attempt.result == null and
+        backward_tick_reason == .backward_refresh_tick and std.meta.eql(service, backward_snapshot);
 
     service.client.server_ipv4 = source_pool.servers[1];
     const mismatch_snapshot = service;
-    const server_mismatch_rejected = reopenNtpServiceAfterTransportLoss(
+    const mismatch_attempt = reopenNtpServiceAfterTransportLossDetailed(
         device,
         &service,
         initial_sample_tick,
-    ) == null and std.meta.eql(service, mismatch_snapshot);
+    );
+    const server_mismatch_reason = mismatch_attempt.rejection orelse return null;
+    const server_mismatch_rejected = mismatch_attempt.result == null and
+        server_mismatch_reason == .retained_server_mismatch and std.meta.eql(service, mismatch_snapshot);
     service.client.server_ipv4 = source_pool.servers[0];
 
     const valid_retry_policy = service.retry_policy;
     service.retry_policy.maximum_retries = 0;
     const retry_snapshot = service;
-    const invalid_retry_rejected = reopenNtpServiceAfterTransportLoss(
+    const retry_attempt = reopenNtpServiceAfterTransportLossDetailed(
         device,
         &service,
         initial_sample_tick,
-    ) == null and std.meta.eql(service, retry_snapshot);
+    );
+    const invalid_retry_reason = retry_attempt.rejection orelse return null;
+    const invalid_retry_rejected = retry_attempt.result == null and
+        invalid_retry_reason == .invalid_retry_policy and std.meta.eql(service, retry_snapshot);
     service.retry_policy = valid_retry_policy;
 
     const valid_rotation_policy = service.source_rotation_policy.?;
     service.source_rotation_policy.?.failures_before_rotation = 0;
     const rotation_snapshot = service;
-    const invalid_rotation_rejected = reopenNtpServiceAfterTransportLoss(
+    const rotation_attempt = reopenNtpServiceAfterTransportLossDetailed(
         device,
         &service,
         initial_sample_tick,
-    ) == null and std.meta.eql(service, rotation_snapshot);
+    );
+    const invalid_rotation_reason = rotation_attempt.rejection orelse return null;
+    const invalid_rotation_rejected = rotation_attempt.result == null and
+        invalid_rotation_reason == .invalid_source_rotation_policy and
+        std.meta.eql(service, rotation_snapshot);
     service.source_rotation_policy = valid_rotation_policy;
 
     const service_snapshots_preserved = backward_tick_rejected and server_mismatch_rejected and
@@ -10250,7 +10355,9 @@ fn verifyNtpReopenValidationFailure(
 
     const reopen_tick = initial_sample_tick +| 1;
     const projected_refresh_timestamp = ntp.projectedTimestampAt(&service.clock, reopen_tick) orelse return null;
-    const reopen = reopenNtpServiceAfterTransportLoss(device, &service, reopen_tick) orelse return null;
+    const reopen_attempt = reopenNtpServiceAfterTransportLossDetailed(device, &service, reopen_tick);
+    if (reopen_attempt.rejection != null) return null;
+    const reopen = reopen_attempt.result orelse return null;
     const new_socket = service.client.socket;
     const peer = udpSocketPeer(device, new_socket) orelse return null;
     const reopen_succeeded = std.meta.eql(reopen.previous_socket, old_socket) and
@@ -10365,9 +10472,13 @@ fn verifyNtpReopenValidationFailure(
         .transport_queue_dropped = transport_close.queue_dropped,
         .abandon_idle = abandon_idle,
         .backward_tick_rejected = backward_tick_rejected,
+        .backward_tick_reason = backward_tick_reason,
         .server_mismatch_rejected = server_mismatch_rejected,
+        .server_mismatch_reason = server_mismatch_reason,
         .invalid_retry_rejected = invalid_retry_rejected,
+        .invalid_retry_reason = invalid_retry_reason,
         .invalid_rotation_rejected = invalid_rotation_rejected,
+        .invalid_rotation_reason = invalid_rotation_reason,
         .service_snapshots_preserved = service_snapshots_preserved,
         .device_cursors_preserved = device_cursors_preserved,
         .failure_ephemeral_cursor = failure_ephemeral_cursor,
@@ -10484,8 +10595,9 @@ fn verifyNtpReopenAllocationFailure(
     const identification_before_failure = device.next_udp_identification;
     const tx_before_failure = device.tx_producer;
     const submissions_before_failure = device.tx_submissions;
-    const failed = reopenNtpServiceAfterTransportLoss(device, &service, counter.read());
-    const reopen_failed = failed == null;
+    const failed_attempt = reopenNtpServiceAfterTransportLossDetailed(device, &service, counter.read());
+    const failure_reason = failed_attempt.rejection orelse return null;
+    const reopen_failed = failed_attempt.result == null and failure_reason == .transport_unavailable;
     const service_preserved = std.meta.eql(service, service_before_failure);
     const device_preserved = device.udp_endpoint_count == endpoints_before_failure and
         device.next_ephemeral_udp_port == ephemeral_before_failure and
@@ -10503,7 +10615,9 @@ fn verifyNtpReopenAllocationFailure(
     if (!fillers_released) return null;
 
     const reopen_tick = counter.read();
-    const reopen = reopenNtpServiceAfterTransportLoss(device, &service, reopen_tick) orelse return null;
+    const reopen_attempt = reopenNtpServiceAfterTransportLossDetailed(device, &service, reopen_tick);
+    if (reopen_attempt.rejection != null) return null;
+    const reopen = reopen_attempt.result orelse return null;
     const new_socket = service.client.socket;
     const peer = udpSocketPeer(device, new_socket) orelse return null;
     const reopen_succeeded = std.meta.eql(reopen.previous_socket, old_socket) and
@@ -10625,6 +10739,7 @@ fn verifyNtpReopenAllocationFailure(
         .failure_ephemeral_cursor = ephemeral_before_failure,
         .failure_generation_cursor = generation_before_failure,
         .reopen_failed = reopen_failed,
+        .failure_reason = failure_reason,
         .service_preserved = service_preserved,
         .device_preserved = device_preserved,
         .fillers_released = fillers_released,

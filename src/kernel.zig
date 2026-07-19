@@ -9944,6 +9944,8 @@ fn inspectE1000e(
     debugWrite(if (network.ntp_reopen_allocation_failure.service_preserved) "yes" else "no");
     debugWrite("/");
     debugWrite(if (network.ntp_reopen_allocation_failure.device_preserved) "yes" else "no");
+    debugWrite(" reason ");
+    debugWrite(@tagName(network.ntp_reopen_allocation_failure.failure_reason));
     debugWrite(" released ");
     debugWrite(if (network.ntp_reopen_allocation_failure.fillers_released) "yes" else "no");
     debugWrite(" reopen socket ");
@@ -10071,6 +10073,14 @@ fn inspectE1000e(
     debugWrite(if (network.ntp_reopen_validation_failure.invalid_retry_rejected) "yes" else "no");
     debugWrite("/");
     debugWrite(if (network.ntp_reopen_validation_failure.invalid_rotation_rejected) "yes" else "no");
+    debugWrite(" reasons ");
+    debugWrite(@tagName(network.ntp_reopen_validation_failure.backward_tick_reason));
+    debugWrite("/");
+    debugWrite(@tagName(network.ntp_reopen_validation_failure.server_mismatch_reason));
+    debugWrite("/");
+    debugWrite(@tagName(network.ntp_reopen_validation_failure.invalid_retry_reason));
+    debugWrite("/");
+    debugWrite(@tagName(network.ntp_reopen_validation_failure.invalid_rotation_reason));
     debugWrite(" snapshots/cursors ");
     debugWrite(if (network.ntp_reopen_validation_failure.service_snapshots_preserved) "yes" else "no");
     debugWrite("/");

@@ -1407,3 +1407,14 @@
 - A subsequent valid reopen uses socket slot/generation/port `2/99/49238`, proving no failed validation consumed transport identity.
 - The reopened synchronized service emits an immediate projected refresh, accepts a source-zero response, reports synchronized source-pool health, and closes cleanly.
 - HPET and 24-bit ACPI PM timer boots verify two transmissions, two accepted samples, and exact final completion, endpoint, cursor, ingress, and dispatch accounting.
+
+## 4.16 - Expose typed NTP transport reopen outcomes
+
+- `NtpServiceTransportReopenError` names inactive-state, live-transport, retained-policy, clock-order, source-pool, source-selection, server, and transport-availability rejection reasons.
+- `NtpServiceTransportReopenAttempt` contains exactly one successful reopen result or one rejection reason.
+- `reopenNtpServiceAfterTransportLossDetailed` performs the full ordered preflight, opens transport only after validation succeeds, and returns `transport_unavailable` when replacement client allocation cannot complete.
+- The existing nullable `reopenNtpServiceAfterTransportLoss` remains a source-compatible wrapper over the detailed result.
+- The endpoint-exhaustion verifier now requires the typed reason `transport_unavailable` while retaining its exact state and cursor atomicity proof.
+- The validation verifier now requires `backward_refresh_tick`, `retained_server_mismatch`, `invalid_retry_policy`, and `invalid_source_rotation_policy` for its four independent failures.
+- Successful detailed attempts are required to have no rejection reason before their result is consumed.
+- HPET and 24-bit ACPI PM timer boots retain the exact 4.14 and 4.15 packet, clock, endpoint, completion, ingress, and dispatch accounting while asserting the typed reason names.
