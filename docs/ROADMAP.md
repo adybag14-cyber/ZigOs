@@ -1464,3 +1464,15 @@
 - The untouched plan executes on socket `2/104/49242`, matches its inspected metadata, and the consumed original still returns `stale_service_state` without mutation.
 - Structured close leaves endpoints/cursor/generation `2/49243/105` while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
 - Full HPET and 24-bit ACPI PM timer boots validate the integrity implementation through the complete regression harness.
+
+## 4.21 - Inspect NTP reopen plan integrity independently of freshness
+
+- `NtpServiceTransportReopenPlanIntegrityInspection` reports the stored tag, canonically recomputed tag, and validity without requiring a device or service pointer.
+- `inspectNtpServiceTransportReopenPlanIntegrity` is pure: it performs no allocation and cannot mutate the plan, service, or device.
+- `executeNtpServiceTransportReopenPreflight` now delegates its first gate to this public inspection function before freshness validation.
+- A packet-free verifier creates an abandoned plan on socket `2/105/49243` and proves its actual and expected tags are equal and nonzero.
+- Independent tag, deadline, service-snapshot, and transport-snapshot modifications all inspect invalid with differing actual/expected tags while the exact runtime state remains unchanged.
+- The original plan then executes on `2/106/49244` and exactly matches its inspected metadata.
+- After execution, the unchanged consumed plan still inspects integrity-valid, while execution rejects it as `stale_service_state`; this explicitly separates byte integrity from lifecycle freshness.
+- Structured close leaves endpoints/cursor/generation `2/49245/107` while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
+- Full HPET and 24-bit ACPI PM timer boots validate the pure inspection API and complete regression harness.
