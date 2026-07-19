@@ -1246,3 +1246,15 @@
 - At the recovery deadline, both packets are purged before the same socket switches to source one, enabling the projected recovery request to transmit.
 - The accepted source-one response completes recovery with `pre_request_discards = 2`, `post_response_discards = 0`, one source rotation, and one recovery success.
 - The verifier proves four transmissions, two accepted samples, unchanged retry semantics, clean close, and exact HPET/ACPI PM timer accounting.
+
+
+## 4.01 - Purge queued replies before operator-selected source reset
+
+- `resetNtpServiceTimeoutToSource` now validates the requested source before touching endpoint data.
+- Once validation succeeds, the operator reset discards and counts stale queued datagrams before switching the connected NTP peer.
+- The reset then selects the requested source on the same socket and clears only transient timeout, recovery, and rejection state.
+- The live verifier seeds terminal state on source two with cumulative quality, discipline, recovery, rotation, and discard diagnostics.
+- Two stale source-two replies are queued while the service is exhausted.
+- An invalid source index is rejected without changing service state, peer binding, queue depth, or queue counters.
+- A valid reset to source one purges both packets, increments `pre_request_discards` from three to five, preserves `post_response_discards = 4`, and emits no packet.
+- Health reports the selected source, additive discard counters, and all cumulative lifecycle diagnostics; duplicate reset is rejected and close accounting is exact.
