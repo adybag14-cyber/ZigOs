@@ -1476,3 +1476,15 @@
 - After execution, the unchanged consumed plan still inspects integrity-valid, while execution rejects it as `stale_service_state`; this explicitly separates byte integrity from lifecycle freshness.
 - Structured close leaves endpoints/cursor/generation `2/49245/107` while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
 - Full HPET and 24-bit ACPI PM timer boots validate the pure inspection API and complete regression harness.
+
+## 4.22 - Inspect NTP reopen plan freshness before allocation
+
+- `NtpServiceTransportReopenPreflightFreshnessInspection` exposes the integrity result, service-snapshot match, transport-allocation match, canonical reinspection match, ready state, and exact rejection reason.
+- `inspectNtpServiceTransportReopenPreflightFreshness` is non-allocating and preserves the supplied service, device endpoint state, readiness cursor, packet cursors, and submission totals.
+- The ordered gates return `invalid_preflight_plan` before state comparison, `stale_service_state` before transport inspection, and `stale_transport_state` before canonical reinspection.
+- A ready result requires all four gates: integrity, service, transport, and canonical reconstruction.
+- `executeNtpServiceTransportReopenPreflight` now delegates every pre-allocation check to the public freshness inspector and opens replacement transport only after it reports ready.
+- A packet-free verifier creates a plan on `2/107/49245`, proves the initial four-gate result ready, then independently verifies altered-tag, changed-service, and endpoint-churn rejection with exact state preservation.
+- Real fixed-port churn opens and closes `2/108/55004`; fresh reinspection then executes on `2/109/49246` and advances endpoint cursor/generation to `49247/110`.
+- The consumed plan remains integrity-valid but freshness-rejects as `stale_service_state`, preserving the distinction established in 4.21.
+- Full HPET and 24-bit ACPI PM timer boots retain IP/TX `166/1`, completions `193/193/22`, ingress/dispatch `211/211/199/198`, and zero transmission movement.

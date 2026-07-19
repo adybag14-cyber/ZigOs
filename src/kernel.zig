@@ -10413,6 +10413,107 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.ntp_reopen_plan_inspection.udp_dispatched);
     debugWrite("\r\n");
+    debugWrite("NTP reopen plan freshness verified: sockets ");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.old_socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.old_socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.old_local_port);
+    debugWrite("->");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.new_socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.new_socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.new_local_port);
+    debugWrite(" server ");
+    debugWriteIpv4(network.ntp_reopen_plan_freshness.server);
+    debugWrite(" initial ready/flags ");
+    debugWrite(if (network.ntp_reopen_plan_freshness.initial_ready) "yes" else "no");
+    for (network.ntp_reopen_plan_freshness.initial_flags) |flag| {
+        debugWrite("/");
+        debugWrite(if (flag) "yes" else "no");
+    }
+    debugWrite(" invalid ");
+    debugWrite(@tagName(network.ntp_reopen_plan_freshness.invalid_reason));
+    debugWrite(" flags ");
+    for (network.ntp_reopen_plan_freshness.invalid_flags, 0..) |flag, index| {
+        if (index != 0) debugWrite("/");
+        debugWrite(if (flag) "yes" else "no");
+    }
+    debugWrite(" stale-service ");
+    debugWrite(@tagName(network.ntp_reopen_plan_freshness.stale_service_reason));
+    debugWrite(" flags ");
+    for (network.ntp_reopen_plan_freshness.stale_service_flags, 0..) |flag, index| {
+        if (index != 0) debugWrite("/");
+        debugWrite(if (flag) "yes" else "no");
+    }
+    debugWrite(" churn ");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.churn_socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.churn_socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.churn_socket_port);
+    debugWrite("/closed ");
+    debugWrite(if (network.ntp_reopen_plan_freshness.churn_closed) "yes" else "no");
+    debugWrite(" stale-transport ");
+    debugWrite(@tagName(network.ntp_reopen_plan_freshness.stale_transport_reason));
+    debugWrite(" flags ");
+    for (network.ntp_reopen_plan_freshness.stale_transport_flags, 0..) |flag, index| {
+        if (index != 0) debugWrite("/");
+        debugWrite(if (flag) "yes" else "no");
+    }
+    debugWrite(" preserved ");
+    for (network.ntp_reopen_plan_freshness.failure_state_preserved, 0..) |preserved, index| {
+        if (index != 0) debugWrite("/");
+        debugWrite(if (preserved) "yes" else "no");
+    }
+    debugWrite(" reinspection ready/flags ");
+    debugWrite(if (network.ntp_reopen_plan_freshness.reinspection_ready) "yes" else "no");
+    for (network.ntp_reopen_plan_freshness.reinspection_flags) |flag| {
+        debugWrite("/");
+        debugWrite(if (flag) "yes" else "no");
+    }
+    debugWrite(" execute/match ");
+    debugWrite(if (network.ntp_reopen_plan_freshness.execution_succeeded) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_plan_freshness.execution_matches_plan) "yes" else "no");
+    debugWrite(" consumed integrity/freshness/reason/preserved ");
+    debugWrite(if (network.ntp_reopen_plan_freshness.consumed_integrity_valid) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_plan_freshness.consumed_freshness_rejected) "yes" else "no");
+    debugWrite("/");
+    debugWrite(@tagName(network.ntp_reopen_plan_freshness.consumed_reason));
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_plan_freshness.consumed_state_preserved) "yes" else "no");
+    debugWrite(" close ");
+    debugWrite(if (network.ntp_reopen_plan_freshness.close_clean) "yes" else "no");
+    debugWrite(" final IP/TX ");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.final_identification_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.final_tx_cursor);
+    debugWrite(" submissions unchanged ");
+    debugWrite(if (network.ntp_reopen_plan_freshness.tx_submissions_unchanged) "yes" else "no");
+    debugWrite(" completions ");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.tx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.tx_completion_dequeues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.rx_completion_enqueues);
+    debugWrite(" endpoints/cursor/generation ");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.final_registered_endpoints);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.final_ephemeral_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.final_generation_cursor);
+    debugWrite(" ingress/dispatch ");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.ingress_dequeued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.packets_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_plan_freshness.udp_dispatched);
+    debugWrite("\r\n");
     debugWrite("NTP close preflight verified: source ");
     debugWriteReferenceKind(network.ntp_close_preflight.source_kind);
     debugWrite(", frequency/bits ");
