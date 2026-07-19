@@ -1578,3 +1578,15 @@
 - Fixed-port churn opens and closes `2/131/55013`; restoring the gateway then yields a fresh plan predicting and opening exactly `2/132/49260`.
 - Active reuse reports original cause `stale_service_state` and rejects `service_active`; structured close leaves endpoint cursor/generation `49261/133`.
 - IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged on full HPET and 24-bit ACPI PM timer boots.
+
+## 4.30 - Protect NTP reopen execution peers
+
+- `NtpServiceTransportReopenExecutionPlan` now embeds the exact connected UDP peer selected from the validated preflight transport snapshot and target server.
+- The execution-plan integrity tag domain advances to v2 and covers peer MAC, IPv4, and port alongside the preflight tag and exact ephemeral allocation.
+- `inspectNtpServiceTransportReopenExecutionPlanIntegrity` independently verifies the stored peer against the canonical gateway/server/NTP-port peer derived from the preflight snapshot.
+- Execution consumes the protected peer directly instead of reconstructing it from mutable device state after inspection.
+- A packet-free verifier abandons `2/133/49261`, previews exact replacement `2/134/49262`, and proves preview purity with all initial integrity dimensions valid.
+- Independently forged MAC, server, and port plans are re-tagged correctly; their tags match, but canonical peer agreement remains false and execution rejects `invalid_execution_preview` without allocation or mutation.
+- The valid plan opens exactly `2/134/49262`, binds the exact protected peer, preserves client/result server identity, and rejects consumed reuse as `stale_execution_preview` while byte integrity remains valid.
+- Structured close leaves endpoint cursor/generation `49263/135`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
+- Full HPET and 24-bit ACPI PM timer boots validate protected peer integrity and exact binding through the complete regression harness.

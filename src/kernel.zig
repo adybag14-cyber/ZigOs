@@ -11303,6 +11303,110 @@ fn inspectE1000e(
     debugWrite("/");
     debugWriteU64Decimal(network.ntp_reopen_peer_preflight.udp_dispatched);
     debugWrite("\r\n");
+    debugWrite("NTP reopen protected peer verified: sockets ");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.old_socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.old_socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.old_local_port);
+    debugWrite("->");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.new_socket_slot);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.new_socket_generation);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.new_local_port);
+    debugWrite(" server ");
+    debugWriteIpv4(network.ntp_reopen_protected_peer.server);
+    debugWrite(" peer gateway/server/port ");
+    debugWrite(if (network.ntp_reopen_protected_peer.peer_mac_matches_gateway) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_protected_peer.peer_server_matches) "yes" else "no");
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.peer_port);
+    debugWrite(" initial tag 0x");
+    debugWriteHex64(network.ntp_reopen_protected_peer.initial_tag);
+    debugWrite(" integrity ");
+    debugWrite(if (network.ntp_reopen_protected_peer.initial_tag_matches) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_protected_peer.initial_preflight_valid) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_protected_peer.initial_allocation_matches) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_protected_peer.initial_peer_matches) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_protected_peer.initial_plan_valid) "yes" else "no");
+    debugWrite(" preview-pure ");
+    debugWrite(if (network.ntp_reopen_protected_peer.preview_pure) "yes" else "no");
+    debugWrite(" forged tag ");
+    for (network.ntp_reopen_protected_peer.forged_tag_matches, 0..) |flag, index| {
+        if (index != 0) debugWrite("/");
+        debugWrite(if (flag) "yes" else "no");
+    }
+    debugWrite(" peer ");
+    for (network.ntp_reopen_protected_peer.forged_peer_matches, 0..) |flag, index| {
+        if (index != 0) debugWrite("/");
+        debugWrite(if (flag) "yes" else "no");
+    }
+    debugWrite(" valid ");
+    for (network.ntp_reopen_protected_peer.forged_valid, 0..) |flag, index| {
+        if (index != 0) debugWrite("/");
+        debugWrite(if (flag) "yes" else "no");
+    }
+    debugWrite(" reasons ");
+    for (network.ntp_reopen_protected_peer.forged_reasons, 0..) |reason, index| {
+        if (index != 0) debugWrite("/");
+        debugWrite(@tagName(reason));
+    }
+    debugWrite(" preserved ");
+    for (network.ntp_reopen_protected_peer.forged_preserved, 0..) |flag, index| {
+        if (index != 0) debugWrite("/");
+        debugWrite(if (flag) "yes" else "no");
+    }
+    debugWrite(" execute/bound/match/client/result ");
+    debugWrite(if (network.ntp_reopen_protected_peer.execution_succeeded) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_protected_peer.peer_bound) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_protected_peer.bound_peer_matches) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_protected_peer.client_server_matches) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_protected_peer.result_matches) "yes" else "no");
+    debugWrite(" active ");
+    debugWrite(@tagName(network.ntp_reopen_protected_peer.active_reason));
+    debugWrite(" integrity/preserved ");
+    debugWrite(if (network.ntp_reopen_protected_peer.active_integrity_valid) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (network.ntp_reopen_protected_peer.active_preserved) "yes" else "no");
+    debugWrite(" close ");
+    debugWrite(if (network.ntp_reopen_protected_peer.close_clean) "yes" else "no");
+    debugWrite(" final IP/TX ");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.final_identification_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.final_tx_cursor);
+    debugWrite(" submissions unchanged ");
+    debugWrite(if (network.ntp_reopen_protected_peer.tx_submissions_unchanged) "yes" else "no");
+    debugWrite(" completions ");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.tx_completion_enqueues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.tx_completion_dequeues);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.rx_completion_enqueues);
+    debugWrite(" endpoints/cursor/generation ");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.final_registered_endpoints);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.final_ephemeral_cursor);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.final_generation_cursor);
+    debugWrite(" ingress/dispatch ");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.ingress_enqueued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.ingress_dequeued);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.packets_dispatched);
+    debugWrite("/");
+    debugWriteU64Decimal(network.ntp_reopen_protected_peer.udp_dispatched);
+    debugWrite("\r\n");
     debugWrite("NTP close preflight verified: source ");
     debugWriteReferenceKind(network.ntp_close_preflight.source_kind);
     debugWrite(", frequency/bits ");
