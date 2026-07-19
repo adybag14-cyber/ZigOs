@@ -1132,3 +1132,12 @@
 - The rejected packet increments the peer-mismatch counter exactly once but produces no NTP poll examination, quality result, hardware sample, step evaluation, clock mutation, or request mutation.
 - The request remains active and accepts the valid source-two response normally, clearing recovery state and recording one recovery success.
 - The verifier proves two transmissions, two accepted samples, one peer-filtered ingress packet, unchanged NTP counters across rejection, clean close, and exact HPET/ACPI PM timer accounting.
+
+## 3.90 - Reject wrong-originate replies from the active NTP source
+
+- A source-pool recovery switches the existing socket to source two and starts a projected-time request.
+- An otherwise valid response from the active connected peer is routed to the NTP endpoint but carries an originate timestamp that does not match the live request.
+- The bounded NTP poll examines and rejects exactly one datagram, remains pending, and does not classify the packet as a quality or clock-step rejection.
+- Rejection performs no hardware-reference read, sample, clock application, peer-mismatch drop, request mutation, retry, or transmission.
+- The unchanged request then accepts a correctly originated response from the same source and completes recovery normally.
+- The verifier proves two transmissions, two accepted samples, one transaction-layer rejection, preserved peer-drop accounting, clean close, and exact HPET/ACPI PM timer packet/ring accounting.
