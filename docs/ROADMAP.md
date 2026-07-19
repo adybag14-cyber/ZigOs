@@ -1526,3 +1526,16 @@
 - Fresh reinspection predicts and opens `2/119/49252`; inspection of the consumed plan remains integrity-valid but reports `stale_execution_preview/stale_service_state`, matching execution.
 - Structured close leaves endpoint cursor/generation `49253/120`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
 - Full HPET and 24-bit ACPI PM timer boots validate pure inspection/execution agreement through the complete regression harness.
+
+## 4.26 - Refresh stale NTP reopen execution plans without mutation
+
+- `NtpServiceTransportReopenExecutionPlanRefresh` records the original 4.25 inspection, an optional refreshed preview, reuse/refreshed flags, and an exact rejection.
+- `refreshNtpServiceTransportReopenExecutionPlan` is pure: invalid plan bytes reject `invalid_execution_preview`, consumable plans are returned unchanged, and integrity-valid stale plans are rebuilt from current service and allocation state.
+- Refresh retains the original deadline while rerunning complete service validation, preflight capture, transport preview, canonical tagging, and exact socket prediction.
+- A packet-free verifier abandons `2/120/49253`; its initial plan predicts `2/121/49254` and refresh returns the same tagged plan byte-for-byte.
+- A modified tag remains unrefreshable and produces no preview.
+- Incrementing retained close-discard diagnostics makes the original plan stale by service snapshot; refresh updates that snapshot and tag while preserving the same predicted socket.
+- Real fixed-port churn opens and closes `2/121/55009`; refreshing the service-updated plan then predicts `2/122/49254` with a new tag and no runtime mutation.
+- Explicit consumption opens exactly `2/122/49254`; refreshing the consumed plan reports original cause `stale_service_state` and current lifecycle rejection `service_active`.
+- Structured close leaves endpoint cursor/generation `49255/123`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
+- Full HPET and 24-bit ACPI PM timer boots validate pure plan refresh/reissue through the complete regression harness.

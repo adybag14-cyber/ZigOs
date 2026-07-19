@@ -858,6 +858,14 @@ pub const NtpServiceTransportReopenExecutionPlanInspection = struct {
     stale_cause: ?NtpServiceTransportReopenError,
 };
 
+pub const NtpServiceTransportReopenExecutionPlanRefresh = struct {
+    original: NtpServiceTransportReopenExecutionPlanInspection,
+    preview: ?NtpServiceTransportReopenExecutionPreview,
+    reused: bool,
+    refreshed: bool,
+    rejection: ?NtpServiceTransportReopenError,
+};
+
 pub const NtpServiceTransportReopenExecutionPreview = struct {
     freshness: NtpServiceTransportReopenPreflightFreshnessInspection,
     transport_available: bool,
@@ -1335,6 +1343,64 @@ pub const NtpReopenExecutionPlanInspectionReport = struct {
     consumed_integrity_valid: bool,
     consumed_pure: bool,
     consumed_execution_agrees: bool,
+    close_clean: bool,
+    final_identification_cursor: u16,
+    final_tx_cursor: u16,
+    tx_submissions_unchanged: bool,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    final_generation_cursor: u32,
+    ingress_enqueued: u64,
+    ingress_dequeued: u64,
+    packets_dispatched: u64,
+    udp_dispatched: u64,
+};
+
+pub const NtpReopenExecutionPlanRefreshReport = struct {
+    old_socket_slot: u16,
+    old_socket_generation: u32,
+    old_local_port: u16,
+    new_socket_slot: u16,
+    new_socket_generation: u32,
+    new_local_port: u16,
+    server: [4]u8,
+    initial_tag: u64,
+    initial_predicted_slot: u16,
+    initial_predicted_generation: u32,
+    initial_predicted_port: u16,
+    idempotent_reused: bool,
+    idempotent_not_refreshed: bool,
+    idempotent_plan_matches: bool,
+    idempotent_pure: bool,
+    invalid_reason: NtpServiceTransportReopenError,
+    invalid_preview_absent: bool,
+    invalid_pure: bool,
+    stale_service_cause: NtpServiceTransportReopenError,
+    service_refresh_succeeded: bool,
+    service_refresh_tag_changed: bool,
+    service_refresh_predicted_same: bool,
+    service_refresh_snapshot_updated: bool,
+    service_refresh_pure: bool,
+    churn_socket_slot: u16,
+    churn_socket_generation: u32,
+    churn_socket_port: u16,
+    churn_closed: bool,
+    stale_transport_cause: NtpServiceTransportReopenError,
+    transport_refresh_succeeded: bool,
+    transport_refresh_tag_changed: bool,
+    transport_refresh_predicted_slot: u16,
+    transport_refresh_predicted_generation: u32,
+    transport_refresh_predicted_port: u16,
+    transport_refresh_pure: bool,
+    execution_succeeded: bool,
+    execution_matches_plan: bool,
+    consumed_original_cause: NtpServiceTransportReopenError,
+    consumed_refresh_reason: NtpServiceTransportReopenError,
+    consumed_preview_absent: bool,
+    consumed_pure: bool,
     close_clean: bool,
     final_identification_cursor: u16,
     final_tx_cursor: u16,
@@ -5899,6 +5965,7 @@ pub const NetworkResult = struct {
     ntp_reopen_execution_preview: NtpReopenExecutionPreviewReport,
     ntp_reopen_execution_plan: NtpReopenExecutionPlanReport,
     ntp_reopen_execution_plan_inspection: NtpReopenExecutionPlanInspectionReport,
+    ntp_reopen_execution_plan_refresh: NtpReopenExecutionPlanRefreshReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -6836,6 +6903,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const ntp_reopen_execution_plan_refresh = verifyNtpReopenExecutionPlanRefresh(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -7071,6 +7142,7 @@ pub fn initializeAndTestNetwork(
         .ntp_reopen_execution_preview = ntp_reopen_execution_preview,
         .ntp_reopen_execution_plan = ntp_reopen_execution_plan,
         .ntp_reopen_execution_plan_inspection = ntp_reopen_execution_plan_inspection,
+        .ntp_reopen_execution_plan_refresh = ntp_reopen_execution_plan_refresh,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -8521,6 +8593,88 @@ pub fn inspectNtpServiceTransportReopenExecutionPlan(
         .consumable = true,
         .rejection = null,
         .stale_cause = null,
+    };
+}
+
+pub fn refreshNtpServiceTransportReopenExecutionPlan(
+    device: *Device,
+    service: *const NtpService,
+    plan: NtpServiceTransportReopenExecutionPlan,
+) NtpServiceTransportReopenExecutionPlanRefresh {
+    const original = inspectNtpServiceTransportReopenExecutionPlan(device, service, plan);
+    if (!original.integrity.valid) {
+        return .{
+            .original = original,
+            .preview = null,
+            .reused = false,
+            .refreshed = false,
+            .rejection = .invalid_execution_preview,
+        };
+    }
+
+    if (original.consumable) {
+        const preview = previewNtpServiceTransportReopenExecution(
+            device,
+            service,
+            plan.preflight,
+        );
+        if (preview.rejection) |reason| {
+            return .{
+                .original = original,
+                .preview = null,
+                .reused = false,
+                .refreshed = false,
+                .rejection = reason,
+            };
+        }
+        const preview_plan = preview.plan orelse unreachable;
+        const reused = std.meta.eql(preview_plan, plan);
+        return .{
+            .original = original,
+            .preview = preview,
+            .reused = reused,
+            .refreshed = !reused,
+            .rejection = null,
+        };
+    }
+
+    const preflight_inspection = inspectNtpServiceTransportReopen(
+        device,
+        service,
+        plan.preflight.refresh_deadline_tick,
+    );
+    if (preflight_inspection.rejection) |reason| {
+        return .{
+            .original = original,
+            .preview = null,
+            .reused = false,
+            .refreshed = false,
+            .rejection = reason,
+        };
+    }
+    const current_preflight = preflight_inspection.preflight orelse unreachable;
+    const preview = previewNtpServiceTransportReopenExecution(
+        device,
+        service,
+        current_preflight,
+    );
+    if (preview.rejection) |reason| {
+        return .{
+            .original = original,
+            .preview = null,
+            .reused = false,
+            .refreshed = false,
+            .rejection = reason,
+        };
+    }
+    const refreshed_plan = preview.plan orelse unreachable;
+    const reused = std.meta.eql(refreshed_plan, plan);
+    return .{
+        .original = original,
+        .preview = preview,
+        .reused = reused,
+        .refreshed = !reused,
+        .rejection = null,
     };
 }
 
@@ -13021,7 +13175,6 @@ fn verifyNtpReopenExecutionPlanInspection(
         return null;
     }
     const abandoned_service = service;
-
     const preflight_inspection = inspectNtpServiceTransportReopen(device, &service, refresh_tick);
     if (preflight_inspection.rejection != null) return null;
     const preflight = preflight_inspection.preflight orelse return null;
@@ -13341,6 +13494,330 @@ fn verifyNtpReopenExecutionPlanInspection(
         .consumed_integrity_valid = consumed.integrity.valid,
         .consumed_pure = consumed_pure,
         .consumed_execution_agrees = consumed_execution_agrees,
+        .close_clean = close_clean,
+        .final_identification_cursor = device.next_udp_identification,
+        .final_tx_cursor = device.tx_producer,
+        .tx_submissions_unchanged = tx_submissions_unchanged,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .final_generation_cursor = device.next_udp_generation,
+        .ingress_enqueued = device.software_rx_queue.enqueued,
+        .ingress_dequeued = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+
+fn verifyNtpReopenExecutionPlanRefresh(
+    device: *Device,
+) ?NtpReopenExecutionPlanRefreshReport {
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_253 or
+        device.next_udp_generation != 120 or device.tx_producer != 1 or
+        device.next_udp_identification != 166 or device.next_dns_transaction_id != 8 or
+        completionQueueEnqueued(&tx_completion_queue) != 193 or
+        completionQueueDequeued(&tx_completion_queue) != 193 or
+        completionQueueEnqueued(&rx_completion_queue) != 22 or
+        device.software_rx_queue.enqueued != 211 or device.software_rx_queue.dequeued != 211 or
+        device.packets_dispatched != 199 or device.udp_packets_dispatched != 198 or
+        device.peer_mismatch_udp_packets_dropped != 4)
+    {
+        return null;
+    }
+
+    const server = [4]u8{ 10, 0, 2, 4 };
+    const refresh_tick: u64 = 163;
+    const submissions_before = device.tx_submissions;
+    var service = openNtpService(device, server, 1, 2) orelse return null;
+    const old_socket = service.client.socket;
+    if (old_socket.endpoint_index != 2 or old_socket.generation != 120 or
+        old_socket.local_port != 49_253 or device.udp_endpoint_count != 3 or
+        device.next_ephemeral_udp_port != 49_254 or device.next_udp_generation != 121)
+    {
+        return null;
+    }
+
+    const transport_close = closeUdpSocketDiscarding(device, old_socket) orelse return null;
+    if (transport_close.discarded_packets != 0 or transport_close.queue_enqueued != 0 or
+        transport_close.queue_dequeued != 0 or transport_close.queue_high_water != 0 or
+        transport_close.queue_dropped != 0 or device.udp_endpoint_count != 2)
+    {
+        return null;
+    }
+    const abandon = abandonNtpServiceAfterTransportLoss(device, &service) orelse return null;
+    if (abandon.request_was_active or abandon.request_cancelled or service.active or
+        service.client.active or service.request_active)
+    {
+        return null;
+    }
+    const preflight_inspection = inspectNtpServiceTransportReopen(device, &service, refresh_tick);
+    if (preflight_inspection.rejection != null) return null;
+    const preflight = preflight_inspection.preflight orelse return null;
+    const initial_preview = previewNtpServiceTransportReopenExecution(device, &service, preflight);
+    if (!initial_preview.ready or initial_preview.rejection != null or
+        !initial_preview.transport_available)
+    {
+        return null;
+    }
+    const initial_plan = initial_preview.plan orelse return null;
+    const initial_predicted = initial_preview.predicted_socket orelse return null;
+    const initial_integrity = inspectNtpServiceTransportReopenExecutionPlanIntegrity(initial_plan);
+    if (!initial_integrity.valid or initial_integrity.actual_tag == 0 or
+        initial_predicted.endpoint_index != 2 or initial_predicted.generation != 121 or
+        initial_predicted.local_port != 49_254)
+    {
+        return null;
+    }
+
+    const idempotent_service = service;
+    const idempotent_transport = captureNtpServiceTransportAllocationSnapshot(device);
+    const idempotent_ready_cursor = device.next_udp_ready_index;
+    const idempotent_identification = device.next_udp_identification;
+    const idempotent_tx = device.tx_producer;
+    const idempotent_submissions = device.tx_submissions;
+    const idempotent = refreshNtpServiceTransportReopenExecutionPlan(
+        device,
+        &service,
+        initial_plan,
+    );
+    const idempotent_preview = idempotent.preview orelse return null;
+    const idempotent_plan = idempotent_preview.plan orelse return null;
+    const idempotent_reused = idempotent.reused and idempotent.original.consumable;
+    const idempotent_not_refreshed = !idempotent.refreshed and idempotent.rejection == null;
+    const idempotent_plan_matches = std.meta.eql(idempotent_plan, initial_plan) and
+        std.meta.eql(idempotent_preview.predicted_socket orelse return null, initial_predicted);
+    const idempotent_pure = std.meta.eql(service, idempotent_service) and
+        std.meta.eql(captureNtpServiceTransportAllocationSnapshot(device), idempotent_transport) and
+        device.next_udp_ready_index == idempotent_ready_cursor and
+        device.next_udp_identification == idempotent_identification and
+        device.tx_producer == idempotent_tx and device.tx_submissions == idempotent_submissions;
+    if (!idempotent_reused or !idempotent_not_refreshed or
+        !idempotent_plan_matches or !idempotent_pure)
+    {
+        return null;
+    }
+
+    var invalid_plan = initial_plan;
+    invalid_plan.integrity_tag +%= 1;
+    const invalid_service = service;
+    const invalid_transport = captureNtpServiceTransportAllocationSnapshot(device);
+    const invalid_ready_cursor = device.next_udp_ready_index;
+    const invalid_identification = device.next_udp_identification;
+    const invalid_tx = device.tx_producer;
+    const invalid_submissions = device.tx_submissions;
+    const invalid = refreshNtpServiceTransportReopenExecutionPlan(device, &service, invalid_plan);
+    const invalid_reason = invalid.rejection orelse return null;
+    const invalid_preview_absent = invalid.preview == null;
+    const invalid_pure = invalid_reason == .invalid_execution_preview and
+        invalid_preview_absent and !invalid.reused and !invalid.refreshed and
+        !invalid.original.integrity.valid and std.meta.eql(service, invalid_service) and
+        std.meta.eql(captureNtpServiceTransportAllocationSnapshot(device), invalid_transport) and
+        device.next_udp_ready_index == invalid_ready_cursor and
+        device.next_udp_identification == invalid_identification and
+        device.tx_producer == invalid_tx and device.tx_submissions == invalid_submissions;
+    if (!invalid_pure) return null;
+
+    service.close_discards +|= 1;
+    const changed_service = service;
+    const service_refresh_transport = captureNtpServiceTransportAllocationSnapshot(device);
+    const service_refresh_ready_cursor = device.next_udp_ready_index;
+    const service_refresh_identification = device.next_udp_identification;
+    const service_refresh_tx = device.tx_producer;
+    const service_refresh_submissions = device.tx_submissions;
+    const service_refresh = refreshNtpServiceTransportReopenExecutionPlan(
+        device,
+        &service,
+        initial_plan,
+    );
+    const stale_service_cause = service_refresh.original.stale_cause orelse return null;
+    const service_preview = service_refresh.preview orelse return null;
+    const service_plan = service_preview.plan orelse return null;
+    const service_predicted = service_preview.predicted_socket orelse return null;
+    const service_integrity = inspectNtpServiceTransportReopenExecutionPlanIntegrity(service_plan);
+    const service_refresh_succeeded = service_refresh.rejection == null and
+        service_refresh.refreshed and !service_refresh.reused and service_integrity.valid and
+        service_refresh.original.rejection == .stale_execution_preview and
+        stale_service_cause == .stale_service_state;
+    const service_refresh_tag_changed = service_plan.integrity_tag != initial_plan.integrity_tag;
+    const service_refresh_predicted_same = std.meta.eql(service_predicted, initial_predicted) and
+        service_predicted.endpoint_index == 2 and service_predicted.generation == 121 and
+        service_predicted.local_port == 49_254;
+    const service_refresh_snapshot_updated = std.meta.eql(
+        service_plan.preflight.service_snapshot,
+        changed_service,
+    );
+    const service_refresh_pure = std.meta.eql(service, changed_service) and
+        std.meta.eql(captureNtpServiceTransportAllocationSnapshot(device), service_refresh_transport) and
+        device.next_udp_ready_index == service_refresh_ready_cursor and
+        device.next_udp_identification == service_refresh_identification and
+        device.tx_producer == service_refresh_tx and
+        device.tx_submissions == service_refresh_submissions;
+    if (!service_refresh_succeeded or !service_refresh_tag_changed or
+        !service_refresh_predicted_same or !service_refresh_snapshot_updated or
+        !service_refresh_pure)
+    {
+        return null;
+    }
+
+    const churn_socket = openUdpSocket(device, 55_009) orelse return null;
+    if (churn_socket.endpoint_index != 2 or churn_socket.generation != 121 or
+        churn_socket.local_port != 55_009 or device.udp_endpoint_count != 3 or
+        device.next_ephemeral_udp_port != 49_254 or device.next_udp_generation != 122)
+    {
+        return null;
+    }
+    const churn_closed = closeUdpSocket(device, churn_socket) and
+        device.udp_endpoint_count == 2 and !udpSocketActive(device, churn_socket) and
+        device.next_ephemeral_udp_port == 49_254 and device.next_udp_generation == 122;
+    if (!churn_closed) return null;
+
+    const transport_refresh_service = service;
+    const transport_refresh_snapshot = captureNtpServiceTransportAllocationSnapshot(device);
+    const transport_refresh_ready_cursor = device.next_udp_ready_index;
+    const transport_refresh_identification = device.next_udp_identification;
+    const transport_refresh_tx = device.tx_producer;
+    const transport_refresh_submissions = device.tx_submissions;
+    const transport_refresh = refreshNtpServiceTransportReopenExecutionPlan(
+        device,
+        &service,
+        service_plan,
+    );
+    const stale_transport_cause = transport_refresh.original.stale_cause orelse return null;
+    const transport_preview = transport_refresh.preview orelse return null;
+    const transport_plan = transport_preview.plan orelse return null;
+    const transport_predicted = transport_preview.predicted_socket orelse return null;
+    const transport_integrity = inspectNtpServiceTransportReopenExecutionPlanIntegrity(transport_plan);
+    const transport_refresh_succeeded = transport_refresh.rejection == null and
+        transport_refresh.refreshed and !transport_refresh.reused and transport_integrity.valid and
+        transport_refresh.original.rejection == .stale_execution_preview and
+        stale_transport_cause == .stale_transport_state;
+    const transport_refresh_tag_changed = transport_plan.integrity_tag != service_plan.integrity_tag;
+    const transport_refresh_pure = std.meta.eql(service, transport_refresh_service) and
+        std.meta.eql(captureNtpServiceTransportAllocationSnapshot(device), transport_refresh_snapshot) and
+        device.next_udp_ready_index == transport_refresh_ready_cursor and
+        device.next_udp_identification == transport_refresh_identification and
+        device.tx_producer == transport_refresh_tx and
+        device.tx_submissions == transport_refresh_submissions;
+    if (!transport_refresh_succeeded or !transport_refresh_tag_changed or
+        transport_predicted.endpoint_index != 2 or transport_predicted.generation != 122 or
+        transport_predicted.local_port != 49_254 or !transport_refresh_pure)
+    {
+        return null;
+    }
+
+    const execution = executeNtpServiceTransportReopenExecutionPreview(
+        device,
+        &service,
+        transport_plan,
+    );
+    const reopened = execution.result orelse return null;
+    const new_socket = service.client.socket;
+    const execution_succeeded = execution.rejection == null and service.active and
+        service.client.active and !service.request_active and device.udp_endpoint_count == 3 and
+        device.next_ephemeral_udp_port == 49_255 and device.next_udp_generation == 123;
+    const execution_matches_plan = std.meta.eql(new_socket, transport_predicted) and
+        std.meta.eql(new_socket, transport_plan.allocation.socket) and
+        std.meta.eql(reopened.socket, new_socket) and
+        std.meta.eql(reopened.previous_socket, old_socket) and
+        std.meta.eql(reopened.server_ipv4, server) and
+        reopened.current_source_index == transport_plan.preflight.current_source_index and
+        reopened.clock_was_synchronized == transport_plan.preflight.clock_was_synchronized and
+        reopened.refresh_deadline_tick == refresh_tick;
+    if (!execution_succeeded or !execution_matches_plan) return null;
+
+    const consumed_service = service;
+    const consumed_transport = captureNtpServiceTransportAllocationSnapshot(device);
+    const consumed_ready_cursor = device.next_udp_ready_index;
+    const consumed_identification = device.next_udp_identification;
+    const consumed_tx = device.tx_producer;
+    const consumed_submissions = device.tx_submissions;
+    const consumed_refresh = refreshNtpServiceTransportReopenExecutionPlan(
+        device,
+        &service,
+        transport_plan,
+    );
+    const consumed_original_cause = consumed_refresh.original.stale_cause orelse return null;
+    const consumed_refresh_reason = consumed_refresh.rejection orelse return null;
+    const consumed_preview_absent = consumed_refresh.preview == null;
+    const consumed_pure = consumed_original_cause == .stale_service_state and
+        consumed_refresh_reason == .service_active and consumed_preview_absent and
+        !consumed_refresh.reused and !consumed_refresh.refreshed and
+        std.meta.eql(service, consumed_service) and
+        std.meta.eql(captureNtpServiceTransportAllocationSnapshot(device), consumed_transport) and
+        device.next_udp_ready_index == consumed_ready_cursor and
+        device.next_udp_identification == consumed_identification and
+        device.tx_producer == consumed_tx and device.tx_submissions == consumed_submissions;
+    if (!consumed_pure) return null;
+
+    const close_result = closeNtpServiceDiscarding(device, &service) orelse return null;
+    const close_clean = !close_result.request_was_active and !close_result.request_cancelled and
+        close_result.socket_close.discarded_packets == 0 and
+        close_result.socket_close.queue_enqueued == 0 and
+        close_result.socket_close.queue_dequeued == 0 and
+        close_result.socket_close.queue_high_water == 0 and
+        close_result.socket_close.queue_dropped == 0 and
+        !service.active and !service.client.active and !service.request_active;
+    if (!close_clean) return null;
+
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const tx_submissions_unchanged = device.tx_submissions == submissions_before;
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_255 or
+        device.next_udp_generation != 123 or device.next_udp_identification != 166 or
+        device.next_dns_transaction_id != 8 or device.tx_producer != 1 or
+        !tx_submissions_unchanged or txe != 193 or txd != 193 or rxe != 22 or
+        device.software_rx_queue.enqueued != 211 or device.software_rx_queue.dequeued != 211 or
+        device.packets_dispatched != 199 or device.udp_packets_dispatched != 198 or
+        device.peer_mismatch_udp_packets_dropped != 4)
+    {
+        return null;
+    }
+
+    return .{
+        .old_socket_slot = old_socket.endpoint_index,
+        .old_socket_generation = old_socket.generation,
+        .old_local_port = old_socket.local_port,
+        .new_socket_slot = new_socket.endpoint_index,
+        .new_socket_generation = new_socket.generation,
+        .new_local_port = new_socket.local_port,
+        .server = server,
+        .initial_tag = initial_plan.integrity_tag,
+        .initial_predicted_slot = initial_predicted.endpoint_index,
+        .initial_predicted_generation = initial_predicted.generation,
+        .initial_predicted_port = initial_predicted.local_port,
+        .idempotent_reused = idempotent_reused,
+        .idempotent_not_refreshed = idempotent_not_refreshed,
+        .idempotent_plan_matches = idempotent_plan_matches,
+        .idempotent_pure = idempotent_pure,
+        .invalid_reason = invalid_reason,
+        .invalid_preview_absent = invalid_preview_absent,
+        .invalid_pure = invalid_pure,
+        .stale_service_cause = stale_service_cause,
+        .service_refresh_succeeded = service_refresh_succeeded,
+        .service_refresh_tag_changed = service_refresh_tag_changed,
+        .service_refresh_predicted_same = service_refresh_predicted_same,
+        .service_refresh_snapshot_updated = service_refresh_snapshot_updated,
+        .service_refresh_pure = service_refresh_pure,
+        .churn_socket_slot = churn_socket.endpoint_index,
+        .churn_socket_generation = churn_socket.generation,
+        .churn_socket_port = churn_socket.local_port,
+        .churn_closed = churn_closed,
+        .stale_transport_cause = stale_transport_cause,
+        .transport_refresh_succeeded = transport_refresh_succeeded,
+        .transport_refresh_tag_changed = transport_refresh_tag_changed,
+        .transport_refresh_predicted_slot = transport_predicted.endpoint_index,
+        .transport_refresh_predicted_generation = transport_predicted.generation,
+        .transport_refresh_predicted_port = transport_predicted.local_port,
+        .transport_refresh_pure = transport_refresh_pure,
+        .execution_succeeded = execution_succeeded,
+        .execution_matches_plan = execution_matches_plan,
+        .consumed_original_cause = consumed_original_cause,
+        .consumed_refresh_reason = consumed_refresh_reason,
+        .consumed_preview_absent = consumed_preview_absent,
+        .consumed_pure = consumed_pure,
         .close_clean = close_clean,
         .final_identification_cursor = device.next_udp_identification,
         .final_tx_cursor = device.tx_producer,
