@@ -1397,3 +1397,13 @@
 - A second reopen succeeds on socket slot/generation/port `2/97/49236`, proving the failed attempt consumed neither an ephemeral port nor a generation.
 - The reopened service starts a bootstrap request, accepts one response, exposes synchronized health with all seeded cumulative diagnostics retained, and closes cleanly.
 - HPET and 24-bit ACPI PM timer boots verify one transmission and exact final completion, endpoint, cursor, ingress, and dispatch accounting.
+
+## 4.15 - Reject invalid NTP transport reopen state before allocation
+
+- A two-source service synchronizes on source zero, loses its old transport, and is abandoned with the synchronized clock and accepted lifecycle retained.
+- Four independent invalid reopen attempts cover a tick before the clock anchor, a retained client-server mismatch, an invalid zero-retry policy, and an invalid zero-threshold source-rotation policy.
+- Each call returns null while preserving the exact deliberately-invalid service snapshot supplied to it.
+- Restoring the valid service after each attempt yields the original abandoned value, and all failures preserve endpoint count, ready cursor, ephemeral cursor `49238`, generation cursor `99`, identification cursor, TX cursor, and submission count.
+- A subsequent valid reopen uses socket slot/generation/port `2/99/49238`, proving no failed validation consumed transport identity.
+- The reopened synchronized service emits an immediate projected refresh, accepts a source-zero response, reports synchronized source-pool health, and closes cleanly.
+- HPET and 24-bit ACPI PM timer boots verify two transmissions, two accepted samples, and exact final completion, endpoint, cursor, ingress, and dispatch accounting.
