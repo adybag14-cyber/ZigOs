@@ -1277,3 +1277,14 @@
 - The bootstrap originate timestamp is preserved exactly and the endpoint queue is empty when the request becomes active.
 - A valid matching response is accepted normally, with `pre_request_discards = 2` and `post_response_discards = 0` exposed through health.
 - HPET and ACPI PM timer boots verify one transmission, one accepted sample, no retries, clean close, and exact accounting.
+
+
+## 4.04 - Purge stale replies during same-source operator reset
+
+- Terminal timeout state is seeded while source one is already the current and operator-selected target.
+- Two delayed source-one replies are queued before reset.
+- Resetting to the same source purges both packets, increments `pre_request_discards` from four to six, and preserves `post_response_discards = 3`.
+- The source, connected peer, socket handle, rotation count, clock-independent cumulative diagnostics, and TX ring state remain unchanged.
+- Only transient timeout, recovery, and rejection counters are cleared.
+- A duplicate reset is rejected before any further queue or counter mutation.
+- Health reports source one, additive discard accounting, and preserved lifecycle diagnostics; close accounting is exact on HPET and ACPI PM timer boots.
