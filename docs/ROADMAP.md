@@ -1234,3 +1234,15 @@
 - Endpoint queue accounting proves the stale queue is empty when the new request becomes active.
 - The valid refresh response is accepted normally; health reports `pre_request_discards = 2` and `post_response_discards = 0`.
 - The verifier proves two transmissions, two accepted samples, no retries, clean close, and exact HPET/ACPI PM timer accounting.
+
+
+## 4.00 - Purge queued old-source replies before recovery peer switching
+
+- A recovery edge case was identified: UDP peer switching rejects connected sockets while endpoint data is queued.
+- Recovery-ready handling now discards and counts stale endpoint datagrams before applying a pending NTP source switch.
+- The ordinary new-request purge remains in place after switching as a second generation-safe guard before transmission.
+- The live verifier synchronizes source zero, starts a refresh, retries once, and reaches timeout with source one pending.
+- Two delayed source-zero replies are routed after timeout and remain queued and readable throughout cooldown.
+- At the recovery deadline, both packets are purged before the same socket switches to source one, enabling the projected recovery request to transmit.
+- The accepted source-one response completes recovery with `pre_request_discards = 2`, `post_response_discards = 0`, one source rotation, and one recovery success.
+- The verifier proves four transmissions, two accepted samples, unchanged retry semantics, clean close, and exact HPET/ACPI PM timer accounting.
