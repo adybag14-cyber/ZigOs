@@ -30,7 +30,7 @@ function Invoke-LegacySession {
     [IO.File]::WriteAllText($serialPath, '')
     $arguments = @(
         '-m', '32M', '-machine', 'pc', '-cpu', 'qemu32', '-boot', 'c',
-        '-drive', "file=$image,format=raw,if=ide,index=0,cache=writeback",
+        '-drive', "file=$image,format=raw,if=ide,index=0,cache=unsafe",
         '-display', 'none', '-serial', 'stdio', '-monitor', 'none',
         '-no-reboot', '-no-shutdown',
         '-debugcon', "file:$debugPath",

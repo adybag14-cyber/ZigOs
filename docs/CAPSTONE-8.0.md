@@ -81,6 +81,8 @@ The release harness then proves persistence:
 8. require zero writes and zero allocations during that boot;
 9. require the complete image SHA-256 to remain unchanged across the second session.
 
+The QEMU harness uses `cache=unsafe` only to avoid a pathological Windows-host `fsync` translation for the emulated ATA `FLUSH CACHE` command. The guest still issues command `0xE7`, waits for completion, rereads every changed sector, and compares all 512 bytes. After QEMU exits, the independent host verifier reads the raw image directly, and the second boot plus unchanged-image SHA-256 check remain mandatory.
+
 ## Deterministic initial filesystem
 
 | File | Bytes | Initial cluster chain | FNV-1a32 |
