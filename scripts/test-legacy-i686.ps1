@@ -58,6 +58,7 @@ $required = @(
     'ZigOs BIOS stage1 protected mode verified: CS 0x0008 CR0.PE yes kernel 0x00010000',
     'ZigOs i686 freestanding kernel image built',
     'ZigOs i686 runtime verified: vendor GenuineIntel max-leaf 0x00000004 CR0 0x00000011 PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes',
+    'ZigOs i686 exceptions verified: vectors 0x00000020 breakpoint-count 0x00000002 last-vector 0x00000003 error 0x00000000 eip-nonzero yes',
     'ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005'
 )
 foreach ($marker in $required) {
@@ -69,6 +70,7 @@ $serial = [IO.File]::ReadAllText($serialPath)
 if (-not [regex]::IsMatch($serial, $e820Pattern)) { throw "E820 COM1 contract missing. Serial: $serial" }
 if (-not $serial.Contains('ZigOs i686 runtime verified: vendor GenuineIntel')) { throw "COM1 runtime marker missing. Serial: $serial" }
 if (-not $serial.Contains('PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes')) { throw "COM1 runtime invariants missing. Serial: $serial" }
+if (-not $serial.Contains('ZigOs i686 exceptions verified: vectors 0x00000020 breakpoint-count 0x00000002 last-vector 0x00000003 error 0x00000000 eip-nonzero yes')) { throw "COM1 exception marker missing. Serial: $serial" }
 if (-not $serial.Contains('ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005')) { throw "COM1 interrupt marker missing. Serial: $serial" }
 
 Write-Host $output.Trim()

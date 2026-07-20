@@ -6,6 +6,7 @@ comptime {
     if (@sizeOf(BootInfo) != 32) @compileError("legacy BootInfo layout changed");
     if (@sizeOf(E820Entry) != 24) @compileError("legacy E820 entry layout changed");
     if (@sizeOf(IdtEntry) != 8) @compileError("legacy IDT entry layout changed");
+    if (@sizeOf(TrapFrame) != 52) @compileError("legacy trap-frame layout changed");
 }
 
 const boot_info_magic: u32 = 0x4F49_425A;
@@ -35,6 +36,22 @@ const E820Entry = extern struct {
     attributes: u32,
 };
 
+const TrapFrame = extern struct {
+    edi: u32,
+    esi: u32,
+    ebp: u32,
+    interrupted_esp: u32,
+    ebx: u32,
+    edx: u32,
+    ecx: u32,
+    eax: u32,
+    vector: u32,
+    error_code: u32,
+    eip: u32,
+    cs: u32,
+    eflags: u32,
+};
+
 const IdtEntry = packed struct {
     offset_low: u16,
     selector: u16,
@@ -53,11 +70,17 @@ extern fn zigos_i686_enable_interrupts() callconv(.c) void;
 extern fn zigos_i686_disable_interrupts() callconv(.c) void;
 extern fn zigos_i686_halt() callconv(.c) void;
 extern fn zigos_i686_irq0_stub() callconv(.c) void;
+extern const zigos_i686_exception_stub_table: [32]u32;
+extern fn zigos_i686_trigger_breakpoint() callconv(.c) void;
 
 var bss_probe: [64]u8 = @splat(0);
 var vga_cursor: usize = 0;
 var idt: [256]IdtEntry = undefined;
 var timer_ticks: u32 = 0;
+var exception_count: u32 = 0;
+var last_exception_vector: u32 = 0;
+var last_exception_error: u32 = 0;
+var last_exception_eip: u32 = 0;
 
 pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     initCom1();
@@ -94,6 +117,25 @@ pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     const ticks = verifyInterruptTimer();
     writeAll("ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x");
     writeHex32(ticks);
+    writeAll("\r\n");
+    haltForever();
+}
+
+pub export fn zigos_i686_exception_dispatch(frame: *const TrapFrame) callconv(.c) void {
+    if (frame.vector == 3) {
+        exception_count +|= 1;
+        last_exception_vector = frame.vector;
+        last_exception_error = frame.error_code;
+        last_exception_eip = frame.eip;
+        return;
+    }
+
+    writeAll("ZigOs i686 fatal exception: vector 0x");
+    writeHex32(frame.vector);
+    writeAll(" error 0x");
+    writeHex32(frame.error_code);
+    writeAll(" eip 0x");
+    writeHex32(frame.eip);
     writeAll("\r\n");
     haltForever();
 }
@@ -171,14 +213,11 @@ fn verifyInterruptTimer() u32 {
         };
     }
 
+    for (0..32) |vector| {
+        setIdtGate(vector, zigos_i686_exception_stub_table[vector]);
+    }
     const handler: u32 = @intCast(@intFromPtr(&zigos_i686_irq0_stub));
-    idt[0x20] = .{
-        .offset_low = @truncate(handler),
-        .selector = 0x0008,
-        .zero = 0,
-        .attributes = 0x8E,
-        .offset_high = @truncate(handler >> 16),
-    };
+    setIdtGate(0x20, handler);
     const base: u32 = @intCast(@intFromPtr(&idt));
     const descriptor = [6]u8{
         0xFF,
@@ -190,6 +229,21 @@ fn verifyInterruptTimer() u32 {
     };
     zigos_i686_load_idt(&descriptor);
 
+    zigos_i686_trigger_breakpoint();
+    zigos_i686_trigger_breakpoint();
+    const exceptions: *volatile u32 = &exception_count;
+    if (exceptions.* != 2 or last_exception_vector != 3 or last_exception_error != 0 or last_exception_eip == 0) {
+        writeAll("ZigOs i686 exceptions failed\r\n");
+        haltForever();
+    }
+    writeAll("ZigOs i686 exceptions verified: vectors 0x00000020 breakpoint-count 0x");
+    writeHex32(exceptions.*);
+    writeAll(" last-vector 0x");
+    writeHex32(last_exception_vector);
+    writeAll(" error 0x");
+    writeHex32(last_exception_error);
+    writeAll(" eip-nonzero yes\r\n");
+
     configurePic();
     configurePit100Hz();
     const ticks: *volatile u32 = &timer_ticks;
@@ -199,6 +253,16 @@ fn verifyInterruptTimer() u32 {
     zigos_i686_out8(0x0021, 0xFF);
     zigos_i686_out8(0x00A1, 0xFF);
     return ticks.*;
+}
+
+fn setIdtGate(vector: usize, handler: u32) void {
+    idt[vector] = .{
+        .offset_low = @truncate(handler),
+        .selector = 0x0008,
+        .zero = 0,
+        .attributes = 0x8E,
+        .offset_high = @truncate(handler >> 16),
+    };
 }
 
 fn configurePic() void {

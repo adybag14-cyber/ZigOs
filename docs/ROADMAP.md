@@ -1708,3 +1708,15 @@
 - The final raw i686 kernel is 3,288 bytes across seven sectors with SHA-256 `AC9B4ED1EF3A1FA2E0DAC48A359C4727DD903073E5596CF8E5C60D05A2057CB3`.
 - The final 1 MiB BIOS disk image SHA-256 is `E3A370A3EDCF287650AE53CB2E04F089FBC79EA9B33E320BEDEBA9EC1E0EF4E1`.
 - GitHub Actions now installs QEMU and executes the complete BIOS stage-0, stage-1, protected-mode, Zig runtime, E820, and hardware-timer boot test in addition to building both architecture artifacts.
+
+
+## 4.41 - Establish a recoverable i686 exception framework
+
+- Added all 32 architectural CPU exception vectors to the legacy IDT while preserving the existing IRQ0 gate.
+- NASM stubs normalize exceptions with and without processor-supplied error codes into one 52-byte trap-frame ABI.
+- The common entry preserves all general registers, aligns the Zig call stack, clears direction state, and returns through `IRETD`.
+- Zig compile-time checks protect the exact trap-frame layout and records vector, error code, and interrupted EIP.
+- Breakpoint vector 3 is explicitly recoverable; two real `INT3` instructions cross the assembly/Zig boundary and resume execution.
+- Unexpected exceptions emit vector, error code, and EIP before entering a nonreturning halt path.
+- Debugcon and COM1 require the exact 32-vector, two-breakpoint, zero-error, nonzero-EIP success marker.
+- The legacy raw payload grows to 4,232 bytes across nine sectors while stage-1 continues to inject exact byte and sector metadata automatically.

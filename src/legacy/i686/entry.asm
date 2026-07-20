@@ -1,4 +1,4 @@
-; ZigOs legacy i686 kernel entry and minimal hardware helpers.
+; ZigOs legacy i686 kernel entry and exact hardware helpers.
 
 bits 32
 
@@ -13,8 +13,11 @@ global zigos_i686_enable_interrupts
 global zigos_i686_disable_interrupts
 global zigos_i686_halt
 global zigos_i686_irq0_stub
+global zigos_i686_exception_stub_table
+global zigos_i686_trigger_breakpoint
 extern zigos_legacy_kernel_main
 extern zigos_i686_timer_interrupt
+extern zigos_i686_exception_dispatch
 extern __bss_start
 extern __bss_end
 
@@ -83,6 +86,10 @@ zigos_i686_halt:
     hlt
     ret
 
+zigos_i686_trigger_breakpoint:
+    int3
+    ret
+
 zigos_i686_irq0_stub:
     pushad
     mov ebp, esp
@@ -94,6 +101,77 @@ zigos_i686_irq0_stub:
     out 0x20, al
     popad
     iretd
+
+; Every exception reaches Zig with the same stack shape:
+; pushad registers, vector, error code, EIP, CS, EFLAGS.
+%macro EXCEPTION_NO_ERROR 1
+zigos_i686_exception_%1:
+    push dword 0
+    push dword %1
+    jmp zigos_i686_exception_common
+%endmacro
+
+%macro EXCEPTION_WITH_ERROR 1
+zigos_i686_exception_%1:
+    push dword %1
+    jmp zigos_i686_exception_common
+%endmacro
+
+EXCEPTION_NO_ERROR 0
+EXCEPTION_NO_ERROR 1
+EXCEPTION_NO_ERROR 2
+EXCEPTION_NO_ERROR 3
+EXCEPTION_NO_ERROR 4
+EXCEPTION_NO_ERROR 5
+EXCEPTION_NO_ERROR 6
+EXCEPTION_NO_ERROR 7
+EXCEPTION_WITH_ERROR 8
+EXCEPTION_NO_ERROR 9
+EXCEPTION_WITH_ERROR 10
+EXCEPTION_WITH_ERROR 11
+EXCEPTION_WITH_ERROR 12
+EXCEPTION_WITH_ERROR 13
+EXCEPTION_WITH_ERROR 14
+EXCEPTION_NO_ERROR 15
+EXCEPTION_NO_ERROR 16
+EXCEPTION_WITH_ERROR 17
+EXCEPTION_NO_ERROR 18
+EXCEPTION_NO_ERROR 19
+EXCEPTION_NO_ERROR 20
+EXCEPTION_WITH_ERROR 21
+EXCEPTION_NO_ERROR 22
+EXCEPTION_NO_ERROR 23
+EXCEPTION_NO_ERROR 24
+EXCEPTION_NO_ERROR 25
+EXCEPTION_NO_ERROR 26
+EXCEPTION_NO_ERROR 27
+EXCEPTION_NO_ERROR 28
+EXCEPTION_WITH_ERROR 29
+EXCEPTION_WITH_ERROR 30
+EXCEPTION_NO_ERROR 31
+
+zigos_i686_exception_common:
+    pushad
+    mov eax, esp
+    mov ebp, esp
+    and esp, -16
+    sub esp, 12
+    push eax
+    cld
+    call zigos_i686_exception_dispatch
+    mov esp, ebp
+    popad
+    add esp, 8
+    iretd
+
+section .rodata
+align 4
+zigos_i686_exception_stub_table:
+%assign exception_index 0
+%rep 32
+    dd zigos_i686_exception_%+exception_index
+%assign exception_index exception_index + 1
+%endrep
 
 section .data
 align 4
