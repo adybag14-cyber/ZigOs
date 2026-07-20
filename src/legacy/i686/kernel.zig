@@ -2638,8 +2638,8 @@ fn ataReadSector(lba: u32, destination_address: u32) bool {
         destination[index * 2] = @truncate(word);
         destination[index * 2 + 1] = @truncate(word >> 8);
     }
-    // Complete READ SECTORS before another ATA command can be issued.
-    return ataWaitReady();
+    // The next ATA command performs the completion wait before programming task-file registers.
+    return true;
 }
 
 fn ataWriteSector(lba: u32, source_address: u32) bool {
