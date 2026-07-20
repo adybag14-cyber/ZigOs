@@ -2623,7 +2623,7 @@ fn ataIdentify(destination: *[256]u16) bool {
 
 fn ataReadSector(lba: u32, destination_address: u32) bool {
     if (ata_sector_count != 0 and lba >= ata_sector_count) return false;
-    if (lba >= 0x1000_0000) return false;
+    if (lba >= 0x1000_0000 or !ataWaitReady()) return false;
     zigos_i686_out8(ata_drive_port, 0xE0 | @as(u8, @truncate(lba >> 24)));
     ataDelay();
     zigos_i686_out8(ata_sector_count_port, 1);
@@ -2638,7 +2638,8 @@ fn ataReadSector(lba: u32, destination_address: u32) bool {
         destination[index * 2] = @truncate(word);
         destination[index * 2 + 1] = @truncate(word >> 8);
     }
-    return true;
+    // Complete READ SECTORS before another ATA command can be issued.
+    return ataWaitReady();
 }
 
 fn ataWriteSector(lba: u32, source_address: u32) bool {

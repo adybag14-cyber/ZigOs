@@ -117,10 +117,10 @@ After the first boot, `NOTES.TXT` occupies root slot 8, contains 720 bytes, and 
 - Kernel physical entry: `0x00010000`.
 - FAT12 partition start: LBA 256.
 - Protected maximum kernel area: 247 sectors.
-- Capstone 8 kernel: 41,900 bytes / 82 sectors at LBA 9–90.
-- Kernel checksum16: `0xE418`.
-- Kernel SHA-256: `F8EDA13F2B5C346607928FF8E3C8AD68CB7A73330D79A2738739ECD95F03BCB8`.
-- Initial image SHA-256: `BDD3C35E082028FA5F31C969536DE277708569F3AAC2D703F586D8B5DCF8B6A2`.
-- Persisted image SHA-256: `3FA03E6A6D618C9B72B408892FAA0F12CCE6FF3FCE2A453200C1F6E72BB756C2`.
+- Capstone 8 kernel: 41,916 bytes / 82 sectors at LBA 9–90.
+- Kernel checksum16: `0x02F3`.
+- Kernel SHA-256: `8A2249E8E48C3B46B55ADC7A9DF13F791373EEDC3FED26AE6A64E7F71F0D8244`.
+- Initial image SHA-256: `FED35C7C9B5D70A7D43C640E66C80065EFA80CF936F12510BA9929978714D23A`.
+- Persisted image SHA-256: `666BCECBD1B34F836CFD5CE24F53D3E152AB16E6C11BF3FEF990659EEB9DE05A`.
 
 The x86-64 UEFI artifact remains an independent regression target and must retain its established byte identity.
