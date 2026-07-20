@@ -50,7 +50,7 @@ $finalMarker = 'ZigOs i686 shell verified: commands 0x00000005 unknown 0x0000000
 $commandPlan = @(
     @{ Command = 'help'; Expect = 'commands: help mem ticks disk cat HELLO.TXT exit' },
     @{ Command = 'mem'; Expect = 'frames-free 0x00001ED1 heap-free 0x00007FF0 heap-base 0x00107000' },
-    @{ Command = 'ticks'; Expect = 'ticks 0x00000005 PIT-Hz 0x00000064' },
+    @{ Command = 'ticks'; Expect = 'ticks 0x0000000C PIT-Hz 0x00000064' },
     @{ Command = 'disk'; Expect = 'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056' },
     @{ Command = 'cat HELLO.TXT'; Expect = 'Loaded through ATA PIO by the i686 kernel.' },
     @{ Command = 'exit'; Expect = $finalMarker }
@@ -115,6 +115,7 @@ $pagingMarker = 'ZigOs i686 paging verified: CR3 0x00100000 CR0 0x80000011 ident
 $heapMarker = 'ZigOs i686 heap verified: base 0x00107000 bytes 0x00008000 free-before 0x00007FF0 first 0x00107010 second 0x00107060 third 0x00107470 reuse 0x00107060 coalesced 0x00007FF0 frames-left 0x00001ED1'
 $ataMarker = 'ZigOs i686 ATA verified: primary-master yes model QEMU HARDDISK LBA28 yes sectors 0x00001000 MBR 0x55AA kernel-LBA 0x00000009 sector-match yes buffer 0x00107010 heap-restored yes'
 $fatMarker = 'ZigOs i686 FAT12 verified: volume-LBA 0x00000040 sectors 0x00000B40 bytes-sector 0x00000200 root-start 0x00000053 data-start 0x00000061 file HELLO.TXT cluster 0x00000002 bytes 0x00000056 hash 0xA9F660F2 chain-end 0x00000FFF heap-restored yes'
+$schedulerMarker = 'ZigOs i686 scheduler verified: policy round-robin tasks 0x00000003 task-a-quanta 0x00000003 task-b-quanta 0x00000003 switches 0x00000007 tick-delta 0x00000007 bootstrap-restored yes'
 
 $debugMarkers = @(
     'ZigOs legacy BIOS stage0 online',
@@ -127,11 +128,11 @@ $debugMarkers = @(
     'ZigOs i686 freestanding kernel image built',
     $runtimeMarker, $exceptionMarker,
     'ZigOs i686 keyboard waiting: IRQ1 0x21 controller-command 0xD2 expected-make 0x1E',
-    $keyboardMarker, $interruptMarker, $frameMarker, $pagingMarker, $heapMarker, $ataMarker, $fatMarker,
+    $keyboardMarker, $interruptMarker, $frameMarker, $pagingMarker, $heapMarker, $ataMarker, $fatMarker, $schedulerMarker,
     $readyMarker,
     'commands: help mem ticks disk cat HELLO.TXT exit',
     'frames-free 0x00001ED1 heap-free 0x00007FF0 heap-base 0x00107000',
-    'ticks 0x00000005 PIT-Hz 0x00000064',
+    'ticks 0x0000000C PIT-Hz 0x00000064',
     'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056',
     'ZigOs legacy FAT12 filesystem is online.',
     'Loaded through ATA PIO by the i686 kernel.',
@@ -147,10 +148,10 @@ if (-not [regex]::IsMatch($serial, $e820Pattern)) { throw "E820 COM1 contract mi
 
 $serialMarkers = @(
     $runtimeMarker, $exceptionMarker, $keyboardMarker, $interruptMarker, $frameMarker,
-    $pagingMarker, $heapMarker, $ataMarker, $fatMarker, $readyMarker,
+    $pagingMarker, $heapMarker, $ataMarker, $fatMarker, $schedulerMarker, $readyMarker,
     'help', 'commands: help mem ticks disk cat HELLO.TXT exit',
     'mem', 'frames-free 0x00001ED1 heap-free 0x00007FF0 heap-base 0x00107000',
-    'ticks', 'ticks 0x00000005 PIT-Hz 0x00000064',
+    'ticks', 'ticks 0x0000000C PIT-Hz 0x00000064',
     'disk', 'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056',
     'cat HELLO.TXT', 'ZigOs legacy FAT12 filesystem is online.',
     'Loaded through ATA PIO by the i686 kernel.', 'exit', $finalMarker

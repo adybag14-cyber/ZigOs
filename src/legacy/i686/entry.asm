@@ -136,9 +136,15 @@ zigos_i686_irq0_stub:
     pushad
     mov ebp, esp
     and esp, -16
+    sub esp, 12
+    push ebp
     cld
     call zigos_i686_timer_interrupt
-    mov esp, ebp
+    test eax, eax
+    jnz .selected_context
+    mov eax, ebp
+.selected_context:
+    mov esp, eax
     mov al, 0x20
     out 0x20, al
     popad

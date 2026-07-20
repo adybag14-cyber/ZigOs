@@ -1804,3 +1804,15 @@
 - The QEMU harness binds COM1 to redirected standard I/O, consumes output asynchronously, and sends six commands one at a time only after the preceding exact response appears, avoiding UART FIFO overrun.
 - Debugcon and the live COM1 transcript must independently contain every command response, the FAT12 payload, and `commands 0x00000005 unknown 0x00000000 exit yes`.
 - The raw kernel is 16,568 bytes across thirty-three sectors with SHA-256 `0D43769F95B59287EDD1556DF808E57AEB09BB217BE1D5F25A2DCFDEFA64D2B8`; the partitioned 2 MiB disk image SHA-256 is `C57A61830F879B091BF7D7C4E3CCA4ECD9646014796CCE0E8605A31B73E5EB77`.
+
+## 4.49 - Preempt legacy i686 kernel tasks
+
+- Changed IRQ0 from a counter-only gate into a stack-switching interrupt dispatcher that passes the complete saved context to Zig and resumes the returned context with `POPAD`/`IRETD`.
+- Added an exact 44-byte ring-0 interrupt-context layout containing all eight `PUSHAD` registers plus EIP, CS, and EFLAGS.
+- Added two independent 4 KiB kernel stacks and synthetic initial interrupt frames with ring-0 code selector `0x08` and IF-enabled EFLAGS.
+- The scheduler uses deterministic round-robin order across bootstrap, task A, and task B while preserving the interrupted bootstrap context.
+- Each worker executes three independently preempted quanta, sleeping with `HLT` between timer interrupts rather than yielding cooperatively.
+- Seven IRQ0 context switches cover bootstrap-to-A, alternating A/B execution, and final restoration of the bootstrap stack.
+- Scheduler shutdown is transactional: the active flag clears in the final timer interrupt before the bootstrap task resumes and masks the PIC.
+- Debugcon and COM1 require exact worker counts `3/3`, switch count `7`, timer delta `7`, and `bootstrap-restored yes`.
+

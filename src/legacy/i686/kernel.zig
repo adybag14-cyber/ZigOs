@@ -7,6 +7,7 @@ comptime {
     if (@sizeOf(E820Entry) != 24) @compileError("legacy E820 entry layout changed");
     if (@sizeOf(IdtEntry) != 8) @compileError("legacy IDT entry layout changed");
     if (@sizeOf(TrapFrame) != 52) @compileError("legacy trap-frame layout changed");
+    if (@sizeOf(InterruptContext) != 44) @compileError("legacy interrupt-context layout changed");
     if (@sizeOf(HeapBlock) != 16) @compileError("legacy heap-block layout changed");
 }
 
@@ -53,6 +54,20 @@ const TrapFrame = extern struct {
     eax: u32,
     vector: u32,
     error_code: u32,
+    eip: u32,
+    cs: u32,
+    eflags: u32,
+};
+
+const InterruptContext = extern struct {
+    edi: u32,
+    esi: u32,
+    ebp: u32,
+    interrupted_esp: u32,
+    ebx: u32,
+    edx: u32,
+    ecx: u32,
+    eax: u32,
     eip: u32,
     cs: u32,
     eflags: u32,
@@ -121,6 +136,15 @@ var fat_file_hash: u32 = 0;
 var fat_ready = false;
 var shell_command_count: u32 = 0;
 var shell_unknown_count: u32 = 0;
+var scheduler_stacks: [3]u32 = @splat(0);
+var scheduler_current: u32 = 0;
+var scheduler_switches: u32 = 0;
+var scheduler_task_a_quanta: u32 = 0;
+var scheduler_task_b_quanta: u32 = 0;
+var scheduler_active = false;
+var scheduler_done = false;
+var scheduler_stack_a: [4096]u8 align(16) = @splat(0);
+var scheduler_stack_b: [4096]u8 align(16) = @splat(0);
 
 pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     initCom1();
@@ -181,8 +205,23 @@ pub export fn zigos_i686_exception_dispatch(frame: *const TrapFrame) callconv(.c
     haltForever();
 }
 
-pub export fn zigos_i686_timer_interrupt() callconv(.c) void {
+pub export fn zigos_i686_timer_interrupt(current_esp: u32) callconv(.c) u32 {
     timer_ticks +|= 1;
+    if (!scheduler_active) return 0;
+
+    scheduler_stacks[scheduler_current] = current_esp;
+    if (scheduler_task_a_quanta >= 3 and scheduler_task_b_quanta >= 3) {
+        scheduler_active = false;
+        scheduler_done = true;
+        scheduler_current = 0;
+        scheduler_switches +|= 1;
+        return scheduler_stacks[0];
+    }
+
+    const next: u32 = if (scheduler_current == 1) 2 else 1;
+    scheduler_current = next;
+    scheduler_switches +|= 1;
+    return scheduler_stacks[next];
 }
 
 pub export fn zigos_i686_keyboard_interrupt() callconv(.c) void {
@@ -557,7 +596,91 @@ fn verifyFat12() void {
     writeAll(" chain-end 0x");
     writeHex32(next_cluster);
     writeAll(" heap-restored yes\r\n");
+    verifyPreemptiveScheduler();
+}
+
+fn verifyPreemptiveScheduler() void {
+    scheduler_stacks = @splat(0);
+    scheduler_current = 0;
+    scheduler_switches = 0;
+    scheduler_task_a_quanta = 0;
+    scheduler_task_b_quanta = 0;
+    scheduler_done = false;
+    scheduler_stacks[1] = initializeKernelTask(&scheduler_stack_a, @intCast(@intFromPtr(&schedulerTaskA)));
+    scheduler_stacks[2] = initializeKernelTask(&scheduler_stack_b, @intCast(@intFromPtr(&schedulerTaskB)));
+    const start_ticks = timer_ticks;
+
+    configurePic();
+    configurePit100Hz();
+    zigos_i686_out8(0x0021, 0xFE);
+    scheduler_active = true;
+    const done: *volatile bool = &scheduler_done;
+    zigos_i686_enable_interrupts();
+    while (!done.*) zigos_i686_halt();
+    zigos_i686_disable_interrupts();
+    zigos_i686_out8(0x0021, 0xFF);
+    zigos_i686_out8(0x00A1, 0xFF);
+
+    const elapsed = timer_ticks -% start_ticks;
+    if (scheduler_active or scheduler_current != 0 or scheduler_task_a_quanta != 3 or
+        scheduler_task_b_quanta != 3 or scheduler_switches != 7 or elapsed != 7)
+    {
+        schedulerFailure("preemption accounting");
+    }
+
+    writeAll("ZigOs i686 scheduler verified: policy round-robin tasks 0x00000003 task-a-quanta 0x");
+    writeHex32(scheduler_task_a_quanta);
+    writeAll(" task-b-quanta 0x");
+    writeHex32(scheduler_task_b_quanta);
+    writeAll(" switches 0x");
+    writeHex32(scheduler_switches);
+    writeAll(" tick-delta 0x");
+    writeHex32(elapsed);
+    writeAll(" bootstrap-restored yes\r\n");
     runShell();
+}
+
+fn initializeKernelTask(stack: *[4096]u8, entry: u32) u32 {
+    const top = @intFromPtr(stack) + stack.len;
+    const context_address: u32 = @intCast(top - @sizeOf(InterruptContext));
+    const context: *InterruptContext = @ptrFromInt(context_address);
+    context.* = .{
+        .edi = 0,
+        .esi = 0,
+        .ebp = 0,
+        .interrupted_esp = 0,
+        .ebx = 0,
+        .edx = 0,
+        .ecx = 0,
+        .eax = 0,
+        .eip = entry,
+        .cs = 0x0008,
+        .eflags = 0x0000_0202,
+    };
+    return context_address;
+}
+
+fn schedulerTaskA() callconv(.c) noreturn {
+    while (true) {
+        scheduler_task_a_quanta +|= 1;
+        zigos_i686_halt();
+    }
+}
+
+fn schedulerTaskB() callconv(.c) noreturn {
+    while (true) {
+        scheduler_task_b_quanta +|= 1;
+        zigos_i686_halt();
+    }
+}
+
+fn schedulerFailure(reason: []const u8) noreturn {
+    scheduler_active = false;
+    zigos_i686_disable_interrupts();
+    writeAll("ZigOs i686 scheduler failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
 }
 
 fn runShell() noreturn {
