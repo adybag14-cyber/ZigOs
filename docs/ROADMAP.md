@@ -1837,3 +1837,14 @@
 - The ring-3 program performs four calls: a 37-byte write, rejected write, getpid, and exit with code 42.
 - Debugcon and COM1 require exact call, byte, PID, rejection, errno, and exit accounting.
 
+## 4.52 - Load ELF32 programs from FAT12
+
+- The deterministic FAT12 generator now emits `INIT.ELF` as a second root file at cluster 3 while retaining `HELLO.TXT` at cluster 2.
+- `INIT.ELF` is a real little-endian ELF32 Intel 80386 executable with a 52-byte ELF header and one 32-byte `PT_LOAD` program header.
+- The host image verifier checks the second root entry, cluster-3 FAT chain, ELF identity, type, machine, entry point, program-header geometry, load address, memory size, and executable flags.
+- The kernel persists validated FAT geometry, locates `INIT.ELF` through the root directory, and reads it through native ATA PIO rather than using embedded program bytes.
+- The loader accepts one bounded `PT_LOAD` segment at `0x00400000`, copies exactly 167 file bytes, and zero-fills the remaining 345 bytes of its 512-byte memory image.
+- The loaded process writes `INIT.ELF executed in ring3 via FAT12.`, obtains PID 1 through `int 0x80`, and exits with code `0x33`.
+- The synchronous ring-3 transition now preserves all cdecl callee-saved registers so user programs may freely clobber EBP, EBX, ESI, and EDI without corrupting kernel metadata.
+- Debugcon and COM1 require file size `0x1A7`, entry `0x00400000`, PT_LOAD file size `0xA7`, memory size `0x200`, flags `5`, PID `1`, exit `0x33`, BSS zeroing, and heap restoration.
+

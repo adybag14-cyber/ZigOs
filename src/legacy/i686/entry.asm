@@ -149,9 +149,13 @@ zigos_i686_read_tr:
     ret
 
 zigos_i686_enter_user:
-    mov [zigos_i686_kernel_return_esp], esp
     mov eax, [esp + 4]
     mov edx, [esp + 8]
+    push ebp
+    push ebx
+    push esi
+    push edi
+    mov [zigos_i686_kernel_return_esp], esp
     mov cx, 0x23
     mov ds, cx
     mov es, cx
@@ -180,6 +184,10 @@ zigos_i686_user_return_stub:
     mov gs, ax
     mov ss, ax
     mov esp, [zigos_i686_kernel_return_esp]
+    pop edi
+    pop esi
+    pop ebx
+    pop ebp
     ret
 
 zigos_i686_syscall_stub:
@@ -203,6 +211,10 @@ zigos_i686_syscall_stub:
     mov gs, ax
     mov ss, ax
     mov esp, [zigos_i686_kernel_return_esp]
+    pop edi
+    pop esi
+    pop ebx
+    pop ebp
     ret
 
 zigos_i686_enable_interrupts:

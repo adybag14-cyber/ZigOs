@@ -58,6 +58,8 @@ if (-not [Linq.Enumerable]::SequenceEqual($fat1, $fat2)) { throw 'FAT12 copies d
 if ($fat1[0] -ne 0xF0 -or $fat1[1] -ne 0xFF -or $fat1[2] -ne 0xFF) { throw 'FAT12 media/reserved entries are invalid.' }
 $cluster2 = $fat1[3] -bor (($fat1[4] -band 0x0F) -shl 8)
 if ($cluster2 -ne 0x0FFF) { throw ('FAT12 cluster 2 is not end-of-chain: 0x{0:X3}' -f $cluster2) }
+$cluster3 = ((([int]$fat1[4]) -shr 4) -bor (([int]$fat1[5]) -shl 4)) -band 0x0FFF
+if ($cluster3 -ne 0x0FFF) { throw ('FAT12 cluster 3 is not end-of-chain: 0x{0:X3}' -f $cluster3) }
 
 $rootOffset = 19 * 512
 $name = [Text.Encoding]::ASCII.GetString($fatVolume, $rootOffset, 11)
@@ -70,11 +72,28 @@ if ($fileLength -ne $expected.Length) { throw 'HELLO.TXT length is invalid.' }
 $fileBytes = [byte[]]$fatVolume[(33 * 512)..(33 * 512 + $fileLength - 1)]
 if (-not [Linq.Enumerable]::SequenceEqual([byte[]]$expected, $fileBytes)) { throw 'HELLO.TXT content differs.' }
 
+$initRoot = $rootOffset + 32
+$initName = [Text.Encoding]::ASCII.GetString($fatVolume, $initRoot, 11)
+if ($initName -ne 'INIT    ELF') { throw "Unexpected second FAT12 root name: '$initName'" }
+if ($fatVolume[$initRoot + 11] -ne 0x20) { throw 'INIT.ELF does not have the archive attribute.' }
+if ([BitConverter]::ToUInt16($fatVolume, $initRoot + 26) -ne 3) { throw 'INIT.ELF does not begin at cluster 3.' }
+$initLength = [BitConverter]::ToUInt32($fatVolume, $initRoot + 28)
+if ($initLength -le 256 -or $initLength -gt 512) { throw "INIT.ELF length is invalid: $initLength" }
+$initOffset = 34 * 512
+$init = [byte[]]$fatVolume[$initOffset..($initOffset + $initLength - 1)]
+if ($init[0] -ne 0x7F -or $init[1] -ne 0x45 -or $init[2] -ne 0x4C -or $init[3] -ne 0x46) { throw 'INIT.ELF magic is invalid.' }
+if ($init[4] -ne 1 -or $init[5] -ne 1 -or $init[6] -ne 1) { throw 'INIT.ELF class/data/version is invalid.' }
+if ([BitConverter]::ToUInt16($init, 16) -ne 2 -or [BitConverter]::ToUInt16($init, 18) -ne 3) { throw 'INIT.ELF type or machine is invalid.' }
+if ([BitConverter]::ToUInt32($init, 24) -ne 0x00400000) { throw 'INIT.ELF entry is invalid.' }
+if ([BitConverter]::ToUInt32($init, 28) -ne 52 -or [BitConverter]::ToUInt16($init, 42) -ne 32 -or [BitConverter]::ToUInt16($init, 44) -ne 1) { throw 'INIT.ELF program-header geometry is invalid.' }
+if ([BitConverter]::ToUInt32($init, 52) -ne 1 -or [BitConverter]::ToUInt32($init, 56) -ne 0x100 -or [BitConverter]::ToUInt32($init, 60) -ne 0x00400000) { throw 'INIT.ELF PT_LOAD identity is invalid.' }
+if ([BitConverter]::ToUInt32($init, 72) -ne 0x200 -or [BitConverter]::ToUInt32($init, 76) -ne 5) { throw 'INIT.ELF memory size or flags are invalid.' }
+
 $kernelSectors = [int][Math]::Ceiling($kernel.Length / 512.0)
 Write-Host "Verified legacy BIOS/FAT12 image: $imagePath"
 Write-Host '  stage0:       512 bytes, signature 0x55AA, partition type 0x01'
 Write-Host '  stage1:       4096 bytes, LBA 1..8, address 0x00008000'
 Write-Host "  kernel:       $($kernel.Length) bytes, $kernelSectors sector(s), LBA 9, address 0x00010000"
-Write-Host '  FAT12:        LBA 64, 2880 sectors, HELLO.TXT cluster 2, 86 bytes'
+Write-Host "  FAT12:        LBA 64, 2880 sectors, HELLO.TXT cluster 2, INIT.ELF cluster 3 ($initLength bytes)"
 Write-Host "  image size:   $($image.Length) bytes"
 Write-Host "  image sha256: $((Get-FileHash $imagePath -Algorithm SHA256).Hash)"

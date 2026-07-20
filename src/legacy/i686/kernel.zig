@@ -187,6 +187,18 @@ var fat_file_length: usize = 0;
 var fat_file_cluster: u16 = 0;
 var fat_file_hash: u32 = 0;
 var fat_ready = false;
+var fat_volume_lba: u32 = 0;
+var fat_start_lba: u32 = 0;
+var fat_root_lba: u32 = 0;
+var fat_data_lba: u32 = 0;
+var fat_bytes_per_sector: u16 = 0;
+var fat_sectors_per_cluster: u8 = 0;
+var init_elf_size: u32 = 0;
+var init_elf_entry: u32 = 0;
+var init_elf_filesz: u32 = 0;
+var init_elf_memsz: u32 = 0;
+var init_elf_hash: u32 = 0;
+var init_elf_exit: u32 = 0;
 var shell_command_count: u32 = 0;
 var shell_unknown_count: u32 = 0;
 var scheduler_stacks: [3]u32 = @splat(0);
@@ -650,6 +662,12 @@ fn verifyFat12() void {
     const fat_start = volume_lba + reserved_sectors;
     const root_start = fat_start + @as(u32, fat_count) * sectors_per_fat;
     const data_start = root_start + root_sectors;
+    fat_volume_lba = volume_lba;
+    fat_start_lba = fat_start;
+    fat_root_lba = root_start;
+    fat_data_lba = data_start;
+    fat_bytes_per_sector = bytes_per_sector;
+    fat_sectors_per_cluster = sectors_per_cluster;
     var found = false;
     var file_size: u32 = 0;
     search: for (0..root_sectors) |sector_index| {
@@ -875,7 +893,111 @@ fn verifySyscallAbi() void {
     writeAll(" exit-code 0x");
     writeHex32(syscall_exit_code);
     writeAll(" kernel-pointer-denied yes\r\n");
+    verifyElfLoader();
+}
+
+fn verifyElfLoader() void {
+    const free_before = heapFreePayloadBytes();
+    const buffer = heapAllocate(512) orelse elfFailure("sector buffer");
+    const sector: [*]const volatile u8 = @ptrFromInt(buffer);
+    var cluster: u16 = 0;
+    var file_size: u32 = 0;
+    var found = false;
+    search: for (0..14) |sector_index| {
+        if (!ataReadSector(fat_root_lba + @as(u32, @intCast(sector_index)), buffer)) elfFailure("read root");
+        for (0..16) |entry_index| {
+            const offset = entry_index * 32;
+            if (sector[offset] == 0) break :search;
+            if (sector[offset] == 0xE5 or sector[offset + 11] == 0x0F) continue;
+            if (!fatNameMatches(sector, offset, "INIT    ELF")) continue;
+            cluster = readLe16(sector, offset + 26);
+            file_size = readLe32(sector, offset + 28);
+            found = true;
+            break :search;
+        }
+    }
+    if (!found or cluster != 3 or file_size > 512 or file_size < 84) elfFailure("INIT.ELF root entry");
+    const cluster_lba = fat_data_lba + (@as(u32, cluster) - 2) * fat_sectors_per_cluster;
+    if (!ataReadSector(cluster_lba, buffer)) elfFailure("read INIT.ELF");
+    if (sector[0] != 0x7F or sector[1] != 'E' or sector[2] != 'L' or sector[3] != 'F' or
+        sector[4] != 1 or sector[5] != 1 or sector[6] != 1 or readLe16(sector, 16) != 2 or
+        readLe16(sector, 18) != 3 or readLe32(sector, 20) != 1)
+    {
+        elfFailure("ELF identity");
+    }
+    const entry = readLe32(sector, 24);
+    const phoff = readLe32(sector, 28);
+    const ehsize = readLe16(sector, 40);
+    const phentsize = readLe16(sector, 42);
+    const phnum = readLe16(sector, 44);
+    if (entry != 0x0040_0000 or phoff != 52 or ehsize != 52 or phentsize != 32 or phnum != 1) {
+        elfFailure("ELF header geometry");
+    }
+    const ph: usize = @intCast(phoff);
+    const segment_type = readLe32(sector, ph);
+    const file_offset = readLe32(sector, ph + 4);
+    const virtual_address = readLe32(sector, ph + 8);
+    const file_bytes = readLe32(sector, ph + 16);
+    const memory_bytes = readLe32(sector, ph + 20);
+    const flags = readLe32(sector, ph + 24);
+    if (segment_type != 1 or file_offset != 0x100 or virtual_address != 0x0040_0000 or
+        file_bytes == 0 or memory_bytes < file_bytes or memory_bytes > 4096 or
+        file_offset + file_bytes > file_size or flags != 5)
+    {
+        elfFailure("PT_LOAD contract");
+    }
+
+    zeroPhysicalFrame(user_code_frame);
+    const destination: [*]volatile u8 = @ptrFromInt(user_code_frame);
+    for (0..file_bytes) |offset| destination[offset] = sector[file_offset + offset];
+    const bss_last: *const volatile u8 = @ptrFromInt(user_code_frame + memory_bytes - 1);
+    if (bss_last.* != 0) elfFailure("BSS zero fill");
+    init_elf_size = file_size;
+    init_elf_entry = entry;
+    init_elf_filesz = file_bytes;
+    init_elf_memsz = memory_bytes;
+    const file_slice: [*]const u8 = @ptrFromInt(buffer);
+    init_elf_hash = fnv1a32(file_slice[0..file_size]);
+
+    syscall_count = 0;
+    syscall_write_bytes = 0;
+    syscall_rejected = 0;
+    syscall_exit_code = 0;
+    syscall_exited = false;
+    zigos_i686_invalidate_page(0x0040_0000);
+    zigos_i686_enter_user(entry, 0x0040_2000);
+    const pid_result: *const volatile u32 = @ptrFromInt(user_code_frame + 0x70);
+    init_elf_exit = syscall_exit_code;
+    if (syscall_count != 3 or syscall_write_bytes != 39 or syscall_rejected != 0 or
+        !syscall_exited or syscall_exit_code != 0x33 or pid_result.* != 1 or bss_last.* != 0)
+    {
+        elfFailure("INIT execution");
+    }
+    if (!heapFree(buffer) or heapFreePayloadBytes() != free_before) elfFailure("heap restoration");
+
+    writeAll("ZigOs i686 ELF verified: file INIT.ELF cluster 0x00000003 bytes 0x");
+    writeHex32(file_size);
+    writeAll(" entry 0x");
+    writeHex32(entry);
+    writeAll(" PT_LOAD-filesz 0x");
+    writeHex32(file_bytes);
+    writeAll(" memsz 0x");
+    writeHex32(memory_bytes);
+    writeAll(" flags 0x");
+    writeHex32(flags);
+    writeAll(" pid 0x");
+    writeHex32(pid_result.*);
+    writeAll(" exit 0x");
+    writeHex32(syscall_exit_code);
+    writeAll(" BSS-zero yes heap-restored yes\r\n");
     runShell();
+}
+
+fn elfFailure(reason: []const u8) noreturn {
+    writeAll("ZigOs i686 ELF failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
 }
 
 fn syscallFailure(reason: []const u8) noreturn {

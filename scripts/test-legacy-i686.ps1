@@ -118,6 +118,7 @@ $fatMarker = 'ZigOs i686 FAT12 verified: volume-LBA 0x00000040 sectors 0x00000B4
 $schedulerMarker = 'ZigOs i686 scheduler verified: policy round-robin tasks 0x00000003 task-a-quanta 0x00000003 task-b-quanta 0x00000003 switches 0x00000007 tick-delta 0x00000007 bootstrap-restored yes'
 $ring3Marker = 'ZigOs i686 ring3 verified: GDT entries 0x00000006 TSS selector 0x00000028 CS 0x0000001B SS 0x00000023 user-ESP 0x00402000 code 0x00400000 stack 0x00402000 sentinel 0xCAFEBABE kernel-user-bit no user-pages yes'
 $syscallMarker = 'ZigOs i686 syscalls verified: vector 0x00000080 calls 0x00000004 write-bytes 0x00000025 getpid 0x00000001 rejected 0x00000001 errno 0xFFFFFFF2 exit-code 0x0000002A kernel-pointer-denied yes'
+$elfMarker = 'ZigOs i686 ELF verified: file INIT.ELF cluster 0x00000003 bytes 0x000001A7 entry 0x00400000 PT_LOAD-filesz 0x000000A7 memsz 0x00000200 flags 0x00000005 pid 0x00000001 exit 0x00000033 BSS-zero yes heap-restored yes'
 
 $debugMarkers = @(
     'ZigOs legacy BIOS stage0 online',
@@ -132,6 +133,7 @@ $debugMarkers = @(
     'ZigOs i686 keyboard waiting: IRQ1 0x21 controller-command 0xD2 expected-make 0x1E',
     $keyboardMarker, $interruptMarker, $frameMarker, $pagingMarker, $heapMarker, $ataMarker, $fatMarker, $schedulerMarker, $ring3Marker,
     'ZigOs ring3 syscall write verified.', $syscallMarker,
+    'INIT.ELF executed in ring3 via FAT12.', $elfMarker,
     $readyMarker,
     'commands: help mem ticks disk cat HELLO.TXT exit',
     'frames-free 0x00001ECF heap-free 0x00007FF0 heap-base 0x00107000',
@@ -152,7 +154,7 @@ if (-not [regex]::IsMatch($serial, $e820Pattern)) { throw "E820 COM1 contract mi
 $serialMarkers = @(
     $runtimeMarker, $exceptionMarker, $keyboardMarker, $interruptMarker, $frameMarker,
     $pagingMarker, $heapMarker, $ataMarker, $fatMarker, $schedulerMarker, $ring3Marker,
-    'ZigOs ring3 syscall write verified.', $syscallMarker, $readyMarker,
+    'ZigOs ring3 syscall write verified.', $syscallMarker, 'INIT.ELF executed in ring3 via FAT12.', $elfMarker, $readyMarker,
     'help', 'commands: help mem ticks disk cat HELLO.TXT exit',
     'mem', 'frames-free 0x00001ECF heap-free 0x00007FF0 heap-base 0x00107000',
     'ticks', 'ticks 0x0000000C PIT-Hz 0x00000064',
