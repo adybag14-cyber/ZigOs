@@ -1684,3 +1684,15 @@
 - The QEMU harness captures both port `0xE9` and COM1 independently and requires the complete runtime invariant marker on both channels.
 - The raw kernel is 1,172 bytes across three BIOS sectors with SHA-256 `6E23F8B09280245316628E2707ABF4ED21738FCC98C1E3DEBF22172C93EB7B49`.
 - The complete disk image SHA-256 is `5C764C2E4ED7D49BBA6195CCE7C7B8B45EE28A4CD87F9EC9E44673D9C1655E3D`.
+
+## 4.39 - Establish a BIOS E820 boot contract
+
+- Stage-1 creates a versioned 32-byte boot-info structure at `0x00005000` and stores up to 64 firmware memory descriptors at `0x00005200`.
+- INT 15h E820 collection validates the `SMAP` signature, accepts 20- or 24-byte records, preserves extended attributes when present, and refuses an empty map.
+- The contract records entry size/count, map address, drive `0x80`, validity flags, kernel physical address, exact byte length, and generated sector count.
+- The boot-info pointer is passed in ESI through the protected-mode jump and captured before BSS initialization by the ELF32 entry.
+- Zig compile-time assertions protect the 32-byte boot-info and 24-byte E820 layouts; runtime checks validate every header field and the 64-entry bound.
+- The kernel computes usable-region count, saturating usable-byte total, and the highest described physical boundary using 64-bit arithmetic on i686.
+- The 32 MiB QEMU machine deterministically reports six entries, two usable regions, `0x0000000001F7FC00` usable bytes, and highest boundary `0x0000000100000000`.
+- Both debugcon and COM1 must carry the exact memory-map statistics while allowing generated kernel byte/sector fields to evolve.
+- The raw kernel is 2,472 bytes across five sectors with SHA-256 `07A70E65AD466A375DD9B5AF2B007C2100DFDAD71263B55761788132005484B5`; the disk image SHA-256 is `C52AB6C0CA7B1469F68C8E84E64E7CB98B2323FCD4B29D141C650BADA1E93826`.

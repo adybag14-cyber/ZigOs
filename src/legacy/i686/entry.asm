@@ -19,6 +19,7 @@ _start:
     and esp, -16
     xor ebp, ebp
     mov [zigos_i686_entry_stack], esp
+    mov [zigos_i686_boot_info_pointer], esi
 
     ; Flat binaries do not carry an initialized BSS payload. Zero it before Zig.
     mov edi, __bss_start
@@ -61,4 +62,6 @@ zigos_i686_out8:
 section .data
 align 4
 global zigos_i686_entry_stack
+global zigos_i686_boot_info_pointer
 zigos_i686_entry_stack: dd 0
+zigos_i686_boot_info_pointer: dd 0

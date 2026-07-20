@@ -50,7 +50,7 @@ $kernelSectors = [int][Math]::Ceiling($kernelBytes.Length / 512.0)
 if ($kernelSectors -lt 1 -or $kernelSectors -gt 127) { throw "Kernel sector count is outside 1..127: $kernelSectors" }
 
 Write-Host "[6/9] Assembling the 8-sector stage1 for $kernelSectors kernel sector(s)"
-& nasm -f bin "-DKERNEL_SECTORS=$kernelSectors" (Join-Path $source 'stage1.asm') -o $stage1
+& nasm -f bin "-DKERNEL_SECTORS=$kernelSectors" "-DKERNEL_BYTES=$($kernelBytes.Length)" (Join-Path $source 'stage1.asm') -o $stage1
 if ($LASTEXITCODE -ne 0) { throw 'BIOS stage1 assembly failed.' }
 
 Write-Host '[7/9] Assembling the 512-byte BIOS stage0'

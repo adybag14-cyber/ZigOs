@@ -53,6 +53,7 @@ $required = @(
     'ZigOs BIOS stage0 verified: drive 0x80 EDD yes signature 0x55AA',
     'ZigOs BIOS stage0 loaded stage1: LBA 1 sectors 8 address 0x00008000',
     'ZigOs BIOS stage1 online: real mode address 0x00008000',
+    'ZigOs BIOS stage1 E820 boot contract ready: info 0x00005000 entries 0x00005200',
     'ZigOs BIOS stage1 loaded kernel: LBA 9 address 0x00010000',
     'ZigOs BIOS stage1 protected mode verified: CS 0x0008 CR0.PE yes kernel 0x00010000',
     'ZigOs i686 freestanding kernel image built',
@@ -61,7 +62,10 @@ $required = @(
 foreach ($marker in $required) {
     if (-not $output.Contains($marker)) { throw "Missing legacy marker: $marker. Output: $output" }
 }
+$e820Pattern = 'ZigOs i686 E820 verified: boot-info 0x00005000 version 0x00000001 entries 0x00000006 usable-regions 0x00000002 usable-bytes 0x0000000001F7FC00 highest 0x0000000100000000 drive 0x80 kernel 0x00010000/0x[0-9A-F]{8}/0x[0-9A-F]{8}'
+if (-not [regex]::IsMatch($output, $e820Pattern)) { throw "E820 debugcon contract missing. Output: $output" }
 $serial = [IO.File]::ReadAllText($serialPath)
+if (-not [regex]::IsMatch($serial, $e820Pattern)) { throw "E820 COM1 contract missing. Serial: $serial" }
 if (-not $serial.Contains('ZigOs i686 runtime verified: vendor GenuineIntel')) { throw "COM1 runtime marker missing. Serial: $serial" }
 if (-not $serial.Contains('PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes')) { throw "COM1 runtime invariants missing. Serial: $serial" }
 
