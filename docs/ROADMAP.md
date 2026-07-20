@@ -1641,3 +1641,14 @@
 - Deterministic values cover payload RCV.NXT `0x2468ACE1 -> 0x2468ACE6`, passive FIN RCV.NXT `0x2468ACEA`, local FIN SND.NXT `0x13579BE0 -> 0x13579BE1`, and active peer-FIN acknowledgement `0x2468ACE2`.
 - The verifier remains packet-free and preserves completions `194/194/23/23`, ingress `213/213`, dispatch `200/1/198`, TX/RX `2/7`, TCP ID `0x7201`, and UDP endpoint cursor/generation `2/49263/135`.
 - Full HPET and 24-bit ACPI PM timer boots validate receive and close semantics through the complete regression harness.
+
+## 4.35 - Add a dual-target i686 build foundation
+
+- Added a separate `src/legacy/i686` architecture path without weakening or conditionally compiling the existing x86-64 UEFI kernel.
+- Canonical Zig now links `kernel.zig` plus a NASM ELF32 entry object for `x86-freestanding-none` with the explicit `i686` CPU baseline.
+- The dedicated linker script fixes the kernel entry and load contract at physical address `0x00010000`, leaving low conventional memory available for BIOS data, loader state, and the protected-mode stack.
+- `zig objcopy` extracts a raw kernel payload from the ELF32 executable without introducing GCC, binutils, or another linker dependency.
+- `verify-legacy-i686.ps1` validates ELF magic, 32-bit class, little-endian encoding, executable type, Intel 80386 machine ID, exact entry address, nonempty payload, initial 127-sector size ceiling, and SHA-256.
+- The first verified outputs are a 4,780-byte ELF32 image and a 280-byte raw payload with SHA-256 `F4BC910D57E6B942C1D41B9EB5FDB304148A5DAF66D5443279A7B65CC8F47683`.
+- The existing AMD64 PE32+ UEFI image remains 888,832 bytes with SHA-256 `ABA23A4C97F504146B1633D846A3F5A46242BC6360CDE9DDA8909A98941F45C2`.
+- GitHub Actions builds and uploads both architecture outputs, establishing the compatibility matrix required for subsequent BIOS boot milestones.

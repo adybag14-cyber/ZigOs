@@ -18,9 +18,13 @@ jobs:
         shell: pwsh
         run: choco install nasm -y --no-progress
 
-      - name: Build with canonical Zig
+      - name: Build x86-64 UEFI with canonical Zig
         shell: pwsh
         run: .\scripts\build.ps1 -Clean
+
+      - name: Build legacy i686 kernel with canonical Zig
+        shell: pwsh
+        run: .\scripts\build-legacy-i686.ps1
 
       - name: Check canonical Zig formatting
         shell: pwsh
@@ -35,4 +39,14 @@ jobs:
         with:
           name: ZigOs-BOOTX64
           path: zig-out/EFI/BOOT/BOOTX64.EFI
+          if-no-files-found: error
+
+
+      - name: Upload legacy i686 kernel
+        uses: actions/upload-artifact@v7
+        with:
+          name: ZigOs-i686-kernel
+          path: |
+            zig-out/legacy/i686/ZIGOS386.ELF
+            zig-out/legacy/i686/ZIGOS386.BIN
           if-no-files-found: error
