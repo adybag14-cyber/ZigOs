@@ -20,6 +20,8 @@ pub const RejectReason = enum(u8) {
     invalid_segment,
     invalid_acknowledgement,
     unexpected_sequence,
+    duplicate_segment,
+    segment_outside_window,
     unsupported_simultaneous_open,
     invalid_retransmission_policy,
 };
@@ -28,7 +30,9 @@ pub const ActionKind = enum(u8) {
     none,
     send_syn,
     send_ack,
+    send_fin_ack,
     connection_reset,
+    connection_closed,
 };
 
 pub const TimerReason = enum(u8) {
@@ -103,6 +107,9 @@ pub const ControlBlock = struct {
     send_window: u16,
     receive_window: u16,
     resets: u32,
+    bytes_received: u64,
+    fins_received: u32,
+    fins_sent: u32,
     retransmission_policy: RetransmissionPolicy,
     retransmission_active: bool,
     retransmission_deadline: u64,
@@ -122,6 +129,9 @@ pub fn init(receive_window: u16) ?ControlBlock {
         .send_window = 0,
         .receive_window = receive_window,
         .resets = 0,
+        .bytes_received = 0,
+        .fins_received = 0,
+        .fins_sent = 0,
         .retransmission_policy = .{
             .initial_timeout_ticks = 0,
             .maximum_timeout_ticks = 0,
@@ -145,6 +155,10 @@ pub fn beginActiveOpen(control: *ControlBlock, initial_sequence: u32) Transition
     control.send_next = initial_sequence +% 1;
     control.receive_next = 0;
     control.send_window = 0;
+    control.resets = 0;
+    control.bytes_received = 0;
+    control.fins_received = 0;
+    control.fins_sent = 0;
     control.retransmission_active = false;
     control.retransmission_deadline = 0;
     control.retransmission_interval = 0;
@@ -179,10 +193,55 @@ pub fn beginActiveOpenAt(
     return transition;
 }
 
+pub fn beginClose(control: *ControlBlock) Transition {
+    const previous = control.state;
+    const next_state: State = switch (previous) {
+        .established => .fin_wait_1,
+        .close_wait => .last_ack,
+        else => return reject(previous, .invalid_state),
+    };
+    const outbound = OutboundSegment{
+        .sequence_number = control.send_next,
+        .acknowledgement_number = control.receive_next,
+        .flags = tcp.flag_fin | tcp.flag_ack,
+        .window_size = control.receive_window,
+    };
+    control.send_next +%= 1;
+    control.fins_sent +|= 1;
+    control.state = next_state;
+    return .{
+        .accepted = true,
+        .previous_state = previous,
+        .state = control.state,
+        .action = .send_fin_ack,
+        .outbound = outbound,
+        .rejection = .none,
+    };
+}
+
+pub fn expireTimeWait(control: *ControlBlock) Transition {
+    const previous = control.state;
+    if (previous != .time_wait) return reject(previous, .invalid_state);
+    control.state = .closed;
+    return .{
+        .accepted = true,
+        .previous_state = previous,
+        .state = control.state,
+        .action = .connection_closed,
+        .outbound = null,
+        .rejection = .none,
+    };
+}
+
 pub fn handleSegment(control: *ControlBlock, segment: SegmentView) Transition {
     return switch (control.state) {
         .syn_sent => handleSynSent(control, segment),
-        .established => handleEstablishedReset(control, segment),
+        .established => handleEstablished(control, segment),
+        .fin_wait_1 => handleFinWait1(control, segment),
+        .fin_wait_2 => handleFinWait2(control, segment),
+        .close_wait => handleCloseWait(control, segment),
+        .last_ack => handleLastAck(control, segment),
+        .time_wait => handleTimeWait(control, segment),
         else => reject(control.state, .invalid_state),
     };
 }
@@ -259,14 +318,7 @@ fn handleSynSent(control: *ControlBlock, segment: SegmentView) Transition {
         control.state = .reset;
         control.resets +|= 1;
         stopRetransmission(control);
-        return .{
-            .accepted = true,
-            .previous_state = previous,
-            .state = control.state,
-            .action = .connection_reset,
-            .outbound = null,
-            .rejection = .none,
-        };
+        return accepted(control, previous, .connection_reset, null);
     }
 
     if (!has_syn) return reject(previous, .invalid_segment);
@@ -283,24 +335,143 @@ fn handleSynSent(control: *ControlBlock, segment: SegmentView) Transition {
     control.send_window = segment.window_size;
     control.state = .established;
     stopRetransmission(control);
-    return .{
-        .accepted = true,
-        .previous_state = previous,
-        .state = control.state,
-        .action = .send_ack,
-        .outbound = .{
-            .sequence_number = control.send_next,
-            .acknowledgement_number = control.receive_next,
-            .flags = tcp.flag_ack,
-            .window_size = control.receive_window,
-        },
-        .rejection = .none,
-    };
+    return accepted(control, previous, .send_ack, makeAck(control));
 }
 
-fn handleEstablishedReset(control: *ControlBlock, segment: SegmentView) Transition {
+fn handleEstablished(control: *ControlBlock, segment: SegmentView) Transition {
     const previous = control.state;
-    if (!hasFlag(segment.flags, tcp.flag_rst)) return reject(previous, .invalid_segment);
+    if (hasFlag(segment.flags, tcp.flag_rst)) return handleSynchronizedReset(control, segment);
+    if (hasFlag(segment.flags, tcp.flag_syn) or !hasFlag(segment.flags, tcp.flag_ack)) {
+        return reject(previous, .invalid_segment);
+    }
+    if (segment.acknowledgement_number != control.send_next) {
+        return reject(previous, .invalid_acknowledgement);
+    }
+    if (segment.payload_length > control.receive_window) {
+        return reject(previous, .segment_outside_window);
+    }
+    if (segment.sequence_number != control.receive_next) {
+        const reason: RejectReason = if (sequenceBefore(segment.sequence_number, control.receive_next))
+            .duplicate_segment
+        else
+            .unexpected_sequence;
+        return acknowledgeRejection(control, previous, reason);
+    }
+
+    control.send_unacknowledged = segment.acknowledgement_number;
+    control.send_window = segment.window_size;
+    if (segment.payload_length != 0) {
+        control.receive_next +%= segment.payload_length;
+        control.bytes_received +|= segment.payload_length;
+    }
+    if (hasFlag(segment.flags, tcp.flag_fin)) {
+        control.receive_next +%= 1;
+        control.fins_received +|= 1;
+        control.state = .close_wait;
+        return accepted(control, previous, .send_ack, makeAck(control));
+    }
+    if (segment.payload_length != 0) return accepted(control, previous, .send_ack, makeAck(control));
+    return accepted(control, previous, .none, null);
+}
+
+fn handleFinWait1(control: *ControlBlock, segment: SegmentView) Transition {
+    const previous = control.state;
+    if (hasFlag(segment.flags, tcp.flag_rst)) return handleSynchronizedReset(control, segment);
+    if (hasFlag(segment.flags, tcp.flag_syn) or !hasFlag(segment.flags, tcp.flag_ack) or
+        segment.payload_length != 0)
+    {
+        return reject(previous, .invalid_segment);
+    }
+    if (segment.acknowledgement_number != control.send_next) {
+        return reject(previous, .invalid_acknowledgement);
+    }
+    if (segment.sequence_number != control.receive_next) {
+        return acknowledgeRejection(control, previous, .unexpected_sequence);
+    }
+    control.send_unacknowledged = segment.acknowledgement_number;
+    control.send_window = segment.window_size;
+    if (hasFlag(segment.flags, tcp.flag_fin)) {
+        control.receive_next +%= 1;
+        control.fins_received +|= 1;
+        control.state = .time_wait;
+        return accepted(control, previous, .send_ack, makeAck(control));
+    }
+    control.state = .fin_wait_2;
+    return accepted(control, previous, .none, null);
+}
+
+fn handleFinWait2(control: *ControlBlock, segment: SegmentView) Transition {
+    const previous = control.state;
+    if (hasFlag(segment.flags, tcp.flag_rst)) return handleSynchronizedReset(control, segment);
+    if (hasFlag(segment.flags, tcp.flag_syn) or !hasFlag(segment.flags, tcp.flag_ack) or
+        segment.payload_length != 0)
+    {
+        return reject(previous, .invalid_segment);
+    }
+    if (segment.acknowledgement_number != control.send_next) {
+        return reject(previous, .invalid_acknowledgement);
+    }
+    if (!hasFlag(segment.flags, tcp.flag_fin)) {
+        if (segment.sequence_number != control.receive_next) {
+            return acknowledgeRejection(control, previous, .unexpected_sequence);
+        }
+        control.send_unacknowledged = segment.acknowledgement_number;
+        control.send_window = segment.window_size;
+        return accepted(control, previous, .none, null);
+    }
+    if (segment.sequence_number != control.receive_next) {
+        const reason: RejectReason = if (segment.sequence_number +% 1 == control.receive_next)
+            .duplicate_segment
+        else
+            .unexpected_sequence;
+        return acknowledgeRejection(control, previous, reason);
+    }
+    control.send_unacknowledged = segment.acknowledgement_number;
+    control.send_window = segment.window_size;
+    control.receive_next +%= 1;
+    control.fins_received +|= 1;
+    control.state = .time_wait;
+    return accepted(control, previous, .send_ack, makeAck(control));
+}
+
+fn handleCloseWait(control: *ControlBlock, segment: SegmentView) Transition {
+    if (hasFlag(segment.flags, tcp.flag_rst)) return handleSynchronizedReset(control, segment);
+    return reject(control.state, .invalid_segment);
+}
+
+fn handleLastAck(control: *ControlBlock, segment: SegmentView) Transition {
+    const previous = control.state;
+    if (hasFlag(segment.flags, tcp.flag_rst)) return handleSynchronizedReset(control, segment);
+    if (hasFlag(segment.flags, tcp.flag_syn) or hasFlag(segment.flags, tcp.flag_fin) or
+        !hasFlag(segment.flags, tcp.flag_ack) or segment.payload_length != 0)
+    {
+        return reject(previous, .invalid_segment);
+    }
+    if (segment.acknowledgement_number != control.send_next) {
+        return reject(previous, .invalid_acknowledgement);
+    }
+    if (segment.sequence_number != control.receive_next) {
+        return acknowledgeRejection(control, previous, .unexpected_sequence);
+    }
+    control.send_unacknowledged = segment.acknowledgement_number;
+    control.send_window = segment.window_size;
+    control.state = .closed;
+    return accepted(control, previous, .connection_closed, null);
+}
+
+fn handleTimeWait(control: *ControlBlock, segment: SegmentView) Transition {
+    if (hasFlag(segment.flags, tcp.flag_rst)) return handleSynchronizedReset(control, segment);
+    if (hasFlag(segment.flags, tcp.flag_fin) and hasFlag(segment.flags, tcp.flag_ack) and
+        segment.payload_length == 0 and segment.sequence_number +% 1 == control.receive_next and
+        segment.acknowledgement_number == control.send_next)
+    {
+        return acknowledgeRejection(control, control.state, .duplicate_segment);
+    }
+    return reject(control.state, .invalid_segment);
+}
+
+fn handleSynchronizedReset(control: *ControlBlock, segment: SegmentView) Transition {
+    const previous = control.state;
     if (hasFlag(segment.flags, tcp.flag_syn) or segment.payload_length != 0) {
         return reject(previous, .invalid_segment);
     }
@@ -310,14 +481,7 @@ fn handleEstablishedReset(control: *ControlBlock, segment: SegmentView) Transiti
     control.state = .reset;
     control.resets +|= 1;
     stopRetransmission(control);
-    return .{
-        .accepted = true,
-        .previous_state = previous,
-        .state = control.state,
-        .action = .connection_reset,
-        .outbound = null,
-        .rejection = .none,
-    };
+    return accepted(control, previous, .connection_reset, null);
 }
 
 fn makeSyn(control: *const ControlBlock) OutboundSegment {
@@ -329,8 +493,48 @@ fn makeSyn(control: *const ControlBlock) OutboundSegment {
     };
 }
 
+fn makeAck(control: *const ControlBlock) OutboundSegment {
+    return .{
+        .sequence_number = control.send_next,
+        .acknowledgement_number = control.receive_next,
+        .flags = tcp.flag_ack,
+        .window_size = control.receive_window,
+    };
+}
+
 fn stopRetransmission(control: *ControlBlock) void {
     control.retransmission_active = false;
+}
+
+fn accepted(
+    control: *const ControlBlock,
+    previous: State,
+    action: ActionKind,
+    outbound: ?OutboundSegment,
+) Transition {
+    return .{
+        .accepted = true,
+        .previous_state = previous,
+        .state = control.state,
+        .action = action,
+        .outbound = outbound,
+        .rejection = .none,
+    };
+}
+
+fn acknowledgeRejection(
+    control: *const ControlBlock,
+    previous: State,
+    reason: RejectReason,
+) Transition {
+    return .{
+        .accepted = false,
+        .previous_state = previous,
+        .state = control.state,
+        .action = .send_ack,
+        .outbound = makeAck(control),
+        .rejection = reason,
+    };
 }
 
 fn timerNoop(
@@ -395,4 +599,5 @@ comptime {
     if (tcp.flag_syn != 0x002) @compileError("TCP SYN flag changed unexpectedly");
     if (tcp.flag_ack != 0x010) @compileError("TCP ACK flag changed unexpectedly");
     if (tcp.flag_rst != 0x004) @compileError("TCP RST flag changed unexpectedly");
+    if (tcp.flag_fin != 0x001) @compileError("TCP FIN flag changed unexpectedly");
 }

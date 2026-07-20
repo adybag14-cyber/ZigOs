@@ -1860,6 +1860,71 @@ pub const TcpRetransmissionReport = struct {
     final_tcp_identification: u16,
 };
 
+pub const TcpReceiveCloseReport = struct {
+    established: bool,
+    initial_receive_next: u32,
+    payload_length: u16,
+    payload_action: tcp_connection.ActionKind,
+    payload_receive_next: u32,
+    payload_bytes_received: u64,
+    payload_acknowledgement: u32,
+    duplicate_rejected: bool,
+    duplicate_reason: tcp_connection.RejectReason,
+    duplicate_ack_exact: bool,
+    duplicate_preserved: bool,
+    out_of_order_rejected: bool,
+    out_of_order_reason: tcp_connection.RejectReason,
+    out_of_order_ack_exact: bool,
+    out_of_order_preserved: bool,
+    oversized_rejected: bool,
+    oversized_reason: tcp_connection.RejectReason,
+    oversized_preserved: bool,
+    passive_fin_payload: u16,
+    passive_state: tcp_connection.State,
+    passive_receive_next: u32,
+    passive_bytes_received: u64,
+    passive_fins_received: u32,
+    passive_acknowledgement: u32,
+    passive_close_state: tcp_connection.State,
+    passive_fin_sequence: u32,
+    passive_send_next: u32,
+    passive_fins_sent: u32,
+    passive_final_state: tcp_connection.State,
+    passive_closed: bool,
+    active_close_state: tcp_connection.State,
+    active_fin_sequence: u32,
+    active_send_next: u32,
+    wrong_fin_ack_rejected: bool,
+    wrong_fin_ack_reason: tcp_connection.RejectReason,
+    wrong_fin_ack_preserved: bool,
+    fin_ack_state: tcp_connection.State,
+    remote_fin_state: tcp_connection.State,
+    remote_fin_acknowledgement: u32,
+    duplicate_fin_rejected: bool,
+    duplicate_fin_reason: tcp_connection.RejectReason,
+    duplicate_fin_ack_exact: bool,
+    duplicate_fin_preserved: bool,
+    time_wait_expired: bool,
+    active_final_state: tcp_connection.State,
+    simultaneous_close: bool,
+    simultaneous_state: tcp_connection.State,
+    reset_compatible: bool,
+    reset_state: tcp_connection.State,
+    packet_free: bool,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    rx_completion_dequeues: u64,
+    ingress_enqueues: u64,
+    ingress_dequeues: u64,
+    packets_dispatched: u64,
+    tcp_dispatched: u64,
+    udp_dispatched: u64,
+    final_tx_cursor: u16,
+    final_rx_cursor: u16,
+    final_tcp_identification: u16,
+};
+
 pub const NtpReopenValidationFailureReport = struct {
     source_kind: time_reference.Kind,
     frequency_hz: u64,
@@ -6416,6 +6481,7 @@ pub const NetworkResult = struct {
     tcp_foundation: TcpFoundationReport,
     tcp_active_open: TcpActiveOpenReport,
     tcp_retransmission: TcpRetransmissionReport,
+    tcp_receive_close: TcpReceiveCloseReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -7388,6 +7454,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const tcp_receive_close = verifyTcpReceiveClose(device, tcp_foundation) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -7631,6 +7701,7 @@ pub fn initializeAndTestNetwork(
         .tcp_foundation = tcp_foundation,
         .tcp_active_open = tcp_active_open,
         .tcp_retransmission = tcp_retransmission,
+        .tcp_receive_close = tcp_receive_close,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -16372,6 +16443,299 @@ fn verifyTcpRetransmission(
         .overflow_start = overflow_start,
         .overflow_deadline = overflow_control.retransmission_deadline,
         .overflow_saturated = overflow_saturated,
+        .packet_free = packet_free,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
+        .rx_completion_dequeues = rxd,
+        .ingress_enqueues = device.software_rx_queue.enqueued,
+        .ingress_dequeues = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .tcp_dispatched = device.tcp_packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+        .final_tx_cursor = device.tx_producer,
+        .final_rx_cursor = device.rx_consumer,
+        .final_tcp_identification = device.next_tcp_identification,
+    };
+}
+
+fn makeEstablishedTcpControl(foundation: TcpFoundationReport) ?tcp_connection.ControlBlock {
+    var control = tcp_connection.init(foundation.syn_window) orelse return null;
+    if (!tcp_connection.beginActiveOpen(&control, foundation.syn_sequence).accepted) return null;
+    const established = tcp_connection.handleSegment(&control, .{
+        .sequence_number = foundation.syn_ack_sequence,
+        .acknowledgement_number = foundation.syn_ack_acknowledgement,
+        .flags = foundation.syn_ack_flags,
+        .window_size = foundation.syn_ack_window,
+    });
+    if (!established.accepted or established.state != .established) return null;
+    return control;
+}
+
+fn verifyTcpReceiveClose(
+    device: *Device,
+    foundation: TcpFoundationReport,
+) ?TcpReceiveCloseReport {
+    const txe_before = completionQueueEnqueued(&tx_completion_queue);
+    const txd_before = completionQueueDequeued(&tx_completion_queue);
+    const rxe_before = completionQueueEnqueued(&rx_completion_queue);
+    const rxd_before = completionQueueDequeued(&rx_completion_queue);
+    const ingress_enqueues_before = device.software_rx_queue.enqueued;
+    const ingress_dequeues_before = device.software_rx_queue.dequeued;
+    const packets_dispatched_before = device.packets_dispatched;
+    const tcp_dispatched_before = device.tcp_packets_dispatched;
+    const udp_dispatched_before = device.udp_packets_dispatched;
+    const tx_cursor_before = device.tx_producer;
+    const rx_cursor_before = device.rx_consumer;
+    const tcp_identification_before = device.next_tcp_identification;
+
+    var passive = makeEstablishedTcpControl(foundation) orelse return null;
+    const initial_receive_next = passive.receive_next;
+    const payload_length: u16 = 5;
+    const payload = tcp_connection.handleSegment(&passive, .{
+        .sequence_number = initial_receive_next,
+        .acknowledgement_number = passive.send_next,
+        .flags = tcp.flag_ack,
+        .window_size = 30_000,
+        .payload_length = payload_length,
+    });
+    const payload_ack = payload.outbound orelse return null;
+    const payload_valid = payload.accepted and payload.state == .established and
+        payload.action == .send_ack and passive.receive_next == initial_receive_next +% payload_length and
+        passive.bytes_received == payload_length and passive.send_window == 30_000 and
+        payload_ack.sequence_number == passive.send_next and
+        payload_ack.acknowledgement_number == passive.receive_next and
+        payload_ack.flags == tcp.flag_ack;
+    if (!payload_valid) return null;
+
+    const after_payload = passive;
+    const duplicate = tcp_connection.handleSegment(&passive, .{
+        .sequence_number = initial_receive_next,
+        .acknowledgement_number = passive.send_next,
+        .flags = tcp.flag_ack,
+        .window_size = 30_000,
+        .payload_length = payload_length,
+    });
+    const duplicate_ack = duplicate.outbound orelse return null;
+    const duplicate_rejected = !duplicate.accepted and duplicate.rejection == .duplicate_segment;
+    const duplicate_ack_exact = duplicate.action == .send_ack and
+        duplicate_ack.acknowledgement_number == after_payload.receive_next and
+        duplicate_ack.sequence_number == after_payload.send_next;
+    const duplicate_preserved = std.meta.eql(passive, after_payload);
+    if (!duplicate_rejected or !duplicate_ack_exact or !duplicate_preserved) return null;
+
+    const before_out_of_order = passive;
+    const out_of_order = tcp_connection.handleSegment(&passive, .{
+        .sequence_number = passive.receive_next +% 3,
+        .acknowledgement_number = passive.send_next,
+        .flags = tcp.flag_ack,
+        .window_size = 30_000,
+        .payload_length = 2,
+    });
+    const out_of_order_ack = out_of_order.outbound orelse return null;
+    const out_of_order_rejected = !out_of_order.accepted and out_of_order.rejection == .unexpected_sequence;
+    const out_of_order_ack_exact = out_of_order.action == .send_ack and
+        out_of_order_ack.acknowledgement_number == before_out_of_order.receive_next and
+        out_of_order_ack.sequence_number == before_out_of_order.send_next;
+    const out_of_order_preserved = std.meta.eql(passive, before_out_of_order);
+    if (!out_of_order_rejected or !out_of_order_ack_exact or !out_of_order_preserved) return null;
+
+    const before_oversized = passive;
+    const oversized = tcp_connection.handleSegment(&passive, .{
+        .sequence_number = passive.receive_next,
+        .acknowledgement_number = passive.send_next,
+        .flags = tcp.flag_ack,
+        .window_size = 30_000,
+        .payload_length = foundation.syn_window + 1,
+    });
+    const oversized_rejected = !oversized.accepted and oversized.rejection == .segment_outside_window;
+    const oversized_preserved = std.meta.eql(passive, before_oversized);
+    if (!oversized_rejected or !oversized_preserved) return null;
+
+    const passive_fin_payload: u16 = 3;
+    const passive_fin = tcp_connection.handleSegment(&passive, .{
+        .sequence_number = passive.receive_next,
+        .acknowledgement_number = passive.send_next,
+        .flags = tcp.flag_fin | tcp.flag_ack,
+        .window_size = 28_000,
+        .payload_length = passive_fin_payload,
+    });
+    const passive_fin_ack = passive_fin.outbound orelse return null;
+    const passive_fin_valid = passive_fin.accepted and passive_fin.state == .close_wait and
+        passive_fin.action == .send_ack and passive.bytes_received == payload_length + passive_fin_payload and
+        passive.fins_received == 1 and passive.receive_next == initial_receive_next +% 9 and
+        passive_fin_ack.acknowledgement_number == passive.receive_next;
+    if (!passive_fin_valid) return null;
+
+    const passive_close = tcp_connection.beginClose(&passive);
+    const passive_close_fin = passive_close.outbound orelse return null;
+    const passive_close_valid = passive_close.accepted and passive_close.state == .last_ack and
+        passive_close.action == .send_fin_ack and passive_close_fin.flags == tcp.flag_fin | tcp.flag_ack and
+        passive_close_fin.sequence_number +% 1 == passive.send_next and
+        passive_close_fin.acknowledgement_number == passive.receive_next and passive.fins_sent == 1;
+    if (!passive_close_valid) return null;
+
+    const passive_final = tcp_connection.handleSegment(&passive, .{
+        .sequence_number = passive.receive_next,
+        .acknowledgement_number = passive.send_next,
+        .flags = tcp.flag_ack,
+        .window_size = 28_000,
+    });
+    const passive_closed = passive_final.accepted and passive_final.state == .closed and
+        passive_final.action == .connection_closed and passive.state == .closed and
+        passive.send_unacknowledged == passive.send_next;
+    if (!passive_closed) return null;
+
+    var active = makeEstablishedTcpControl(foundation) orelse return null;
+    const active_close = tcp_connection.beginClose(&active);
+    const active_fin = active_close.outbound orelse return null;
+    const active_close_valid = active_close.accepted and active_close.state == .fin_wait_1 and
+        active_close.action == .send_fin_ack and active_fin.sequence_number +% 1 == active.send_next and
+        active_fin.acknowledgement_number == active.receive_next and active.fins_sent == 1;
+    if (!active_close_valid) return null;
+
+    const before_wrong_fin_ack = active;
+    const wrong_fin_ack = tcp_connection.handleSegment(&active, .{
+        .sequence_number = active.receive_next,
+        .acknowledgement_number = active.send_next -% 1,
+        .flags = tcp.flag_ack,
+        .window_size = 27_000,
+    });
+    const wrong_fin_ack_rejected = !wrong_fin_ack.accepted and
+        wrong_fin_ack.rejection == .invalid_acknowledgement;
+    const wrong_fin_ack_preserved = std.meta.eql(active, before_wrong_fin_ack);
+    if (!wrong_fin_ack_rejected or !wrong_fin_ack_preserved) return null;
+
+    const fin_ack = tcp_connection.handleSegment(&active, .{
+        .sequence_number = active.receive_next,
+        .acknowledgement_number = active.send_next,
+        .flags = tcp.flag_ack,
+        .window_size = 27_000,
+    });
+    if (!fin_ack.accepted or fin_ack.state != .fin_wait_2 or active.state != .fin_wait_2) return null;
+
+    const remote_fin_sequence = active.receive_next;
+    const remote_fin = tcp_connection.handleSegment(&active, .{
+        .sequence_number = remote_fin_sequence,
+        .acknowledgement_number = active.send_next,
+        .flags = tcp.flag_fin | tcp.flag_ack,
+        .window_size = 27_000,
+    });
+    const remote_fin_ack = remote_fin.outbound orelse return null;
+    const remote_fin_valid = remote_fin.accepted and remote_fin.state == .time_wait and
+        remote_fin.action == .send_ack and active.receive_next == remote_fin_sequence +% 1 and
+        active.fins_received == 1 and remote_fin_ack.acknowledgement_number == active.receive_next;
+    if (!remote_fin_valid) return null;
+
+    const before_duplicate_fin = active;
+    const duplicate_fin = tcp_connection.handleSegment(&active, .{
+        .sequence_number = active.receive_next -% 1,
+        .acknowledgement_number = active.send_next,
+        .flags = tcp.flag_fin | tcp.flag_ack,
+        .window_size = 27_000,
+    });
+    const duplicate_fin_ack = duplicate_fin.outbound orelse return null;
+    const duplicate_fin_rejected = !duplicate_fin.accepted and
+        duplicate_fin.rejection == .duplicate_segment and duplicate_fin.action == .send_ack;
+    const duplicate_fin_ack_exact = duplicate_fin_ack.sequence_number == active.send_next and
+        duplicate_fin_ack.acknowledgement_number == active.receive_next;
+    const duplicate_fin_preserved = std.meta.eql(active, before_duplicate_fin);
+    if (!duplicate_fin_rejected or !duplicate_fin_ack_exact or !duplicate_fin_preserved) return null;
+
+    const time_wait_expiration = tcp_connection.expireTimeWait(&active);
+    const time_wait_expired = time_wait_expiration.accepted and time_wait_expiration.state == .closed and
+        time_wait_expiration.action == .connection_closed and active.state == .closed;
+    if (!time_wait_expired) return null;
+
+    var simultaneous = makeEstablishedTcpControl(foundation) orelse return null;
+    if (!tcp_connection.beginClose(&simultaneous).accepted) return null;
+    const simultaneous_fin = tcp_connection.handleSegment(&simultaneous, .{
+        .sequence_number = simultaneous.receive_next,
+        .acknowledgement_number = simultaneous.send_next,
+        .flags = tcp.flag_fin | tcp.flag_ack,
+        .window_size = 26_000,
+    });
+    const simultaneous_close = simultaneous_fin.accepted and simultaneous_fin.state == .time_wait and
+        simultaneous_fin.action == .send_ack and simultaneous.state == .time_wait;
+    if (!simultaneous_close) return null;
+
+    var reset_control = makeEstablishedTcpControl(foundation) orelse return null;
+    const reset = tcp_connection.handleSegment(&reset_control, .{
+        .sequence_number = reset_control.receive_next,
+        .acknowledgement_number = reset_control.send_next,
+        .flags = tcp.flag_rst | tcp.flag_ack,
+        .window_size = 0,
+    });
+    const reset_compatible = reset.accepted and reset.state == .reset and
+        reset.action == .connection_reset and reset_control.state == .reset;
+    if (!reset_compatible) return null;
+
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const rxd = completionQueueDequeued(&rx_completion_queue);
+    const packet_free = txe == txe_before and txd == txd_before and rxe == rxe_before and rxd == rxd_before and
+        device.software_rx_queue.enqueued == ingress_enqueues_before and
+        device.software_rx_queue.dequeued == ingress_dequeues_before and
+        device.packets_dispatched == packets_dispatched_before and
+        device.tcp_packets_dispatched == tcp_dispatched_before and
+        device.udp_packets_dispatched == udp_dispatched_before and
+        device.tx_producer == tx_cursor_before and device.rx_consumer == rx_cursor_before and
+        device.next_tcp_identification == tcp_identification_before and
+        device.udp_endpoint_count == 2 and device.next_ephemeral_udp_port == 49_263 and
+        device.next_udp_generation == 135;
+    if (!packet_free) return null;
+
+    return .{
+        .established = true,
+        .initial_receive_next = initial_receive_next,
+        .payload_length = payload_length,
+        .payload_action = payload.action,
+        .payload_receive_next = after_payload.receive_next,
+        .payload_bytes_received = after_payload.bytes_received,
+        .payload_acknowledgement = payload_ack.acknowledgement_number,
+        .duplicate_rejected = duplicate_rejected,
+        .duplicate_reason = duplicate.rejection,
+        .duplicate_ack_exact = duplicate_ack_exact,
+        .duplicate_preserved = duplicate_preserved,
+        .out_of_order_rejected = out_of_order_rejected,
+        .out_of_order_reason = out_of_order.rejection,
+        .out_of_order_ack_exact = out_of_order_ack_exact,
+        .out_of_order_preserved = out_of_order_preserved,
+        .oversized_rejected = oversized_rejected,
+        .oversized_reason = oversized.rejection,
+        .oversized_preserved = oversized_preserved,
+        .passive_fin_payload = passive_fin_payload,
+        .passive_state = passive_fin.state,
+        .passive_receive_next = passive_fin_ack.acknowledgement_number,
+        .passive_bytes_received = payload_length + passive_fin_payload,
+        .passive_fins_received = 1,
+        .passive_acknowledgement = passive_fin_ack.acknowledgement_number,
+        .passive_close_state = passive_close.state,
+        .passive_fin_sequence = passive_close_fin.sequence_number,
+        .passive_send_next = passive_close_fin.sequence_number +% 1,
+        .passive_fins_sent = 1,
+        .passive_final_state = passive_final.state,
+        .passive_closed = passive_closed,
+        .active_close_state = active_close.state,
+        .active_fin_sequence = active_fin.sequence_number,
+        .active_send_next = active_fin.sequence_number +% 1,
+        .wrong_fin_ack_rejected = wrong_fin_ack_rejected,
+        .wrong_fin_ack_reason = wrong_fin_ack.rejection,
+        .wrong_fin_ack_preserved = wrong_fin_ack_preserved,
+        .fin_ack_state = fin_ack.state,
+        .remote_fin_state = remote_fin.state,
+        .remote_fin_acknowledgement = remote_fin_ack.acknowledgement_number,
+        .duplicate_fin_rejected = duplicate_fin_rejected,
+        .duplicate_fin_reason = duplicate_fin.rejection,
+        .duplicate_fin_ack_exact = duplicate_fin_ack_exact,
+        .duplicate_fin_preserved = duplicate_fin_preserved,
+        .time_wait_expired = time_wait_expired,
+        .active_final_state = time_wait_expiration.state,
+        .simultaneous_close = simultaneous_close,
+        .simultaneous_state = simultaneous_fin.state,
+        .reset_compatible = reset_compatible,
+        .reset_state = reset.state,
         .packet_free = packet_free,
         .tx_completion_enqueues = txe,
         .tx_completion_dequeues = txd,

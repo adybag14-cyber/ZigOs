@@ -1627,3 +1627,17 @@
 - Invalid-policy, backward-tick, and early-tick paths preserve the complete control block byte-for-byte.
 - The verifier remains packet-free and preserves completions `194/194/23/23`, ingress `213/213`, dispatch `200/1/198`, TX/RX `2/7`, TCP ID `0x7201`, and UDP endpoint cursor/generation `2/49263/135`.
 - Full HPET and 24-bit ACPI PM timer boots validate retransmission timing and cancellation through the complete regression harness.
+
+## 4.34 - Add TCP receive sequencing and graceful close
+
+- Established connections now consume only the exact next receive sequence, advance RCV.NXT by payload length, account received bytes, update the peer window, and emit a cumulative ACK.
+- Duplicate payload and future out-of-order payload produce exact current acknowledgements without mutating the control block; their typed causes are `duplicate_segment` and `unexpected_sequence`.
+- Payload larger than the advertised receive window is rejected as `segment_outside_window` before any sequence, byte, window, or lifecycle state changes.
+- A peer payload-plus-FIN advances RCV.NXT by payload plus one, records the FIN, enters `close_wait`, and emits the exact ACK.
+- Passive application close emits `FIN|ACK`, enters `last_ack`, advances SND.NXT by one, and reaches `closed` only after the matching final ACK.
+- Active close emits `FIN|ACK`, enters `fin_wait_1`, rejects a wrong FIN acknowledgement without mutation, advances through `fin_wait_2`, and enters `time_wait` after the peer FIN.
+- Duplicate FIN in TIME-WAIT is acknowledged again without changing sequence or lifecycle state; explicit TIME-WAIT expiry then transitions to `closed`.
+- A combined peer `FIN|ACK` in `fin_wait_1` implements simultaneous close directly into TIME-WAIT, while synchronized RST handling remains valid from established state.
+- Deterministic values cover payload RCV.NXT `0x2468ACE1 -> 0x2468ACE6`, passive FIN RCV.NXT `0x2468ACEA`, local FIN SND.NXT `0x13579BE0 -> 0x13579BE1`, and active peer-FIN acknowledgement `0x2468ACE2`.
+- The verifier remains packet-free and preserves completions `194/194/23/23`, ingress `213/213`, dispatch `200/1/198`, TX/RX `2/7`, TCP ID `0x7201`, and UDP endpoint cursor/generation `2/49263/135`.
+- Full HPET and 24-bit ACPI PM timer boots validate receive and close semantics through the complete regression harness.
