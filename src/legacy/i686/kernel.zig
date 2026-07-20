@@ -169,6 +169,7 @@ extern var zigos_i686_entry_checksum_ok: u32;
 extern var zigos_i686_entry_checksum_observed: u32;
 extern fn zigos_i686_read_cr0() callconv(.c) u32;
 extern fn zigos_i686_read_cr3() callconv(.c) u32;
+extern fn zigos_i686_write_cr3(page_directory: u32) callconv(.c) void;
 extern fn zigos_i686_enable_paging(page_directory: u32) callconv(.c) void;
 extern fn zigos_i686_invalidate_page(address: u32) callconv(.c) void;
 extern fn zigos_i686_cpuid_vendor(destination: [*]u8) callconv(.c) u32;
@@ -235,7 +236,7 @@ var vfs_sector_buffer: [512]u8 align(16) = @splat(0);
 var vfs_open_count: u32 = 0;
 var vfs_read_count: u32 = 0;
 var vfs_close_count: u32 = 0;
-var process_table: [4]ProcessRecord = @splat(.{});
+var process_table: [8]ProcessRecord = @splat(.{});
 var process_count: u32 = 0;
 var next_pid: u32 = 2;
 var current_pid: u32 = 1;
@@ -251,6 +252,16 @@ var scheduler_active = false;
 var scheduler_done = false;
 var scheduler_stack_a: [4096]u8 align(16) = @splat(0);
 var scheduler_stack_b: [4096]u8 align(16) = @splat(0);
+var user_scheduler_stacks: [3]u32 = @splat(0);
+var user_scheduler_cr3: [3]u32 = @splat(0);
+var user_scheduler_kernel_tops: [3]u32 = @splat(0);
+var user_scheduler_quanta: [3]u32 = @splat(0);
+var user_scheduler_current: u32 = 0;
+var user_scheduler_switches: u32 = 0;
+var user_scheduler_active = false;
+var user_scheduler_done = false;
+var user_scheduler_kernel_stack_a: [4096]u8 align(16) = @splat(0);
+var user_scheduler_kernel_stack_b: [4096]u8 align(16) = @splat(0);
 var kernel_page_directory: u32 = 0;
 var kernel_identity_tables: [4]u32 = @splat(0);
 var kernel_gdt: [6][8]u8 align(8) = @splat(@splat(0));
@@ -329,6 +340,28 @@ pub export fn zigos_i686_exception_dispatch(frame: *const TrapFrame) callconv(.c
 
 pub export fn zigos_i686_timer_interrupt(current_esp: u32) callconv(.c) u32 {
     timer_ticks +|= 1;
+    if (user_scheduler_active) {
+        user_scheduler_stacks[user_scheduler_current] = current_esp;
+        if (user_scheduler_current != 0) user_scheduler_quanta[user_scheduler_current] +|= 1;
+        if (user_scheduler_quanta[1] >= 3 and user_scheduler_quanta[2] >= 3) {
+            user_scheduler_active = false;
+            user_scheduler_done = true;
+            user_scheduler_current = 0;
+            user_scheduler_switches +|= 1;
+            current_pid = 0;
+            kernel_tss.esp0 = user_scheduler_kernel_tops[0];
+            zigos_i686_write_cr3(user_scheduler_cr3[0]);
+            return user_scheduler_stacks[0];
+        }
+
+        const next: u32 = if (user_scheduler_current == 1) 2 else 1;
+        user_scheduler_current = next;
+        user_scheduler_switches +|= 1;
+        current_pid = next + 1;
+        kernel_tss.esp0 = user_scheduler_kernel_tops[next];
+        zigos_i686_write_cr3(user_scheduler_cr3[next]);
+        return user_scheduler_stacks[next];
+    }
     if (!scheduler_active) return 0;
 
     scheduler_stacks[scheduler_current] = current_esp;
@@ -1211,10 +1244,179 @@ fn initializeVfsAndProcesses() void {
     writeHex32(first_read);
     writeAll("/0x");
     writeHex32(second_read);
-    writeAll(" process-capacity 0x00000004 PID1 exited 0x");
+    writeAll(" process-capacity 0x00000008 PID1 exited 0x");
     writeHex32(init_elf_exit);
     writeAll("\r\n");
+    verifyUserProcessScheduler();
     runShell();
+}
+
+fn verifyUserProcessScheduler() void {
+    const free_before = free_frame_count;
+    var frames: [8]u32 = @splat(0);
+    for (&frames) |*frame| frame.* = allocateFrame() orelse userSchedulerFailure("frame allocation");
+
+    const task_a_directory = frames[0];
+    const task_a_table = frames[1];
+    const task_a_code = frames[2];
+    const task_a_stack = frames[3];
+    const task_b_directory = frames[4];
+    const task_b_table = frames[5];
+    const task_b_code = frames[6];
+    const task_b_stack = frames[7];
+    buildUserAddressSpace(task_a_directory, task_a_table, task_a_code, task_a_stack);
+    buildUserAddressSpace(task_b_directory, task_b_table, task_b_code, task_b_stack);
+
+    const program = [_]u8{ 0xFF, 0x05, 0x00, 0x01, 0x40, 0x00, 0xEB, 0xF8 };
+    const task_a_bytes: [*]volatile u8 = @ptrFromInt(task_a_code);
+    const task_b_bytes: [*]volatile u8 = @ptrFromInt(task_b_code);
+    for (program, 0..) |byte, index| {
+        task_a_bytes[index] = byte;
+        task_b_bytes[index] = byte;
+    }
+    const task_a_counter: *volatile u32 = @ptrFromInt(task_a_code + 0x100);
+    const task_b_counter: *volatile u32 = @ptrFromInt(task_b_code + 0x100);
+    task_a_counter.* = 0x1100_0000;
+    task_b_counter.* = 0x2200_0000;
+
+    process_table[1] = .{
+        .pid = 2,
+        .name = fatName("WORKA   BIN"),
+        .exit_code = 0,
+        .state = .running,
+    };
+    process_table[2] = .{
+        .pid = 3,
+        .name = fatName("WORKB   BIN"),
+        .exit_code = 0,
+        .state = .running,
+    };
+    process_count = 3;
+    next_pid = 4;
+    last_spawned_pid = 3;
+
+    user_scheduler_stacks = @splat(0);
+    user_scheduler_cr3 = @splat(0);
+    user_scheduler_kernel_tops = @splat(0);
+    user_scheduler_quanta = @splat(0);
+    user_scheduler_current = 0;
+    user_scheduler_switches = 0;
+    user_scheduler_done = false;
+    user_scheduler_cr3[0] = kernel_page_directory;
+    user_scheduler_cr3[1] = task_a_directory;
+    user_scheduler_cr3[2] = task_b_directory;
+    user_scheduler_kernel_tops[0] = @intCast(@intFromPtr(&user_transition_stack) + user_transition_stack.len);
+    user_scheduler_kernel_tops[1] = @intCast(@intFromPtr(&user_scheduler_kernel_stack_a) + user_scheduler_kernel_stack_a.len);
+    user_scheduler_kernel_tops[2] = @intCast(@intFromPtr(&user_scheduler_kernel_stack_b) + user_scheduler_kernel_stack_b.len);
+    user_scheduler_stacks[1] = initializeUserTask(&user_scheduler_kernel_stack_a);
+    user_scheduler_stacks[2] = initializeUserTask(&user_scheduler_kernel_stack_b);
+    const start_ticks = timer_ticks;
+
+    configurePic();
+    configurePit100Hz();
+    zigos_i686_out8(0x0021, 0xFE);
+    user_scheduler_active = true;
+    const done: *volatile bool = &user_scheduler_done;
+    zigos_i686_enable_interrupts();
+    while (!done.*) zigos_i686_halt();
+    zigos_i686_disable_interrupts();
+    zigos_i686_out8(0x0021, 0xFF);
+    zigos_i686_out8(0x00A1, 0xFF);
+
+    const elapsed = timer_ticks -% start_ticks;
+    const observed_a = task_a_counter.*;
+    const observed_b = task_b_counter.*;
+    const directory_a: [*]const volatile u32 = @ptrFromInt(task_a_directory);
+    const directory_b: [*]const volatile u32 = @ptrFromInt(task_b_directory);
+    var failure_mask: u32 = 0;
+    if (user_scheduler_active or user_scheduler_current != 0 or !user_scheduler_done) failure_mask |= 1 << 0;
+    if (user_scheduler_quanta[1] != 3 or user_scheduler_quanta[2] != 3) failure_mask |= 1 << 1;
+    if (user_scheduler_switches != 7 or elapsed != 7) failure_mask |= 1 << 2;
+    if (zigos_i686_read_cr3() != kernel_page_directory) failure_mask |= 1 << 3;
+    if (task_a_directory == task_b_directory or task_a_code == task_b_code or task_a_stack == task_b_stack) failure_mask |= 1 << 4;
+    if (user_scheduler_kernel_tops[1] == user_scheduler_kernel_tops[2]) failure_mask |= 1 << 5;
+    if ((directory_a[0] & 0x004) != 0 or (directory_b[0] & 0x004) != 0) failure_mask |= 1 << 6;
+    if ((directory_a[1] & 0x007) != 0x007 or (directory_b[1] & 0x007) != 0x007) failure_mask |= 1 << 7;
+    if (observed_a <= 0x1100_0000 or observed_b <= 0x2200_0000) failure_mask |= 1 << 8;
+    if ((observed_a >> 24) != 0x11 or (observed_b >> 24) != 0x22 or observed_a == observed_b) failure_mask |= 1 << 9;
+    if (kernel_tss.esp0 != user_scheduler_kernel_tops[0] or current_pid != 0) failure_mask |= 1 << 10;
+    if (failure_mask != 0) {
+        writeAll("ZigOs i686 user scheduler failed: predicate-mask 0x");
+        writeHex32(failure_mask);
+        writeAll("\r\n");
+        haltForever();
+    }
+
+    process_table[1].exit_code = 0x40;
+    process_table[1].state = .exited;
+    process_table[2].exit_code = 0x41;
+    process_table[2].state = .exited;
+
+    var frame_index: usize = frames.len;
+    while (frame_index != 0) {
+        frame_index -= 1;
+        if (!freeFrame(frames[frame_index])) userSchedulerFailure("frame release");
+    }
+    if (free_frame_count != free_before) userSchedulerFailure("frame restoration");
+
+    writeAll("ZigOs i686 user scheduler verified: policy preemptive-CPL3 tasks 0x00000002 address-spaces 0x00000002 switches 0x");
+    writeHex32(user_scheduler_switches);
+    writeAll(" quanta 0x");
+    writeHex32(user_scheduler_quanta[1]);
+    writeAll("/0x");
+    writeHex32(user_scheduler_quanta[2]);
+    writeAll(" tick-delta 0x");
+    writeHex32(elapsed);
+    writeAll(" CR3-distinct yes kernel-stacks distinct shared-VA 0x00400100 tags 0x");
+    writeHex8(@truncate(observed_a >> 24));
+    writeAll("/0x");
+    writeHex8(@truncate(observed_b >> 24));
+    writeAll(" active yes frames-restored yes\r\n");
+}
+
+fn buildUserAddressSpace(directory_frame: u32, table_frame: u32, code_frame: u32, stack_frame: u32) void {
+    zeroPhysicalFrame(directory_frame);
+    zeroPhysicalFrame(table_frame);
+    zeroPhysicalFrame(code_frame);
+    zeroPhysicalFrame(stack_frame);
+    const source: [*]const volatile u32 = @ptrFromInt(kernel_page_directory);
+    const destination: [*]volatile u32 = @ptrFromInt(directory_frame);
+    for (0..1024) |index| destination[index] = source[index];
+    destination[1] = table_frame | 0x007;
+    const table: [*]volatile u32 = @ptrFromInt(table_frame);
+    table[0] = code_frame | 0x007;
+    table[2] = stack_frame | 0x007;
+}
+
+fn initializeUserTask(stack: *[4096]u8) u32 {
+    const top = @intFromPtr(stack) + stack.len;
+    const context_address: u32 = @intCast(top - @sizeOf(UserReturnFrame));
+    const context: *UserReturnFrame = @ptrFromInt(context_address);
+    context.* = .{
+        .edi = 0,
+        .esi = 0,
+        .ebp = 0,
+        .interrupted_esp = 0,
+        .ebx = 0,
+        .edx = 0,
+        .ecx = 0,
+        .eax = 0,
+        .eip = 0x0040_0000,
+        .cs = 0x001B,
+        .eflags = 0x0000_0202,
+        .user_esp = 0x0040_3000,
+        .user_ss = 0x0023,
+    };
+    return context_address;
+}
+
+fn userSchedulerFailure(reason: []const u8) noreturn {
+    user_scheduler_active = false;
+    zigos_i686_disable_interrupts();
+    writeAll("ZigOs i686 user scheduler failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
 }
 
 fn fatName(comptime text: []const u8) [11]u8 {
@@ -1467,7 +1669,7 @@ fn runShell() noreturn {
                 if (descriptor.open) descriptors_closed = false;
             }
             if (vfs_open_count != 3 or vfs_read_count != 4 or vfs_close_count != 3 or
-                process_count != 2 or last_spawned_pid != 2 or syscall_exit_code != 0x33 or
+                process_count != 4 or last_spawned_pid != 4 or syscall_exit_code != 0x33 or
                 !descriptors_closed or shell_command_count != 8 or shell_unknown_count != 0)
             {
                 shellFailure("VFS/process accounting");

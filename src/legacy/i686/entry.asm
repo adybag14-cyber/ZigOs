@@ -7,6 +7,7 @@ section .text
 global _start
 global zigos_i686_read_cr0
 global zigos_i686_read_cr3
+global zigos_i686_write_cr3
 global zigos_i686_enable_paging
 global zigos_i686_invalidate_page
 global zigos_i686_cpuid_vendor
@@ -83,6 +84,12 @@ zigos_i686_read_cr0:
 
 zigos_i686_read_cr3:
     mov eax, cr3
+    ret
+
+; cdecl: void zigos_i686_write_cr3(u32 page_directory)
+zigos_i686_write_cr3:
+    mov eax, [esp + 4]
+    mov cr3, eax
     ret
 
 ; cdecl: void zigos_i686_enable_paging(u32 page_directory)
@@ -254,6 +261,11 @@ zigos_i686_trigger_breakpoint:
 
 zigos_i686_irq0_stub:
     pushad
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
     mov ebp, esp
     and esp, -16
     sub esp, 12
@@ -264,6 +276,18 @@ zigos_i686_irq0_stub:
     jnz .selected_context
     mov eax, ebp
 .selected_context:
+    mov edx, [eax + 36]
+    test dl, 3
+    jz .kernel_data_segments
+    mov dx, 0x23
+    jmp .load_data_segments
+.kernel_data_segments:
+    mov dx, 0x10
+.load_data_segments:
+    mov ds, dx
+    mov es, dx
+    mov fs, dx
+    mov gs, dx
     mov esp, eax
     mov al, 0x20
     out 0x20, al

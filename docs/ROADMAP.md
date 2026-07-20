@@ -1876,3 +1876,17 @@
 - Reference hashes: kernel `9EDE0CCE5959951212740814AE3EE701F4BFBF6DF5AE01C6F46C880840B327F6`; disk image `F91559C52FDB6CC684474493A131641405A1569380F469FC7B2B5E78C70FAE6F`.
 - The complete nine-command COM1 shell session and every prior legacy subsystem contract continue to pass unchanged after the layout and integrity upgrade.
 
+## 6.0 - Capstone preemptive multiprocess userspace
+
+- Added a CR3 write primitive and a timer interrupt path that can select either ring-0 or ring-3 saved contexts.
+- IRQ0 normalizes data segments before entering Zig and restores ring-appropriate selectors from the selected context before `IRETD`.
+- Two runnable CPL3 processes each own a page directory, user page table, physical code page, physical stack page, and dedicated 4 KiB kernel privilege stack.
+- The scheduler updates CR3, current PID, and TSS `esp0` on every task selection.
+- Both processes execute at `0x00400000` and modify virtual address `0x00400100`, while physical tags `0x11` and `0x22` prove isolation across address spaces.
+- The deterministic PIT schedule delivers three quanta to each process, performs seven total switches, and restores the bootstrap task, kernel CR3, TSS stack, and PID state.
+- Eight temporary paging and user frames are released after the proof, with exact free-frame restoration.
+- The process table expands to eight slots and retains PID1 `INIT.ELF`, PID2 `WORKA.BIN`, PID3 `WORKB.BIN`, and shell-launched PID4 `INIT.ELF`.
+- The complete COM1 shell contract now reports timer count `0x13`, all four exited processes, and unchanged VFS descriptor accounting.
+- Reference kernel: 29,948 bytes, 59 sectors at LBA9-67, checksum16 `0x6B47`, SHA-256 `3818AEBF59C33B216EB54BD7817B82062D4962D62A046D4D24B5DBC98715453A`.
+- Reference disk image SHA-256: `E2B46B4971DDFD812E0AA778B7416265B4B928E1395F869DF8EFB0B447721094`.
+
