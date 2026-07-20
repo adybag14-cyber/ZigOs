@@ -48,12 +48,22 @@ Write-Host '[5/10] Verifying legacy kernel contracts'
 & (Join-Path $PSScriptRoot 'verify-legacy-i686.ps1') -ElfPath $elf -BinaryPath $binary
 $kernelBytes = [IO.File]::ReadAllBytes($binary)
 $kernelSectors = [int][Math]::Ceiling($kernelBytes.Length / 512.0)
-if ($kernelSectors -lt 1 -or $kernelSectors -gt 55) {
-    throw "Kernel sector count overlaps the FAT12 partition or is invalid: $kernelSectors"
+$fatPartitionLba = 256
+$maximumKernelSectors = $fatPartitionLba - 9
+if ($kernelSectors -lt 1 -or $kernelSectors -gt $maximumKernelSectors) {
+    throw "Kernel sector count overlaps the LBA256 FAT12 partition or is invalid: $kernelSectors"
 }
+$paddedKernel = New-Object byte[] ($kernelSectors * 512)
+[Array]::Copy($kernelBytes, $paddedKernel, $kernelBytes.Length)
+$kernelChecksum = 0
+for ($offset = 0; $offset -lt $paddedKernel.Length; $offset += 2) {
+    $word = [int]$paddedKernel[$offset] -bor (([int]$paddedKernel[$offset + 1]) -shl 8)
+    $kernelChecksum = ($kernelChecksum + $word) -band 0xFFFF
+}
+$kernelChecksumDefine = ('0x{0:X4}' -f $kernelChecksum)
 
-Write-Host "[6/10] Assembling the 8-sector stage1 for $kernelSectors kernel sector(s)"
-& nasm -f bin "-DKERNEL_SECTORS=$kernelSectors" "-DKERNEL_BYTES=$($kernelBytes.Length)" (Join-Path $source 'stage1.asm') -o $stage1
+Write-Host "[6/10] Assembling the 8-sector stage1 for $kernelSectors kernel sector(s), checksum $kernelChecksumDefine"
+& nasm -f bin "-DKERNEL_SECTORS=$kernelSectors" "-DKERNEL_BYTES=$($kernelBytes.Length)" "-DKERNEL_CHECKSUM=$kernelChecksumDefine" "-DFAT_LBA=$fatPartitionLba" (Join-Path $source 'stage1.asm') -o $stage1
 if ($LASTEXITCODE -ne 0) { throw 'BIOS stage1 assembly failed.' }
 
 Write-Host '[7/10] Assembling the 512-byte BIOS stage0'
@@ -62,7 +72,7 @@ if ($LASTEXITCODE -ne 0) { throw 'BIOS boot-sector assembly failed.' }
 
 Write-Host '[8/10] Generating deterministic FAT12 data volume'
 $python = Get-Command python -ErrorAction Stop | Select-Object -ExpandProperty Source
-& $python (Join-Path $PSScriptRoot 'create-legacy-fat12.py') --output $fatVolume
+& $python (Join-Path $PSScriptRoot 'create-legacy-fat12.py') --output $fatVolume --hidden-sectors $fatPartitionLba
 if ($LASTEXITCODE -ne 0) { throw 'FAT12 volume generation failed.' }
 $fatBytes = [IO.File]::ReadAllBytes($fatVolume)
 if ($fatBytes.Length -ne 1474560) { throw "FAT12 volume size is invalid: $($fatBytes.Length)" }
@@ -74,7 +84,7 @@ $stage1Bytes = [IO.File]::ReadAllBytes($stage1)
 [Array]::Copy($bootBytes, 0, $imageBytes, 0, $bootBytes.Length)
 [Array]::Copy($stage1Bytes, 0, $imageBytes, 512, $stage1Bytes.Length)
 [Array]::Copy($kernelBytes, 0, $imageBytes, 9 * 512, $kernelBytes.Length)
-[Array]::Copy($fatBytes, 0, $imageBytes, 64 * 512, $fatBytes.Length)
+[Array]::Copy($fatBytes, 0, $imageBytes, $fatPartitionLba * 512, $fatBytes.Length)
 
 $partition = 446
 $imageBytes[$partition + 0] = 0x00
@@ -85,7 +95,7 @@ $imageBytes[$partition + 4] = 0x01
 $imageBytes[$partition + 5] = 0xFE
 $imageBytes[$partition + 6] = 0xFF
 $imageBytes[$partition + 7] = 0xFF
-[BitConverter]::GetBytes([uint32]64).CopyTo($imageBytes, $partition + 8)
+[BitConverter]::GetBytes([uint32]$fatPartitionLba).CopyTo($imageBytes, $partition + 8)
 [BitConverter]::GetBytes([uint32]2880).CopyTo($imageBytes, $partition + 12)
 [IO.File]::WriteAllBytes($diskImage, $imageBytes)
 

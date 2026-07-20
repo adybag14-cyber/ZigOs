@@ -1862,3 +1862,17 @@
 - The final raw kernel occupies 27,124 bytes across 53 sectors, ending at LBA61 and preserving the enforced LBA64 FAT12 partition boundary; SHA-256 is `8CFEF2BF57955860A251C8027F09185B9568DBC80FDF01545CBD0875176F257F`.
 - The final partitioned 2 MiB image SHA-256 is `A88410AC06C2446D3260EA891E3CC745E34BFF1AEEEB7D02D0516A3FFC83FE39`.
 
+## 5.0 - Capstone platform release
+
+- Promoted the legacy BIOS/i686 runtime from milestone numbering to the versioned `5.0.0` capstone release.
+- Relocated the FAT12 partition from LBA64 to LBA256 and raised the bounded kernel capacity from 55 to 247 sectors.
+- Stage-1 now loads the kernel through repeated EDD requests of at most 64 sectors while advancing both destination segments and source LBAs.
+- The build computes an additive little-endian checksum16 over the complete padded kernel-sector image.
+- Stage-1 verifies the checksum before entering protected mode; `_start` independently verifies the same in-memory image before modifying `.data` or clearing BSS.
+- Boot-info ABI version 2 retains its exact 32-byte size and carries checksum16, FAT LBA256, and explicit E820/chunked-load/checksum flags `0x07`.
+- The kernel rejects inconsistent versions, flags, sector bounds, FAT placement, or entry-stage checksum state.
+- The host image verifier requires a zero-filled protected gap from the padded kernel end through LBA255, preventing unnoticed filesystem overlap.
+- The reference kernel occupies 27,388 bytes across 54 sectors at LBA9-62, checksum16 `0x2FA8`, leaving 193 sectors / 98,816 bytes of reserved growth.
+- Reference hashes: kernel `9EDE0CCE5959951212740814AE3EE701F4BFBF6DF5AE01C6F46C880840B327F6`; disk image `F91559C52FDB6CC684474493A131641405A1569380F469FC7B2B5E78C70FAE6F`.
+- The complete nine-command COM1 shell session and every prior legacy subsystem contract continue to pass unchanged after the layout and integrity upgrade.
+

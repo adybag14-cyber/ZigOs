@@ -31,11 +31,11 @@ const BootInfo = extern struct {
     e820_entries_address: u32,
     boot_drive: u8,
     flags: u8,
-    reserved0: u16,
+    kernel_checksum16: u16,
     kernel_address: u32,
     kernel_bytes: u32,
     kernel_sectors: u16,
-    reserved1: u16,
+    fat_partition_lba: u16,
 };
 
 const E820Entry = extern struct {
@@ -165,6 +165,8 @@ const IdtEntry = packed struct {
 extern var zigos_i686_entry_stack: u32;
 extern const __kernel_end: u8;
 extern var zigos_i686_boot_info_pointer: u32;
+extern var zigos_i686_entry_checksum_ok: u32;
+extern var zigos_i686_entry_checksum_observed: u32;
 extern fn zigos_i686_read_cr0() callconv(.c) u32;
 extern fn zigos_i686_read_cr3() callconv(.c) u32;
 extern fn zigos_i686_enable_paging(page_directory: u32) callconv(.c) void;
@@ -405,11 +407,13 @@ fn verifyAndReportBootInfo() void {
     }
 
     const info: *const BootInfo = @ptrFromInt(pointer);
-    const valid = info.magic == boot_info_magic and info.version == 1 and info.size == @sizeOf(BootInfo) and
+    const valid = info.magic == boot_info_magic and info.version == 2 and info.size == @sizeOf(BootInfo) and
         info.e820_entry_size == @sizeOf(E820Entry) and info.e820_entry_count != 0 and
         info.e820_entry_count <= maximum_e820_entries and info.e820_entries_address == 0x0000_5200 and
-        info.boot_drive == 0x80 and (info.flags & 1) != 0 and info.kernel_address == 0x0001_0000 and
-        info.kernel_bytes != 0 and info.kernel_sectors != 0;
+        info.boot_drive == 0x80 and (info.flags & 0x07) == 0x07 and info.kernel_address == 0x0001_0000 and
+        info.kernel_bytes != 0 and info.kernel_sectors != 0 and info.kernel_sectors <= 247 and
+        info.fat_partition_lba == 256 and zigos_i686_entry_checksum_ok == 1 and
+        zigos_i686_entry_checksum_observed == info.kernel_checksum16;
     if (!valid) {
         writeAll("ZigOs i686 E820 failed: invalid boot contract\r\n");
         return;
@@ -450,6 +454,12 @@ fn verifyAndReportBootInfo() void {
     writeHex32(info.kernel_bytes);
     writeAll("/0x");
     writeHex32(info.kernel_sectors);
+    writeAll(" loader checksum16 0x");
+    writeHex32(info.kernel_checksum16);
+    writeAll(" entry-checksum yes FAT-LBA 0x");
+    writeHex32(info.fat_partition_lba);
+    writeAll(" flags 0x");
+    writeHex8(info.flags);
     writeAll("\r\n");
 }
 
@@ -679,7 +689,7 @@ fn verifyFat12() void {
     if (sector[partition_offset + 4] != 0x01) fatFailure("partition type");
     const volume_lba = readLe32(sector, partition_offset + 8);
     const partition_sectors = readLe32(sector, partition_offset + 12);
-    if (volume_lba != 64 or partition_sectors != 2880) fatFailure("partition geometry");
+    if (volume_lba != 256 or partition_sectors != 2880) fatFailure("partition geometry");
 
     if (!ataReadSector(volume_lba, buffer)) fatFailure("read BPB");
     const bytes_per_sector = readLe16(sector, 11);

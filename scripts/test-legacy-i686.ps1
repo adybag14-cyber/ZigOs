@@ -117,7 +117,7 @@ $frameMarker = 'ZigOs i686 frame allocator verified: managed-limit 0x04000000 fr
 $pagingMarker = 'ZigOs i686 paging verified: CR3 0x00100000 CR0 0x80000011 identity-MiB 0x00000010 tables 0x00000004 alias 0xC0000000 physical 0x00106000 value 0xA5A55A5A free-frames 0x00001ED9'
 $heapMarker = 'ZigOs i686 heap verified: base 0x00107000 bytes 0x00008000 free-before 0x00007FF0 first 0x00107010 second 0x00107060 third 0x00107470 reuse 0x00107060 coalesced 0x00007FF0 frames-left 0x00001ED1'
 $ataMarker = 'ZigOs i686 ATA verified: primary-master yes model QEMU HARDDISK LBA28 yes sectors 0x00001000 MBR 0x55AA kernel-LBA 0x00000009 sector-match yes buffer 0x00107010 heap-restored yes'
-$fatMarker = 'ZigOs i686 FAT12 verified: volume-LBA 0x00000040 sectors 0x00000B40 bytes-sector 0x00000200 root-start 0x00000053 data-start 0x00000061 file HELLO.TXT cluster 0x00000002 bytes 0x00000056 hash 0xA9F660F2 chain-end 0x00000FFF heap-restored yes'
+$fatMarker = 'ZigOs i686 FAT12 verified: volume-LBA 0x00000100 sectors 0x00000B40 bytes-sector 0x00000200 root-start 0x00000113 data-start 0x00000121 file HELLO.TXT cluster 0x00000002 bytes 0x00000056 hash 0xA9F660F2 chain-end 0x00000FFF heap-restored yes'
 $schedulerMarker = 'ZigOs i686 scheduler verified: policy round-robin tasks 0x00000003 task-a-quanta 0x00000003 task-b-quanta 0x00000003 switches 0x00000007 tick-delta 0x00000007 bootstrap-restored yes'
 $ring3Marker = 'ZigOs i686 ring3 verified: GDT entries 0x00000006 TSS selector 0x00000028 CS 0x0000001B SS 0x00000023 user-ESP 0x00402000 code 0x00400000 stack 0x00402000 sentinel 0xCAFEBABE kernel-user-bit no user-pages yes'
 $syscallMarker = 'ZigOs i686 syscalls verified: vector 0x00000080 calls 0x00000004 write-bytes 0x00000025 getpid 0x00000001 rejected 0x00000001 errno 0xFFFFFFF2 exit-code 0x0000002A kernel-pointer-denied yes'
@@ -131,6 +131,7 @@ $debugMarkers = @(
     'ZigOs BIOS stage0 loaded stage1: LBA 1 sectors 8 address 0x00008000',
     'ZigOs BIOS stage1 online: real mode address 0x00008000',
     'ZigOs BIOS stage1 E820 boot contract ready: info 0x00005000 entries 0x00005200',
+    'ZigOs BIOS stage1 kernel verified: chunked-EDD yes max-chunk 0x0040 checksum16 yes FAT-LBA 0x00000100',
     'ZigOs BIOS stage1 loaded kernel: LBA 9 address 0x00010000',
     'ZigOs BIOS stage1 protected mode verified: CS 0x0008 CR0.PE yes kernel 0x00010000',
     'ZigOs i686 freestanding kernel image built',
@@ -155,7 +156,7 @@ foreach ($marker in $debugMarkers) {
     if (-not $debug.Contains($marker)) { throw "Missing debugcon marker: $marker. Output: $debug" }
 }
 
-$e820Pattern = 'ZigOs i686 E820 verified: boot-info 0x00005000 version 0x00000001 entries 0x00000006 usable-regions 0x00000002 usable-bytes 0x0000000001F7FC00 highest 0x0000000100000000 drive 0x80 kernel 0x00010000/0x[0-9A-F]{8}/0x[0-9A-F]{8}'
+$e820Pattern = 'ZigOs i686 E820 verified: boot-info 0x00005000 version 0x00000002 entries 0x00000006 usable-regions 0x00000002 usable-bytes 0x0000000001F7FC00 highest 0x0000000100000000 drive 0x80 kernel 0x00010000/0x[0-9A-F]{8}/0x[0-9A-F]{8} loader checksum16 0x[0-9A-F]{8} entry-checksum yes FAT-LBA 0x00000100 flags 0x07'
 if (-not [regex]::IsMatch($debug, $e820Pattern)) { throw "E820 debugcon contract missing. Output: $debug" }
 if (-not [regex]::IsMatch($serial, $e820Pattern)) { throw "E820 COM1 contract missing. Serial: $serial" }
 

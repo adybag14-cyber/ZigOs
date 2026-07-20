@@ -42,6 +42,25 @@ _start:
     mov esp, 0x0009F000
     and esp, -16
     xor ebp, ebp
+
+    ; Verify the exact padded sector image before any kernel .data or BSS mutation.
+    mov ebx, esi
+    movzx ecx, word [ebx + 28]
+    shl ecx, 8
+    mov edi, 0x00010000
+    xor edx, edx
+.checksum_words:
+    mov ax, [edi]
+    add dx, ax
+    add edi, 2
+    loop .checksum_words
+    movzx eax, dx
+    mov [zigos_i686_entry_checksum_observed], eax
+    xor eax, eax
+    cmp dx, [ebx + 18]
+    sete al
+    mov [zigos_i686_entry_checksum_ok], eax
+
     mov [zigos_i686_entry_stack], esp
     mov [zigos_i686_boot_info_pointer], esi
 
@@ -338,7 +357,11 @@ section .data
 align 4
 global zigos_i686_entry_stack
 global zigos_i686_boot_info_pointer
+global zigos_i686_entry_checksum_ok
+global zigos_i686_entry_checksum_observed
 zigos_i686_entry_stack: dd 0
 zigos_i686_boot_info_pointer: dd 0
+zigos_i686_entry_checksum_ok: dd 0
+zigos_i686_entry_checksum_observed: dd 0
 global zigos_i686_kernel_return_esp
 zigos_i686_kernel_return_esp: dd 0

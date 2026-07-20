@@ -51,13 +51,13 @@ def root_entry(volume:bytearray,index:int,name:bytes,cluster:int,data:bytes)->No
     o=ROOT_START*BPS+index*32; volume[o:o+11]=name; volume[o+11]=0x20
     struct.pack_into("<H",volume,o+26,cluster); struct.pack_into("<I",volume,o+28,len(data))
 
-def build_volume()->bytes:
+def build_volume(hidden_sectors:int)->bytes:
     v=bytearray(TOTAL*BPS); boot=memoryview(v)[:BPS]
     boot[0:3]=b"\xEB\x3C\x90"; boot[3:11]=b"ZIGOS   "; struct.pack_into("<H",boot,11,BPS)
     boot[13]=SPC; struct.pack_into("<H",boot,14,RESERVED); boot[16]=FATS
     struct.pack_into("<H",boot,17,ROOT_ENTRIES); struct.pack_into("<H",boot,19,TOTAL); boot[21]=0xF0
     struct.pack_into("<H",boot,22,SPF); struct.pack_into("<H",boot,24,18); struct.pack_into("<H",boot,26,2)
-    struct.pack_into("<I",boot,28,64); boot[36]=0x80; boot[38]=0x29; struct.pack_into("<I",boot,39,0x5A49474F)
+    struct.pack_into("<I",boot,28,hidden_sectors); boot[36]=0x80; boot[38]=0x29; struct.pack_into("<I",boot,39,0x5A49474F)
     boot[43:54]=b"ZIGOS FAT12"; boot[54:62]=b"FAT12   "; message=b"ZigOs FAT12 data volume"; boot[62:62+len(message)]=message; boot[510:512]=b"\x55\xAA"
     fat=bytearray(SPF*BPS); fat[:3]=b"\xF0\xFF\xFF"; set_fat12_entry(fat,2,0xfff); set_fat12_entry(fat,3,0xfff)
     for i in range(FATS):
@@ -68,7 +68,8 @@ def build_volume()->bytes:
     return bytes(v)
 
 def main()->None:
-    ap=argparse.ArgumentParser(); ap.add_argument("--output",type=Path,required=True); a=ap.parse_args()
-    volume=build_volume(); a.output.parent.mkdir(parents=True,exist_ok=True); a.output.write_bytes(volume)
-    print(f"Created FAT12 volume: {a.output} | sectors={TOTAL} root={ROOT_START} data={DATA_START} hello={len(HELLO)} init_elf={len(INIT_ELF)} elf_fnv={fnv1a32(INIT_ELF):08X}")
+    ap=argparse.ArgumentParser(); ap.add_argument("--output",type=Path,required=True); ap.add_argument("--hidden-sectors",type=int,default=256); a=ap.parse_args()
+    if a.hidden_sectors < 64 or a.hidden_sectors > 0xffff: raise SystemExit("hidden sector count outside supported range")
+    volume=build_volume(a.hidden_sectors); a.output.parent.mkdir(parents=True,exist_ok=True); a.output.write_bytes(volume)
+    print(f"Created FAT12 volume: {a.output} | hidden={a.hidden_sectors} sectors={TOTAL} root={ROOT_START} data={DATA_START} hello={len(HELLO)} init_elf={len(INIT_ELF)} elf_fnv={fnv1a32(INIT_ELF):08X}")
 if __name__=="__main__": main()

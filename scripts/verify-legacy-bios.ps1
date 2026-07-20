@@ -18,7 +18,7 @@ $image = [IO.File]::ReadAllBytes($imagePath)
 if ($boot.Length -ne 512) { throw "BIOS stage0 must be exactly 512 bytes; got $($boot.Length)." }
 if ($boot[510] -ne 0x55 -or $boot[511] -ne 0xAA) { throw 'BIOS stage0 is missing the 0x55AA signature.' }
 if ($stage1.Length -ne 4096) { throw "BIOS stage1 must be exactly 4096 bytes; got $($stage1.Length)." }
-if ($kernel.Length -le 0 -or $kernel.Length -gt (55 * 512)) { throw "Kernel payload size is invalid: $($kernel.Length)." }
+if ($kernel.Length -le 0 -or $kernel.Length -gt (247 * 512)) { throw "Kernel payload size is invalid: $($kernel.Length)." }
 if ($fatVolume.Length -ne 1474560) { throw "FAT12 volume must be exactly 1.44 MiB; got $($fatVolume.Length)." }
 if ($image.Length -ne 2097152) { throw "Legacy disk image must be exactly 2 MiB; got $($image.Length)." }
 
@@ -30,7 +30,7 @@ $stage1Image = [byte[]]$image[512..4607]
 $kernelStart = 9 * 512
 $kernelEnd = $kernelStart + $kernel.Length - 1
 $kernelImage = [byte[]]$image[$kernelStart..$kernelEnd]
-$fatStart = 64 * 512
+$fatStart = 256 * 512
 $fatEnd = $fatStart + $fatVolume.Length - 1
 $fatImage = [byte[]]$image[$fatStart..$fatEnd]
 if (-not [Linq.Enumerable]::SequenceEqual([byte[]]$stage1, $stage1Image)) { throw 'Stage1 image bytes differ.' }
@@ -39,7 +39,7 @@ if (-not [Linq.Enumerable]::SequenceEqual([byte[]]$fatVolume, $fatImage)) { thro
 
 $partition = 446
 if ($image[$partition + 4] -ne 0x01) { throw 'The first MBR partition is not FAT12 type 0x01.' }
-if ([BitConverter]::ToUInt32($image, $partition + 8) -ne 64) { throw 'The FAT12 partition does not start at LBA 64.' }
+if ([BitConverter]::ToUInt32($image, $partition + 8) -ne 256) { throw 'The FAT12 partition does not start at LBA 256.' }
 if ([BitConverter]::ToUInt32($image, $partition + 12) -ne 2880) { throw 'The FAT12 partition length is not 2,880 sectors.' }
 
 if ($fatVolume[510] -ne 0x55 -or $fatVolume[511] -ne 0xAA) { throw 'FAT12 boot sector signature is invalid.' }
@@ -50,7 +50,7 @@ if ($fatVolume[16] -ne 2) { throw 'FAT12 copy count is invalid.' }
 if ([BitConverter]::ToUInt16($fatVolume, 17) -ne 224) { throw 'FAT12 root-entry count is invalid.' }
 if ([BitConverter]::ToUInt16($fatVolume, 19) -ne 2880) { throw 'FAT12 total-sector count is invalid.' }
 if ([BitConverter]::ToUInt16($fatVolume, 22) -ne 9) { throw 'FAT12 sectors-per-FAT is invalid.' }
-if ([BitConverter]::ToUInt32($fatVolume, 28) -ne 64) { throw 'FAT12 hidden-sector count is invalid.' }
+if ([BitConverter]::ToUInt32($fatVolume, 28) -ne 256) { throw 'FAT12 hidden-sector count is invalid.' }
 
 $fat1 = [byte[]]$fatVolume[(1 * 512)..((1 + 9) * 512 - 1)]
 $fat2 = [byte[]]$fatVolume[(10 * 512)..((10 + 9) * 512 - 1)]
@@ -90,10 +90,23 @@ if ([BitConverter]::ToUInt32($init, 52) -ne 1 -or [BitConverter]::ToUInt32($init
 if ([BitConverter]::ToUInt32($init, 72) -ne 0x200 -or [BitConverter]::ToUInt32($init, 76) -ne 5) { throw 'INIT.ELF memory size or flags are invalid.' }
 
 $kernelSectors = [int][Math]::Ceiling($kernel.Length / 512.0)
+
+$paddedKernel = New-Object byte[] ($kernelSectors * 512)
+[Array]::Copy($kernel, $paddedKernel, $kernel.Length)
+$kernelChecksum = 0
+for ($offset = 0; $offset -lt $paddedKernel.Length; $offset += 2) {
+    $word = [int]$paddedKernel[$offset] -bor (([int]$paddedKernel[$offset + 1]) -shl 8)
+    $kernelChecksum = ($kernelChecksum + $word) -band 0xFFFF
+}
+$kernelEndLba = 9 + $kernelSectors - 1
+if ($kernelEndLba -ge 256) { throw "Kernel overlaps FAT12 partition at LBA256." }
+for ($offset = (9 + $kernelSectors) * 512; $offset -lt 256 * 512; $offset++) {
+    if ($image[$offset] -ne 0) { throw "Non-zero byte found in protected kernel/FAT gap at image offset $offset." }
+}
 Write-Host "Verified legacy BIOS/FAT12 image: $imagePath"
 Write-Host '  stage0:       512 bytes, signature 0x55AA, partition type 0x01'
 Write-Host '  stage1:       4096 bytes, LBA 1..8, address 0x00008000'
-Write-Host "  kernel:       $($kernel.Length) bytes, $kernelSectors sector(s), LBA 9, address 0x00010000"
-Write-Host "  FAT12:        LBA 64, 2880 sectors, HELLO.TXT cluster 2, INIT.ELF cluster 3 ($initLength bytes)"
+Write-Host "  kernel:       $($kernel.Length) bytes, $kernelSectors sector(s), LBA 9..$kernelEndLba, checksum16 0x$('{0:X4}' -f $kernelChecksum), address 0x00010000"
+Write-Host "  FAT12:        LBA 256, 2880 sectors, HELLO.TXT cluster 2, INIT.ELF cluster 3 ($initLength bytes)"
 Write-Host "  image size:   $($image.Length) bytes"
 Write-Host "  image sha256: $((Get-FileHash $imagePath -Algorithm SHA256).Hash)"
