@@ -16,6 +16,7 @@ const maximum_e820_entries: u16 = 64;
 const frame_size: u32 = 4096;
 const managed_memory_limit: u32 = 64 * 1024 * 1024;
 const managed_frame_count: usize = managed_memory_limit / frame_size;
+const expected_fat_file = "ZigOs legacy FAT12 filesystem is online.\r\nLoaded through ATA PIO by the i686 kernel.\r\n";
 const frame_bitmap_bytes: usize = managed_frame_count / 8;
 
 const BootInfo = extern struct {
@@ -113,6 +114,11 @@ var ata_model: [40]u8 = @splat(0);
 var ata_model_length: usize = 0;
 var ata_sector_count: u32 = 0;
 var ata_ready = false;
+var fat_file_content: [256]u8 = @splat(0);
+var fat_file_length: usize = 0;
+var fat_file_cluster: u16 = 0;
+var fat_file_hash: u32 = 0;
+var fat_ready = false;
 
 pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     initCom1();
@@ -458,6 +464,135 @@ fn verifyHeap() void {
     verifyAta();
 }
 
+fn verifyFat12() void {
+    const free_before = heapFreePayloadBytes();
+    const buffer = heapAllocate(512) orelse fatFailure("sector buffer");
+    const sector: [*]const volatile u8 = @ptrFromInt(buffer);
+
+    if (!ataReadSector(0, buffer)) fatFailure("read MBR");
+    const partition_offset: usize = 446;
+    if (sector[partition_offset + 4] != 0x01) fatFailure("partition type");
+    const volume_lba = readLe32(sector, partition_offset + 8);
+    const partition_sectors = readLe32(sector, partition_offset + 12);
+    if (volume_lba != 64 or partition_sectors != 2880) fatFailure("partition geometry");
+
+    if (!ataReadSector(volume_lba, buffer)) fatFailure("read BPB");
+    const bytes_per_sector = readLe16(sector, 11);
+    const sectors_per_cluster = sector[13];
+    const reserved_sectors = readLe16(sector, 14);
+    const fat_count = sector[16];
+    const root_entries = readLe16(sector, 17);
+    const total_sectors = readLe16(sector, 19);
+    const sectors_per_fat = readLe16(sector, 22);
+    const hidden_sectors = readLe32(sector, 28);
+    if (bytes_per_sector != 512 or sectors_per_cluster != 1 or reserved_sectors != 1 or
+        fat_count != 2 or root_entries != 224 or total_sectors != 2880 or
+        sectors_per_fat != 9 or hidden_sectors != volume_lba or sector[510] != 0x55 or sector[511] != 0xAA)
+    {
+        fatFailure("BPB contract");
+    }
+
+    const root_sectors: u32 = (@as(u32, root_entries) * 32 + bytes_per_sector - 1) / bytes_per_sector;
+    const fat_start = volume_lba + reserved_sectors;
+    const root_start = fat_start + @as(u32, fat_count) * sectors_per_fat;
+    const data_start = root_start + root_sectors;
+    var found = false;
+    var file_size: u32 = 0;
+    search: for (0..root_sectors) |sector_index| {
+        if (!ataReadSector(root_start + @as(u32, @intCast(sector_index)), buffer)) fatFailure("read root");
+        for (0..16) |entry_index| {
+            const offset = entry_index * 32;
+            const first = sector[offset];
+            if (first == 0) break :search;
+            if (first == 0xE5) continue;
+            const attributes = sector[offset + 11];
+            if (attributes == 0x0F or (attributes & 0x08) != 0) continue;
+            if (!fatNameMatches(sector, offset, "HELLO   TXT")) continue;
+            fat_file_cluster = readLe16(sector, offset + 26);
+            file_size = readLe32(sector, offset + 28);
+            found = true;
+            break :search;
+        }
+    }
+    if (!found or fat_file_cluster < 2 or file_size != expected_fat_file.len or file_size > fat_file_content.len) {
+        fatFailure("HELLO.TXT root entry");
+    }
+
+    const fat_offset: u32 = @as(u32, fat_file_cluster) + @as(u32, fat_file_cluster) / 2;
+    const fat_sector_lba = fat_start + fat_offset / bytes_per_sector;
+    const fat_byte_offset: usize = @intCast(fat_offset % bytes_per_sector);
+    if (fat_byte_offset >= 511 or !ataReadSector(fat_sector_lba, buffer)) fatFailure("read FAT");
+    const pair = @as(u16, sector[fat_byte_offset]) | (@as(u16, sector[fat_byte_offset + 1]) << 8);
+    const next_cluster: u16 = if ((fat_file_cluster & 1) == 0) pair & 0x0FFF else pair >> 4;
+    if (next_cluster < 0x0FF8) fatFailure("multi-cluster chain not expected");
+
+    const cluster_lba = data_start + (@as(u32, fat_file_cluster) - 2) * sectors_per_cluster;
+    if (!ataReadSector(cluster_lba, buffer)) fatFailure("read file cluster");
+    fat_file_length = @intCast(file_size);
+    for (0..fat_file_length) |index| fat_file_content[index] = sector[index];
+    if (!equalBytes(fat_file_content[0..fat_file_length], expected_fat_file)) fatFailure("file content");
+    fat_file_hash = fnv1a32(fat_file_content[0..fat_file_length]);
+    if (fat_file_hash != 0xA9F6_60F2) fatFailure("file hash");
+    if (!heapFree(buffer) or heapFreePayloadBytes() != free_before) fatFailure("heap restoration");
+    fat_ready = true;
+
+    writeAll("ZigOs i686 FAT12 verified: volume-LBA 0x");
+    writeHex32(volume_lba);
+    writeAll(" sectors 0x");
+    writeHex32(partition_sectors);
+    writeAll(" bytes-sector 0x");
+    writeHex32(bytes_per_sector);
+    writeAll(" root-start 0x");
+    writeHex32(root_start);
+    writeAll(" data-start 0x");
+    writeHex32(data_start);
+    writeAll(" file HELLO.TXT cluster 0x");
+    writeHex32(fat_file_cluster);
+    writeAll(" bytes 0x");
+    writeHex32(file_size);
+    writeAll(" hash 0x");
+    writeHex32(fat_file_hash);
+    writeAll(" chain-end 0x");
+    writeHex32(next_cluster);
+    writeAll(" heap-restored yes\r\n");
+}
+
+fn readLe16(bytes: [*]const volatile u8, offset: usize) u16 {
+    return @as(u16, bytes[offset]) | (@as(u16, bytes[offset + 1]) << 8);
+}
+
+fn readLe32(bytes: [*]const volatile u8, offset: usize) u32 {
+    return @as(u32, bytes[offset]) |
+        (@as(u32, bytes[offset + 1]) << 8) |
+        (@as(u32, bytes[offset + 2]) << 16) |
+        (@as(u32, bytes[offset + 3]) << 24);
+}
+
+fn fatNameMatches(bytes: [*]const volatile u8, offset: usize, expected: []const u8) bool {
+    if (expected.len != 11) return false;
+    for (expected, 0..) |value, index| if (bytes[offset + index] != value) return false;
+    return true;
+}
+
+fn equalBytes(left: []const u8, right: []const u8) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |a, b| if (a != b) return false;
+    return true;
+}
+
+fn fnv1a32(bytes: []const u8) u32 {
+    var hash: u32 = 0x811C_9DC5;
+    for (bytes) |byte| hash = (hash ^ byte) *% 0x0100_0193;
+    return hash;
+}
+
+fn fatFailure(reason: []const u8) noreturn {
+    writeAll("ZigOs i686 FAT12 failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
+}
+
 const ata_data_port: u16 = 0x01F0;
 const ata_sector_count_port: u16 = 0x01F2;
 const ata_lba_low_port: u16 = 0x01F3;
@@ -493,6 +628,7 @@ fn verifyAta() void {
     writeAll(" MBR 0x55AA kernel-LBA 0x00000009 sector-match yes buffer 0x");
     writeHex32(buffer);
     writeAll(" heap-restored yes\r\n");
+    verifyFat12();
 }
 
 fn ataIdentify(destination: *[256]u16) bool {
@@ -512,7 +648,7 @@ fn ataIdentify(destination: *[256]u16) bool {
 }
 
 fn ataReadSector(lba: u32, destination_address: u32) bool {
-    if (!ata_ready and ata_sector_count != 0 and lba >= ata_sector_count) return false;
+    if (ata_sector_count != 0 and lba >= ata_sector_count) return false;
     if (lba >= 0x1000_0000) return false;
     zigos_i686_out8(ata_drive_port, 0xE0 | @as(u8, @truncate(lba >> 24)));
     ataDelay();

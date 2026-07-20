@@ -37,7 +37,8 @@ $interruptMarker = 'ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x00000
 $frameMarker = 'ZigOs i686 frame allocator verified: managed-limit 0x04000000 frame-size 0x00001000 free-before 0x00001EE0 first 0x00100000 second 0x00101000 third 0x00102000 reuse 0x00101000 free-after 0x00001EE0 kernel-end-below-1M yes'
 $pagingMarker = 'ZigOs i686 paging verified: CR3 0x00100000 CR0 0x80000011 identity-MiB 0x00000010 tables 0x00000004 alias 0xC0000000 physical 0x00106000 value 0xA5A55A5A free-frames 0x00001ED9'
 $heapMarker = 'ZigOs i686 heap verified: base 0x00107000 bytes 0x00008000 free-before 0x00007FF0 first 0x00107010 second 0x00107060 third 0x00107470 reuse 0x00107060 coalesced 0x00007FF0 frames-left 0x00001ED1'
-$finalMarker = 'ZigOs i686 ATA verified: primary-master yes model QEMU HARDDISK LBA28 yes sectors 0x00000800 MBR 0x55AA kernel-LBA 0x00000009 sector-match yes buffer 0x00107010 heap-restored yes'
+$ataMarker = 'ZigOs i686 ATA verified: primary-master yes model QEMU HARDDISK LBA28 yes sectors 0x00001000 MBR 0x55AA kernel-LBA 0x00000009 sector-match yes buffer 0x00107010 heap-restored yes'
+$finalMarker = 'ZigOs i686 FAT12 verified: volume-LBA 0x00000040 sectors 0x00000B40 bytes-sector 0x00000200 root-start 0x00000053 data-start 0x00000061 file HELLO.TXT cluster 0x00000002 bytes 0x00000056 hash 0xA9F660F2 chain-end 0x00000FFF heap-restored yes'
 try {
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 100
@@ -70,6 +71,7 @@ $required = @(
     $frameMarker,
     $pagingMarker,
     $heapMarker,
+    $ataMarker,
     $finalMarker
 )
 foreach ($marker in $required) {
@@ -89,6 +91,7 @@ foreach ($marker in @(
     $frameMarker,
     $pagingMarker,
     $heapMarker,
+    $ataMarker,
     $finalMarker
 )) {
     if (-not $serial.Contains($marker)) { throw "COM1 marker missing: $marker. Serial: $serial" }

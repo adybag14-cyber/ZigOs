@@ -1779,3 +1779,15 @@
 - LBA9 is read into the bounded heap and compared byte-for-byte with the first 512 bytes of the executing kernel at physical address `0x00010000`.
 - Releasing the sector buffer must restore the heap to its exact pre-I/O free capacity.
 - Debugcon and COM1 require model, capacity, signature, kernel-sector equality, buffer address, and heap-restoration evidence.
+
+
+## 4.47 - Mount and load a deterministic FAT12 filesystem
+
+- Added a tracked deterministic FAT12 generator producing a standard 1.44 MiB volume with two nine-sector FATs, 224 root entries, and one-sector clusters.
+- The legacy disk image expands to 2 MiB and carries an MBR type-`0x01` partition at LBA 64 for exactly 2,880 sectors.
+- Host verification checks the partition table, BPB, hidden-sector count, mirrored FAT bytes, reserved entries, root record, cluster-2 end marker, and exact file content before QEMU starts.
+- The generated root directory contains `HELLO.TXT` at cluster 2 with a fixed 86-byte payload and FNV-1a32 `0xA9F660F2`.
+- The kernel rereads the MBR through native ATA, derives FAT/root/data LBAs from the BPB, scans bounded root entries, decodes the 12-bit cluster entry, and loads the file data.
+- Runtime geometry is LBA64, root LBA `0x53`, data LBA `0x61`, cluster 2, and end-of-chain `0x0FFF`.
+- Exact content, length, hash, and heap restoration are required on debugcon and COM1.
+- The kernel occupies 15,096 bytes across thirty sectors, staying below the enforced LBA64 partition boundary.
