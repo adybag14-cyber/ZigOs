@@ -1890,3 +1890,19 @@
 - Reference kernel: 29,948 bytes, 59 sectors at LBA9-67, checksum16 `0x6B47`, SHA-256 `3818AEBF59C33B216EB54BD7817B82062D4962D62A046D4D24B5DBC98715453A`.
 - Reference disk image SHA-256: `E2B46B4971DDFD812E0AA778B7416265B4B928E1395F869DF8EFB0B447721094`.
 
+## 7.0 - Capstone userland filesystem ABI
+
+- Extended `int 0x80` with bounded `open`, `read`, and `close` calls while retaining `write`, `getpid`, and `exit`.
+- Added wrap-safe readable and writable user-pointer validation within the mapped `0x00400000` user page and a 128-byte per-read bound.
+- VFS descriptors now record an owning PID; read and close require exact ownership, while kernel clients use PID 0.
+- A deliberate owner-isolation probe opens `HELLO.TXT` as PID `0x77`, rejects read and close attempts from PID `0x78`, preserves the file offset and counters, and then closes through the correct owner.
+- Process exit closes any remaining owned descriptors and reports exact cleanup accounting.
+- The deterministic FAT12 volume adds `CAT.ELF` at cluster 4: a 510-byte ELF32 i386 executable with a 254-byte `R-X` PT_LOAD segment and embedded `HELLO   TXT` name.
+- `CAT.ELF` performs five CPL3 calls: open, 86-byte read, 86-byte write, explicit close, and exit `0x44`.
+- The shell adds `run CAT.ELF`; the user program prints the exact `HELLO.TXT` contents and is retained as exited PID 5.
+- The host image verifier checks cluster-4 FAT termination, root metadata, ELF identity, entry point, PT_LOAD geometry, flags, and embedded FAT name.
+- The ten-command COM1 harness now drives help, ls, mem, ticks, disk, kernel cat, INIT execution, CAT execution, ps, and exit.
+- Final accounting requires six VFS opens, six reads, six closes, five process records, last PID 5, exit `0x44`, nine operational commands, zero unknown commands, and no leaked descriptors.
+- Reference kernel: 32,604 bytes, 64 sectors at LBA9-72, checksum16 `0x5281`, SHA-256 `6648B69C2BD7B118BEEDBC5BB59AD28E6F077525FBD93B105B7F584CF7745CF1`.
+- Reference disk image SHA-256: `E41A2DA36D20034A2B9EC84CA5DBED234683983BFA4C091B2C47B61838BC6BF7`.
+

@@ -60,6 +60,8 @@ $cluster2 = $fat1[3] -bor (($fat1[4] -band 0x0F) -shl 8)
 if ($cluster2 -ne 0x0FFF) { throw ('FAT12 cluster 2 is not end-of-chain: 0x{0:X3}' -f $cluster2) }
 $cluster3 = ((([int]$fat1[4]) -shr 4) -bor (([int]$fat1[5]) -shl 4)) -band 0x0FFF
 if ($cluster3 -ne 0x0FFF) { throw ('FAT12 cluster 3 is not end-of-chain: 0x{0:X3}' -f $cluster3) }
+$cluster4 = (([int]$fat1[6]) -bor ((([int]$fat1[7]) -band 0x0F) -shl 8)) -band 0x0FFF
+if ($cluster4 -ne 0x0FFF) { throw ('FAT12 cluster 4 is not end-of-chain: 0x{0:X3}' -f $cluster4) }
 
 $rootOffset = 19 * 512
 $name = [Text.Encoding]::ASCII.GetString($fatVolume, $rootOffset, 11)
@@ -89,6 +91,25 @@ if ([BitConverter]::ToUInt32($init, 28) -ne 52 -or [BitConverter]::ToUInt16($ini
 if ([BitConverter]::ToUInt32($init, 52) -ne 1 -or [BitConverter]::ToUInt32($init, 56) -ne 0x100 -or [BitConverter]::ToUInt32($init, 60) -ne 0x00400000) { throw 'INIT.ELF PT_LOAD identity is invalid.' }
 if ([BitConverter]::ToUInt32($init, 72) -ne 0x200 -or [BitConverter]::ToUInt32($init, 76) -ne 5) { throw 'INIT.ELF memory size or flags are invalid.' }
 
+$catRoot = $rootOffset + 64
+$catName = [Text.Encoding]::ASCII.GetString($fatVolume, $catRoot, 11)
+if ($catName -ne 'CAT     ELF') { throw "Unexpected third FAT12 root name: '$catName'" }
+if ($fatVolume[$catRoot + 11] -ne 0x20) { throw 'CAT.ELF does not have the archive attribute.' }
+if ([BitConverter]::ToUInt16($fatVolume, $catRoot + 26) -ne 4) { throw 'CAT.ELF does not begin at cluster 4.' }
+$catLength = [BitConverter]::ToUInt32($fatVolume, $catRoot + 28)
+if ($catLength -ne 510) { throw "CAT.ELF length is invalid: $catLength" }
+$catOffset = 35 * 512
+$cat = [byte[]]$fatVolume[$catOffset..($catOffset + $catLength - 1)]
+if ($cat[0] -ne 0x7F -or $cat[1] -ne 0x45 -or $cat[2] -ne 0x4C -or $cat[3] -ne 0x46) { throw 'CAT.ELF magic is invalid.' }
+if ($cat[4] -ne 1 -or $cat[5] -ne 1 -or $cat[6] -ne 1) { throw 'CAT.ELF class/data/version is invalid.' }
+if ([BitConverter]::ToUInt16($cat, 16) -ne 2 -or [BitConverter]::ToUInt16($cat, 18) -ne 3) { throw 'CAT.ELF type or machine is invalid.' }
+if ([BitConverter]::ToUInt32($cat, 24) -ne 0x00400000) { throw 'CAT.ELF entry is invalid.' }
+if ([BitConverter]::ToUInt32($cat, 28) -ne 52 -or [BitConverter]::ToUInt16($cat, 42) -ne 32 -or [BitConverter]::ToUInt16($cat, 44) -ne 1) { throw 'CAT.ELF program-header geometry is invalid.' }
+if ([BitConverter]::ToUInt32($cat, 52) -ne 1 -or [BitConverter]::ToUInt32($cat, 56) -ne 0x100 -or [BitConverter]::ToUInt32($cat, 60) -ne 0x00400000) { throw 'CAT.ELF PT_LOAD identity is invalid.' }
+if ([BitConverter]::ToUInt32($cat, 68) -ne 0xFE -or [BitConverter]::ToUInt32($cat, 72) -ne 0x200 -or [BitConverter]::ToUInt32($cat, 76) -ne 5) { throw 'CAT.ELF segment geometry or flags are invalid.' }
+$nameBytes = [Text.Encoding]::ASCII.GetString($cat, 0x100 + 0x90, 11)
+if ($nameBytes -ne 'HELLO   TXT') { throw 'CAT.ELF embedded FAT name is invalid.' }
+
 $kernelSectors = [int][Math]::Ceiling($kernel.Length / 512.0)
 
 $paddedKernel = New-Object byte[] ($kernelSectors * 512)
@@ -107,6 +128,6 @@ Write-Host "Verified legacy BIOS/FAT12 image: $imagePath"
 Write-Host '  stage0:       512 bytes, signature 0x55AA, partition type 0x01'
 Write-Host '  stage1:       4096 bytes, LBA 1..8, address 0x00008000'
 Write-Host "  kernel:       $($kernel.Length) bytes, $kernelSectors sector(s), LBA 9..$kernelEndLba, checksum16 0x$('{0:X4}' -f $kernelChecksum), address 0x00010000"
-Write-Host "  FAT12:        LBA 256, 2880 sectors, HELLO.TXT cluster 2, INIT.ELF cluster 3 ($initLength bytes)"
+Write-Host "  FAT12:        LBA 256, 2880 sectors, HELLO.TXT cluster 2, INIT.ELF cluster 3 ($initLength bytes), CAT.ELF cluster 4 ($catLength bytes)"
 Write-Host "  image size:   $($image.Length) bytes"
 Write-Host "  image sha256: $((Get-FileHash $imagePath -Algorithm SHA256).Hash)"

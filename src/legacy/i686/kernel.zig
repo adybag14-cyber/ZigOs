@@ -131,6 +131,7 @@ const VfsNode = struct {
 const VfsDescriptor = struct {
     node_index: u8 = 0,
     offset: u32 = 0,
+    owner_pid: u32 = 0,
     open: bool = false,
 };
 
@@ -229,6 +230,7 @@ var init_elf_filesz: u32 = 0;
 var init_elf_memsz: u32 = 0;
 var init_elf_hash: u32 = 0;
 var init_elf_exit: u32 = 0;
+var cat_elf_size: u32 = 0;
 var vfs_nodes: [4]VfsNode = @splat(.{});
 var vfs_node_count: u32 = 0;
 var vfs_descriptors: [4]VfsDescriptor = @splat(.{});
@@ -275,6 +277,11 @@ var user_code_frame: u32 = 0;
 var user_stack_frame: u32 = 0;
 var syscall_count: u32 = 0;
 var syscall_write_bytes: u32 = 0;
+var syscall_file_opens: u32 = 0;
+var syscall_file_reads: u32 = 0;
+var syscall_file_read_bytes: u32 = 0;
+var syscall_file_closes: u32 = 0;
+var syscall_exit_cleanup_closes: u32 = 0;
 var syscall_rejected: u32 = 0;
 var syscall_exit_code: u32 = 0;
 var syscall_exited = false;
@@ -399,18 +406,14 @@ pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) 
     syscall_count +|= 1;
     switch (frame.eax) {
         1 => {
-            const length = frame.ecx;
-            const start = frame.ebx;
-            const end = start +% length;
-            if (length > 128 or end < start or start < 0x0040_0000 or end > 0x0040_1000) {
+            const bytes = userReadableSlice(frame.ebx, frame.ecx, 128) orelse {
                 syscall_rejected +|= 1;
                 frame.eax = 0xFFFF_FFF2;
                 return 0;
-            }
-            const bytes: [*]const u8 = @ptrFromInt(start);
-            writeAll(bytes[0..length]);
-            syscall_write_bytes +|= length;
-            frame.eax = length;
+            };
+            writeAll(bytes);
+            syscall_write_bytes +|= frame.ecx;
+            frame.eax = frame.ecx;
             return 0;
         },
         2 => {
@@ -420,7 +423,59 @@ pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) 
         3 => {
             syscall_exit_code = frame.ebx;
             syscall_exited = true;
+            syscall_exit_cleanup_closes = vfsCloseAllOwned(current_pid);
             return 1;
+        },
+        4 => {
+            const name = userReadableSlice(frame.ebx, frame.ecx, 11) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (name.len != 11 or current_pid == 0) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFEA;
+                return 0;
+            }
+            const fd = vfsOpenOwned(name, current_pid) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            };
+            syscall_file_opens +|= 1;
+            frame.eax = fd;
+            return 0;
+        },
+        5 => {
+            if (frame.ebx > 0xFF or frame.edx > 128 or current_pid == 0) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF7;
+                return 0;
+            }
+            const destination = userWritableSlice(frame.ecx, frame.edx, 128) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const amount = vfsReadOwned(@truncate(frame.ebx), current_pid, destination) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF7;
+                return 0;
+            };
+            syscall_file_reads +|= 1;
+            syscall_file_read_bytes +|= @intCast(amount);
+            frame.eax = @intCast(amount);
+            return 0;
+        },
+        6 => {
+            if (frame.ebx > 0xFF or current_pid == 0 or !vfsCloseOwned(@truncate(frame.ebx), current_pid)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF7;
+                return 0;
+            }
+            syscall_file_closes +|= 1;
+            frame.eax = 0;
+            return 0;
         },
         else => {
             syscall_rejected +|= 1;
@@ -428,6 +483,20 @@ pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) 
             return 0;
         },
     }
+}
+
+fn userReadableSlice(start: u32, length: u32, maximum: u32) ?[]const u8 {
+    const end = start +% length;
+    if (length > maximum or end < start or start < 0x0040_0000 or end > 0x0040_1000) return null;
+    const bytes: [*]const u8 = @ptrFromInt(start);
+    return bytes[0..@intCast(length)];
+}
+
+fn userWritableSlice(start: u32, length: u32, maximum: u32) ?[]u8 {
+    const end = start +% length;
+    if (length > maximum or end < start or start < 0x0040_0000 or end > 0x0040_1000) return null;
+    const bytes: [*]u8 = @ptrFromInt(start);
+    return bytes[0..@intCast(length)];
 }
 
 fn verifyAndReportBootInfo() void {
@@ -1208,8 +1277,10 @@ fn initializeVfsAndProcesses() void {
 
     const hello_index = vfsFindNode("HELLO   TXT") orelse vfsFailure("HELLO.TXT node");
     const init_index = vfsFindNode("INIT    ELF") orelse vfsFailure("INIT.ELF node");
-    if (vfs_node_count != 2 or vfs_nodes[hello_index].size != expected_fat_file.len or
-        vfs_nodes[init_index].size != init_elf_size)
+    const cat_index = vfsFindNode("CAT     ELF") orelse vfsFailure("CAT.ELF node");
+    cat_elf_size = vfs_nodes[cat_index].size;
+    if (vfs_node_count != 3 or vfs_nodes[hello_index].size != expected_fat_file.len or
+        vfs_nodes[init_index].size != init_elf_size or cat_elf_size != 510)
     {
         vfsFailure("root inventory");
     }
@@ -1222,6 +1293,17 @@ fn initializeVfsAndProcesses() void {
         !equalBytes(probe[0..], expected_fat_file))
     {
         vfsFailure("split read");
+    }
+
+    var denied_probe: [1]u8 = @splat(0);
+    const owner_probe_fd = vfsOpenOwned("HELLO   TXT", 0x77) orelse vfsFailure("owner probe open");
+    const owner_offset_before = vfs_descriptors[owner_probe_fd].offset;
+    const denied_read = vfsReadOwned(owner_probe_fd, 0x78, denied_probe[0..]);
+    const denied_close = vfsCloseOwned(owner_probe_fd, 0x78);
+    if (denied_read != null or denied_close or vfs_descriptors[owner_probe_fd].offset != owner_offset_before or
+        !vfsCloseOwned(owner_probe_fd, 0x77))
+    {
+        vfsFailure("descriptor owner isolation");
     }
 
     process_table = @splat(.{});
@@ -1244,7 +1326,9 @@ fn initializeVfsAndProcesses() void {
     writeHex32(first_read);
     writeAll("/0x");
     writeHex32(second_read);
-    writeAll(" process-capacity 0x00000008 PID1 exited 0x");
+    writeAll(" owner-probe-fd 0x");
+    writeHex32(owner_probe_fd);
+    writeAll(" owner-denied yes process-capacity 0x00000008 PID1 exited 0x");
     writeHex32(init_elf_exit);
     writeAll("\r\n");
     verifyUserProcessScheduler();
@@ -1436,12 +1520,17 @@ fn vfsFindNode(name: []const u8) ?usize {
 }
 
 fn vfsOpen(name: []const u8) ?u8 {
+    return vfsOpenOwned(name, 0);
+}
+
+fn vfsOpenOwned(name: []const u8, owner_pid: u32) ?u8 {
     const node_index = vfsFindNode(name) orelse return null;
     for (&vfs_descriptors, 0..) |*descriptor, index| {
         if (descriptor.open) continue;
         descriptor.* = .{
             .node_index = @intCast(node_index),
             .offset = 0,
+            .owner_pid = owner_pid,
             .open = true,
         };
         vfs_open_count +|= 1;
@@ -1451,19 +1540,23 @@ fn vfsOpen(name: []const u8) ?u8 {
 }
 
 fn vfsRead(fd: u8, destination: []u8) usize {
+    return vfsReadOwned(fd, 0, destination) orelse 0;
+}
+
+fn vfsReadOwned(fd: u8, owner_pid: u32, destination: []u8) ?usize {
     const index: usize = fd;
-    if (index >= vfs_descriptors.len) return 0;
+    if (index >= vfs_descriptors.len) return null;
     var descriptor = &vfs_descriptors[index];
-    if (!descriptor.open) return 0;
+    if (!descriptor.open or descriptor.owner_pid != owner_pid) return null;
     const node_index: usize = descriptor.node_index;
-    if (node_index >= vfs_nodes.len or !vfs_nodes[node_index].present) return 0;
+    if (node_index >= vfs_nodes.len or !vfs_nodes[node_index].present) return null;
     const node = &vfs_nodes[node_index];
     if (descriptor.offset >= node.size or destination.len == 0) return 0;
     const remaining: usize = @intCast(node.size - descriptor.offset);
     const amount = @min(destination.len, remaining);
     const cluster_lba = fat_data_lba + (@as(u32, node.cluster) - 2) * fat_sectors_per_cluster;
     const buffer_address: u32 = @intCast(@intFromPtr(&vfs_sector_buffer));
-    if (!ataReadSector(cluster_lba, buffer_address)) return 0;
+    if (!ataReadSector(cluster_lba, buffer_address)) return null;
     const source_offset: usize = @intCast(descriptor.offset);
     for (0..amount) |offset| destination[offset] = vfs_sector_buffer[source_offset + offset];
     descriptor.offset += @intCast(amount);
@@ -1472,16 +1565,43 @@ fn vfsRead(fd: u8, destination: []u8) usize {
 }
 
 fn vfsClose(fd: u8) bool {
+    return vfsCloseOwned(fd, 0);
+}
+
+fn vfsCloseOwned(fd: u8, owner_pid: u32) bool {
     const index: usize = fd;
-    if (index >= vfs_descriptors.len or !vfs_descriptors[index].open) return false;
+    if (index >= vfs_descriptors.len or !vfs_descriptors[index].open or
+        vfs_descriptors[index].owner_pid != owner_pid)
+    {
+        return false;
+    }
     vfs_descriptors[index] = .{};
     vfs_close_count +|= 1;
     return true;
 }
 
+fn vfsCloseAllOwned(owner_pid: u32) u32 {
+    var closed: u32 = 0;
+    for (&vfs_descriptors) |*descriptor| {
+        if (!descriptor.open or descriptor.owner_pid != owner_pid) continue;
+        descriptor.* = .{};
+        vfs_close_count +|= 1;
+        closed +|= 1;
+    }
+    return closed;
+}
+
+fn vfsOpenCountOwned(owner_pid: u32) u32 {
+    var count: u32 = 0;
+    for (vfs_descriptors) |descriptor| {
+        if (descriptor.open and descriptor.owner_pid == owner_pid) count +|= 1;
+    }
+    return count;
+}
+
 fn vfsReadWhole(name: []const u8, destination: []u8) ?usize {
     const fd = vfsOpen(name) orelse return null;
-    const amount = vfsRead(fd, destination);
+    const amount = vfsReadOwned(fd, 0, destination) orelse return null;
     if (!vfsClose(fd)) return null;
     const node_index = vfsFindNode(name) orelse return null;
     if (amount != vfs_nodes[node_index].size) return null;
@@ -1574,6 +1694,93 @@ fn spawnInitProcess() ?u32 {
     return pid;
 }
 
+fn spawnCatProcess() ?u32 {
+    var slot: ?usize = null;
+    for (&process_table, 0..) |*record, index| {
+        if (record.state == .free) {
+            slot = index;
+            break;
+        }
+    }
+    const process_index = slot orelse return null;
+    const pid = next_pid;
+    next_pid +|= 1;
+    process_table[process_index] = .{
+        .pid = pid,
+        .name = fatName("CAT     ELF"),
+        .exit_code = 0,
+        .state = .running,
+    };
+    process_count +|= 1;
+
+    const free_before = heapFreePayloadBytes();
+    const image_address = heapAllocate(512) orelse processFailure("CAT image allocation");
+    const image: [*]u8 = @ptrFromInt(image_address);
+    const amount = vfsReadWhole("CAT     ELF", image[0..512]) orelse processFailure("CAT VFS read");
+    if (amount != cat_elf_size or amount != 510 or readLe32(image, 0) != 0x464C_457F or
+        readLe32(image, 24) != 0x0040_0000 or readLe32(image, 28) != 52)
+    {
+        processFailure("CAT ELF identity");
+    }
+    const phoff: usize = @intCast(readLe32(image, 28));
+    const file_offset = readLe32(image, phoff + 4);
+    const file_bytes = readLe32(image, phoff + 16);
+    const memory_bytes = readLe32(image, phoff + 20);
+    const flags = readLe32(image, phoff + 24);
+    if (file_offset != 0x100 or file_bytes != 0xFE or memory_bytes != 0x200 or flags != 5 or
+        file_offset + file_bytes > amount)
+    {
+        processFailure("CAT ELF bounds");
+    }
+
+    zeroPhysicalFrame(user_code_frame);
+    const code: [*]volatile u8 = @ptrFromInt(user_code_frame);
+    for (0..file_bytes) |offset| code[offset] = image[file_offset + offset];
+    zigos_i686_invalidate_page(0x0040_0000);
+    syscall_count = 0;
+    syscall_write_bytes = 0;
+    syscall_file_opens = 0;
+    syscall_file_reads = 0;
+    syscall_file_read_bytes = 0;
+    syscall_file_closes = 0;
+    syscall_exit_cleanup_closes = 0;
+    syscall_rejected = 0;
+    syscall_exit_code = 0;
+    syscall_exited = false;
+    current_pid = pid;
+    zigos_i686_enter_user(0x0040_0000, 0x0040_2000);
+    current_pid = 0;
+    if (!syscall_exited or syscall_exit_code != 0x44 or syscall_count != 5 or
+        syscall_write_bytes != expected_fat_file.len or syscall_file_opens != 1 or
+        syscall_file_reads != 1 or syscall_file_read_bytes != expected_fat_file.len or
+        syscall_file_closes != 1 or syscall_exit_cleanup_closes != 0 or syscall_rejected != 0 or
+        vfsOpenCountOwned(pid) != 0)
+    {
+        processFailure("CAT user execution");
+    }
+    process_table[process_index].exit_code = syscall_exit_code;
+    process_table[process_index].state = .exited;
+    last_spawned_pid = pid;
+    if (!heapFree(image_address) or heapFreePayloadBytes() != free_before) processFailure("CAT heap restoration");
+
+    writeAll("ZigOs i686 user VFS syscalls verified: open 0x");
+    writeHex32(syscall_file_opens);
+    writeAll(" reads 0x");
+    writeHex32(syscall_file_reads);
+    writeAll(" read-bytes 0x");
+    writeHex32(syscall_file_read_bytes);
+    writeAll(" closes 0x");
+    writeHex32(syscall_file_closes);
+    writeAll(" write-bytes 0x");
+    writeHex32(syscall_write_bytes);
+    writeAll(" exit 0x");
+    writeHex32(syscall_exit_code);
+    writeAll(" owner-isolation yes explicit-close yes cleanup-closes 0x");
+    writeHex32(syscall_exit_cleanup_closes);
+    writeAll(" heap-restored yes\r\n");
+    return pid;
+}
+
 fn listProcesses() void {
     for (&process_table) |*record| {
         if (record.state == .free) continue;
@@ -1604,10 +1811,10 @@ fn processFailure(reason: []const u8) noreturn {
 }
 
 fn runShell() noreturn {
-    if (!ata_ready or !fat_ready or !heap_ready or !frame_allocator_ready or vfs_node_count != 2) {
+    if (!ata_ready or !fat_ready or !heap_ready or !frame_allocator_ready or vfs_node_count != 3) {
         shellFailure("subsystems unavailable");
     }
-    writeAll("ZigOs i686 shell ready: prompt zigos> commands help ls mem ticks disk cat HELLO.TXT run INIT.ELF ps exit\r\n");
+    writeAll("ZigOs i686 shell ready: prompt zigos> commands help ls mem ticks disk cat HELLO.TXT run INIT.ELF run CAT.ELF ps exit\r\n");
     var line: [64]u8 = undefined;
     while (true) {
         writeAll("zigos> ");
@@ -1616,7 +1823,7 @@ fn runShell() noreturn {
         if (command.len == 0) continue;
         if (equalBytes(command, "help")) {
             shell_command_count +|= 1;
-            writeAll("commands: help ls mem ticks disk cat HELLO.TXT run INIT.ELF ps exit\r\n");
+            writeAll("commands: help ls mem ticks disk cat HELLO.TXT run INIT.ELF run CAT.ELF ps exit\r\n");
         } else if (equalBytes(command, "ls")) {
             shell_command_count +|= 1;
             listVfsRoot();
@@ -1646,6 +1853,8 @@ fn runShell() noreturn {
             writeHex32(@as(u32, @intCast(fat_file_length)));
             writeAll(" INIT.ELF-bytes 0x");
             writeHex32(init_elf_size);
+            writeAll(" CAT.ELF-bytes 0x");
+            writeHex32(cat_elf_size);
             writeAll("\r\n");
         } else if (equalBytes(command, "cat HELLO.TXT")) {
             shell_command_count +|= 1;
@@ -1660,6 +1869,18 @@ fn runShell() noreturn {
             writeAll(" syscalls 0x");
             writeHex32(syscall_count);
             writeAll("\r\n");
+        } else if (equalBytes(command, "run CAT.ELF")) {
+            shell_command_count +|= 1;
+            const pid = spawnCatProcess() orelse shellFailure("CAT process capacity");
+            writeAll("process PID 0x");
+            writeHex32(pid);
+            writeAll(" CAT.ELF exited 0x");
+            writeHex32(syscall_exit_code);
+            writeAll(" syscalls 0x");
+            writeHex32(syscall_count);
+            writeAll(" read-bytes 0x");
+            writeHex32(syscall_file_read_bytes);
+            writeAll("\r\n");
         } else if (equalBytes(command, "ps")) {
             shell_command_count +|= 1;
             listProcesses();
@@ -1668,9 +1889,9 @@ fn runShell() noreturn {
             for (vfs_descriptors) |descriptor| {
                 if (descriptor.open) descriptors_closed = false;
             }
-            if (vfs_open_count != 3 or vfs_read_count != 4 or vfs_close_count != 3 or
-                process_count != 4 or last_spawned_pid != 4 or syscall_exit_code != 0x33 or
-                !descriptors_closed or shell_command_count != 8 or shell_unknown_count != 0)
+            if (vfs_open_count != 6 or vfs_read_count != 6 or vfs_close_count != 6 or
+                process_count != 5 or last_spawned_pid != 5 or syscall_exit_code != 0x44 or
+                !descriptors_closed or shell_command_count != 9 or shell_unknown_count != 0)
             {
                 shellFailure("VFS/process accounting");
             }
