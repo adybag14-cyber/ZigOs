@@ -1602,3 +1602,15 @@
 - A real `50000 -> 443` SYN leaves descriptor `1`, advances TX cursor `1 -> 2` and TCP identification `0x7200 -> 0x7201`, and receives a checksum-valid 60-byte RST-ACK through RX descriptor `6 -> 7` from `192.0.2.1:443` with acknowledgement `0x13579BE0`.
 - The live reply is parsed as `RST|ACK`, released back to hardware, and leaves balanced completion ownership `TX 194/194`, `RX 23/23`, ingress `213/213`, dispatch `200/1/198` for total/TCP/UDP, and unchanged UDP endpoint cursor/generation `2/49263/135`.
 - Full HPET and 24-bit ACPI PM timer boots validate the TCP codec, dispatch path, DMA transmission, live hardware response, descriptor recycling, and complete regression harness.
+
+## 4.32 - Add a native TCP active-open state machine
+
+- Added `src/tcp_connection.zig` with an explicit TCP control block, connection states, typed transition actions, typed rejection causes, outbound control-segment descriptions, and wrap-safe 32-bit sequence comparisons.
+- Active open moves atomically from `closed` to `syn_sent`, records ISS/SND.UNA/SND.NXT, and emits an exact SYN description without touching the NIC or UDP state.
+- SYN-SENT handling accepts only a matching SYN-ACK or RST-ACK, rejects wrong acknowledgements, unsupported simultaneous open, malformed flag combinations, and duplicate active opens without mutating the control block.
+- A valid synthetic SYN-ACK advances SND.UNA, captures the peer window, sets RCV.NXT to peer sequence plus one, enters `established`, and emits the exact final ACK.
+- Established-state reset handling requires the exact next receive sequence; duplicate SYN and wrong-sequence RST inputs are rejected with byte-for-byte state preservation.
+- The live `192.0.2.1:443` RST-ACK captured by milestone 4.31 is consumed by a fresh active-open control block and transitions deterministically to `reset` with the expected acknowledgement.
+- Wraparound checks prove ordering across `0xFFFF_FFF0 -> 0x0000_0010`, including inclusive window membership through sequence zero.
+- The verifier is packet-free after the 4.31 exchange and preserves completions `194/194/23/23`, ingress `213/213`, dispatch `200/1/198`, TX/RX `2/7`, TCP ID `0x7201`, and UDP endpoint cursor/generation `2/49263/135`.
+- Full HPET and 24-bit ACPI PM timer boots validate the state machine and live RST transition through the complete regression harness.

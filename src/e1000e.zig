@@ -6,6 +6,7 @@ const apic = @import("apic.zig");
 const dhcp = @import("dhcp.zig");
 const udp = @import("udp.zig");
 const tcp = @import("tcp.zig");
+const tcp_connection = @import("tcp_connection.zig");
 const tftp = @import("tftp.zig");
 const dns = @import("dns.zig");
 const ntp = @import("ntp.zig");
@@ -1751,6 +1752,64 @@ pub const TcpFoundationReport = struct {
     final_registered_endpoints: u16,
     final_ephemeral_cursor: u16,
     final_udp_generation: u32,
+};
+
+pub const TcpActiveOpenReport = struct {
+    initial_state: tcp_connection.State,
+    syn_state: tcp_connection.State,
+    established_state: tcp_connection.State,
+    reset_state: tcp_connection.State,
+    live_reset_state: tcp_connection.State,
+    initial_sequence: u32,
+    syn_send_unacknowledged: u32,
+    syn_send_next: u32,
+    syn_action: tcp_connection.ActionKind,
+    syn_flags: u9,
+    syn_window: u16,
+    invalid_init_rejected: bool,
+    duplicate_open_rejected: bool,
+    duplicate_open_reason: tcp_connection.RejectReason,
+    wrong_ack_rejected: bool,
+    wrong_ack_reason: tcp_connection.RejectReason,
+    wrong_ack_preserved: bool,
+    simultaneous_open_rejected: bool,
+    simultaneous_open_reason: tcp_connection.RejectReason,
+    simultaneous_open_preserved: bool,
+    established: bool,
+    peer_sequence: u32,
+    receive_next: u32,
+    send_unacknowledged: u32,
+    peer_window: u16,
+    ack_action: tcp_connection.ActionKind,
+    ack_sequence: u32,
+    ack_acknowledgement: u32,
+    ack_flags: u9,
+    ack_window: u16,
+    duplicate_syn_rejected: bool,
+    duplicate_syn_reason: tcp_connection.RejectReason,
+    duplicate_syn_preserved: bool,
+    wrong_reset_rejected: bool,
+    wrong_reset_reason: tcp_connection.RejectReason,
+    wrong_reset_preserved: bool,
+    reset_accepted: bool,
+    reset_count: u32,
+    live_rst_accepted: bool,
+    live_rst_acknowledgement: u32,
+    live_reset_count: u32,
+    wrap_checks: [3]bool,
+    packet_free: bool,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    rx_completion_dequeues: u64,
+    ingress_enqueues: u64,
+    ingress_dequeues: u64,
+    packets_dispatched: u64,
+    tcp_dispatched: u64,
+    udp_dispatched: u64,
+    final_tx_cursor: u16,
+    final_rx_cursor: u16,
+    final_tcp_identification: u16,
 };
 
 pub const NtpReopenValidationFailureReport = struct {
@@ -6307,6 +6366,7 @@ pub const NetworkResult = struct {
     ntp_reopen_peer_preflight: NtpReopenPeerPreflightReport,
     ntp_reopen_protected_peer: NtpReopenProtectedPeerReport,
     tcp_foundation: TcpFoundationReport,
+    tcp_active_open: TcpActiveOpenReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -7271,6 +7331,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const tcp_active_open = verifyTcpActiveOpen(device, tcp_foundation) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -7512,6 +7576,7 @@ pub fn initializeAndTestNetwork(
         .ntp_reopen_peer_preflight = ntp_reopen_peer_preflight,
         .ntp_reopen_protected_peer = ntp_reopen_protected_peer,
         .tcp_foundation = tcp_foundation,
+        .tcp_active_open = tcp_active_open,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -15854,6 +15919,214 @@ fn verifyTcpFoundation(device: *Device) ?TcpFoundationReport {
         .final_registered_endpoints = device.udp_endpoint_count,
         .final_ephemeral_cursor = device.next_ephemeral_udp_port,
         .final_udp_generation = device.next_udp_generation,
+    };
+}
+
+fn verifyTcpActiveOpen(
+    device: *Device,
+    foundation: TcpFoundationReport,
+) ?TcpActiveOpenReport {
+    const txe_before = completionQueueEnqueued(&tx_completion_queue);
+    const txd_before = completionQueueDequeued(&tx_completion_queue);
+    const rxe_before = completionQueueEnqueued(&rx_completion_queue);
+    const rxd_before = completionQueueDequeued(&rx_completion_queue);
+    const ingress_enqueues_before = device.software_rx_queue.enqueued;
+    const ingress_dequeues_before = device.software_rx_queue.dequeued;
+    const packets_dispatched_before = device.packets_dispatched;
+    const tcp_dispatched_before = device.tcp_packets_dispatched;
+    const udp_dispatched_before = device.udp_packets_dispatched;
+    const tx_cursor_before = device.tx_producer;
+    const rx_cursor_before = device.rx_consumer;
+    const tcp_identification_before = device.next_tcp_identification;
+
+    const invalid_init_rejected = tcp_connection.init(0) == null;
+    var control = tcp_connection.init(foundation.syn_window) orelse return null;
+    const initial_state = control.state;
+    const open = tcp_connection.beginActiveOpen(&control, foundation.syn_sequence);
+    const syn = open.outbound orelse return null;
+    const syn_valid = open.accepted and open.previous_state == .closed and open.state == .syn_sent and
+        open.action == .send_syn and syn.sequence_number == foundation.syn_sequence and
+        syn.acknowledgement_number == 0 and syn.flags == tcp.flag_syn and
+        syn.window_size == foundation.syn_window and control.state == .syn_sent and
+        control.initial_send_sequence == foundation.syn_sequence and
+        control.send_unacknowledged == foundation.syn_sequence and
+        control.send_next == foundation.syn_sequence +% 1;
+    if (!invalid_init_rejected or !syn_valid) return null;
+
+    const before_duplicate_open = control;
+    const duplicate_open = tcp_connection.beginActiveOpen(&control, foundation.syn_sequence +% 17);
+    const duplicate_open_rejected = !duplicate_open.accepted and
+        duplicate_open.rejection == .invalid_state and std.meta.eql(control, before_duplicate_open);
+    if (!duplicate_open_rejected) return null;
+
+    const before_wrong_ack = control;
+    const wrong_ack = tcp_connection.handleSegment(&control, .{
+        .sequence_number = foundation.syn_ack_sequence,
+        .acknowledgement_number = foundation.syn_ack_acknowledgement +% 1,
+        .flags = tcp.flag_syn | tcp.flag_ack,
+        .window_size = foundation.syn_ack_window,
+    });
+    const wrong_ack_rejected = !wrong_ack.accepted and wrong_ack.rejection == .invalid_acknowledgement;
+    const wrong_ack_preserved = std.meta.eql(control, before_wrong_ack);
+    if (!wrong_ack_rejected or !wrong_ack_preserved) return null;
+
+    const before_simultaneous = control;
+    const simultaneous = tcp_connection.handleSegment(&control, .{
+        .sequence_number = foundation.syn_ack_sequence,
+        .acknowledgement_number = 0,
+        .flags = tcp.flag_syn,
+        .window_size = foundation.syn_ack_window,
+    });
+    const simultaneous_open_rejected = !simultaneous.accepted and
+        simultaneous.rejection == .unsupported_simultaneous_open;
+    const simultaneous_open_preserved = std.meta.eql(control, before_simultaneous);
+    if (!simultaneous_open_rejected or !simultaneous_open_preserved) return null;
+
+    const established_transition = tcp_connection.handleSegment(&control, .{
+        .sequence_number = foundation.syn_ack_sequence,
+        .acknowledgement_number = foundation.syn_ack_acknowledgement,
+        .flags = foundation.syn_ack_flags,
+        .window_size = foundation.syn_ack_window,
+    });
+    const established_ack = established_transition.outbound orelse return null;
+    const established = established_transition.accepted and established_transition.state == .established and
+        established_transition.action == .send_ack and control.state == .established and
+        control.send_unacknowledged == foundation.syn_ack_acknowledgement and
+        control.receive_next == foundation.syn_ack_sequence +% 1 and
+        control.send_window == foundation.syn_ack_window and
+        established_ack.sequence_number == control.send_next and
+        established_ack.acknowledgement_number == control.receive_next and
+        established_ack.flags == tcp.flag_ack and established_ack.window_size == foundation.syn_window;
+    if (!established) return null;
+
+    const established_snapshot = control;
+    const duplicate_syn = tcp_connection.handleSegment(&control, .{
+        .sequence_number = foundation.syn_ack_sequence,
+        .acknowledgement_number = foundation.syn_ack_acknowledgement,
+        .flags = tcp.flag_syn | tcp.flag_ack,
+        .window_size = foundation.syn_ack_window,
+    });
+    const duplicate_syn_rejected = !duplicate_syn.accepted and duplicate_syn.rejection == .invalid_segment;
+    const duplicate_syn_preserved = std.meta.eql(control, established_snapshot);
+    if (!duplicate_syn_rejected or !duplicate_syn_preserved) return null;
+
+    const before_wrong_reset = control;
+    const wrong_reset = tcp_connection.handleSegment(&control, .{
+        .sequence_number = control.receive_next +% 1,
+        .acknowledgement_number = control.send_next,
+        .flags = tcp.flag_rst | tcp.flag_ack,
+        .window_size = 0,
+    });
+    const wrong_reset_rejected = !wrong_reset.accepted and wrong_reset.rejection == .unexpected_sequence;
+    const wrong_reset_preserved = std.meta.eql(control, before_wrong_reset);
+    if (!wrong_reset_rejected or !wrong_reset_preserved) return null;
+
+    const reset_transition = tcp_connection.handleSegment(&control, .{
+        .sequence_number = control.receive_next,
+        .acknowledgement_number = control.send_next,
+        .flags = tcp.flag_rst | tcp.flag_ack,
+        .window_size = 0,
+    });
+    const reset_accepted = reset_transition.accepted and reset_transition.state == .reset and
+        reset_transition.action == .connection_reset and control.state == .reset and control.resets == 1;
+    if (!reset_accepted) return null;
+
+    var live_control = tcp_connection.init(foundation.syn_window) orelse return null;
+    const live_open = tcp_connection.beginActiveOpen(&live_control, foundation.syn_sequence);
+    if (!live_open.accepted) return null;
+    const live_rst = tcp_connection.handleSegment(&live_control, .{
+        .sequence_number = foundation.hardware_reply_sequence,
+        .acknowledgement_number = foundation.hardware_reply_acknowledgement,
+        .flags = foundation.hardware_reply_flags,
+        .window_size = foundation.hardware_reply_window,
+    });
+    const live_rst_accepted = live_rst.accepted and live_rst.state == .reset and
+        live_rst.action == .connection_reset and live_control.state == .reset and
+        live_control.send_unacknowledged == foundation.hardware_reply_acknowledgement and
+        live_control.resets == 1;
+    if (!live_rst_accepted) return null;
+
+    const wrap_checks = [3]bool{
+        tcp_connection.sequenceBefore(0xFFFF_FFF0, 0x0000_0010),
+        tcp_connection.sequenceAfter(0x0000_0010, 0xFFFF_FFF0),
+        tcp_connection.sequenceBetweenInclusive(0, 0xFFFF_FFF0, 0x0000_0010),
+    };
+    for (wrap_checks) |valid| {
+        if (!valid) return null;
+    }
+
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const rxd = completionQueueDequeued(&rx_completion_queue);
+    const packet_free = txe == txe_before and txd == txd_before and rxe == rxe_before and rxd == rxd_before and
+        device.software_rx_queue.enqueued == ingress_enqueues_before and
+        device.software_rx_queue.dequeued == ingress_dequeues_before and
+        device.packets_dispatched == packets_dispatched_before and
+        device.tcp_packets_dispatched == tcp_dispatched_before and
+        device.udp_packets_dispatched == udp_dispatched_before and
+        device.tx_producer == tx_cursor_before and device.rx_consumer == rx_cursor_before and
+        device.next_tcp_identification == tcp_identification_before and
+        device.udp_endpoint_count == 2 and device.next_ephemeral_udp_port == 49_263 and
+        device.next_udp_generation == 135;
+    if (!packet_free) return null;
+
+    return .{
+        .initial_state = initial_state,
+        .syn_state = open.state,
+        .established_state = established_transition.state,
+        .reset_state = reset_transition.state,
+        .live_reset_state = live_rst.state,
+        .initial_sequence = foundation.syn_sequence,
+        .syn_send_unacknowledged = before_duplicate_open.send_unacknowledged,
+        .syn_send_next = before_duplicate_open.send_next,
+        .syn_action = open.action,
+        .syn_flags = syn.flags,
+        .syn_window = syn.window_size,
+        .invalid_init_rejected = invalid_init_rejected,
+        .duplicate_open_rejected = duplicate_open_rejected,
+        .duplicate_open_reason = duplicate_open.rejection,
+        .wrong_ack_rejected = wrong_ack_rejected,
+        .wrong_ack_reason = wrong_ack.rejection,
+        .wrong_ack_preserved = wrong_ack_preserved,
+        .simultaneous_open_rejected = simultaneous_open_rejected,
+        .simultaneous_open_reason = simultaneous.rejection,
+        .simultaneous_open_preserved = simultaneous_open_preserved,
+        .established = established,
+        .peer_sequence = foundation.syn_ack_sequence,
+        .receive_next = established_snapshot.receive_next,
+        .send_unacknowledged = established_snapshot.send_unacknowledged,
+        .peer_window = established_snapshot.send_window,
+        .ack_action = established_transition.action,
+        .ack_sequence = established_ack.sequence_number,
+        .ack_acknowledgement = established_ack.acknowledgement_number,
+        .ack_flags = established_ack.flags,
+        .ack_window = established_ack.window_size,
+        .duplicate_syn_rejected = duplicate_syn_rejected,
+        .duplicate_syn_reason = duplicate_syn.rejection,
+        .duplicate_syn_preserved = duplicate_syn_preserved,
+        .wrong_reset_rejected = wrong_reset_rejected,
+        .wrong_reset_reason = wrong_reset.rejection,
+        .wrong_reset_preserved = wrong_reset_preserved,
+        .reset_accepted = reset_accepted,
+        .reset_count = control.resets,
+        .live_rst_accepted = live_rst_accepted,
+        .live_rst_acknowledgement = foundation.hardware_reply_acknowledgement,
+        .live_reset_count = live_control.resets,
+        .wrap_checks = wrap_checks,
+        .packet_free = packet_free,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
+        .rx_completion_dequeues = rxd,
+        .ingress_enqueues = device.software_rx_queue.enqueued,
+        .ingress_dequeues = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .tcp_dispatched = device.tcp_packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+        .final_tx_cursor = device.tx_producer,
+        .final_rx_cursor = device.rx_consumer,
+        .final_tcp_identification = device.next_tcp_identification,
     };
 }
 
