@@ -65,11 +65,13 @@ extern var zigos_i686_boot_info_pointer: u32;
 extern fn zigos_i686_read_cr0() callconv(.c) u32;
 extern fn zigos_i686_cpuid_vendor(destination: [*]u8) callconv(.c) u32;
 extern fn zigos_i686_out8(port: u16, value: u8) callconv(.c) void;
+extern fn zigos_i686_in8(port: u16) callconv(.c) u8;
 extern fn zigos_i686_load_idt(descriptor: *const [6]u8) callconv(.c) void;
 extern fn zigos_i686_enable_interrupts() callconv(.c) void;
 extern fn zigos_i686_disable_interrupts() callconv(.c) void;
 extern fn zigos_i686_halt() callconv(.c) void;
 extern fn zigos_i686_irq0_stub() callconv(.c) void;
+extern fn zigos_i686_irq1_stub() callconv(.c) void;
 extern const zigos_i686_exception_stub_table: [32]u32;
 extern fn zigos_i686_trigger_breakpoint() callconv(.c) void;
 
@@ -81,6 +83,9 @@ var exception_count: u32 = 0;
 var last_exception_vector: u32 = 0;
 var last_exception_error: u32 = 0;
 var last_exception_eip: u32 = 0;
+var keyboard_irq_count: u32 = 0;
+var keyboard_make_count: u32 = 0;
+var keyboard_last_make: u8 = 0;
 
 pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     initCom1();
@@ -142,6 +147,15 @@ pub export fn zigos_i686_exception_dispatch(frame: *const TrapFrame) callconv(.c
 
 pub export fn zigos_i686_timer_interrupt() callconv(.c) void {
     timer_ticks +|= 1;
+}
+
+pub export fn zigos_i686_keyboard_interrupt() callconv(.c) void {
+    const scancode = zigos_i686_in8(0x0060);
+    keyboard_irq_count +|= 1;
+    if ((scancode & 0x80) == 0) {
+        keyboard_make_count +|= 1;
+        keyboard_last_make = scancode;
+    }
 }
 
 fn verifyAndReportBootInfo() void {
@@ -216,8 +230,10 @@ fn verifyInterruptTimer() u32 {
     for (0..32) |vector| {
         setIdtGate(vector, zigos_i686_exception_stub_table[vector]);
     }
-    const handler: u32 = @intCast(@intFromPtr(&zigos_i686_irq0_stub));
-    setIdtGate(0x20, handler);
+    const timer_handler: u32 = @intCast(@intFromPtr(&zigos_i686_irq0_stub));
+    const keyboard_handler: u32 = @intCast(@intFromPtr(&zigos_i686_irq1_stub));
+    setIdtGate(0x20, timer_handler);
+    setIdtGate(0x21, keyboard_handler);
     const base: u32 = @intCast(@intFromPtr(&idt));
     const descriptor = [6]u8{
         0xFF,
@@ -250,9 +266,39 @@ fn verifyInterruptTimer() u32 {
     zigos_i686_enable_interrupts();
     while (ticks.* < 5) zigos_i686_halt();
     zigos_i686_disable_interrupts();
+    zigos_i686_out8(0x0021, 0xFD);
+    writeAll("ZigOs i686 keyboard waiting: IRQ1 0x21 controller-command 0xD2 expected-make 0x1E\r\n");
+    const makes: *volatile u32 = &keyboard_make_count;
+    injectPs2Scancode(0x1E);
+    zigos_i686_enable_interrupts();
+    while (makes.* < 1 or keyboard_last_make != 0x1E) zigos_i686_halt();
+    zigos_i686_disable_interrupts();
     zigos_i686_out8(0x0021, 0xFF);
     zigos_i686_out8(0x00A1, 0xFF);
+    writeAll("ZigOs i686 keyboard verified: IRQ1 0x21 make-count 0x");
+    writeHex32(makes.*);
+    writeAll(" last-make 0x");
+    writeHex8(keyboard_last_make);
+    writeAll(" irq-count-nonzero ");
+    writeAll(if (keyboard_irq_count != 0) "yes" else "no");
+    writeAll("\r\n");
     return ticks.*;
+}
+
+fn injectPs2Scancode(scancode: u8) void {
+    waitPs2InputReady();
+    zigos_i686_out8(0x0064, 0xD2);
+    waitPs2InputReady();
+    zigos_i686_out8(0x0060, scancode);
+}
+
+fn waitPs2InputReady() void {
+    var remaining: u32 = 100_000;
+    while (remaining != 0) : (remaining -= 1) {
+        if ((zigos_i686_in8(0x0064) & 0x02) == 0) return;
+    }
+    writeAll("ZigOs i686 keyboard failed: controller input busy\r\n");
+    haltForever();
 }
 
 fn setIdtGate(vector: usize, handler: u32) void {
@@ -284,7 +330,7 @@ fn configurePic() void {
     ioWait();
     zigos_i686_out8(0x00A1, 0x01);
     ioWait();
-    zigos_i686_out8(0x0021, 0xFE);
+    zigos_i686_out8(0x0021, 0xFC);
     zigos_i686_out8(0x00A1, 0xFF);
 }
 

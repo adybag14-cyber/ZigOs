@@ -33,11 +33,12 @@ $arguments = @(
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -PassThru
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 $output = ''
+$finalMarker = 'ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005'
 try {
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 100
         try { $output = [IO.File]::ReadAllText($debugPath) } catch { continue }
-        if ($output.Contains('ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005')) { break }
+        if ($output.Contains($finalMarker)) { break }
         if ($process.HasExited) { break }
     }
 } finally {
@@ -59,19 +60,27 @@ $required = @(
     'ZigOs i686 freestanding kernel image built',
     'ZigOs i686 runtime verified: vendor GenuineIntel max-leaf 0x00000004 CR0 0x00000011 PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes',
     'ZigOs i686 exceptions verified: vectors 0x00000020 breakpoint-count 0x00000002 last-vector 0x00000003 error 0x00000000 eip-nonzero yes',
-    'ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005'
+    'ZigOs i686 keyboard waiting: IRQ1 0x21 controller-command 0xD2 expected-make 0x1E',
+    'ZigOs i686 keyboard verified: IRQ1 0x21 make-count 0x00000001 last-make 0x1E irq-count-nonzero yes',
+    $finalMarker
 )
 foreach ($marker in $required) {
     if (-not $output.Contains($marker)) { throw "Missing legacy marker: $marker. Output: $output" }
 }
+
 $e820Pattern = 'ZigOs i686 E820 verified: boot-info 0x00005000 version 0x00000001 entries 0x00000006 usable-regions 0x00000002 usable-bytes 0x0000000001F7FC00 highest 0x0000000100000000 drive 0x80 kernel 0x00010000/0x[0-9A-F]{8}/0x[0-9A-F]{8}'
 if (-not [regex]::IsMatch($output, $e820Pattern)) { throw "E820 debugcon contract missing. Output: $output" }
 $serial = [IO.File]::ReadAllText($serialPath)
 if (-not [regex]::IsMatch($serial, $e820Pattern)) { throw "E820 COM1 contract missing. Serial: $serial" }
-if (-not $serial.Contains('ZigOs i686 runtime verified: vendor GenuineIntel')) { throw "COM1 runtime marker missing. Serial: $serial" }
-if (-not $serial.Contains('PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes')) { throw "COM1 runtime invariants missing. Serial: $serial" }
-if (-not $serial.Contains('ZigOs i686 exceptions verified: vectors 0x00000020 breakpoint-count 0x00000002 last-vector 0x00000003 error 0x00000000 eip-nonzero yes')) { throw "COM1 exception marker missing. Serial: $serial" }
-if (-not $serial.Contains('ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005')) { throw "COM1 interrupt marker missing. Serial: $serial" }
+foreach ($marker in @(
+    'ZigOs i686 runtime verified: vendor GenuineIntel',
+    'PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes',
+    'ZigOs i686 exceptions verified: vectors 0x00000020 breakpoint-count 0x00000002 last-vector 0x00000003 error 0x00000000 eip-nonzero yes',
+    'ZigOs i686 keyboard verified: IRQ1 0x21 make-count 0x00000001 last-make 0x1E irq-count-nonzero yes',
+    $finalMarker
+)) {
+    if (-not $serial.Contains($marker)) { throw "COM1 marker missing: $marker. Serial: $serial" }
+}
 
 Write-Host $output.Trim()
 Write-Host '--- COM1 ---'

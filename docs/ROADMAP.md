@@ -1720,3 +1720,14 @@
 - Unexpected exceptions emit vector, error code, and EIP before entering a nonreturning halt path.
 - Debugcon and COM1 require the exact 32-vector, two-breakpoint, zero-error, nonzero-EIP success marker.
 - The legacy raw payload grows to 4,232 bytes across nine sectors while stage-1 continues to inject exact byte and sector metadata automatically.
+
+
+## 4.42 - Deliver PS/2 keyboard interrupts
+
+- Added an IRQ1 assembly gate at IDT vector `0x21` with full register preservation, aligned Zig entry, master-PIC EOI, and `IRETD` return.
+- Added exact byte input from the 8042 data/status ports while retaining the existing output helpers.
+- The PIC leaves IRQ0 and IRQ1 unmasked during setup, then masks the timer while independently validating keyboard delivery.
+- A bounded 8042 readiness loop issues controller command `0xD2` and places make code `0x1E` in the controller output buffer, causing the emulated hardware to assert IRQ1.
+- The Zig handler counts IRQ delivery, distinguishes make from break codes, and records the last make code without polling the keyboard data path.
+- The boot harness requires one make event, scan code `0x1E`, and nonzero IRQ accounting on both debugcon and COM1.
+- The raw payload is 4,928 bytes across ten sectors, with stage-1 metadata again generated from the exact image.
