@@ -1848,3 +1848,17 @@
 - The synchronous ring-3 transition now preserves all cdecl callee-saved registers so user programs may freely clobber EBP, EBX, ESI, and EDI without corrupting kernel metadata.
 - Debugcon and COM1 require file size `0x1A7`, entry `0x00400000`, PT_LOAD file size `0xA7`, memory size `0x200`, flags `5`, PID `1`, exit `0x33`, BSS zeroing, and heap restoration.
 
+## 4.53 - Add a bounded VFS and process lifecycle
+
+- Added a fixed-capacity VFS mount over the validated FAT12 root with four cached nodes and four descriptor slots.
+- Root mounting ignores deleted, long-name, volume-label, and directory entries, and rejects files that exceed the current single-cluster bound.
+- Descriptors retain independent byte offsets and provide bounded `open`, `read`, and `close` semantics rather than exposing raw FAT sectors to shell commands.
+- A boot probe opens `HELLO.TXT` as descriptor 0, reads it in exact 32-byte and 54-byte portions, verifies the reconstructed 86-byte payload, and closes it.
+- Added a four-slot process table with PID allocation, running/exited states, FAT 8.3 names, and retained exit codes.
+- The original boot-loaded `INIT.ELF` becomes exited PID 1; `run INIT.ELF` loads the file again through VFS, assigns PID 2, executes at CPL3, obtains PID 2 through `getpid`, and exits `0x33`.
+- `ls` enumerates `HELLO.TXT` and `INIT.ELF` from cached VFS nodes; `cat HELLO.TXT` reads through a descriptor; `ps` reports both exited user processes.
+- The expanded live COM1 harness sends nine paced commands: help, ls, mem, ticks, disk, cat, run, ps, and exit.
+- Final accounting requires three opens, four reads, three closes, two process records, last PID 2, exit `0x33`, eight operational shell commands, zero unknown commands, and no leaked descriptors.
+- The final raw kernel occupies 27,124 bytes across 53 sectors, ending at LBA61 and preserving the enforced LBA64 FAT12 partition boundary; SHA-256 is `8CFEF2BF57955860A251C8027F09185B9568DBC80FDF01545CBD0875176F257F`.
+- The final partitioned 2 MiB image SHA-256 is `A88410AC06C2446D3260EA891E3CC745E34BFF1AEEEB7D02D0516A3FFC83FE39`.
+

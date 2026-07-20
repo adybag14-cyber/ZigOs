@@ -45,14 +45,17 @@ $serialBuilder = [Text.StringBuilder]::new()
 $stdoutReadTask = $process.StandardOutput.ReadLineAsync()
 $stderrTask = $process.StandardError.ReadToEndAsync()
 
-$readyMarker = 'ZigOs i686 shell ready: prompt zigos> commands help mem ticks disk cat HELLO.TXT exit'
-$finalMarker = 'ZigOs i686 shell verified: commands 0x00000005 unknown 0x00000000 exit yes'
+$readyMarker = 'ZigOs i686 shell ready: prompt zigos> commands help ls mem ticks disk cat HELLO.TXT run INIT.ELF ps exit'
+$finalMarker = 'ZigOs i686 shell verified: commands 0x00000008 unknown 0x00000000 exit yes'
 $commandPlan = @(
-    @{ Command = 'help'; Expect = 'commands: help mem ticks disk cat HELLO.TXT exit' },
+    @{ Command = 'help'; Expect = 'commands: help ls mem ticks disk cat HELLO.TXT run INIT.ELF ps exit' },
+    @{ Command = 'ls'; Expect = 'INIT.ELF 0x000001A7' },
     @{ Command = 'mem'; Expect = 'frames-free 0x00001ECF heap-free 0x00007FF0 heap-base 0x00107000' },
     @{ Command = 'ticks'; Expect = 'ticks 0x0000000C PIT-Hz 0x00000064' },
-    @{ Command = 'disk'; Expect = 'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056' },
+    @{ Command = 'disk'; Expect = 'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056 INIT.ELF-bytes 0x000001A7' },
     @{ Command = 'cat HELLO.TXT'; Expect = 'Loaded through ATA PIO by the i686 kernel.' },
+    @{ Command = 'run INIT.ELF'; Expect = 'process PID 0x00000002 INIT.ELF exited 0x00000033 syscalls 0x00000003' },
+    @{ Command = 'ps'; Expect = 'PID 0x00000002 EXITED 0x00000033 INIT.ELF' },
     @{ Command = 'exit'; Expect = $finalMarker }
 )
 $nextCommand = 0
@@ -119,6 +122,8 @@ $schedulerMarker = 'ZigOs i686 scheduler verified: policy round-robin tasks 0x00
 $ring3Marker = 'ZigOs i686 ring3 verified: GDT entries 0x00000006 TSS selector 0x00000028 CS 0x0000001B SS 0x00000023 user-ESP 0x00402000 code 0x00400000 stack 0x00402000 sentinel 0xCAFEBABE kernel-user-bit no user-pages yes'
 $syscallMarker = 'ZigOs i686 syscalls verified: vector 0x00000080 calls 0x00000004 write-bytes 0x00000025 getpid 0x00000001 rejected 0x00000001 errno 0xFFFFFFF2 exit-code 0x0000002A kernel-pointer-denied yes'
 $elfMarker = 'ZigOs i686 ELF verified: file INIT.ELF cluster 0x00000003 bytes 0x000001A7 entry 0x00400000 PT_LOAD-filesz 0x000000A7 memsz 0x00000200 flags 0x00000005 pid 0x00000001 exit 0x00000033 BSS-zero yes heap-restored yes'
+$vfsReadyMarker = 'ZigOs i686 VFS/process ready: mount FAT12 root-files 0x00000002 fd-capacity 0x00000004 probe-fd 0x00000000 split-read 0x00000020/0x00000036 process-capacity 0x00000004 PID1 exited 0x00000033'
+$vfsFinalMarker = 'ZigOs i686 VFS/process verified: opens 0x00000003 reads 0x00000004 closes 0x00000003 processes 0x00000002 last-pid 0x00000002 last-exit 0x00000033 descriptors-closed yes'
 
 $debugMarkers = @(
     'ZigOs legacy BIOS stage0 online',
@@ -133,15 +138,18 @@ $debugMarkers = @(
     'ZigOs i686 keyboard waiting: IRQ1 0x21 controller-command 0xD2 expected-make 0x1E',
     $keyboardMarker, $interruptMarker, $frameMarker, $pagingMarker, $heapMarker, $ataMarker, $fatMarker, $schedulerMarker, $ring3Marker,
     'ZigOs ring3 syscall write verified.', $syscallMarker,
-    'INIT.ELF executed in ring3 via FAT12.', $elfMarker,
+    'INIT.ELF executed in ring3 via FAT12.', $elfMarker, $vfsReadyMarker,
     $readyMarker,
-    'commands: help mem ticks disk cat HELLO.TXT exit',
+    'commands: help ls mem ticks disk cat HELLO.TXT run INIT.ELF ps exit',
+    'HELLO.TXT 0x00000056', 'INIT.ELF 0x000001A7',
     'frames-free 0x00001ECF heap-free 0x00007FF0 heap-base 0x00107000',
     'ticks 0x0000000C PIT-Hz 0x00000064',
-    'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056',
+    'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056 INIT.ELF-bytes 0x000001A7',
     'ZigOs legacy FAT12 filesystem is online.',
     'Loaded through ATA PIO by the i686 kernel.',
-    $finalMarker
+    'process PID 0x00000002 INIT.ELF exited 0x00000033 syscalls 0x00000003',
+    'PID 0x00000001 EXITED 0x00000033 INIT.ELF', 'PID 0x00000002 EXITED 0x00000033 INIT.ELF',
+    $vfsFinalMarker, $finalMarker
 )
 foreach ($marker in $debugMarkers) {
     if (-not $debug.Contains($marker)) { throw "Missing debugcon marker: $marker. Output: $debug" }
@@ -154,13 +162,17 @@ if (-not [regex]::IsMatch($serial, $e820Pattern)) { throw "E820 COM1 contract mi
 $serialMarkers = @(
     $runtimeMarker, $exceptionMarker, $keyboardMarker, $interruptMarker, $frameMarker,
     $pagingMarker, $heapMarker, $ataMarker, $fatMarker, $schedulerMarker, $ring3Marker,
-    'ZigOs ring3 syscall write verified.', $syscallMarker, 'INIT.ELF executed in ring3 via FAT12.', $elfMarker, $readyMarker,
-    'help', 'commands: help mem ticks disk cat HELLO.TXT exit',
+    'ZigOs ring3 syscall write verified.', $syscallMarker, 'INIT.ELF executed in ring3 via FAT12.', $elfMarker, $vfsReadyMarker, $readyMarker,
+    'help', 'commands: help ls mem ticks disk cat HELLO.TXT run INIT.ELF ps exit',
+    'ls', 'HELLO.TXT 0x00000056', 'INIT.ELF 0x000001A7',
     'mem', 'frames-free 0x00001ECF heap-free 0x00007FF0 heap-base 0x00107000',
     'ticks', 'ticks 0x0000000C PIT-Hz 0x00000064',
-    'disk', 'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056',
+    'disk', 'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056 INIT.ELF-bytes 0x000001A7',
     'cat HELLO.TXT', 'ZigOs legacy FAT12 filesystem is online.',
-    'Loaded through ATA PIO by the i686 kernel.', 'exit', $finalMarker
+    'Loaded through ATA PIO by the i686 kernel.',
+    'run INIT.ELF', 'process PID 0x00000002 INIT.ELF exited 0x00000033 syscalls 0x00000003',
+    'ps', 'PID 0x00000001 EXITED 0x00000033 INIT.ELF', 'PID 0x00000002 EXITED 0x00000033 INIT.ELF',
+    'exit', $vfsFinalMarker, $finalMarker
 )
 foreach ($marker in $serialMarkers) {
     if (-not $serial.Contains($marker)) { throw "Missing COM1 marker: $marker. Serial: $serial" }
