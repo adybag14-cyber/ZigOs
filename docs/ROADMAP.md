@@ -1816,3 +1816,14 @@
 - Scheduler shutdown is transactional: the active flag clears in the final timer interrupt before the bootstrap task resumes and masks the PIC.
 - Debugcon and COM1 require exact worker counts `3/3`, switch count `7`, timer delta `7`, and `bootstrap-restored yes`.
 
+## 4.50 - Establish ring-3 privilege isolation
+
+- Replaced the temporary stage-1 descriptor table with a kernel-owned six-entry GDT containing null, ring-0 code/data, ring-3 code/data, and a 32-bit available TSS descriptor.
+- Added an exact 104-byte TSS with selector `0x28`, ring-0 stack selector `0x10`, and a dedicated 4 KiB privilege-transition stack.
+- Added assembly helpers for `LGDT`, far control-transfer reloading, segment reload, `LTR`, `STR`, and controlled `IRETD` entry into CPL3.
+- Added user mappings at `0x00400000` and `0x00402000` with present, writable, and user permissions while retaining supervisor-only kernel mappings.
+- A real ring-3 instruction stream writes sentinel `0xCAFEBABE`, preserves EAX `0x13579BDF`, and invokes a DPL-3 interrupt gate.
+- The processor switches to TSS.ESP0, captures CS `0x1B`, SS `0x23`, and user ESP `0x00402000`, then restores the original kernel call stack.
+- Named postcondition predicates independently validate TR, registers, privilege selectors, sentinel coherence, kernel U/S denial, and user PTE permissions.
+- The two persistent user frames reduce live free-frame accounting from `0x1ED1` to `0x1ECF`; the shell and harness require that exact state.
+

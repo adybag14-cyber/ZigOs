@@ -8,6 +8,8 @@ comptime {
     if (@sizeOf(IdtEntry) != 8) @compileError("legacy IDT entry layout changed");
     if (@sizeOf(TrapFrame) != 52) @compileError("legacy trap-frame layout changed");
     if (@sizeOf(InterruptContext) != 44) @compileError("legacy interrupt-context layout changed");
+    if (@sizeOf(UserReturnFrame) != 52) @compileError("legacy user-return frame layout changed");
+    if (@sizeOf(Tss) != 104) @compileError("legacy TSS layout changed");
     if (@sizeOf(HeapBlock) != 16) @compileError("legacy heap-block layout changed");
 }
 
@@ -73,6 +75,51 @@ const InterruptContext = extern struct {
     eflags: u32,
 };
 
+const UserReturnFrame = extern struct {
+    edi: u32,
+    esi: u32,
+    ebp: u32,
+    interrupted_esp: u32,
+    ebx: u32,
+    edx: u32,
+    ecx: u32,
+    eax: u32,
+    eip: u32,
+    cs: u32,
+    eflags: u32,
+    user_esp: u32,
+    user_ss: u32,
+};
+
+const Tss = extern struct {
+    previous: u32 = 0,
+    esp0: u32 = 0,
+    ss0: u32 = 0,
+    esp1: u32 = 0,
+    ss1: u32 = 0,
+    esp2: u32 = 0,
+    ss2: u32 = 0,
+    cr3: u32 = 0,
+    eip: u32 = 0,
+    eflags: u32 = 0,
+    eax: u32 = 0,
+    ecx: u32 = 0,
+    edx: u32 = 0,
+    ebx: u32 = 0,
+    esp: u32 = 0,
+    ebp: u32 = 0,
+    esi: u32 = 0,
+    edi: u32 = 0,
+    es: u32 = 0,
+    cs: u32 = 0,
+    ss: u32 = 0,
+    ds: u32 = 0,
+    fs: u32 = 0,
+    gs: u32 = 0,
+    ldt: u32 = 0,
+    trap_iomap: u32 = 0,
+};
+
 const HeapBlock = extern struct {
     payload_bytes: u32,
     next_address: u32,
@@ -100,6 +147,11 @@ extern fn zigos_i686_out8(port: u16, value: u8) callconv(.c) void;
 extern fn zigos_i686_in8(port: u16) callconv(.c) u8;
 extern fn zigos_i686_in16(port: u16) callconv(.c) u16;
 extern fn zigos_i686_load_idt(descriptor: *const [6]u8) callconv(.c) void;
+extern fn zigos_i686_load_gdt(descriptor: *const [6]u8) callconv(.c) void;
+extern fn zigos_i686_load_tr(selector: u16) callconv(.c) void;
+extern fn zigos_i686_read_tr() callconv(.c) u32;
+extern fn zigos_i686_enter_user(entry: u32, user_stack: u32) callconv(.c) void;
+extern fn zigos_i686_user_return_stub() callconv(.c) void;
 extern fn zigos_i686_enable_interrupts() callconv(.c) void;
 extern fn zigos_i686_disable_interrupts() callconv(.c) void;
 extern fn zigos_i686_halt() callconv(.c) void;
@@ -145,6 +197,15 @@ var scheduler_active = false;
 var scheduler_done = false;
 var scheduler_stack_a: [4096]u8 align(16) = @splat(0);
 var scheduler_stack_b: [4096]u8 align(16) = @splat(0);
+var kernel_page_directory: u32 = 0;
+var kernel_identity_tables: [4]u32 = @splat(0);
+var kernel_gdt: [6][8]u8 align(8) = @splat(@splat(0));
+var kernel_tss: Tss align(16) = .{};
+var user_transition_stack: [4096]u8 align(16) = @splat(0);
+var user_return_eax: u32 = 0;
+var user_return_cs: u32 = 0;
+var user_return_ss: u32 = 0;
+var user_return_esp: u32 = 0;
 
 pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     initCom1();
@@ -231,6 +292,13 @@ pub export fn zigos_i686_keyboard_interrupt() callconv(.c) void {
         keyboard_make_count +|= 1;
         keyboard_last_make = scancode;
     }
+}
+
+pub export fn zigos_i686_user_return_dispatch(frame: *const UserReturnFrame) callconv(.c) void {
+    user_return_eax = frame.eax;
+    user_return_cs = frame.cs;
+    user_return_ss = frame.user_ss;
+    user_return_esp = frame.user_esp;
 }
 
 fn verifyAndReportBootInfo() void {
@@ -402,8 +470,10 @@ fn verifyFrameAllocator() void {
 
 fn verifyPaging() void {
     const page_directory = allocateFrame() orelse frameAllocatorFailure("page directory");
+    kernel_page_directory = page_directory;
     var identity_tables: [4]u32 = undefined;
     for (&identity_tables) |*table| table.* = allocateFrame() orelse frameAllocatorFailure("identity table");
+    kernel_identity_tables = identity_tables;
     const alias_table = allocateFrame() orelse frameAllocatorFailure("alias table");
     const test_frame = allocateFrame() orelse frameAllocatorFailure("paging test frame");
 
@@ -637,7 +707,117 @@ fn verifyPreemptiveScheduler() void {
     writeAll(" tick-delta 0x");
     writeHex32(elapsed);
     writeAll(" bootstrap-restored yes\r\n");
+    verifyRing3Isolation();
+}
+
+fn verifyRing3Isolation() void {
+    installProtectedGdt();
+    const code_frame = allocateFrame() orelse ring3Failure("code frame");
+    const stack_frame = allocateFrame() orelse ring3Failure("stack frame");
+    zeroPhysicalFrame(code_frame);
+    zeroPhysicalFrame(stack_frame);
+
+    const user_code_virtual: u32 = 0x0040_0000;
+    const user_stack_virtual: u32 = 0x0040_2000;
+    const directory: [*]volatile u32 = @ptrFromInt(kernel_page_directory);
+    const table: [*]volatile u32 = @ptrFromInt(kernel_identity_tables[1]);
+    directory[1] |= 0x004;
+    table[0] = code_frame | 0x007;
+    table[2] = stack_frame | 0x007;
+    zigos_i686_invalidate_page(user_code_virtual);
+    zigos_i686_invalidate_page(user_stack_virtual);
+
+    const machine_code = [_]u8{
+        0xC7, 0x05, 0x80, 0x00, 0x40, 0x00, 0xBE, 0xBA, 0xFE, 0xCA,
+        0xB8, 0xDF, 0x9B, 0x57, 0x13, 0xCD, 0x30, 0xF4,
+    };
+    const code: [*]volatile u8 = @ptrFromInt(code_frame);
+    for (machine_code, 0..) |byte, index| code[index] = byte;
+    const sentinel: *volatile u32 = @ptrFromInt(code_frame + 0x80);
+    sentinel.* = 0;
+
+    const return_handler: u32 = @intCast(@intFromPtr(&zigos_i686_user_return_stub));
+    setIdtGateAttributes(0x30, return_handler, 0xEE);
+    user_return_eax = 0;
+    user_return_cs = 0;
+    user_return_ss = 0;
+    user_return_esp = 0;
+    zigos_i686_enter_user(user_code_virtual, user_stack_virtual);
+
+    const kernel_table: [*]const volatile u32 = @ptrFromInt(kernel_identity_tables[0]);
+    const kernel_pte = kernel_table[0x0001_0000 / frame_size];
+    const user_code_pte = table[0];
+    const user_stack_pte = table[2];
+    const observed_tr = zigos_i686_read_tr();
+    const observed_sentinel = sentinel.*;
+    var failure_mask: u32 = 0;
+    if (observed_tr != 0x28) failure_mask |= 1 << 0;
+    if (observed_sentinel != 0xCAFE_BABE) failure_mask |= 1 << 1;
+    if (user_return_eax != 0x1357_9BDF) failure_mask |= 1 << 2;
+    if (user_return_cs != 0x1B) failure_mask |= 1 << 3;
+    if (user_return_ss != 0x23) failure_mask |= 1 << 4;
+    if (user_return_esp != user_stack_virtual) failure_mask |= 1 << 5;
+    if ((kernel_pte & 0x004) != 0) failure_mask |= 1 << 6;
+    if ((user_code_pte & 0x007) != 0x007) failure_mask |= 1 << 7;
+    if ((user_stack_pte & 0x007) != 0x007) failure_mask |= 1 << 8;
+    if (failure_mask != 0) {
+        writeAll("ZigOs i686 ring3 failed: predicate-mask 0x");
+        writeHex32(failure_mask);
+        writeAll("\r\n");
+        haltForever();
+    }
+
+    writeAll("ZigOs i686 ring3 verified: GDT entries 0x00000006 TSS selector 0x00000028 CS 0x");
+    writeHex32(user_return_cs);
+    writeAll(" SS 0x");
+    writeHex32(user_return_ss);
+    writeAll(" user-ESP 0x");
+    writeHex32(user_return_esp);
+    writeAll(" code 0x00400000 stack 0x00402000 sentinel 0x");
+    writeHex32(sentinel.*);
+    writeAll(" kernel-user-bit no user-pages yes\r\n");
     runShell();
+}
+
+fn installProtectedGdt() void {
+    kernel_gdt = @splat(@splat(0));
+    writeGdtDescriptor(&kernel_gdt[1], 0, 0x000F_FFFF, 0x9A, 0xCF);
+    writeGdtDescriptor(&kernel_gdt[2], 0, 0x000F_FFFF, 0x92, 0xCF);
+    writeGdtDescriptor(&kernel_gdt[3], 0, 0x000F_FFFF, 0xFA, 0xCF);
+    writeGdtDescriptor(&kernel_gdt[4], 0, 0x000F_FFFF, 0xF2, 0xCF);
+    kernel_tss = .{};
+    kernel_tss.esp0 = @intCast(@intFromPtr(&user_transition_stack) + user_transition_stack.len);
+    kernel_tss.ss0 = 0x10;
+    kernel_tss.trap_iomap = @as(u32, @sizeOf(Tss)) << 16;
+    writeGdtDescriptor(&kernel_gdt[5], @intCast(@intFromPtr(&kernel_tss)), @sizeOf(Tss) - 1, 0x89, 0x00);
+    const base: u32 = @intCast(@intFromPtr(&kernel_gdt));
+    const limit: u16 = @intCast(@sizeOf(@TypeOf(kernel_gdt)) - 1);
+    const descriptor = [6]u8{
+        @truncate(limit),      @truncate(limit >> 8),
+        @truncate(base),       @truncate(base >> 8),
+        @truncate(base >> 16), @truncate(base >> 24),
+    };
+    zigos_i686_load_gdt(&descriptor);
+    zigos_i686_load_tr(0x28);
+}
+
+fn writeGdtDescriptor(entry: *[8]u8, base: u32, limit: u32, access: u8, flags: u8) void {
+    entry[0] = @truncate(limit);
+    entry[1] = @truncate(limit >> 8);
+    entry[2] = @truncate(base);
+    entry[3] = @truncate(base >> 8);
+    entry[4] = @truncate(base >> 16);
+    entry[5] = access;
+    entry[6] = @truncate((limit >> 16) & 0x0F);
+    entry[6] |= flags & 0xF0;
+    entry[7] = @truncate(base >> 24);
+}
+
+fn ring3Failure(reason: []const u8) noreturn {
+    writeAll("ZigOs i686 ring3 failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
 }
 
 fn initializeKernelTask(stack: *[4096]u8, entry: u32) u32 {
@@ -1149,11 +1329,15 @@ fn waitPs2InputReady() void {
 }
 
 fn setIdtGate(vector: usize, handler: u32) void {
+    setIdtGateAttributes(vector, handler, 0x8E);
+}
+
+fn setIdtGateAttributes(vector: usize, handler: u32, attributes: u8) void {
     idt[vector] = .{
         .offset_low = @truncate(handler),
         .selector = 0x0008,
         .zero = 0,
-        .attributes = 0x8E,
+        .attributes = attributes,
         .offset_high = @truncate(handler >> 16),
     };
 }

@@ -14,6 +14,11 @@ global zigos_i686_out8
 global zigos_i686_in8
 global zigos_i686_in16
 global zigos_i686_load_idt
+global zigos_i686_load_gdt
+global zigos_i686_load_tr
+global zigos_i686_read_tr
+global zigos_i686_enter_user
+global zigos_i686_user_return_stub
 global zigos_i686_enable_interrupts
 global zigos_i686_disable_interrupts
 global zigos_i686_halt
@@ -25,6 +30,7 @@ extern zigos_legacy_kernel_main
 extern zigos_i686_timer_interrupt
 extern zigos_i686_keyboard_interrupt
 extern zigos_i686_exception_dispatch
+extern zigos_i686_user_return_dispatch
 extern __bss_start
 extern __bss_end
 
@@ -114,6 +120,64 @@ zigos_i686_in16:
 zigos_i686_load_idt:
     mov eax, [esp + 4]
     lidt [eax]
+    ret
+
+; cdecl: void zigos_i686_load_gdt(const void *descriptor)
+zigos_i686_load_gdt:
+    mov eax, [esp + 4]
+    lgdt [eax]
+    jmp 0x08:.reload_segments
+.reload_segments:
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    ret
+
+zigos_i686_load_tr:
+    mov eax, [esp + 4]
+    ltr ax
+    ret
+
+zigos_i686_read_tr:
+    xor eax, eax
+    str ax
+    ret
+
+zigos_i686_enter_user:
+    mov [zigos_i686_kernel_return_esp], esp
+    mov eax, [esp + 4]
+    mov edx, [esp + 8]
+    mov cx, 0x23
+    mov ds, cx
+    mov es, cx
+    mov fs, cx
+    mov gs, cx
+    push dword 0x23
+    push edx
+    push dword 0x00000002
+    push dword 0x1B
+    push eax
+    iretd
+
+zigos_i686_user_return_stub:
+    pushad
+    mov eax, esp
+    mov ebp, esp
+    and esp, -16
+    sub esp, 12
+    push eax
+    cld
+    call zigos_i686_user_return_dispatch
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, [zigos_i686_kernel_return_esp]
     ret
 
 zigos_i686_enable_interrupts:
@@ -239,3 +303,5 @@ global zigos_i686_entry_stack
 global zigos_i686_boot_info_pointer
 zigos_i686_entry_stack: dd 0
 zigos_i686_boot_info_pointer: dd 0
+global zigos_i686_kernel_return_esp
+zigos_i686_kernel_return_esp: dd 0
