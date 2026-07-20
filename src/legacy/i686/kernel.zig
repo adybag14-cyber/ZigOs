@@ -2606,6 +2606,7 @@ fn verifyAta() void {
 }
 
 fn ataIdentify(destination: *[256]u16) bool {
+    if (!ataWaitIdle()) return false;
     zigos_i686_out8(ata_drive_port, 0xA0);
     ataDelay();
     zigos_i686_out8(ata_sector_count_port, 0);
@@ -2623,7 +2624,7 @@ fn ataIdentify(destination: *[256]u16) bool {
 
 fn ataReadSector(lba: u32, destination_address: u32) bool {
     if (ata_sector_count != 0 and lba >= ata_sector_count) return false;
-    if (lba >= 0x1000_0000 or !ataWaitReady()) return false;
+    if (lba >= 0x1000_0000 or !ataWaitIdle()) return false;
     zigos_i686_out8(ata_drive_port, 0xE0 | @as(u8, @truncate(lba >> 24)));
     ataDelay();
     zigos_i686_out8(ata_sector_count_port, 1);
@@ -2644,7 +2645,7 @@ fn ataReadSector(lba: u32, destination_address: u32) bool {
 
 fn ataWriteSector(lba: u32, source_address: u32) bool {
     if (ata_sector_count != 0 and lba >= ata_sector_count) return false;
-    if (lba >= 0x1000_0000 or !ataWaitReady()) return false;
+    if (lba >= 0x1000_0000 or !ataWaitIdle()) return false;
     zigos_i686_out8(ata_drive_port, 0xE0 | @as(u8, @truncate(lba >> 24)));
     ataDelay();
     zigos_i686_out8(ata_sector_count_port, 1);
@@ -2660,9 +2661,9 @@ fn ataWriteSector(lba: u32, source_address: u32) bool {
     }
     // The device may assert BSY after the final data word. Complete the
     // WRITE SECTORS command before issuing the independent FLUSH CACHE command.
-    if (!ataWaitReady()) return false;
+    if (!ataWaitIdle()) return false;
     zigos_i686_out8(ata_status_command_port, 0xE7);
-    if (!ataWaitReady()) return false;
+    if (!ataWaitIdle()) return false;
     if (!ataReadSector(lba, @intCast(@intFromPtr(&ata_verify_buffer)))) return false;
     for (0..512) |index| {
         if (ata_verify_buffer[index] != source[index]) return false;
@@ -2671,17 +2672,30 @@ fn ataWriteSector(lba: u32, source_address: u32) bool {
     return true;
 }
 
+const ata_poll_limit: u32 = 65_536;
+
 fn ataWaitReady() bool {
-    var remaining: u32 = 1_000_000;
+    var remaining: u32 = ata_poll_limit;
     while (remaining != 0) : (remaining -= 1) {
         const status = zigos_i686_in8(ata_status_command_port);
-        if ((status & 0x80) == 0) return (status & 0x21) == 0;
+        if ((status & 0x21) != 0) return false;
+        if ((status & 0x80) == 0) return true;
+    }
+    return false;
+}
+
+fn ataWaitIdle() bool {
+    var remaining: u32 = ata_poll_limit;
+    while (remaining != 0) : (remaining -= 1) {
+        const status = zigos_i686_in8(ata_status_command_port);
+        if ((status & 0x21) != 0) return false;
+        if ((status & 0x88) == 0) return true;
     }
     return false;
 }
 
 fn ataWaitData() bool {
-    var remaining: u32 = 1_000_000;
+    var remaining: u32 = ata_poll_limit;
     while (remaining != 0) : (remaining -= 1) {
         const status = zigos_i686_in8(ata_status_command_port);
         if ((status & 0x21) != 0) return false;

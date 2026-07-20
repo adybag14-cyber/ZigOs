@@ -1908,7 +1908,7 @@
 
 ## 8.0 - Capstone persistent writable userspace
 
-- Goal 1: Added ATA PIO sector writes using command `0x30`, cache flush `0xE7`, and mandatory 512-byte read-after-write comparison.
+- Goal 1: Added ATA PIO sector writes using command `0x30`, cache flush `0xE7`, mandatory 512-byte read-after-write comparison, and bounded command serialization requiring `BSY=0` plus `DRQ=0` before every new command.
 - Goal 2: Generalized FAT12 validation and VFS reads across bounded multi-cluster chains; `BIG.TXT` proves `5 -> 6 -> 7 -> EOC` and hash `E5D120DF`.
 - Goal 3: Added packed FAT12 entry updates, mirrored writes to both FAT copies, deterministic first-free allocation, chain linking, and bounded freeing.
 - Goal 4: Added writable 8.3 root-directory entry creation, first-cluster/size updates, and truncate semantics with an independent root-scan buffer.
@@ -1921,5 +1921,5 @@
 - The first live shell session executes 14 commands including exit, retains seven process records, waits for PID 6, contains PID 7's page fault at `0x00800000`, and ends with zero descriptors and zero unknown commands.
 - Runtime mutation creates root slot 8 `NOTES.TXT`, 720 bytes, chain `14 -> 15 -> EOC`, FNV-1a32 `C6181D2F`; both FAT copies and exact content are verified offline.
 - A second QEMU boot uses the same image without rebuilding, reads/hashes/stats `NOTES.TXT`, performs zero writes and allocations, and must leave the complete disk SHA-256 unchanged.
-- Reference kernel: 41,916 bytes, 82 sectors at LBA9-90, checksum16 `0x0553`, SHA-256 `F5014CAECA6F328F0D2176C9789C3D927232197334EEF1135726EB216505B816`.
-- Initial image SHA-256: `BB8A9EE8D650D35475013A62B01A09852A71DC1B8110CACD6E2FEF8BA5D97BC5`; persisted image SHA-256: `8F7B6525DF6A81C23F55F02D1E6F0C47642CC63C6FFF8DE2646BE0EE0B01E667`.
+- Reference kernel: 41,948 bytes, 82 sectors at LBA9-90, checksum16 `0xEE2D`, SHA-256 `E626432D97EA8A42CAB9BAC1B519A0AEBEBC2096F7B3E3E3D8BD62720A2F5AD2`.
+- Initial image SHA-256: `0A478B127FF14E3D3D13F83D3A3E2E321F018C89AB91131B4844CE058E5184E2`; persisted image SHA-256: `47080279C1A72F053E3715CCE2B499CEE8D4FCB31807F300C7B8773934F6E6C2`.
