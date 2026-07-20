@@ -49,4 +49,6 @@ jobs:
           path: |
             zig-out/legacy/i686/ZIGOS386.ELF
             zig-out/legacy/i686/ZIGOS386.BIN
+            zig-out/legacy/i686/BOOTSECT.BIN
+            zig-out/legacy/i686/ZIGOS386.IMG
           if-no-files-found: error

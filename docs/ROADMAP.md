@@ -1652,3 +1652,14 @@
 - The first verified outputs are a 4,780-byte ELF32 image and a 280-byte raw payload with SHA-256 `F4BC910D57E6B942C1D41B9EB5FDB304148A5DAF66D5443279A7B65CC8F47683`.
 - The existing AMD64 PE32+ UEFI image remains 888,832 bytes with SHA-256 `ABA23A4C97F504146B1633D846A3F5A46242BC6360CDE9DDA8909A98941F45C2`.
 - GitHub Actions builds and uploads both architecture outputs, establishing the compatibility matrix required for subsequent BIOS boot milestones.
+
+## 4.36 - Boot a verified BIOS stage-0 sector
+
+- Added a flat 16-bit boot sector assembled at the PC BIOS load address `0x00007C00` and constrained to exactly 512 bytes.
+- Stage-0 establishes deterministic zero-based data/stack segments, captures the firmware-provided boot drive, and emits debugcon diagnostics without relying on UEFI services.
+- The loader probes INT 13h Extensions with function `AH=41h`, verifies the returned `0xAA55` handshake and packet-interface capability bit, and reports the hard-disk drive number `0x80`.
+- The final two sector bytes are verified as the mandatory little-endian `0x55AA` boot signature before image construction.
+- The build creates a deterministic 1 MiB raw hard-disk image beginning byte-for-byte with the verified boot sector.
+- `test-legacy-i686.ps1` boots the image with `qemu-system-i386`, captures port `0xE9`, handles debugcon flush after emulator shutdown, and requires exact stage-entry and EDD markers.
+- QEMU reports `ZigOs BIOS stage0 verified: drive 0x80 EDD yes signature 0x55AA` through real legacy firmware execution.
+- The verified stage-0 image SHA-256 is `85EA3880E9EBFBAE97541AD9FF4B7BCAF87A216240A3878AB31985D0C30F8F2E`; GitHub artifacts now include the sector and bootable image alongside ELF32 and raw kernel outputs.
