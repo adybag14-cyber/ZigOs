@@ -1663,3 +1663,13 @@
 - `test-legacy-i686.ps1` boots the image with `qemu-system-i386`, captures port `0xE9`, handles debugcon flush after emulator shutdown, and requires exact stage-entry and EDD markers.
 - QEMU reports `ZigOs BIOS stage0 verified: drive 0x80 EDD yes signature 0x55AA` through real legacy firmware execution.
 - The verified stage-0 image SHA-256 is `85EA3880E9EBFBAE97541AD9FF4B7BCAF87A216240A3878AB31985D0C30F8F2E`; GitHub artifacts now include the sector and bootable image alongside ELF32 and raw kernel outputs.
+
+## 4.37 - Load stage-1 and enter the Zig i686 kernel
+
+- Stage-0 uses an INT 13h Extended Read disk-address packet to load eight sectors from LBA 1 to `0x00008000`.
+- The build pads stage-1 to 4,096 bytes, computes the kernel sector count, and places the payload at LBA 9 and address `0x00010000`.
+- Stage-1 enables A20, installs flat 4 GiB code/data descriptors, sets protected mode, and far-jumps with CS selector `0x0008`.
+- Protected-mode entry installs data selector `0x0010`, an aligned stack at `0x0009F000`, and jumps to the canonical Zig entry.
+- Image verification checks stage-0, stage-1, and kernel placement byte-for-byte before execution.
+- QEMU requires exact markers for both BIOS stages, disk loading, protected-mode entry, and Zig kernel handoff.
+- The complete image SHA-256 is `E97329FF8F98B6EDEA7C7AABE62358B883742A86898B72F7E08959296E7E0B4A`.
