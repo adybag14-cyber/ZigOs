@@ -1590,3 +1590,15 @@
 - The valid plan opens exactly `2/134/49262`, binds the exact protected peer, preserves client/result server identity, and rejects consumed reuse as `stale_execution_preview` while byte integrity remains valid.
 - Structured close leaves endpoint cursor/generation `49263/135`, while IP/TX `166/1`, completions `193/193/22`, and ingress/dispatch `211/211/199/198` remain unchanged.
 - Full HPET and 24-bit ACPI PM timer boots validate protected peer integrity and exact binding through the complete regression harness.
+
+## 4.31 - Add a native TCP transport foundation
+
+- Added `src/tcp.zig` with bounded Ethernet II, IPv4, and TCP frame construction and parsing for TCP protocol number 6.
+- The builder supports 20-60 byte TCP headers, aligned options, payloads, all nine control flags, urgent-pointer validation, minimum Ethernet padding, IPv4 checksums, and TCP pseudo-header checksums.
+- The parser rejects invalid MAC/IP/port selectors, malformed IPv4 lengths or fragments, bad IPv4/TCP checksums, illegal TCP data offsets, reserved bits, and inconsistent urgent pointers before exposing options or payload.
+- e1000e packet classification now routes valid TCP frames into a dedicated bounded queue, tracks TCP dispatches independently, and counts malformed TCP drops without affecting UDP endpoint state.
+- `sendTcpSegment` provides transactional TCP transmission: it builds and self-validates the exact frame, submits through the real DMA TX ring, and advances a dedicated IPv4 identification cursor only after completion.
+- The deterministic verifier builds a 32-byte SYN with MSS, window-scale, SACK-permitted, and NOP options; rejects zero-port, unaligned-option, urgent-pointer, checksum, fragment, offset, and reserved-bit cases; and routes a synthetic SYN-ACK through the shared software dispatcher.
+- A real `50000 -> 443` SYN leaves descriptor `1`, advances TX cursor `1 -> 2` and TCP identification `0x7200 -> 0x7201`, and receives a checksum-valid 60-byte RST-ACK through RX descriptor `6 -> 7` from `192.0.2.1:443` with acknowledgement `0x13579BE0`.
+- The live reply is parsed as `RST|ACK`, released back to hardware, and leaves balanced completion ownership `TX 194/194`, `RX 23/23`, ingress `213/213`, dispatch `200/1/198` for total/TCP/UDP, and unchanged UDP endpoint cursor/generation `2/49263/135`.
+- Full HPET and 24-bit ACPI PM timer boots validate the TCP codec, dispatch path, DMA transmission, live hardware response, descriptor recycling, and complete regression harness.

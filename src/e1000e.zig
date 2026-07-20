@@ -5,6 +5,7 @@ const paging = @import("paging.zig");
 const apic = @import("apic.zig");
 const dhcp = @import("dhcp.zig");
 const udp = @import("udp.zig");
+const tcp = @import("tcp.zig");
 const tftp = @import("tftp.zig");
 const dns = @import("dns.zig");
 const ntp = @import("ntp.zig");
@@ -91,6 +92,7 @@ const arp_request: u16 = 1;
 const arp_reply: u16 = 2;
 const ipv4_header_bytes: usize = 20;
 const ipv4_protocol_icmp: u8 = 1;
+const ipv4_protocol_tcp: u8 = tcp.protocol_number;
 const ipv4_protocol_udp: u8 = 17;
 const ipv4_dont_fragment: u16 = 1 << 14;
 const icmp_echo_reply: u8 = 0;
@@ -196,6 +198,7 @@ pub const SoftwarePacketQueue = struct {
 pub const PacketKind = enum(u8) {
     arp,
     icmp,
+    tcp,
     udp,
     unknown,
 };
@@ -380,6 +383,7 @@ pub const Device = struct {
     software_rx_queue: SoftwarePacketQueue,
     arp_rx_queue: SoftwarePacketQueue,
     icmp_rx_queue: SoftwarePacketQueue,
+    tcp_rx_queue: SoftwarePacketQueue,
     udp_rx_queue: SoftwarePacketQueue,
     udp_endpoints: [udp_endpoint_capacity]UdpEndpoint,
     udp_endpoint_count: u16,
@@ -387,13 +391,16 @@ pub const Device = struct {
     next_ephemeral_udp_port: u16,
     next_udp_ready_index: u8,
     next_udp_identification: u16,
+    next_tcp_identification: u16,
     next_dns_transaction_id: u16,
     unmatched_udp_packets_dropped: u64,
     invalid_udp_packets_dropped: u64,
     peer_mismatch_udp_packets_dropped: u64,
+    invalid_tcp_packets_dropped: u64,
     packets_dispatched: u64,
     arp_packets_dispatched: u64,
     icmp_packets_dispatched: u64,
+    tcp_packets_dispatched: u64,
     udp_packets_dispatched: u64,
     unknown_packets_dropped: u64,
 };
@@ -404,6 +411,30 @@ pub const TxCompletion = struct {
     frame_length: u16,
     interrupt_count: u64,
     interrupt_cause: u32,
+};
+
+pub const TcpTransmitOptions = struct {
+    destination_mac: [6]u8,
+    destination_ipv4: [4]u8,
+    source_port: u16,
+    destination_port: u16,
+    sequence_number: u32,
+    acknowledgement_number: u32 = 0,
+    flags: u9,
+    window_size: u16,
+    urgent_pointer: u16 = 0,
+    ttl: u8 = 64,
+    options: []const u8 = &.{},
+    payload: []const u8 = &.{},
+};
+
+pub const TcpTransmitResult = struct {
+    completion: TxCompletion,
+    identification: u16,
+    next_identification: u16,
+    checksum: u16,
+    header_length: u8,
+    flags: u9,
 };
 
 pub const ReceivedFrame = struct {
@@ -1649,6 +1680,77 @@ pub const NtpReopenProtectedPeerReport = struct {
     ingress_dequeued: u64,
     packets_dispatched: u64,
     udp_dispatched: u64,
+};
+
+pub const TcpFoundationReport = struct {
+    protocol_number: u8,
+    source_port: u16,
+    destination_port: u16,
+    syn_frame_length: u16,
+    syn_header_length: u8,
+    syn_sequence: u32,
+    syn_flags: u9,
+    syn_window: u16,
+    syn_options_length: u8,
+    syn_checksum: u16,
+    codec_valid: bool,
+    invalid_builds_rejected: [3]bool,
+    checksum_rejected: bool,
+    fragment_rejected: bool,
+    offset_rejected: bool,
+    reserved_rejected: bool,
+    malformed_dispatch_dropped: bool,
+    invalid_tcp_dropped: u64,
+    valid_dispatch_routed: bool,
+    syn_ack_sequence: u32,
+    syn_ack_acknowledgement: u32,
+    syn_ack_flags: u9,
+    syn_ack_window: u16,
+    syn_ack_header_length: u8,
+    syn_ack_options_length: u8,
+    tcp_queue_enqueues: u64,
+    tcp_queue_dequeues: u64,
+    tcp_queue_high_water: u16,
+    tcp_queue_dropped: u64,
+    transmit_identification: u16,
+    transmit_next_identification: u16,
+    transmit_descriptor: u16,
+    transmit_next_cursor: u16,
+    transmit_frame_length: u16,
+    transmit_checksum: u16,
+    transmit_flags: u9,
+    identification_advanced: bool,
+    hardware_reply_valid: bool,
+    hardware_reply_frame_length: u16,
+    hardware_reply_descriptor: u16,
+    hardware_reply_next_cursor: u16,
+    hardware_reply_source_mac_gateway: bool,
+    hardware_reply_source_ipv4: [4]u8,
+    hardware_reply_source_port: u16,
+    hardware_reply_destination_port: u16,
+    hardware_reply_sequence: u32,
+    hardware_reply_acknowledgement: u32,
+    hardware_reply_flags: u9,
+    hardware_reply_window: u16,
+    hardware_reply_header_length: u8,
+    hardware_reply_checksum: u16,
+    hardware_reply_released: bool,
+    tx_submissions_delta: u64,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    rx_completion_dequeues: u64,
+    ingress_enqueues: u64,
+    ingress_dequeues: u64,
+    packets_dispatched: u64,
+    tcp_dispatched: u64,
+    udp_dispatched: u64,
+    final_tx_cursor: u16,
+    final_rx_cursor: u16,
+    final_tcp_identification: u16,
+    final_registered_endpoints: u16,
+    final_ephemeral_cursor: u16,
+    final_udp_generation: u32,
 };
 
 pub const NtpReopenValidationFailureReport = struct {
@@ -6204,6 +6306,7 @@ pub const NetworkResult = struct {
     ntp_reopen_refresh_execution: NtpReopenRefreshExecutionReport,
     ntp_reopen_peer_preflight: NtpReopenPeerPreflightReport,
     ntp_reopen_protected_peer: NtpReopenProtectedPeerReport,
+    tcp_foundation: TcpFoundationReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -6233,7 +6336,6 @@ var rx_ready_mask: u32 = 0;
 var tx_completion_queue: CompletionQueue = undefined;
 var rx_completion_queue: CompletionQueue = undefined;
 var active_device_storage: ?Device = null;
-
 extern fn zigos_memory_fence() callconv(cc) void;
 extern fn zigos_cpu_relax() callconv(cc) void;
 extern fn zigos_enable_interrupts() callconv(cc) void;
@@ -6723,6 +6825,7 @@ pub fn initializeAndTestNetwork(
         .software_rx_queue = std.mem.zeroes(SoftwarePacketQueue),
         .arp_rx_queue = std.mem.zeroes(SoftwarePacketQueue),
         .icmp_rx_queue = std.mem.zeroes(SoftwarePacketQueue),
+        .tcp_rx_queue = std.mem.zeroes(SoftwarePacketQueue),
         .udp_rx_queue = std.mem.zeroes(SoftwarePacketQueue),
         .udp_endpoints = std.mem.zeroes([udp_endpoint_capacity]UdpEndpoint),
         .udp_endpoint_count = 0,
@@ -6730,13 +6833,16 @@ pub fn initializeAndTestNetwork(
         .next_ephemeral_udp_port = ephemeral_udp_port_first,
         .next_udp_ready_index = 0,
         .next_udp_identification = 0x7000,
+        .next_tcp_identification = 0x7200,
         .next_dns_transaction_id = 0x5000,
         .unmatched_udp_packets_dropped = 0,
         .invalid_udp_packets_dropped = 0,
         .peer_mismatch_udp_packets_dropped = 0,
+        .invalid_tcp_packets_dropped = 0,
         .packets_dispatched = 0,
         .arp_packets_dispatched = 0,
         .icmp_packets_dispatched = 0,
+        .tcp_packets_dispatched = 0,
         .udp_packets_dispatched = 0,
         .unknown_packets_dropped = 0,
     };
@@ -7161,6 +7267,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const tcp_foundation = verifyTcpFoundation(device) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -7401,6 +7511,7 @@ pub fn initializeAndTestNetwork(
         .ntp_reopen_refresh_execution = ntp_reopen_refresh_execution,
         .ntp_reopen_peer_preflight = ntp_reopen_peer_preflight,
         .ntp_reopen_protected_peer = ntp_reopen_protected_peer,
+        .tcp_foundation = tcp_foundation,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -7453,6 +7564,47 @@ pub fn submitFrame(device: *Device, frame: []const u8) ?TxCompletion {
         .frame_length = @intCast(frame.len),
         .interrupt_count = observed - baseline,
         .interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire),
+    };
+}
+
+pub fn sendTcpSegment(device: *Device, options: TcpTransmitOptions) ?TcpTransmitResult {
+    const identification = device.next_tcp_identification;
+    var frame = std.mem.zeroes([maximum_ethernet_frame_bytes]u8);
+    const frame_length = tcp.buildFrame(&frame, .{
+        .source_mac = device.local_mac,
+        .destination_mac = options.destination_mac,
+        .source_ipv4 = device.local_ipv4,
+        .destination_ipv4 = options.destination_ipv4,
+        .source_port = options.source_port,
+        .destination_port = options.destination_port,
+        .identification = identification,
+        .sequence_number = options.sequence_number,
+        .acknowledgement_number = options.acknowledgement_number,
+        .flags = options.flags,
+        .window_size = options.window_size,
+        .urgent_pointer = options.urgent_pointer,
+        .ttl = options.ttl,
+        .options = options.options,
+        .payload = options.payload,
+    }) orelse return null;
+    const parsed = tcp.parseFrame(frame[0..frame_length], .{
+        .destination_mac = options.destination_mac,
+        .source_mac = device.local_mac,
+        .destination_ipv4 = options.destination_ipv4,
+        .source_ipv4 = device.local_ipv4,
+        .destination_port = options.destination_port,
+        .source_port = options.source_port,
+    }) orelse return null;
+    const completion = submitFrame(device, frame[0..frame_length]) orelse return null;
+    const next_identification = nextTcpIdentification(identification);
+    device.next_tcp_identification = next_identification;
+    return .{
+        .completion = completion,
+        .identification = identification,
+        .next_identification = next_identification,
+        .checksum = parsed.checksum,
+        .header_length = parsed.header_length,
+        .flags = parsed.flags,
     };
 }
 
@@ -7516,6 +7668,16 @@ pub fn dispatchNextPacketResult(device: *Device) PacketDispatchResult {
     const queue = switch (kind) {
         .arp => &device.arp_rx_queue,
         .icmp => &device.icmp_rx_queue,
+        .tcp => blk: {
+            _ = tcp.parseFrame(packet.bytes[0..packet.length], .{
+                .destination_mac = device.local_mac,
+                .destination_ipv4 = device.local_ipv4,
+            }) orelse {
+                device.invalid_tcp_packets_dropped +|= 1;
+                return .dropped;
+            };
+            break :blk &device.tcp_rx_queue;
+        },
         .udp => blk: {
             const datagram = udp.parseFrame(packet.bytes[0..packet.length], .{
                 .destination_mac = device.local_mac,
@@ -7549,6 +7711,7 @@ pub fn dispatchNextPacketResult(device: *Device) PacketDispatchResult {
     switch (kind) {
         .arp => device.arp_packets_dispatched +|= 1,
         .icmp => device.icmp_packets_dispatched +|= 1,
+        .tcp => device.tcp_packets_dispatched +|= 1,
         .udp => device.udp_packets_dispatched +|= 1,
         .unknown => unreachable,
     }
@@ -7585,6 +7748,10 @@ pub fn dequeueArpPacket(device: *Device) ?Packet {
 
 pub fn dequeueIcmpPacket(device: *Device) ?Packet {
     return dequeueQueuedPacket(&device.icmp_rx_queue);
+}
+
+pub fn dequeueTcpPacket(device: *Device) ?Packet {
+    return dequeueQueuedPacket(&device.tcp_rx_queue);
 }
 
 pub fn dequeueUdpPacket(device: *Device) ?Packet {
@@ -10344,6 +10511,11 @@ fn nextUdpIdentification(identification: u16) u16 {
     return if (next == 0) 1 else next;
 }
 
+fn nextTcpIdentification(identification: u16) u16 {
+    const next = identification +% 1;
+    return if (next == 0) 1 else next;
+}
+
 fn nextDnsTransactionId(transaction_id: u16) u16 {
     const next = transaction_id +% 1;
     return if (next == 0) 1 else next;
@@ -10436,6 +10608,7 @@ fn classifyPacket(frame: []const u8) PacketKind {
 
     return switch (frame[ip_offset + 9]) {
         ipv4_protocol_icmp => .icmp,
+        ipv4_protocol_tcp => .tcp,
         ipv4_protocol_udp => .udp,
         else => .unknown,
     };
@@ -11312,7 +11485,6 @@ fn verifyNtpRejectionExhaustion(
     if (socket.endpoint_index != 2 or socket.generation != 52 or socket.local_port != 49_193 or
         device.next_ephemeral_udp_port != 49_194 or device.next_udp_generation != 53 or
         device.udp_endpoint_count != 3) return null;
-
     const submissions_before = device.tx_submissions;
     const start_tick = counter.read();
     const initial = stepNtpServiceAutomatic(
@@ -11436,7 +11608,6 @@ fn verifyNtpRejectionExhaustion(
 
     const close_succeeded = closeNtpService(device, &service);
     if (!close_succeeded or service.active or service.client.active or service.request_active) return null;
-
     const txe = completionQueueEnqueued(&tx_completion_queue);
     const txd = completionQueueDequeued(&tx_completion_queue);
     const rxe = completionQueueEnqueued(&rx_completion_queue);
@@ -15343,6 +15514,346 @@ fn verifyNtpReopenProtectedPeer(device: *Device) ?NtpReopenProtectedPeerReport {
         .ingress_dequeued = device.software_rx_queue.dequeued,
         .packets_dispatched = device.packets_dispatched,
         .udp_dispatched = device.udp_packets_dispatched,
+    };
+}
+
+fn enqueueTcpFoundationFrame(device: *Device, frame: []const u8) bool {
+    if (frame.len == 0 or frame.len > maximum_software_packet_bytes or frame.len > std.math.maxInt(u16)) {
+        return false;
+    }
+    var packet = std.mem.zeroes(Packet);
+    packet.length = @intCast(frame.len);
+    packet.source_descriptor = std.math.maxInt(u16);
+    @memcpy(packet.bytes[0..frame.len], frame);
+    return enqueueQueuedPacket(&device.software_rx_queue, packet);
+}
+
+fn verifyTcpFoundation(device: *Device) ?TcpFoundationReport {
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_263 or
+        device.next_udp_generation != 135 or device.next_udp_identification != 166 or
+        device.next_tcp_identification != 0x7200 or device.next_dns_transaction_id != 8 or
+        device.tx_producer != 1 or device.tcp_packets_dispatched != 0 or
+        device.invalid_tcp_packets_dropped != 0 or
+        device.tcp_rx_queue.enqueued != 0 or device.tcp_rx_queue.dequeued != 0 or
+        device.tcp_rx_queue.dropped != 0 or device.tcp_rx_queue.high_water != 0 or
+        completionQueueEnqueued(&tx_completion_queue) != 193 or
+        completionQueueDequeued(&tx_completion_queue) != 193 or
+        completionQueueEnqueued(&rx_completion_queue) != 22 or
+        device.software_rx_queue.enqueued != 211 or device.software_rx_queue.dequeued != 211 or
+        device.packets_dispatched != 199 or device.udp_packets_dispatched != 198)
+    {
+        return null;
+    }
+    const remote_mac = device.gateway_mac;
+    const remote_ipv4 = [4]u8{ 192, 0, 2, 1 };
+    const source_port: u16 = 50_000;
+    const destination_port: u16 = 443;
+    const syn_sequence: u32 = 0x1357_9BDF;
+    const syn_options = [12]u8{
+        2, 4, 0x05, 0xB4,
+        1, 3, 3,    7,
+        4, 2, 1,    1,
+    };
+    const syn_flags = tcp.flag_syn;
+    const syn_window: u16 = 64_240;
+
+    var syn_frame = std.mem.zeroes([maximum_ethernet_frame_bytes]u8);
+    const syn_frame_length = tcp.buildFrame(&syn_frame, .{
+        .source_mac = device.local_mac,
+        .destination_mac = remote_mac,
+        .source_ipv4 = device.local_ipv4,
+        .destination_ipv4 = remote_ipv4,
+        .source_port = source_port,
+        .destination_port = destination_port,
+        .identification = 0x7200,
+        .sequence_number = syn_sequence,
+        .flags = syn_flags,
+        .window_size = syn_window,
+        .options = &syn_options,
+    }) orelse return null;
+    const parsed_syn = tcp.parseFrame(syn_frame[0..syn_frame_length], .{
+        .destination_mac = remote_mac,
+        .source_mac = device.local_mac,
+        .destination_ipv4 = remote_ipv4,
+        .source_ipv4 = device.local_ipv4,
+        .destination_port = destination_port,
+        .source_port = source_port,
+    }) orelse return null;
+    const codec_valid = syn_frame_length == 66 and parsed_syn.frame_length == syn_frame_length and
+        parsed_syn.identification == 0x7200 and parsed_syn.sequence_number == syn_sequence and
+        parsed_syn.acknowledgement_number == 0 and parsed_syn.flags == syn_flags and
+        parsed_syn.hasFlag(tcp.flag_syn) and !parsed_syn.hasFlag(tcp.flag_ack) and
+        parsed_syn.window_size == syn_window and parsed_syn.header_length == 32 and
+        parsed_syn.urgent_pointer == 0 and parsed_syn.checksum != 0 and
+        std.mem.eql(u8, parsed_syn.options, &syn_options) and parsed_syn.payload.len == 0;
+    if (!codec_valid) return null;
+    var invalid_scratch = std.mem.zeroes([maximum_ethernet_frame_bytes]u8);
+    const zero_port_rejected = tcp.buildFrame(&invalid_scratch, .{
+        .source_mac = device.local_mac,
+        .destination_mac = remote_mac,
+        .source_ipv4 = device.local_ipv4,
+        .destination_ipv4 = remote_ipv4,
+        .source_port = 0,
+        .destination_port = destination_port,
+        .identification = 0x7200,
+        .sequence_number = syn_sequence,
+        .flags = syn_flags,
+        .window_size = syn_window,
+        .options = &syn_options,
+    }) == null;
+    const unaligned_options_rejected = tcp.buildFrame(&invalid_scratch, .{
+        .source_mac = device.local_mac,
+        .destination_mac = remote_mac,
+        .source_ipv4 = device.local_ipv4,
+        .destination_ipv4 = remote_ipv4,
+        .source_port = source_port,
+        .destination_port = destination_port,
+        .identification = 0x7200,
+        .sequence_number = syn_sequence,
+        .flags = syn_flags,
+        .window_size = syn_window,
+        .options = syn_options[0..11],
+    }) == null;
+    const invalid_urgent_rejected = tcp.buildFrame(&invalid_scratch, .{
+        .source_mac = device.local_mac,
+        .destination_mac = remote_mac,
+        .source_ipv4 = device.local_ipv4,
+        .destination_ipv4 = remote_ipv4,
+        .source_port = source_port,
+        .destination_port = destination_port,
+        .identification = 0x7200,
+        .sequence_number = syn_sequence,
+        .flags = syn_flags,
+        .window_size = syn_window,
+        .urgent_pointer = 1,
+        .options = &syn_options,
+    }) == null;
+    const invalid_builds_rejected = [3]bool{
+        zero_port_rejected,
+        unaligned_options_rejected,
+        invalid_urgent_rejected,
+    };
+    for (invalid_builds_rejected) |rejected| {
+        if (!rejected) return null;
+    }
+    var bad_checksum = syn_frame;
+    bad_checksum[14 + 20 + 16] ^= 0x01;
+    const checksum_rejected = tcp.parseFrame(bad_checksum[0..syn_frame_length], .{
+        .destination_mac = remote_mac,
+        .destination_ipv4 = remote_ipv4,
+    }) == null;
+    var fragmented = syn_frame;
+    writeNetwork16(&fragmented, 14 + 6, ipv4_dont_fragment | 1);
+    const fragment_rejected = tcp.parseFrame(fragmented[0..syn_frame_length], .{
+        .destination_mac = remote_mac,
+        .destination_ipv4 = remote_ipv4,
+    }) == null;
+    var bad_offset = syn_frame;
+    bad_offset[14 + 20 + 12] = 4 << 4;
+    const offset_rejected = tcp.parseFrame(bad_offset[0..syn_frame_length], .{
+        .destination_mac = remote_mac,
+        .destination_ipv4 = remote_ipv4,
+    }) == null;
+    var reserved = syn_frame;
+    reserved[14 + 20 + 12] |= 0x02;
+    const reserved_rejected = tcp.parseFrame(reserved[0..syn_frame_length], .{
+        .destination_mac = remote_mac,
+        .destination_ipv4 = remote_ipv4,
+    }) == null;
+    if (!checksum_rejected or !fragment_rejected or !offset_rejected or !reserved_rejected) return null;
+    const syn_ack_sequence: u32 = 0x2468_ACE0;
+    const syn_ack_acknowledgement = syn_sequence + 1;
+    const syn_ack_flags = tcp.flag_syn | tcp.flag_ack;
+    const syn_ack_window: u16 = 32_768;
+    const syn_ack_options = [4]u8{ 2, 4, 0x05, 0xB4 };
+    var syn_ack_frame = std.mem.zeroes([maximum_ethernet_frame_bytes]u8);
+    const syn_ack_frame_length = tcp.buildFrame(&syn_ack_frame, .{
+        .source_mac = remote_mac,
+        .destination_mac = device.local_mac,
+        .source_ipv4 = remote_ipv4,
+        .destination_ipv4 = device.local_ipv4,
+        .source_port = destination_port,
+        .destination_port = source_port,
+        .identification = 0x7300,
+        .sequence_number = syn_ack_sequence,
+        .acknowledgement_number = syn_ack_acknowledgement,
+        .flags = syn_ack_flags,
+        .window_size = syn_ack_window,
+        .options = &syn_ack_options,
+    }) orelse return null;
+    if (syn_ack_frame_length != 60) return null;
+    var malformed_syn_ack = syn_ack_frame;
+    malformed_syn_ack[14 + 20 + 16] ^= 0x80;
+    if (!enqueueTcpFoundationFrame(device, malformed_syn_ack[0..syn_ack_frame_length])) return null;
+    const malformed_dispatch_dropped = dispatchNextPacketResult(device) == .dropped and
+        device.invalid_tcp_packets_dropped == 1 and device.tcp_packets_dispatched == 0 and
+        device.packets_dispatched == 199 and device.tcp_rx_queue.enqueued == 0 and
+        device.software_rx_queue.enqueued == 212 and device.software_rx_queue.dequeued == 212;
+    if (!malformed_dispatch_dropped) return null;
+    if (!enqueueTcpFoundationFrame(device, syn_ack_frame[0..syn_ack_frame_length])) return null;
+    const valid_dispatch_routed = dispatchNextPacketResult(device) == .routed and
+        device.invalid_tcp_packets_dropped == 1 and device.tcp_packets_dispatched == 1 and
+        device.packets_dispatched == 200 and device.udp_packets_dispatched == 198 and
+        device.tcp_rx_queue.enqueued == 1 and device.tcp_rx_queue.high_water == 1 and
+        device.software_rx_queue.enqueued == 213 and device.software_rx_queue.dequeued == 213;
+    if (!valid_dispatch_routed) return null;
+    const routed_packet = dequeueTcpPacket(device) orelse return null;
+    const parsed_syn_ack = tcp.parseFrame(routed_packet.bytes[0..routed_packet.length], .{
+        .destination_mac = device.local_mac,
+        .source_mac = remote_mac,
+        .destination_ipv4 = device.local_ipv4,
+        .source_ipv4 = remote_ipv4,
+        .destination_port = source_port,
+        .source_port = destination_port,
+    }) orelse return null;
+    if (parsed_syn_ack.sequence_number != syn_ack_sequence or
+        parsed_syn_ack.acknowledgement_number != syn_ack_acknowledgement) return null;
+    if (parsed_syn_ack.flags != syn_ack_flags or !parsed_syn_ack.hasFlag(tcp.flag_syn) or
+        !parsed_syn_ack.hasFlag(tcp.flag_ack)) return null;
+    if (parsed_syn_ack.window_size != syn_ack_window or parsed_syn_ack.header_length != 24) return null;
+    if (!std.mem.eql(u8, parsed_syn_ack.options, &syn_ack_options) or parsed_syn_ack.payload.len != 0) return null;
+    if (device.tcp_rx_queue.dequeued != 1) return null;
+
+    const submissions_before = device.tx_submissions;
+    const transmit = sendTcpSegment(device, .{
+        .destination_mac = remote_mac,
+        .destination_ipv4 = remote_ipv4,
+        .source_port = source_port,
+        .destination_port = destination_port,
+        .sequence_number = syn_sequence,
+        .flags = syn_flags,
+        .window_size = syn_window,
+        .options = &syn_options,
+    }) orelse return null;
+    const hardware_reply = receiveFrame(device) orelse return null;
+    const parsed_hardware_reply = tcp.parseFrame(hardware_reply.bytes, .{
+        .destination_mac = device.local_mac,
+        .source_mac = device.gateway_mac,
+        .destination_ipv4 = device.local_ipv4,
+        .source_ipv4 = remote_ipv4,
+        .destination_port = source_port,
+        .source_port = destination_port,
+    }) orelse return null;
+    const hardware_reply_source_mac_gateway = std.meta.eql(
+        parsed_hardware_reply.source_mac,
+        device.gateway_mac,
+    );
+    const hardware_reply_valid = classifyPacket(hardware_reply.bytes) == .tcp and
+        hardware_reply.frame_length == 60 and hardware_reply.descriptor_index == 6 and
+        hardware_reply.next_cursor == 7 and hardware_reply_source_mac_gateway and
+        std.meta.eql(parsed_hardware_reply.source_ipv4, remote_ipv4) and
+        parsed_hardware_reply.source_port == destination_port and
+        parsed_hardware_reply.destination_port == source_port and
+        parsed_hardware_reply.sequence_number == 0 and
+        parsed_hardware_reply.acknowledgement_number == syn_sequence + 1 and
+        parsed_hardware_reply.flags == tcp.flag_rst | tcp.flag_ack and
+        parsed_hardware_reply.hasFlag(tcp.flag_rst) and
+        parsed_hardware_reply.hasFlag(tcp.flag_ack) and
+        !parsed_hardware_reply.hasFlag(tcp.flag_syn) and
+        parsed_hardware_reply.window_size == 0 and
+        parsed_hardware_reply.header_length == tcp.minimum_header_bytes and
+        parsed_hardware_reply.options.len == 0 and parsed_hardware_reply.payload.len == 0 and
+        parsed_hardware_reply.checksum != 0;
+    if (!hardware_reply_valid) return null;
+    const hardware_reply_released = releaseFrame(device, hardware_reply);
+    if (!hardware_reply_released) return null;
+    const identification_advanced = transmit.identification == 0x7200 and
+        transmit.next_identification == 0x7201 and device.next_tcp_identification == 0x7201;
+    const tx_submissions_delta = device.tx_submissions - submissions_before;
+    if (!identification_advanced or tx_submissions_delta != 1 or
+        transmit.completion.descriptor_index != 1 or transmit.completion.next_cursor != 2 or
+        transmit.completion.frame_length != syn_frame_length or transmit.checksum != parsed_syn.checksum or
+        transmit.header_length != parsed_syn.header_length or transmit.flags != syn_flags)
+    {
+        return null;
+    }
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const rxd = completionQueueDequeued(&rx_completion_queue);
+    if (device.tx_producer != 2 or device.rx_consumer != 7 or
+        device.next_tcp_identification != 0x7201 or device.next_udp_identification != 166 or
+        device.next_dns_transaction_id != 8 or txe != 194 or txd != 194 or rxe != 23 or rxd != 23 or
+        device.software_rx_queue.enqueued != 213 or device.software_rx_queue.dequeued != 213 or
+        device.tcp_rx_queue.enqueued != 1 or device.tcp_rx_queue.dequeued != 1 or
+        device.tcp_rx_queue.high_water != 1 or device.tcp_rx_queue.dropped != 0 or
+        device.invalid_tcp_packets_dropped != 1 or device.packets_dispatched != 200 or
+        device.tcp_packets_dispatched != 1 or device.udp_packets_dispatched != 198 or
+        device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_263 or
+        device.next_udp_generation != 135)
+    {
+        return null;
+    }
+
+    return .{
+        .protocol_number = tcp.protocol_number,
+        .source_port = source_port,
+        .destination_port = destination_port,
+        .syn_frame_length = syn_frame_length,
+        .syn_header_length = parsed_syn.header_length,
+        .syn_sequence = parsed_syn.sequence_number,
+        .syn_flags = parsed_syn.flags,
+        .syn_window = parsed_syn.window_size,
+        .syn_options_length = @intCast(parsed_syn.options.len),
+        .syn_checksum = parsed_syn.checksum,
+        .codec_valid = codec_valid,
+        .invalid_builds_rejected = invalid_builds_rejected,
+        .checksum_rejected = checksum_rejected,
+        .fragment_rejected = fragment_rejected,
+        .offset_rejected = offset_rejected,
+        .reserved_rejected = reserved_rejected,
+        .malformed_dispatch_dropped = malformed_dispatch_dropped,
+        .invalid_tcp_dropped = device.invalid_tcp_packets_dropped,
+        .valid_dispatch_routed = valid_dispatch_routed,
+        .syn_ack_sequence = parsed_syn_ack.sequence_number,
+        .syn_ack_acknowledgement = parsed_syn_ack.acknowledgement_number,
+        .syn_ack_flags = parsed_syn_ack.flags,
+        .syn_ack_window = parsed_syn_ack.window_size,
+        .syn_ack_header_length = parsed_syn_ack.header_length,
+        .syn_ack_options_length = @intCast(parsed_syn_ack.options.len),
+        .tcp_queue_enqueues = device.tcp_rx_queue.enqueued,
+        .tcp_queue_dequeues = device.tcp_rx_queue.dequeued,
+        .tcp_queue_high_water = device.tcp_rx_queue.high_water,
+        .tcp_queue_dropped = device.tcp_rx_queue.dropped,
+        .transmit_identification = transmit.identification,
+        .transmit_next_identification = transmit.next_identification,
+        .transmit_descriptor = transmit.completion.descriptor_index,
+        .transmit_next_cursor = transmit.completion.next_cursor,
+        .transmit_frame_length = transmit.completion.frame_length,
+        .transmit_checksum = transmit.checksum,
+        .transmit_flags = transmit.flags,
+        .identification_advanced = identification_advanced,
+        .hardware_reply_valid = hardware_reply_valid,
+        .hardware_reply_frame_length = hardware_reply.frame_length,
+        .hardware_reply_descriptor = hardware_reply.descriptor_index,
+        .hardware_reply_next_cursor = hardware_reply.next_cursor,
+        .hardware_reply_source_mac_gateway = hardware_reply_source_mac_gateway,
+        .hardware_reply_source_ipv4 = parsed_hardware_reply.source_ipv4,
+        .hardware_reply_source_port = parsed_hardware_reply.source_port,
+        .hardware_reply_destination_port = parsed_hardware_reply.destination_port,
+        .hardware_reply_sequence = parsed_hardware_reply.sequence_number,
+        .hardware_reply_acknowledgement = parsed_hardware_reply.acknowledgement_number,
+        .hardware_reply_flags = parsed_hardware_reply.flags,
+        .hardware_reply_window = parsed_hardware_reply.window_size,
+        .hardware_reply_header_length = parsed_hardware_reply.header_length,
+        .hardware_reply_checksum = parsed_hardware_reply.checksum,
+        .hardware_reply_released = hardware_reply_released,
+        .tx_submissions_delta = tx_submissions_delta,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
+        .rx_completion_dequeues = rxd,
+        .ingress_enqueues = device.software_rx_queue.enqueued,
+        .ingress_dequeues = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .tcp_dispatched = device.tcp_packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+        .final_tx_cursor = device.tx_producer,
+        .final_rx_cursor = device.rx_consumer,
+        .final_tcp_identification = device.next_tcp_identification,
+        .final_registered_endpoints = device.udp_endpoint_count,
+        .final_ephemeral_cursor = device.next_ephemeral_udp_port,
+        .final_udp_generation = device.next_udp_generation,
     };
 }
 
