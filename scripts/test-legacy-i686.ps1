@@ -35,7 +35,8 @@ $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 $output = ''
 $interruptMarker = 'ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005'
 $frameMarker = 'ZigOs i686 frame allocator verified: managed-limit 0x04000000 frame-size 0x00001000 free-before 0x00001EE0 first 0x00100000 second 0x00101000 third 0x00102000 reuse 0x00101000 free-after 0x00001EE0 kernel-end-below-1M yes'
-$finalMarker = 'ZigOs i686 paging verified: CR3 0x00100000 CR0 0x80000011 identity-MiB 0x00000010 tables 0x00000004 alias 0xC0000000 physical 0x00106000 value 0xA5A55A5A free-frames 0x00001ED9'
+$pagingMarker = 'ZigOs i686 paging verified: CR3 0x00100000 CR0 0x80000011 identity-MiB 0x00000010 tables 0x00000004 alias 0xC0000000 physical 0x00106000 value 0xA5A55A5A free-frames 0x00001ED9'
+$finalMarker = 'ZigOs i686 heap verified: base 0x00107000 bytes 0x00008000 free-before 0x00007FF0 first 0x00107010 second 0x00107060 third 0x00107470 reuse 0x00107060 coalesced 0x00007FF0 frames-left 0x00001ED1'
 try {
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 100
@@ -66,6 +67,7 @@ $required = @(
     'ZigOs i686 keyboard verified: IRQ1 0x21 make-count 0x00000001 last-make 0x1E irq-count-nonzero yes',
     $interruptMarker,
     $frameMarker,
+    $pagingMarker,
     $finalMarker
 )
 foreach ($marker in $required) {
@@ -83,6 +85,7 @@ foreach ($marker in @(
     'ZigOs i686 keyboard verified: IRQ1 0x21 make-count 0x00000001 last-make 0x1E irq-count-nonzero yes',
     $interruptMarker,
     $frameMarker,
+    $pagingMarker,
     $finalMarker
 )) {
     if (-not $serial.Contains($marker)) { throw "COM1 marker missing: $marker. Serial: $serial" }

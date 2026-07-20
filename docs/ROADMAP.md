@@ -1755,3 +1755,15 @@
 - Runtime validation requires CR3 `0x00100000`, CR0 `0x80000011`, four identity tables, alias value `0xA5A55A5A`, and exact remaining-frame count `0x1ED9`.
 - Paging remains enabled after verification, establishing the MMU foundation for the bounded heap and later protected execution work.
 - The raw kernel is 9,912 bytes across twenty sectors with SHA-256 `97D9FC919D209D3FB70B4BF42CD794CC01085C56F3CDD1336A9704F6D9481E0B`.
+
+
+## 4.45 - Add a bounded coalescing i686 heap
+
+- The frame allocator supplies eight contiguous pages at `0x00107000`, creating a 32 KiB identity-mapped kernel heap.
+- A fixed 16-byte in-heap block header records payload size, next block, allocation state, and reserved metadata.
+- First-fit allocation aligns every request to 16 bytes and splits only when the remainder can hold a header plus a minimally aligned payload.
+- Free validates exact payload pointers, rejects invalid and double frees, then coalesces forward and backward adjacent free blocks.
+- Deterministic allocations return `0x00107010`, `0x00107060`, and `0x00107470`; freeing the middle block and requesting 512 bytes reuses `0x00107060`.
+- Sentinel fills prove middle-block reuse does not corrupt the first or third allocation.
+- Releasing all allocations restores one `0x7FF0`-byte free block and leaves exact physical-frame accounting `0x1ED1`.
+- Debugcon and COM1 both require the complete split, reuse, coalescing, and frame-accounting marker.

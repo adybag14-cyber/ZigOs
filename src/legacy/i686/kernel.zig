@@ -7,6 +7,7 @@ comptime {
     if (@sizeOf(E820Entry) != 24) @compileError("legacy E820 entry layout changed");
     if (@sizeOf(IdtEntry) != 8) @compileError("legacy IDT entry layout changed");
     if (@sizeOf(TrapFrame) != 52) @compileError("legacy trap-frame layout changed");
+    if (@sizeOf(HeapBlock) != 16) @compileError("legacy heap-block layout changed");
 }
 
 const boot_info_magic: u32 = 0x4F49_425A;
@@ -56,6 +57,13 @@ const TrapFrame = extern struct {
     eflags: u32,
 };
 
+const HeapBlock = extern struct {
+    payload_bytes: u32,
+    next_address: u32,
+    is_free: u32,
+    reserved: u32,
+};
+
 const IdtEntry = packed struct {
     offset_low: u16,
     selector: u16,
@@ -97,6 +105,9 @@ var keyboard_last_make: u8 = 0;
 var frame_bitmap: [frame_bitmap_bytes]u8 = @splat(0xFF);
 var free_frame_count: u32 = 0;
 var frame_allocator_ready = false;
+var heap_base: u32 = 0;
+var heap_bytes: u32 = 0;
+var heap_ready = false;
 
 pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     initCom1();
@@ -390,6 +401,161 @@ fn verifyPaging() void {
     writeAll(" free-frames 0x");
     writeHex32(free_frame_count);
     writeAll("\r\n");
+    verifyHeap();
+}
+
+fn verifyHeap() void {
+    const frame_count: u32 = 8;
+    var frames: [8]u32 = undefined;
+    for (&frames, 0..) |*frame, index| {
+        frame.* = allocateFrame() orelse heapFailure("frame allocation");
+        if (index != 0 and frame.* != frames[index - 1] + frame_size) heapFailure("noncontiguous frames");
+        zeroPhysicalFrame(frame.*);
+    }
+    initializeHeap(frames[0], frame_count * frame_size);
+    const free_before = heapFreePayloadBytes();
+
+    const first = heapAllocate(64) orelse heapFailure("first allocation");
+    const second = heapAllocate(1024) orelse heapFailure("second allocation");
+    const third = heapAllocate(4096) orelse heapFailure("third allocation");
+    fillBytes(first, 64, 0x11);
+    fillBytes(second, 1024, 0x22);
+    fillBytes(third, 4096, 0x33);
+    if (!heapFree(second)) heapFailure("free second");
+    const reused = heapAllocate(512) orelse heapFailure("reuse allocation");
+    if (reused != second) heapFailure("first-fit reuse");
+    fillBytes(reused, 512, 0x44);
+    if (!bytesEqual(first, 64, 0x11) or !bytesEqual(third, 4096, 0x33)) heapFailure("sentinel corruption");
+    if (!heapFree(reused) or !heapFree(first) or !heapFree(third)) heapFailure("final frees");
+    if (heapFreePayloadBytes() != free_before) heapFailure("coalescing accounting");
+    const head: *const HeapBlock = @ptrFromInt(heap_base);
+    if (head.next_address != 0 or head.is_free != 1 or head.payload_bytes != free_before) heapFailure("single-block coalesce");
+
+    writeAll("ZigOs i686 heap verified: base 0x");
+    writeHex32(heap_base);
+    writeAll(" bytes 0x");
+    writeHex32(heap_bytes);
+    writeAll(" free-before 0x");
+    writeHex32(free_before);
+    writeAll(" first 0x");
+    writeHex32(first);
+    writeAll(" second 0x");
+    writeHex32(second);
+    writeAll(" third 0x");
+    writeHex32(third);
+    writeAll(" reuse 0x");
+    writeHex32(reused);
+    writeAll(" coalesced 0x");
+    writeHex32(head.payload_bytes);
+    writeAll(" frames-left 0x");
+    writeHex32(free_frame_count);
+    writeAll("\r\n");
+}
+
+fn initializeHeap(base: u32, bytes: u32) void {
+    if ((base & 0xF) != 0 or bytes <= @sizeOf(HeapBlock)) heapFailure("invalid heap range");
+    heap_base = base;
+    heap_bytes = bytes;
+    const head: *HeapBlock = @ptrFromInt(base);
+    head.* = .{
+        .payload_bytes = bytes - @sizeOf(HeapBlock),
+        .next_address = 0,
+        .is_free = 1,
+        .reserved = 0,
+    };
+    heap_ready = true;
+}
+
+fn heapAllocate(requested_bytes: u32) ?u32 {
+    if (!heap_ready or requested_bytes == 0) return null;
+    const aligned = alignUp16(requested_bytes);
+    var address = heap_base;
+    while (address != 0) {
+        const block: *HeapBlock = @ptrFromInt(address);
+        if (block.is_free == 1 and block.payload_bytes >= aligned) {
+            const remaining = block.payload_bytes - aligned;
+            if (remaining >= @sizeOf(HeapBlock) + 16) {
+                const split_address = address + @sizeOf(HeapBlock) + aligned;
+                const split: *HeapBlock = @ptrFromInt(split_address);
+                split.* = .{
+                    .payload_bytes = remaining - @sizeOf(HeapBlock),
+                    .next_address = block.next_address,
+                    .is_free = 1,
+                    .reserved = 0,
+                };
+                block.next_address = split_address;
+                block.payload_bytes = aligned;
+            }
+            block.is_free = 0;
+            return address + @sizeOf(HeapBlock);
+        }
+        address = block.next_address;
+    }
+    return null;
+}
+
+fn heapFree(payload_address: u32) bool {
+    if (!heap_ready or payload_address < heap_base + @sizeOf(HeapBlock) or payload_address >= heap_base + heap_bytes) return false;
+    var previous_address: u32 = 0;
+    var address = heap_base;
+    while (address != 0) {
+        const block: *HeapBlock = @ptrFromInt(address);
+        if (address + @sizeOf(HeapBlock) == payload_address) {
+            if (block.is_free == 1) return false;
+            block.is_free = 1;
+            coalesceNext(block);
+            if (previous_address != 0) {
+                const previous: *HeapBlock = @ptrFromInt(previous_address);
+                if (previous.is_free == 1) coalesceNext(previous);
+            }
+            return true;
+        }
+        previous_address = address;
+        address = block.next_address;
+    }
+    return false;
+}
+
+fn coalesceNext(block: *HeapBlock) void {
+    while (block.next_address != 0) {
+        const next: *HeapBlock = @ptrFromInt(block.next_address);
+        if (next.is_free != 1) return;
+        block.payload_bytes +|= @sizeOf(HeapBlock) + next.payload_bytes;
+        block.next_address = next.next_address;
+    }
+}
+
+fn heapFreePayloadBytes() u32 {
+    var total: u32 = 0;
+    var address = heap_base;
+    while (address != 0) {
+        const block: *const HeapBlock = @ptrFromInt(address);
+        if (block.is_free == 1) total +|= block.payload_bytes;
+        address = block.next_address;
+    }
+    return total;
+}
+
+fn alignUp16(value: u32) u32 {
+    return (value +| 15) & ~@as(u32, 15);
+}
+
+fn fillBytes(address: u32, count: usize, value: u8) void {
+    const bytes: [*]volatile u8 = @ptrFromInt(address);
+    for (0..count) |index| bytes[index] = value;
+}
+
+fn bytesEqual(address: u32, count: usize, value: u8) bool {
+    const bytes: [*]const volatile u8 = @ptrFromInt(address);
+    for (0..count) |index| if (bytes[index] != value) return false;
+    return true;
+}
+
+fn heapFailure(reason: []const u8) noreturn {
+    writeAll("ZigOs i686 heap failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
 }
 
 fn zeroPhysicalFrame(address: u32) void {
