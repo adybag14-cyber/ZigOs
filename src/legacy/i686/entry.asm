@@ -1,12 +1,16 @@
-; ZigOs legacy i686 kernel entry.
-; The BIOS loader will eventually enter this image in 32-bit protected mode.
+; ZigOs legacy i686 kernel entry and minimal hardware helpers.
 
 bits 32
 
 section .text
 
 global _start
+global zigos_i686_read_cr0
+global zigos_i686_cpuid_vendor
+global zigos_i686_out8
 extern zigos_legacy_kernel_main
+extern __bss_start
+extern __bss_end
 
 _start:
     cli
@@ -14,8 +18,47 @@ _start:
     mov esp, 0x0009F000
     and esp, -16
     xor ebp, ebp
+    mov [zigos_i686_entry_stack], esp
+
+    ; Flat binaries do not carry an initialized BSS payload. Zero it before Zig.
+    mov edi, __bss_start
+    mov ecx, __bss_end
+    sub ecx, edi
+    xor eax, eax
+    rep stosb
+
     call zigos_legacy_kernel_main
 
 .hang:
     hlt
     jmp .hang
+
+zigos_i686_read_cr0:
+    mov eax, cr0
+    ret
+
+; cdecl: u32 zigos_i686_cpuid_vendor(u8 *destination)
+zigos_i686_cpuid_vendor:
+    push ebx
+    push edi
+    mov eax, 0
+    cpuid
+    mov edi, [esp + 12]
+    mov [edi], ebx
+    mov [edi + 4], edx
+    mov [edi + 8], ecx
+    pop edi
+    pop ebx
+    ret
+
+; cdecl: void zigos_i686_out8(u16 port, u8 value)
+zigos_i686_out8:
+    mov edx, [esp + 4]
+    mov eax, [esp + 8]
+    out dx, al
+    ret
+
+section .data
+align 4
+global zigos_i686_entry_stack
+zigos_i686_entry_stack: dd 0

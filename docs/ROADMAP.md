@@ -1673,3 +1673,14 @@
 - Image verification checks stage-0, stage-1, and kernel placement byte-for-byte before execution.
 - QEMU requires exact markers for both BIOS stages, disk loading, protected-mode entry, and Zig kernel handoff.
 - The complete image SHA-256 is `E97329FF8F98B6EDEA7C7AABE62358B883742A86898B72F7E08959296E7E0B4A`.
+
+## 4.38 - Verify the freestanding i686 runtime and consoles
+
+- The ELF32 entry stores the exact incoming stack, clears the complete linker-defined BSS range, and preserves cdecl nonvolatile registers around CPUID helpers.
+- The Zig kernel verifies CPUID vendor `GenuineIntel`, maximum basic leaf `0x00000004`, CR0 value `0x00000011`, protected-mode enablement, stack `0x0009F000`, and 16-byte alignment.
+- A 64-byte BSS probe proves zero initialization before mutation, covering the flat-binary runtime requirement that cannot be delegated to an executable loader.
+- VGA text memory at `0x000B8000` is cleared and receives mirrored kernel output with deterministic cursor and newline handling.
+- COM1 is initialized at 38,400 baud, 8N1, FIFO enabled; every kernel message is mirrored to debugcon, serial, and VGA.
+- The QEMU harness captures both port `0xE9` and COM1 independently and requires the complete runtime invariant marker on both channels.
+- The raw kernel is 1,172 bytes across three BIOS sectors with SHA-256 `6E23F8B09280245316628E2707ABF4ED21738FCC98C1E3DEBF22172C93EB7B49`.
+- The complete disk image SHA-256 is `5C764C2E4ED7D49BBA6195CCE7C7B8B45EE28A4CD87F9EC9E44673D9C1655E3D`.
