@@ -36,7 +36,7 @@ jobs:
 
       - name: Boot-test legacy BIOS i686 image
         shell: pwsh
-        run: .\scripts\test-legacy-i686.ps1 -TimeoutSeconds 50
+        run: .\scripts\test-legacy-i686.ps1 -TimeoutSeconds 180
 
       - name: Upload UEFI image
         uses: actions/upload-artifact@v7

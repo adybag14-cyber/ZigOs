@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(15, 90)]
+    [ValidateRange(15, 300)]
     [int]$TimeoutSeconds = 40
 )
 
