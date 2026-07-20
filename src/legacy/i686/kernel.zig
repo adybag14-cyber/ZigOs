@@ -2657,6 +2657,9 @@ fn ataWriteSector(lba: u32, source_address: u32) bool {
         const word = @as(u16, source[index * 2]) | (@as(u16, source[index * 2 + 1]) << 8);
         zigos_i686_out16(ata_data_port, word);
     }
+    // The device may assert BSY after the final data word. Complete the
+    // WRITE SECTORS command before issuing the independent FLUSH CACHE command.
+    if (!ataWaitReady()) return false;
     zigos_i686_out8(ata_status_command_port, 0xE7);
     if (!ataWaitReady()) return false;
     if (!ataReadSector(lba, @intCast(@intFromPtr(&ata_verify_buffer)))) return false;

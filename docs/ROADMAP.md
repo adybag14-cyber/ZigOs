@@ -1921,5 +1921,5 @@
 - The first live shell session executes 14 commands including exit, retains seven process records, waits for PID 6, contains PID 7's page fault at `0x00800000`, and ends with zero descriptors and zero unknown commands.
 - Runtime mutation creates root slot 8 `NOTES.TXT`, 720 bytes, chain `14 -> 15 -> EOC`, FNV-1a32 `C6181D2F`; both FAT copies and exact content are verified offline.
 - A second QEMU boot uses the same image without rebuilding, reads/hashes/stats `NOTES.TXT`, performs zero writes and allocations, and must leave the complete disk SHA-256 unchanged.
-- Reference kernel: 41,884 bytes, 82 sectors at LBA9-90, checksum16 `0x5976`, SHA-256 `24A49B4D2ACB98A923F384CCFD9E3B5C6934B8F328742253F19A7A9D02C22BAC`.
-- Initial image SHA-256: `17A7F288593505087D895479141D28BE1397891E367E4FAA99743EAAB2460C15`; persisted image SHA-256: `2362C7B2B2FE5F3D0E89E1320FBE40496C85CA95B894AF8F3EE9AC9D898A0299`.
+- Reference kernel: 41,900 bytes, 82 sectors at LBA9-90, checksum16 `0xE418`, SHA-256 `F8EDA13F2B5C346607928FF8E3C8AD68CB7A73330D79A2738739ECD95F03BCB8`.
+- Initial image SHA-256: `BDD3C35E082028FA5F31C969536DE277708569F3AAC2D703F586D8B5DCF8B6A2`; persisted image SHA-256: `3FA03E6A6D618C9B72B408892FAA0F12CCE6FF3FCE2A453200C1F6E72BB756C2`.
