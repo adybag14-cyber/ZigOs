@@ -152,6 +152,7 @@ extern fn zigos_i686_load_tr(selector: u16) callconv(.c) void;
 extern fn zigos_i686_read_tr() callconv(.c) u32;
 extern fn zigos_i686_enter_user(entry: u32, user_stack: u32) callconv(.c) void;
 extern fn zigos_i686_user_return_stub() callconv(.c) void;
+extern fn zigos_i686_syscall_stub() callconv(.c) void;
 extern fn zigos_i686_enable_interrupts() callconv(.c) void;
 extern fn zigos_i686_disable_interrupts() callconv(.c) void;
 extern fn zigos_i686_halt() callconv(.c) void;
@@ -206,6 +207,13 @@ var user_return_eax: u32 = 0;
 var user_return_cs: u32 = 0;
 var user_return_ss: u32 = 0;
 var user_return_esp: u32 = 0;
+var user_code_frame: u32 = 0;
+var user_stack_frame: u32 = 0;
+var syscall_count: u32 = 0;
+var syscall_write_bytes: u32 = 0;
+var syscall_rejected: u32 = 0;
+var syscall_exit_code: u32 = 0;
+var syscall_exited = false;
 
 pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     initCom1();
@@ -299,6 +307,41 @@ pub export fn zigos_i686_user_return_dispatch(frame: *const UserReturnFrame) cal
     user_return_cs = frame.cs;
     user_return_ss = frame.user_ss;
     user_return_esp = frame.user_esp;
+}
+
+pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) u32 {
+    syscall_count +|= 1;
+    switch (frame.eax) {
+        1 => {
+            const length = frame.ecx;
+            const start = frame.ebx;
+            const end = start +% length;
+            if (length > 128 or end < start or start < 0x0040_0000 or end > 0x0040_1000) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            }
+            const bytes: [*]const u8 = @ptrFromInt(start);
+            writeAll(bytes[0..length]);
+            syscall_write_bytes +|= length;
+            frame.eax = length;
+            return 0;
+        },
+        2 => {
+            frame.eax = 1;
+            return 0;
+        },
+        3 => {
+            syscall_exit_code = frame.ebx;
+            syscall_exited = true;
+            return 1;
+        },
+        else => {
+            syscall_rejected +|= 1;
+            frame.eax = 0xFFFF_FFDA;
+            return 0;
+        },
+    }
 }
 
 fn verifyAndReportBootInfo() void {
@@ -712,18 +755,18 @@ fn verifyPreemptiveScheduler() void {
 
 fn verifyRing3Isolation() void {
     installProtectedGdt();
-    const code_frame = allocateFrame() orelse ring3Failure("code frame");
-    const stack_frame = allocateFrame() orelse ring3Failure("stack frame");
-    zeroPhysicalFrame(code_frame);
-    zeroPhysicalFrame(stack_frame);
+    user_code_frame = allocateFrame() orelse ring3Failure("code frame");
+    user_stack_frame = allocateFrame() orelse ring3Failure("stack frame");
+    zeroPhysicalFrame(user_code_frame);
+    zeroPhysicalFrame(user_stack_frame);
 
     const user_code_virtual: u32 = 0x0040_0000;
     const user_stack_virtual: u32 = 0x0040_2000;
     const directory: [*]volatile u32 = @ptrFromInt(kernel_page_directory);
     const table: [*]volatile u32 = @ptrFromInt(kernel_identity_tables[1]);
     directory[1] |= 0x004;
-    table[0] = code_frame | 0x007;
-    table[2] = stack_frame | 0x007;
+    table[0] = user_code_frame | 0x007;
+    table[2] = user_stack_frame | 0x007;
     zigos_i686_invalidate_page(user_code_virtual);
     zigos_i686_invalidate_page(user_stack_virtual);
 
@@ -731,9 +774,9 @@ fn verifyRing3Isolation() void {
         0xC7, 0x05, 0x80, 0x00, 0x40, 0x00, 0xBE, 0xBA, 0xFE, 0xCA,
         0xB8, 0xDF, 0x9B, 0x57, 0x13, 0xCD, 0x30, 0xF4,
     };
-    const code: [*]volatile u8 = @ptrFromInt(code_frame);
+    const code: [*]volatile u8 = @ptrFromInt(user_code_frame);
     for (machine_code, 0..) |byte, index| code[index] = byte;
-    const sentinel: *volatile u32 = @ptrFromInt(code_frame + 0x80);
+    const sentinel: *volatile u32 = @ptrFromInt(user_code_frame + 0x80);
     sentinel.* = 0;
 
     const return_handler: u32 = @intCast(@intFromPtr(&zigos_i686_user_return_stub));
@@ -776,7 +819,70 @@ fn verifyRing3Isolation() void {
     writeAll(" code 0x00400000 stack 0x00402000 sentinel 0x");
     writeHex32(sentinel.*);
     writeAll(" kernel-user-bit no user-pages yes\r\n");
+    verifySyscallAbi();
+}
+
+fn verifySyscallAbi() void {
+    const code: [*]volatile u8 = @ptrFromInt(user_code_frame);
+    var index: usize = 0;
+    while (index < 512) : (index += 1) code[index] = 0;
+    const program = [_]u8{
+        0xB8, 0x01, 0x00, 0x00, 0x00,
+        0xBB, 0x00, 0x01, 0x40, 0x00,
+        0xB9, 0x25, 0x00, 0x00, 0x00,
+        0xCD, 0x80, 0xB8, 0x01, 0x00,
+        0x00, 0x00, 0xBB, 0x00, 0x00,
+        0x01, 0x00, 0xB9, 0x04, 0x00,
+        0x00, 0x00, 0xCD, 0x80, 0xA3,
+        0x88, 0x00, 0x40, 0x00, 0xB8,
+        0x02, 0x00, 0x00, 0x00, 0xCD,
+        0x80, 0xA3, 0x84, 0x00, 0x40,
+        0x00, 0xB8, 0x03, 0x00, 0x00,
+        0x00, 0xBB, 0x2A, 0x00, 0x00,
+        0x00, 0xCD, 0x80, 0xF4,
+    };
+    for (program, 0..) |byte, offset| code[offset] = byte;
+    const message = "ZigOs ring3 syscall write verified.\r\n";
+    for (message, 0..) |byte, offset| code[0x100 + offset] = byte;
+
+    syscall_count = 0;
+    syscall_write_bytes = 0;
+    syscall_rejected = 0;
+    syscall_exit_code = 0;
+    syscall_exited = false;
+    setIdtGateAttributes(0x80, @intCast(@intFromPtr(&zigos_i686_syscall_stub)), 0xEE);
+    zigos_i686_invalidate_page(0x0040_0000);
+    zigos_i686_enter_user(0x0040_0000, 0x0040_2000);
+
+    const pid_result: *const volatile u32 = @ptrFromInt(user_code_frame + 0x84);
+    const rejected_result: *const volatile u32 = @ptrFromInt(user_code_frame + 0x88);
+    if (syscall_count != 4 or syscall_write_bytes != message.len or syscall_rejected != 1 or
+        syscall_exit_code != 42 or !syscall_exited or pid_result.* != 1 or rejected_result.* != 0xFFFF_FFF2)
+    {
+        syscallFailure("ABI accounting");
+    }
+
+    writeAll("ZigOs i686 syscalls verified: vector 0x00000080 calls 0x");
+    writeHex32(syscall_count);
+    writeAll(" write-bytes 0x");
+    writeHex32(syscall_write_bytes);
+    writeAll(" getpid 0x");
+    writeHex32(pid_result.*);
+    writeAll(" rejected 0x");
+    writeHex32(syscall_rejected);
+    writeAll(" errno 0x");
+    writeHex32(rejected_result.*);
+    writeAll(" exit-code 0x");
+    writeHex32(syscall_exit_code);
+    writeAll(" kernel-pointer-denied yes\r\n");
     runShell();
+}
+
+fn syscallFailure(reason: []const u8) noreturn {
+    writeAll("ZigOs i686 syscalls failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
 }
 
 fn installProtectedGdt() void {

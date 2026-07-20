@@ -19,6 +19,7 @@ global zigos_i686_load_tr
 global zigos_i686_read_tr
 global zigos_i686_enter_user
 global zigos_i686_user_return_stub
+global zigos_i686_syscall_stub
 global zigos_i686_enable_interrupts
 global zigos_i686_disable_interrupts
 global zigos_i686_halt
@@ -31,6 +32,7 @@ extern zigos_i686_timer_interrupt
 extern zigos_i686_keyboard_interrupt
 extern zigos_i686_exception_dispatch
 extern zigos_i686_user_return_dispatch
+extern zigos_i686_syscall_dispatch
 extern __bss_start
 extern __bss_end
 
@@ -171,6 +173,29 @@ zigos_i686_user_return_stub:
     push eax
     cld
     call zigos_i686_user_return_dispatch
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, [zigos_i686_kernel_return_esp]
+    ret
+
+zigos_i686_syscall_stub:
+    pushad
+    mov ebp, esp
+    and esp, -16
+    sub esp, 12
+    push ebp
+    cld
+    call zigos_i686_syscall_dispatch
+    test eax, eax
+    jnz .exit_to_kernel
+    mov esp, ebp
+    popad
+    iretd
+.exit_to_kernel:
     mov ax, 0x10
     mov ds, ax
     mov es, ax

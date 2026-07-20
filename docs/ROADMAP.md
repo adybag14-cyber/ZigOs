@@ -1827,3 +1827,13 @@
 - Named postcondition predicates independently validate TR, registers, privilege selectors, sentinel coherence, kernel U/S denial, and user PTE permissions.
 - The two persistent user frames reduce live free-frame accounting from `0x1ED1` to `0x1ECF`; the shell and harness require that exact state.
 
+## 4.51 - Add a ring-3 syscall ABI
+
+- Added a DPL-3 interrupt gate at vector `0x80` with a complete writable register frame and normal `IRETD` return to user mode.
+- Syscall number 1 performs bounded writes only from the mapped user code page and returns the exact byte count in EAX.
+- Syscall number 2 returns deterministic process ID 1; syscall number 3 records an exit code and restores the synchronous kernel caller.
+- The dispatcher rejects oversized, wrapping, unmapped, and supervisor-range pointers before dereferencing them.
+- A user request targeting kernel address `0x00010000` returns `0xFFFFFFF2` (`-EFAULT`) and increments an independent rejection counter.
+- The ring-3 program performs four calls: a 37-byte write, rejected write, getpid, and exit with code 42.
+- Debugcon and COM1 require exact call, byte, PID, rejection, errno, and exit accounting.
+

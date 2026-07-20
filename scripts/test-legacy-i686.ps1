@@ -117,6 +117,7 @@ $ataMarker = 'ZigOs i686 ATA verified: primary-master yes model QEMU HARDDISK LB
 $fatMarker = 'ZigOs i686 FAT12 verified: volume-LBA 0x00000040 sectors 0x00000B40 bytes-sector 0x00000200 root-start 0x00000053 data-start 0x00000061 file HELLO.TXT cluster 0x00000002 bytes 0x00000056 hash 0xA9F660F2 chain-end 0x00000FFF heap-restored yes'
 $schedulerMarker = 'ZigOs i686 scheduler verified: policy round-robin tasks 0x00000003 task-a-quanta 0x00000003 task-b-quanta 0x00000003 switches 0x00000007 tick-delta 0x00000007 bootstrap-restored yes'
 $ring3Marker = 'ZigOs i686 ring3 verified: GDT entries 0x00000006 TSS selector 0x00000028 CS 0x0000001B SS 0x00000023 user-ESP 0x00402000 code 0x00400000 stack 0x00402000 sentinel 0xCAFEBABE kernel-user-bit no user-pages yes'
+$syscallMarker = 'ZigOs i686 syscalls verified: vector 0x00000080 calls 0x00000004 write-bytes 0x00000025 getpid 0x00000001 rejected 0x00000001 errno 0xFFFFFFF2 exit-code 0x0000002A kernel-pointer-denied yes'
 
 $debugMarkers = @(
     'ZigOs legacy BIOS stage0 online',
@@ -130,6 +131,7 @@ $debugMarkers = @(
     $runtimeMarker, $exceptionMarker,
     'ZigOs i686 keyboard waiting: IRQ1 0x21 controller-command 0xD2 expected-make 0x1E',
     $keyboardMarker, $interruptMarker, $frameMarker, $pagingMarker, $heapMarker, $ataMarker, $fatMarker, $schedulerMarker, $ring3Marker,
+    'ZigOs ring3 syscall write verified.', $syscallMarker,
     $readyMarker,
     'commands: help mem ticks disk cat HELLO.TXT exit',
     'frames-free 0x00001ECF heap-free 0x00007FF0 heap-base 0x00107000',
@@ -149,7 +151,8 @@ if (-not [regex]::IsMatch($serial, $e820Pattern)) { throw "E820 COM1 contract mi
 
 $serialMarkers = @(
     $runtimeMarker, $exceptionMarker, $keyboardMarker, $interruptMarker, $frameMarker,
-    $pagingMarker, $heapMarker, $ataMarker, $fatMarker, $schedulerMarker, $ring3Marker, $readyMarker,
+    $pagingMarker, $heapMarker, $ataMarker, $fatMarker, $schedulerMarker, $ring3Marker,
+    'ZigOs ring3 syscall write verified.', $syscallMarker, $readyMarker,
     'help', 'commands: help mem ticks disk cat HELLO.TXT exit',
     'mem', 'frames-free 0x00001ECF heap-free 0x00007FF0 heap-base 0x00107000',
     'ticks', 'ticks 0x0000000C PIT-Hz 0x00000064',
