@@ -7,11 +7,13 @@ section .text
 global _start
 global zigos_i686_read_cr0
 global zigos_i686_read_cr3
+global zigos_i686_read_cr2
 global zigos_i686_write_cr3
 global zigos_i686_enable_paging
 global zigos_i686_invalidate_page
 global zigos_i686_cpuid_vendor
 global zigos_i686_out8
+global zigos_i686_out16
 global zigos_i686_in8
 global zigos_i686_in16
 global zigos_i686_load_idt
@@ -86,6 +88,10 @@ zigos_i686_read_cr3:
     mov eax, cr3
     ret
 
+zigos_i686_read_cr2:
+    mov eax, cr2
+    ret
+
 ; cdecl: void zigos_i686_write_cr3(u32 page_directory)
 zigos_i686_write_cr3:
     mov eax, [esp + 4]
@@ -128,6 +134,13 @@ zigos_i686_out8:
     mov edx, [esp + 4]
     mov eax, [esp + 8]
     out dx, al
+    ret
+
+; cdecl: void zigos_i686_out16(u16 port, u16 value)
+zigos_i686_out16:
+    mov edx, [esp + 4]
+    mov eax, [esp + 8]
+    out dx, ax
     ret
 
 ; cdecl: u8 zigos_i686_in8(u16 port)
@@ -363,10 +376,25 @@ zigos_i686_exception_common:
     push eax
     cld
     call zigos_i686_exception_dispatch
+    test eax, eax
+    jnz .exception_exit_to_kernel
     mov esp, ebp
     popad
     add esp, 8
     iretd
+.exception_exit_to_kernel:
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, [zigos_i686_kernel_return_esp]
+    pop edi
+    pop esi
+    pop ebx
+    pop ebp
+    ret
 
 section .rodata
 align 4

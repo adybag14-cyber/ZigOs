@@ -1906,3 +1906,20 @@
 - Reference kernel: 32,604 bytes, 64 sectors at LBA9-72, checksum16 `0x5281`, SHA-256 `6648B69C2BD7B118BEEDBC5BB59AD28E6F077525FBD93B105B7F584CF7745CF1`.
 - Reference disk image SHA-256: `E41A2DA36D20034A2B9EC84CA5DBED234683983BFA4C091B2C47B61838BC6BF7`.
 
+## 8.0 - Capstone persistent writable userspace
+
+- Goal 1: Added ATA PIO sector writes using command `0x30`, cache flush `0xE7`, and mandatory 512-byte read-after-write comparison.
+- Goal 2: Generalized FAT12 validation and VFS reads across bounded multi-cluster chains; `BIG.TXT` proves `5 -> 6 -> 7 -> EOC` and hash `E5D120DF`.
+- Goal 3: Added packed FAT12 entry updates, mirrored writes to both FAT copies, deterministic first-free allocation, chain linking, and bounded freeing.
+- Goal 4: Added writable 8.3 root-directory entry creation, first-cluster/size updates, and truncate semantics with an independent root-scan buffer.
+- Goal 5: Added multi-cluster descriptor writes, persistent offsets, read/write access flags, beginning/current/end seek, append, and a 4 KiB file bound.
+- Goal 6: Extended `int 0x80` to eight calls by adding flagged open, file write, and file seek while retaining wrap-safe user-memory and descriptor-owner checks.
+- Goal 7: Added the 1,488-byte three-cluster `WRITER.ELF`, which creates/truncates `NOTES.TXT`, writes 700 bytes, seeks and reads them back, appends 20 bytes, closes twice, and exits `0x55` after nine syscalls.
+- Goal 8: Replaced per-program shell launch paths with generic FAT-name ELF32/i386 loading, one bounded executable `PT_LOAD`, PID assignment, BSS zeroing, and exact heap restoration.
+- Goal 9: Added parent PID, one-time wait status, faulted-process records, CR2 capture, page-fault exit `0x8E`, and descriptor cleanup without halting the kernel.
+- Goal 10: Loaded `SPINA.ELF` and `SPINB.ELF` from FAT12 into separate CR3 spaces and kernel stacks, then proved three quanta each, seven switches, same-VA physical isolation, and exact eight-frame restoration.
+- The first live shell session executes 14 commands including exit, retains seven process records, waits for PID 6, contains PID 7's page fault at `0x00800000`, and ends with zero descriptors and zero unknown commands.
+- Runtime mutation creates root slot 8 `NOTES.TXT`, 720 bytes, chain `14 -> 15 -> EOC`, FNV-1a32 `C6181D2F`; both FAT copies and exact content are verified offline.
+- A second QEMU boot uses the same image without rebuilding, reads/hashes/stats `NOTES.TXT`, performs zero writes and allocations, and must leave the complete disk SHA-256 unchanged.
+- Reference kernel: 41,884 bytes, 82 sectors at LBA9-90, checksum16 `0x5976`, SHA-256 `24A49B4D2ACB98A923F384CCFD9E3B5C6934B8F328742253F19A7A9D02C22BAC`.
+- Initial image SHA-256: `17A7F288593505087D895479141D28BE1397891E367E4FAA99743EAAB2460C15`; persisted image SHA-256: `2362C7B2B2FE5F3D0E89E1320FBE40496C85CA95B894AF8F3EE9AC9D898A0299`.
