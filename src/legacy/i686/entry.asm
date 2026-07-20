@@ -6,6 +6,9 @@ section .text
 
 global _start
 global zigos_i686_read_cr0
+global zigos_i686_read_cr3
+global zigos_i686_enable_paging
+global zigos_i686_invalidate_page
 global zigos_i686_cpuid_vendor
 global zigos_i686_out8
 global zigos_i686_in8
@@ -48,6 +51,27 @@ _start:
 
 zigos_i686_read_cr0:
     mov eax, cr0
+    ret
+
+zigos_i686_read_cr3:
+    mov eax, cr3
+    ret
+
+; cdecl: void zigos_i686_enable_paging(u32 page_directory)
+zigos_i686_enable_paging:
+    mov eax, [esp + 4]
+    mov cr3, eax
+    mov eax, cr0
+    or eax, 0x80000000
+    mov cr0, eax
+    jmp short .paging_serialized
+.paging_serialized:
+    ret
+
+; cdecl: void zigos_i686_invalidate_page(u32 address)
+zigos_i686_invalidate_page:
+    mov eax, [esp + 4]
+    invlpg [eax]
     ret
 
 ; cdecl: u32 zigos_i686_cpuid_vendor(u8 *destination)

@@ -68,6 +68,9 @@ extern var zigos_i686_entry_stack: u32;
 extern const __kernel_end: u8;
 extern var zigos_i686_boot_info_pointer: u32;
 extern fn zigos_i686_read_cr0() callconv(.c) u32;
+extern fn zigos_i686_read_cr3() callconv(.c) u32;
+extern fn zigos_i686_enable_paging(page_directory: u32) callconv(.c) void;
+extern fn zigos_i686_invalidate_page(address: u32) callconv(.c) void;
 extern fn zigos_i686_cpuid_vendor(destination: [*]u8) callconv(.c) u32;
 extern fn zigos_i686_out8(port: u16, value: u8) callconv(.c) void;
 extern fn zigos_i686_in8(port: u16) callconv(.c) u8;
@@ -331,6 +334,74 @@ fn verifyFrameAllocator() void {
     writeAll(" kernel-end-below-1M ");
     writeAll(if (@intFromPtr(&__kernel_end) < 0x0010_0000) "yes" else "no");
     writeAll("\r\n");
+    verifyPaging();
+}
+
+fn verifyPaging() void {
+    const page_directory = allocateFrame() orelse frameAllocatorFailure("page directory");
+    var identity_tables: [4]u32 = undefined;
+    for (&identity_tables) |*table| table.* = allocateFrame() orelse frameAllocatorFailure("identity table");
+    const alias_table = allocateFrame() orelse frameAllocatorFailure("alias table");
+    const test_frame = allocateFrame() orelse frameAllocatorFailure("paging test frame");
+
+    zeroPhysicalFrame(page_directory);
+    for (identity_tables) |table| zeroPhysicalFrame(table);
+    zeroPhysicalFrame(alias_table);
+    zeroPhysicalFrame(test_frame);
+
+    const directory: [*]volatile u32 = @ptrFromInt(page_directory);
+    for (identity_tables, 0..) |table_address, directory_index| {
+        directory[directory_index] = table_address | 0x003;
+        const table: [*]volatile u32 = @ptrFromInt(table_address);
+        const base_page: u32 = @intCast(directory_index * 1024);
+        for (0..1024) |entry_index| {
+            const page: u32 = base_page + @as(u32, @intCast(entry_index));
+            table[entry_index] = page * frame_size | 0x003;
+        }
+    }
+
+    const alias_virtual: u32 = 0xC000_0000;
+    directory[alias_virtual >> 22] = alias_table | 0x003;
+    const alias_entries: [*]volatile u32 = @ptrFromInt(alias_table);
+    alias_entries[0] = test_frame | 0x003;
+
+    const physical_value: *volatile u32 = @ptrFromInt(test_frame);
+    physical_value.* = 0x1122_3344;
+    zigos_i686_enable_paging(page_directory);
+    const cr0 = zigos_i686_read_cr0();
+    const cr3 = zigos_i686_read_cr3();
+    const alias_value: *volatile u32 = @ptrFromInt(alias_virtual);
+    if (alias_value.* != 0x1122_3344) pagingFailure("initial alias read");
+    alias_value.* = 0xA5A5_5A5A;
+    zigos_i686_invalidate_page(alias_virtual);
+    if (physical_value.* != 0xA5A5_5A5A) pagingFailure("alias writeback");
+    if ((cr0 & 0x8000_0000) == 0 or cr3 != page_directory) pagingFailure("control registers");
+
+    writeAll("ZigOs i686 paging verified: CR3 0x");
+    writeHex32(cr3);
+    writeAll(" CR0 0x");
+    writeHex32(cr0);
+    writeAll(" identity-MiB 0x00000010 tables 0x00000004 alias 0x");
+    writeHex32(alias_virtual);
+    writeAll(" physical 0x");
+    writeHex32(test_frame);
+    writeAll(" value 0x");
+    writeHex32(physical_value.*);
+    writeAll(" free-frames 0x");
+    writeHex32(free_frame_count);
+    writeAll("\r\n");
+}
+
+fn zeroPhysicalFrame(address: u32) void {
+    const words: [*]volatile u32 = @ptrFromInt(address);
+    for (0..1024) |index| words[index] = 0;
+}
+
+fn pagingFailure(reason: []const u8) noreturn {
+    writeAll("ZigOs i686 paging failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
 }
 
 fn initializeFrameAllocator() void {

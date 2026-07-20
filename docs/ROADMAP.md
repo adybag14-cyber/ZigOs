@@ -1743,3 +1743,15 @@
 - Invalid, unaligned, low-memory, out-of-range, and double-free operations are rejected by the allocator API.
 - The 32 MiB QEMU E820 map yields exactly `0x1EE0` managed free frames before and after the transactional test.
 - A linker-provided kernel-end symbol confirms the complete loaded image and BSS remain below the reserved 1 MiB boundary.
+
+
+## 4.44 - Activate allocator-backed i686 paging
+
+- Added exact assembly helpers to read CR3, load a page directory, enable CR0.PG, serialize the transition, and invalidate individual translations.
+- The frame allocator supplies one page directory, four identity page tables, one higher-half alias table, and one test frame.
+- Four standard 4 KiB page tables identity-map the first 16 MiB so the existing kernel, VGA, stack, page structures, and early devices remain reachable after paging starts.
+- Directory index 768 maps virtual address `0xC0000000` through a separate page table to physical frame `0x00106000`.
+- A value written through the physical identity mapping is read through the higher-half alias, overwritten virtually, invalidated with `INVLPG`, and observed through the physical mapping.
+- Runtime validation requires CR3 `0x00100000`, CR0 `0x80000011`, four identity tables, alias value `0xA5A55A5A`, and exact remaining-frame count `0x1ED9`.
+- Paging remains enabled after verification, establishing the MMU foundation for the bounded heap and later protected execution work.
+- The raw kernel is 9,912 bytes across twenty sectors with SHA-256 `97D9FC919D209D3FB70B4BF42CD794CC01085C56F3CDD1336A9704F6D9481E0B`.
