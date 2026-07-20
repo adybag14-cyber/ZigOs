@@ -1614,3 +1614,16 @@
 - Wraparound checks prove ordering across `0xFFFF_FFF0 -> 0x0000_0010`, including inclusive window membership through sequence zero.
 - The verifier is packet-free after the 4.31 exchange and preserves completions `194/194/23/23`, ingress `213/213`, dispatch `200/1/198`, TX/RX `2/7`, TCP ID `0x7201`, and UDP endpoint cursor/generation `2/49263/135`.
 - Full HPET and 24-bit ACPI PM timer boots validate the state machine and live RST transition through the complete regression harness.
+
+## 4.33 - Add bounded TCP SYN retransmission
+
+- `RetransmissionPolicy` validates a nonzero initial timeout, a cap at least as large as the initial timeout, and a nonzero retry budget before active-open state can change.
+- `beginActiveOpenAt` arms a monotonic SYN timer while preserving the source-compatible untimed active-open API.
+- `onTimer` rejects backward ticks, reports pre-deadline no-ops without mutation, retransmits the exact original SYN at the deadline, and records typed timer actions and reasons.
+- Retry intervals follow capped exponential backoff `3 -> 6 -> 10 -> 10`; exact retransmission ticks `103/109/119` produce next deadlines `109/119/129` with counts `1/2/3`.
+- At tick `129`, the exhausted retry budget transitions atomically from `syn_sent` to `timed_out`, stops the timer, and emits no additional segment.
+- Matching SYN-ACK establishment and live RST-ACK reset both cancel the timer; later timer calls are rejected as invalid for their terminal states.
+- Deadline addition and interval doubling saturate at `u64` maximum; an open starting at `18446744073709551613` with timeout `5` clamps to `18446744073709551615`.
+- Invalid-policy, backward-tick, and early-tick paths preserve the complete control block byte-for-byte.
+- The verifier remains packet-free and preserves completions `194/194/23/23`, ingress `213/213`, dispatch `200/1/198`, TX/RX `2/7`, TCP ID `0x7201`, and UDP endpoint cursor/generation `2/49263/135`.
+- Full HPET and 24-bit ACPI PM timer boots validate retransmission timing and cancellation through the complete regression harness.

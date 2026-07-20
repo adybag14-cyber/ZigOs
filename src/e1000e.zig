@@ -1812,6 +1812,54 @@ pub const TcpActiveOpenReport = struct {
     final_tcp_identification: u16,
 };
 
+pub const TcpRetransmissionReport = struct {
+    initial_timeout_ticks: u64,
+    maximum_timeout_ticks: u64,
+    maximum_retries: u8,
+    invalid_policies_rejected: [3]bool,
+    initial_tick: u64,
+    initial_deadline: u64,
+    initial_interval: u64,
+    timer_active: bool,
+    backward_rejected: bool,
+    backward_reason: tcp_connection.TimerReason,
+    backward_preserved: bool,
+    early_noop: bool,
+    early_reason: tcp_connection.TimerReason,
+    early_preserved: bool,
+    retry_ticks: [3]u64,
+    retry_actions: [3]tcp_connection.TimerAction,
+    retry_counts: [3]u8,
+    retry_intervals: [3]u64,
+    retry_deadlines: [3]u64,
+    retry_syn_exact: [3]bool,
+    timeout_tick: u64,
+    timeout_action: tcp_connection.TimerAction,
+    timeout_state: tcp_connection.State,
+    timeout_retries: u8,
+    timeout_timer_stopped: bool,
+    established_timer_cancelled: bool,
+    established_timer_reason: tcp_connection.TimerReason,
+    reset_timer_cancelled: bool,
+    reset_timer_reason: tcp_connection.TimerReason,
+    overflow_start: u64,
+    overflow_deadline: u64,
+    overflow_saturated: bool,
+    packet_free: bool,
+    tx_completion_enqueues: u64,
+    tx_completion_dequeues: u64,
+    rx_completion_enqueues: u64,
+    rx_completion_dequeues: u64,
+    ingress_enqueues: u64,
+    ingress_dequeues: u64,
+    packets_dispatched: u64,
+    tcp_dispatched: u64,
+    udp_dispatched: u64,
+    final_tx_cursor: u16,
+    final_rx_cursor: u16,
+    final_tcp_identification: u16,
+};
+
 pub const NtpReopenValidationFailureReport = struct {
     source_kind: time_reference.Kind,
     frequency_hz: u64,
@@ -6367,6 +6415,7 @@ pub const NetworkResult = struct {
     ntp_reopen_protected_peer: NtpReopenProtectedPeerReport,
     tcp_foundation: TcpFoundationReport,
     tcp_active_open: TcpActiveOpenReport,
+    tcp_retransmission: TcpRetransmissionReport,
     ntp_timestamp: NtpTimestampReport,
     ntp_automatic_timestamp: NtpAutomaticTimestampReport,
     ntp_quality: NtpQualityReport,
@@ -7335,6 +7384,10 @@ pub fn initializeAndTestNetwork(
         active_device_storage = null;
         return null;
     };
+    const tcp_retransmission = verifyTcpRetransmission(device, tcp_foundation) orelse {
+        active_device_storage = null;
+        return null;
+    };
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
@@ -7577,6 +7630,7 @@ pub fn initializeAndTestNetwork(
         .ntp_reopen_protected_peer = ntp_reopen_protected_peer,
         .tcp_foundation = tcp_foundation,
         .tcp_active_open = tcp_active_open,
+        .tcp_retransmission = tcp_retransmission,
         .ntp_timestamp = ntp_timestamp,
         .ntp_automatic_timestamp = ntp_automatic_timestamp,
         .ntp_quality = ntp_quality,
@@ -16114,6 +16168,210 @@ fn verifyTcpActiveOpen(
         .live_rst_acknowledgement = foundation.hardware_reply_acknowledgement,
         .live_reset_count = live_control.resets,
         .wrap_checks = wrap_checks,
+        .packet_free = packet_free,
+        .tx_completion_enqueues = txe,
+        .tx_completion_dequeues = txd,
+        .rx_completion_enqueues = rxe,
+        .rx_completion_dequeues = rxd,
+        .ingress_enqueues = device.software_rx_queue.enqueued,
+        .ingress_dequeues = device.software_rx_queue.dequeued,
+        .packets_dispatched = device.packets_dispatched,
+        .tcp_dispatched = device.tcp_packets_dispatched,
+        .udp_dispatched = device.udp_packets_dispatched,
+        .final_tx_cursor = device.tx_producer,
+        .final_rx_cursor = device.rx_consumer,
+        .final_tcp_identification = device.next_tcp_identification,
+    };
+}
+
+fn verifyTcpRetransmission(
+    device: *Device,
+    foundation: TcpFoundationReport,
+) ?TcpRetransmissionReport {
+    const txe_before = completionQueueEnqueued(&tx_completion_queue);
+    const txd_before = completionQueueDequeued(&tx_completion_queue);
+    const rxe_before = completionQueueEnqueued(&rx_completion_queue);
+    const rxd_before = completionQueueDequeued(&rx_completion_queue);
+    const ingress_enqueues_before = device.software_rx_queue.enqueued;
+    const ingress_dequeues_before = device.software_rx_queue.dequeued;
+    const packets_dispatched_before = device.packets_dispatched;
+    const tcp_dispatched_before = device.tcp_packets_dispatched;
+    const udp_dispatched_before = device.udp_packets_dispatched;
+    const tx_cursor_before = device.tx_producer;
+    const rx_cursor_before = device.rx_consumer;
+    const tcp_identification_before = device.next_tcp_identification;
+
+    const policy = tcp_connection.RetransmissionPolicy{
+        .initial_timeout_ticks = 3,
+        .maximum_timeout_ticks = 10,
+        .maximum_retries = 3,
+    };
+    const invalid_policies = [3]tcp_connection.RetransmissionPolicy{
+        .{ .initial_timeout_ticks = 0, .maximum_timeout_ticks = 10, .maximum_retries = 3 },
+        .{ .initial_timeout_ticks = 4, .maximum_timeout_ticks = 3, .maximum_retries = 3 },
+        .{ .initial_timeout_ticks = 3, .maximum_timeout_ticks = 10, .maximum_retries = 0 },
+    };
+    var invalid_policies_rejected = [3]bool{ false, false, false };
+    for (invalid_policies, 0..) |invalid_policy, index| {
+        var candidate = tcp_connection.init(foundation.syn_window) orelse return null;
+        const before = candidate;
+        const result = tcp_connection.beginActiveOpenAt(&candidate, foundation.syn_sequence, 100, invalid_policy);
+        invalid_policies_rejected[index] = !result.accepted and
+            result.rejection == .invalid_retransmission_policy and std.meta.eql(candidate, before);
+    }
+    for (invalid_policies_rejected) |rejected| {
+        if (!rejected) return null;
+    }
+
+    const initial_tick: u64 = 100;
+    var control = tcp_connection.init(foundation.syn_window) orelse return null;
+    const open = tcp_connection.beginActiveOpenAt(&control, foundation.syn_sequence, initial_tick, policy);
+    const initial_syn = open.outbound orelse return null;
+    if (!open.accepted or control.state != .syn_sent or !control.retransmission_active or
+        control.retransmission_deadline != 103 or control.retransmission_interval != 3 or
+        control.retransmissions != 0 or control.last_timer_tick != initial_tick or
+        initial_syn.sequence_number != foundation.syn_sequence or initial_syn.flags != tcp.flag_syn)
+    {
+        return null;
+    }
+
+    const before_backward = control;
+    const backward = tcp_connection.onTimer(&control, 99);
+    const backward_rejected = backward.action == .none and backward.reason == .backward_tick;
+    const backward_preserved = std.meta.eql(control, before_backward);
+    if (!backward_rejected or !backward_preserved) return null;
+
+    const before_early = control;
+    const early = tcp_connection.onTimer(&control, 102);
+    const early_noop = early.action == .none and early.reason == .before_deadline;
+    const early_preserved = std.meta.eql(control, before_early);
+    if (!early_noop or !early_preserved) return null;
+
+    const retry_ticks = [3]u64{ 103, 109, 119 };
+    const expected_counts = [3]u8{ 1, 2, 3 };
+    const expected_intervals = [3]u64{ 6, 10, 10 };
+    const expected_deadlines = [3]u64{ 109, 119, 129 };
+    var retry_actions = [3]tcp_connection.TimerAction{ .none, .none, .none };
+    var retry_counts = [3]u8{ 0, 0, 0 };
+    var retry_intervals = [3]u64{ 0, 0, 0 };
+    var retry_deadlines = [3]u64{ 0, 0, 0 };
+    var retry_syn_exact = [3]bool{ false, false, false };
+    for (retry_ticks, 0..) |tick, index| {
+        const result = tcp_connection.onTimer(&control, tick);
+        const retransmit = result.outbound orelse return null;
+        retry_actions[index] = result.action;
+        retry_counts[index] = result.retransmissions;
+        retry_intervals[index] = result.interval;
+        retry_deadlines[index] = result.next_deadline;
+        retry_syn_exact[index] = result.action == .retransmit_syn and result.reason == .none and
+            result.state == .syn_sent and retransmit.sequence_number == foundation.syn_sequence and
+            retransmit.acknowledgement_number == 0 and retransmit.flags == tcp.flag_syn and
+            retransmit.window_size == foundation.syn_window and
+            result.retransmissions == expected_counts[index] and
+            result.interval == expected_intervals[index] and
+            result.next_deadline == expected_deadlines[index];
+        if (!retry_syn_exact[index]) return null;
+    }
+
+    const timeout_tick: u64 = 129;
+    const timeout = tcp_connection.onTimer(&control, timeout_tick);
+    const timeout_valid = timeout.action == .timed_out and timeout.reason == .none and
+        timeout.previous_state == .syn_sent and timeout.state == .timed_out and
+        control.state == .timed_out and control.retransmissions == 3 and
+        !control.retransmission_active and timeout.outbound == null;
+    if (!timeout_valid) return null;
+
+    var established_control = tcp_connection.init(foundation.syn_window) orelse return null;
+    if (!tcp_connection.beginActiveOpenAt(&established_control, foundation.syn_sequence, 200, policy).accepted) return null;
+    const established = tcp_connection.handleSegment(&established_control, .{
+        .sequence_number = foundation.syn_ack_sequence,
+        .acknowledgement_number = foundation.syn_ack_acknowledgement,
+        .flags = foundation.syn_ack_flags,
+        .window_size = foundation.syn_ack_window,
+    });
+    const established_timer = tcp_connection.onTimer(&established_control, 203);
+    const established_timer_cancelled = established.accepted and established.state == .established and
+        !established_control.retransmission_active and established_timer.action == .none and
+        established_timer.reason == .invalid_state and established_timer.state == .established;
+    if (!established_timer_cancelled) return null;
+
+    var reset_control = tcp_connection.init(foundation.syn_window) orelse return null;
+    if (!tcp_connection.beginActiveOpenAt(&reset_control, foundation.syn_sequence, 300, policy).accepted) return null;
+    const reset = tcp_connection.handleSegment(&reset_control, .{
+        .sequence_number = foundation.hardware_reply_sequence,
+        .acknowledgement_number = foundation.hardware_reply_acknowledgement,
+        .flags = foundation.hardware_reply_flags,
+        .window_size = foundation.hardware_reply_window,
+    });
+    const reset_timer = tcp_connection.onTimer(&reset_control, 303);
+    const reset_timer_cancelled = reset.accepted and reset.state == .reset and
+        !reset_control.retransmission_active and reset_timer.action == .none and
+        reset_timer.reason == .invalid_state and reset_timer.state == .reset;
+    if (!reset_timer_cancelled) return null;
+
+    const overflow_start = std.math.maxInt(u64) - 2;
+    var overflow_control = tcp_connection.init(foundation.syn_window) orelse return null;
+    const overflow_open = tcp_connection.beginActiveOpenAt(&overflow_control, foundation.syn_sequence, overflow_start, .{
+        .initial_timeout_ticks = 5,
+        .maximum_timeout_ticks = 10,
+        .maximum_retries = 1,
+    });
+    const overflow_saturated = overflow_open.accepted and
+        overflow_control.retransmission_deadline == std.math.maxInt(u64) and
+        tcp_connection.saturatingAdd(overflow_start, 5) == std.math.maxInt(u64) and
+        tcp_connection.nextRetransmissionInterval(std.math.maxInt(u64) - 1, std.math.maxInt(u64)) ==
+            std.math.maxInt(u64);
+    if (!overflow_saturated) return null;
+
+    const txe = completionQueueEnqueued(&tx_completion_queue);
+    const txd = completionQueueDequeued(&tx_completion_queue);
+    const rxe = completionQueueEnqueued(&rx_completion_queue);
+    const rxd = completionQueueDequeued(&rx_completion_queue);
+    const packet_free = txe == txe_before and txd == txd_before and rxe == rxe_before and rxd == rxd_before and
+        device.software_rx_queue.enqueued == ingress_enqueues_before and
+        device.software_rx_queue.dequeued == ingress_dequeues_before and
+        device.packets_dispatched == packets_dispatched_before and
+        device.tcp_packets_dispatched == tcp_dispatched_before and
+        device.udp_packets_dispatched == udp_dispatched_before and
+        device.tx_producer == tx_cursor_before and device.rx_consumer == rx_cursor_before and
+        device.next_tcp_identification == tcp_identification_before and
+        device.udp_endpoint_count == 2 and device.next_ephemeral_udp_port == 49_263 and
+        device.next_udp_generation == 135;
+    if (!packet_free) return null;
+
+    return .{
+        .initial_timeout_ticks = policy.initial_timeout_ticks,
+        .maximum_timeout_ticks = policy.maximum_timeout_ticks,
+        .maximum_retries = policy.maximum_retries,
+        .invalid_policies_rejected = invalid_policies_rejected,
+        .initial_tick = initial_tick,
+        .initial_deadline = 103,
+        .initial_interval = 3,
+        .timer_active = true,
+        .backward_rejected = backward_rejected,
+        .backward_reason = backward.reason,
+        .backward_preserved = backward_preserved,
+        .early_noop = early_noop,
+        .early_reason = early.reason,
+        .early_preserved = early_preserved,
+        .retry_ticks = retry_ticks,
+        .retry_actions = retry_actions,
+        .retry_counts = retry_counts,
+        .retry_intervals = retry_intervals,
+        .retry_deadlines = retry_deadlines,
+        .retry_syn_exact = retry_syn_exact,
+        .timeout_tick = timeout_tick,
+        .timeout_action = timeout.action,
+        .timeout_state = timeout.state,
+        .timeout_retries = timeout.retransmissions,
+        .timeout_timer_stopped = !control.retransmission_active,
+        .established_timer_cancelled = established_timer_cancelled,
+        .established_timer_reason = established_timer.reason,
+        .reset_timer_cancelled = reset_timer_cancelled,
+        .reset_timer_reason = reset_timer.reason,
+        .overflow_start = overflow_start,
+        .overflow_deadline = overflow_control.retransmission_deadline,
+        .overflow_saturated = overflow_saturated,
         .packet_free = packet_free,
         .tx_completion_enqueues = txe,
         .tx_completion_dequeues = txd,
