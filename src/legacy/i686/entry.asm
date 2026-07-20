@@ -8,7 +8,13 @@ global _start
 global zigos_i686_read_cr0
 global zigos_i686_cpuid_vendor
 global zigos_i686_out8
+global zigos_i686_load_idt
+global zigos_i686_enable_interrupts
+global zigos_i686_disable_interrupts
+global zigos_i686_halt
+global zigos_i686_irq0_stub
 extern zigos_legacy_kernel_main
+extern zigos_i686_timer_interrupt
 extern __bss_start
 extern __bss_end
 
@@ -58,6 +64,36 @@ zigos_i686_out8:
     mov eax, [esp + 8]
     out dx, al
     ret
+
+; cdecl: void zigos_i686_load_idt(const void *descriptor)
+zigos_i686_load_idt:
+    mov eax, [esp + 4]
+    lidt [eax]
+    ret
+
+zigos_i686_enable_interrupts:
+    sti
+    ret
+
+zigos_i686_disable_interrupts:
+    cli
+    ret
+
+zigos_i686_halt:
+    hlt
+    ret
+
+zigos_i686_irq0_stub:
+    pushad
+    mov ebp, esp
+    and esp, -16
+    cld
+    call zigos_i686_timer_interrupt
+    mov esp, ebp
+    mov al, 0x20
+    out 0x20, al
+    popad
+    iretd
 
 section .data
 align 4

@@ -1696,3 +1696,15 @@
 - The 32 MiB QEMU machine deterministically reports six entries, two usable regions, `0x0000000001F7FC00` usable bytes, and highest boundary `0x0000000100000000`.
 - Both debugcon and COM1 must carry the exact memory-map statistics while allowing generated kernel byte/sector fields to evolve.
 - The raw kernel is 2,472 bytes across five sectors with SHA-256 `07A70E65AD466A375DD9B5AF2B007C2100DFDAD71263B55761788132005484B5`; the disk image SHA-256 is `C52AB6C0CA7B1469F68C8E84E64E7CB98B2323FCD4B29D141C650BADA1E93826`.
+
+## 4.40 - Deliver timer interrupts on legacy i686
+
+- Added a full 256-entry i686 IDT with compile-time-protected eight-byte gate layout and an explicit six-byte little-endian `LIDT` descriptor that cannot acquire compiler padding.
+- IRQ0 vector `0x20` uses a hand-written assembly gate that saves all general registers, aligns the interrupt stack for Zig, clears direction state, calls the exported timer handler, sends the master-PIC EOI, restores context, and returns with `IRETD`.
+- The dual 8259 PIC is masked before reconfiguration, initialized in cascade mode, remapped to vectors `0x20/0x28`, and left with only master IRQ0 unmasked (`0xFE/0xFF`).
+- PIT channel 0 is programmed in square-wave mode with divisor `0x2E9C` (11,932) for an approximately 100 Hz periodic source.
+- The kernel enables interrupts only after IDT/PIC/PIT setup, sleeps with `HLT`, counts exactly five volatile IRQ deliveries, disables interrupts, and masks both PICs before reporting success.
+- Debugcon and COM1 both require `IDT 0x00000100`, limit `0x000007FF`, IRQ0 `0x20`, PIC offsets, masks, PIT frequency/divisor, and tick count `0x00000005`.
+- The final raw i686 kernel is 3,288 bytes across seven sectors with SHA-256 `AC9B4ED1EF3A1FA2E0DAC48A359C4727DD903073E5596CF8E5C60D05A2057CB3`.
+- The final 1 MiB BIOS disk image SHA-256 is `E3A370A3EDCF287650AE53CB2E04F089FBC79EA9B33E320BEDEBA9EC1E0EF4E1`.
+- GitHub Actions now installs QEMU and executes the complete BIOS stage-0, stage-1, protected-mode, Zig runtime, E820, and hardware-timer boot test in addition to building both architecture artifacts.

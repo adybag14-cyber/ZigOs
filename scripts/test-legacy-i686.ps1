@@ -37,7 +37,7 @@ try {
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 100
         try { $output = [IO.File]::ReadAllText($debugPath) } catch { continue }
-        if ($output.Contains('ZigOs i686 freestanding kernel image built')) { break }
+        if ($output.Contains('ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005')) { break }
         if ($process.HasExited) { break }
     }
 } finally {
@@ -57,7 +57,8 @@ $required = @(
     'ZigOs BIOS stage1 loaded kernel: LBA 9 address 0x00010000',
     'ZigOs BIOS stage1 protected mode verified: CS 0x0008 CR0.PE yes kernel 0x00010000',
     'ZigOs i686 freestanding kernel image built',
-    'ZigOs i686 runtime verified: vendor GenuineIntel max-leaf 0x00000004 CR0 0x00000011 PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes'
+    'ZigOs i686 runtime verified: vendor GenuineIntel max-leaf 0x00000004 CR0 0x00000011 PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes',
+    'ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005'
 )
 foreach ($marker in $required) {
     if (-not $output.Contains($marker)) { throw "Missing legacy marker: $marker. Output: $output" }
@@ -68,6 +69,7 @@ $serial = [IO.File]::ReadAllText($serialPath)
 if (-not [regex]::IsMatch($serial, $e820Pattern)) { throw "E820 COM1 contract missing. Serial: $serial" }
 if (-not $serial.Contains('ZigOs i686 runtime verified: vendor GenuineIntel')) { throw "COM1 runtime marker missing. Serial: $serial" }
 if (-not $serial.Contains('PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes')) { throw "COM1 runtime invariants missing. Serial: $serial" }
+if (-not $serial.Contains('ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005')) { throw "COM1 interrupt marker missing. Serial: $serial" }
 
 Write-Host $output.Trim()
 Write-Host '--- COM1 ---'

@@ -14,9 +14,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Install NASM
+      - name: Install NASM and QEMU
         shell: pwsh
-        run: choco install nasm -y --no-progress
+        run: choco install nasm qemu -y --no-progress
 
       - name: Build x86-64 UEFI with canonical Zig
         shell: pwsh
@@ -33,6 +33,10 @@ jobs:
           $zig = ".toolchains\zig-canonical\zig-x86_64-windows-$version\zig.exe"
           & $zig fmt --check src
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Boot-test legacy BIOS i686 image
+        shell: pwsh
+        run: .\scripts\test-legacy-i686.ps1 -TimeoutSeconds 20
 
       - name: Upload UEFI image
         uses: actions/upload-artifact@v7

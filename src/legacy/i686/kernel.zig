@@ -5,6 +5,7 @@ comptime {
     if (builtin.os.tag != .freestanding) @compileError("legacy kernel requires a freestanding target");
     if (@sizeOf(BootInfo) != 32) @compileError("legacy BootInfo layout changed");
     if (@sizeOf(E820Entry) != 24) @compileError("legacy E820 entry layout changed");
+    if (@sizeOf(IdtEntry) != 8) @compileError("legacy IDT entry layout changed");
 }
 
 const boot_info_magic: u32 = 0x4F49_425A;
@@ -34,14 +35,29 @@ const E820Entry = extern struct {
     attributes: u32,
 };
 
+const IdtEntry = packed struct {
+    offset_low: u16,
+    selector: u16,
+    zero: u8,
+    attributes: u8,
+    offset_high: u16,
+};
+
 extern var zigos_i686_entry_stack: u32;
 extern var zigos_i686_boot_info_pointer: u32;
 extern fn zigos_i686_read_cr0() callconv(.c) u32;
 extern fn zigos_i686_cpuid_vendor(destination: [*]u8) callconv(.c) u32;
 extern fn zigos_i686_out8(port: u16, value: u8) callconv(.c) void;
+extern fn zigos_i686_load_idt(descriptor: *const [6]u8) callconv(.c) void;
+extern fn zigos_i686_enable_interrupts() callconv(.c) void;
+extern fn zigos_i686_disable_interrupts() callconv(.c) void;
+extern fn zigos_i686_halt() callconv(.c) void;
+extern fn zigos_i686_irq0_stub() callconv(.c) void;
 
 var bss_probe: [64]u8 = @splat(0);
 var vga_cursor: usize = 0;
+var idt: [256]IdtEntry = undefined;
+var timer_ticks: u32 = 0;
 
 pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     initCom1();
@@ -75,7 +91,15 @@ pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     writeAll(" VGA yes COM1 yes\r\n");
 
     verifyAndReportBootInfo();
+    const ticks = verifyInterruptTimer();
+    writeAll("ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x");
+    writeHex32(ticks);
+    writeAll("\r\n");
     haltForever();
+}
+
+pub export fn zigos_i686_timer_interrupt() callconv(.c) void {
+    timer_ticks +|= 1;
 }
 
 fn verifyAndReportBootInfo() void {
@@ -134,6 +158,80 @@ fn verifyAndReportBootInfo() void {
     writeAll("/0x");
     writeHex32(info.kernel_sectors);
     writeAll("\r\n");
+}
+
+fn verifyInterruptTimer() u32 {
+    for (&idt) |*entry| {
+        entry.* = .{
+            .offset_low = 0,
+            .selector = 0,
+            .zero = 0,
+            .attributes = 0,
+            .offset_high = 0,
+        };
+    }
+
+    const handler: u32 = @intCast(@intFromPtr(&zigos_i686_irq0_stub));
+    idt[0x20] = .{
+        .offset_low = @truncate(handler),
+        .selector = 0x0008,
+        .zero = 0,
+        .attributes = 0x8E,
+        .offset_high = @truncate(handler >> 16),
+    };
+    const base: u32 = @intCast(@intFromPtr(&idt));
+    const descriptor = [6]u8{
+        0xFF,
+        0x07,
+        @truncate(base),
+        @truncate(base >> 8),
+        @truncate(base >> 16),
+        @truncate(base >> 24),
+    };
+    zigos_i686_load_idt(&descriptor);
+
+    configurePic();
+    configurePit100Hz();
+    const ticks: *volatile u32 = &timer_ticks;
+    zigos_i686_enable_interrupts();
+    while (ticks.* < 5) zigos_i686_halt();
+    zigos_i686_disable_interrupts();
+    zigos_i686_out8(0x0021, 0xFF);
+    zigos_i686_out8(0x00A1, 0xFF);
+    return ticks.*;
+}
+
+fn configurePic() void {
+    zigos_i686_out8(0x0021, 0xFF);
+    zigos_i686_out8(0x00A1, 0xFF);
+    zigos_i686_out8(0x0020, 0x11);
+    ioWait();
+    zigos_i686_out8(0x00A0, 0x11);
+    ioWait();
+    zigos_i686_out8(0x0021, 0x20);
+    ioWait();
+    zigos_i686_out8(0x00A1, 0x28);
+    ioWait();
+    zigos_i686_out8(0x0021, 0x04);
+    ioWait();
+    zigos_i686_out8(0x00A1, 0x02);
+    ioWait();
+    zigos_i686_out8(0x0021, 0x01);
+    ioWait();
+    zigos_i686_out8(0x00A1, 0x01);
+    ioWait();
+    zigos_i686_out8(0x0021, 0xFE);
+    zigos_i686_out8(0x00A1, 0xFF);
+}
+
+fn configurePit100Hz() void {
+    zigos_i686_out8(0x0043, 0x36);
+    zigos_i686_out8(0x0040, 0x9C);
+    zigos_i686_out8(0x0040, 0x2E);
+}
+
+fn ioWait() void {
+    zigos_i686_out8(0x0080, 0);
 }
 
 fn initCom1() void {
