@@ -1731,3 +1731,15 @@
 - The Zig handler counts IRQ delivery, distinguishes make from break codes, and records the last make code without polling the keyboard data path.
 - The boot harness requires one make event, scan code `0x1E`, and nonzero IRQ accounting on both debugcon and COM1.
 - The raw payload is 4,928 bytes across ten sectors, with stage-1 metadata again generated from the exact image.
+
+
+## 4.43 - Own physical memory with an E820 frame allocator
+
+- Added a 4 KiB physical-frame bitmap covering a bounded 64 MiB i686 management window.
+- E820 usable ranges are clipped, page-aligned, and converted into free frames while non-usable and out-of-window ranges remain reserved.
+- All physical memory below 1 MiB stays reserved for BIOS data, boot information, stage-1, kernel, VGA, and the protected-mode stack.
+- Allocation scans deterministically from 1 MiB and returns `0x00100000`, `0x00101000`, and `0x00102000` for the first three frames.
+- Freeing the middle frame and allocating again returns exactly `0x00101000`, proving bitmap reuse and lowest-frame ordering.
+- Invalid, unaligned, low-memory, out-of-range, and double-free operations are rejected by the allocator API.
+- The 32 MiB QEMU E820 map yields exactly `0x1EE0` managed free frames before and after the transactional test.
+- A linker-provided kernel-end symbol confirms the complete loaded image and BSS remain below the reserved 1 MiB boundary.

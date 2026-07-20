@@ -12,6 +12,10 @@ comptime {
 const boot_info_magic: u32 = 0x4F49_425A;
 const boot_info_address: u32 = 0x0000_5000;
 const maximum_e820_entries: u16 = 64;
+const frame_size: u32 = 4096;
+const managed_memory_limit: u32 = 64 * 1024 * 1024;
+const managed_frame_count: usize = managed_memory_limit / frame_size;
+const frame_bitmap_bytes: usize = managed_frame_count / 8;
 
 const BootInfo = extern struct {
     magic: u32,
@@ -61,6 +65,7 @@ const IdtEntry = packed struct {
 };
 
 extern var zigos_i686_entry_stack: u32;
+extern const __kernel_end: u8;
 extern var zigos_i686_boot_info_pointer: u32;
 extern fn zigos_i686_read_cr0() callconv(.c) u32;
 extern fn zigos_i686_cpuid_vendor(destination: [*]u8) callconv(.c) u32;
@@ -86,6 +91,9 @@ var last_exception_eip: u32 = 0;
 var keyboard_irq_count: u32 = 0;
 var keyboard_make_count: u32 = 0;
 var keyboard_last_make: u8 = 0;
+var frame_bitmap: [frame_bitmap_bytes]u8 = @splat(0xFF);
+var free_frame_count: u32 = 0;
+var frame_allocator_ready = false;
 
 pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     initCom1();
@@ -123,6 +131,7 @@ pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     writeAll("ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x");
     writeHex32(ticks);
     writeAll("\r\n");
+    verifyFrameAllocator();
     haltForever();
 }
 
@@ -283,6 +292,130 @@ fn verifyInterruptTimer() u32 {
     writeAll(if (keyboard_irq_count != 0) "yes" else "no");
     writeAll("\r\n");
     return ticks.*;
+}
+
+fn verifyFrameAllocator() void {
+    initializeFrameAllocator();
+    const free_before = free_frame_count;
+    const first = allocateFrame() orelse frameAllocatorFailure("first allocation");
+    const second = allocateFrame() orelse frameAllocatorFailure("second allocation");
+    const third = allocateFrame() orelse frameAllocatorFailure("third allocation");
+    if (first != 0x0010_0000 or second != 0x0010_1000 or third != 0x0010_2000) {
+        frameAllocatorFailure("unexpected allocation order");
+    }
+    if (!freeFrame(second)) frameAllocatorFailure("free second");
+    const reused = allocateFrame() orelse frameAllocatorFailure("reuse allocation");
+    if (reused != second) frameAllocatorFailure("reuse mismatch");
+    if (!freeFrame(first) or !freeFrame(reused) or !freeFrame(third)) {
+        frameAllocatorFailure("final free");
+    }
+    const free_after = free_frame_count;
+    if (free_after != free_before) frameAllocatorFailure("accounting mismatch");
+
+    writeAll("ZigOs i686 frame allocator verified: managed-limit 0x");
+    writeHex32(managed_memory_limit);
+    writeAll(" frame-size 0x");
+    writeHex32(frame_size);
+    writeAll(" free-before 0x");
+    writeHex32(free_before);
+    writeAll(" first 0x");
+    writeHex32(first);
+    writeAll(" second 0x");
+    writeHex32(second);
+    writeAll(" third 0x");
+    writeHex32(third);
+    writeAll(" reuse 0x");
+    writeHex32(reused);
+    writeAll(" free-after 0x");
+    writeHex32(free_after);
+    writeAll(" kernel-end-below-1M ");
+    writeAll(if (@intFromPtr(&__kernel_end) < 0x0010_0000) "yes" else "no");
+    writeAll("\r\n");
+}
+
+fn initializeFrameAllocator() void {
+    @memset(frame_bitmap[0..], 0xFF);
+    free_frame_count = 0;
+    const info: *const BootInfo = @ptrFromInt(boot_info_address);
+    const entries: [*]const E820Entry = @ptrFromInt(info.e820_entries_address);
+    for (0..info.e820_entry_count) |index| {
+        const entry = entries[index];
+        if (entry.kind != 1 or entry.length == 0) continue;
+        const raw_end = entry.base +| entry.length;
+        const bounded_start = if (entry.base < managed_memory_limit) entry.base else managed_memory_limit;
+        const bounded_end = if (raw_end < managed_memory_limit) raw_end else managed_memory_limit;
+        var start: u32 = @intCast(bounded_start);
+        var end: u32 = @intCast(bounded_end);
+        start = alignUpFrame(start);
+        end &= ~(frame_size - 1);
+        while (start < end) : (start += frame_size) markFrameFree(start / frame_size);
+    }
+    reserveFrameRange(0, 0x0010_0000);
+    frame_allocator_ready = true;
+}
+
+fn allocateFrame() ?u32 {
+    if (!frame_allocator_ready) return null;
+    var index: usize = 0x0010_0000 / frame_size;
+    while (index < managed_frame_count) : (index += 1) {
+        if (frameIsFree(index)) {
+            markFrameUsed(index);
+            return @intCast(index * frame_size);
+        }
+    }
+    return null;
+}
+
+fn freeFrame(address: u32) bool {
+    if (!frame_allocator_ready or address < 0x0010_0000 or address >= managed_memory_limit or
+        (address & (frame_size - 1)) != 0)
+    {
+        return false;
+    }
+    const index: usize = @intCast(address / frame_size);
+    if (frameIsFree(index)) return false;
+    markFrameFree(index);
+    return true;
+}
+
+fn reserveFrameRange(start_address: u32, end_address: u32) void {
+    var address = start_address & ~(frame_size - 1);
+    const end = alignUpFrame(end_address);
+    while (address < end and address < managed_memory_limit) : (address += frame_size) {
+        markFrameUsed(@intCast(address / frame_size));
+    }
+}
+
+fn frameIsFree(index: usize) bool {
+    return (frame_bitmap[index / 8] & (@as(u8, 1) << @intCast(index & 7))) == 0;
+}
+
+fn markFrameFree(index_value: anytype) void {
+    const index: usize = @intCast(index_value);
+    const mask = @as(u8, 1) << @intCast(index & 7);
+    if ((frame_bitmap[index / 8] & mask) != 0) {
+        frame_bitmap[index / 8] &= ~mask;
+        free_frame_count +|= 1;
+    }
+}
+
+fn markFrameUsed(index: usize) void {
+    const mask = @as(u8, 1) << @intCast(index & 7);
+    if ((frame_bitmap[index / 8] & mask) == 0) {
+        frame_bitmap[index / 8] |= mask;
+        free_frame_count -|= 1;
+    }
+}
+
+fn alignUpFrame(value: u32) u32 {
+    return (value +| (frame_size - 1)) & ~(frame_size - 1);
+}
+
+fn frameAllocatorFailure(reason: []const u8) noreturn {
+    writeAll("ZigOs i686 frame allocator failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
 }
 
 fn injectPs2Scancode(scancode: u8) void {

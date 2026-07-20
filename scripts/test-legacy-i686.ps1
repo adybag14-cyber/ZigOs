@@ -33,7 +33,8 @@ $arguments = @(
 $process = Start-Process -FilePath $qemu -ArgumentList $arguments -PassThru
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 $output = ''
-$finalMarker = 'ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005'
+$interruptMarker = 'ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005'
+$finalMarker = 'ZigOs i686 frame allocator verified: managed-limit 0x04000000 frame-size 0x00001000 free-before 0x00001EE0 first 0x00100000 second 0x00101000 third 0x00102000 reuse 0x00101000 free-after 0x00001EE0 kernel-end-below-1M yes'
 try {
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 100
@@ -62,6 +63,7 @@ $required = @(
     'ZigOs i686 exceptions verified: vectors 0x00000020 breakpoint-count 0x00000002 last-vector 0x00000003 error 0x00000000 eip-nonzero yes',
     'ZigOs i686 keyboard waiting: IRQ1 0x21 controller-command 0xD2 expected-make 0x1E',
     'ZigOs i686 keyboard verified: IRQ1 0x21 make-count 0x00000001 last-make 0x1E irq-count-nonzero yes',
+    $interruptMarker,
     $finalMarker
 )
 foreach ($marker in $required) {
@@ -77,6 +79,7 @@ foreach ($marker in @(
     'PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes',
     'ZigOs i686 exceptions verified: vectors 0x00000020 breakpoint-count 0x00000002 last-vector 0x00000003 error 0x00000000 eip-nonzero yes',
     'ZigOs i686 keyboard verified: IRQ1 0x21 make-count 0x00000001 last-make 0x1E irq-count-nonzero yes',
+    $interruptMarker,
     $finalMarker
 )) {
     if (-not $serial.Contains($marker)) { throw "COM1 marker missing: $marker. Serial: $serial" }
