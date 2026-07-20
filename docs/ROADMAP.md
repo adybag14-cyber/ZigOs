@@ -1767,3 +1767,15 @@
 - Sentinel fills prove middle-block reuse does not corrupt the first or third allocation.
 - Releasing all allocations restores one `0x7FF0`-byte free block and leaves exact physical-frame accounting `0x1ED1`.
 - Debugcon and COM1 both require the complete split, reuse, coalescing, and frame-accounting marker.
+
+
+## 4.46 - Read the boot disk through native ATA PIO
+
+- Added exact 16-bit port input alongside the existing byte I/O helpers.
+- A bounded primary-master IDENTIFY path selects the device, enforces BSY/DRQ/ERR/DF status transitions, and reads all 256 identification words.
+- The kernel byte-swaps and trims words 27-46 to recover model `QEMU HARDDISK`, verifies LBA28 support, and reports the 2,048-sector image capacity.
+- Native LBA28 PIO reads program drive/head, count, low/mid/high LBA bytes, issue command `0x20`, and transfer exactly 256 words.
+- LBA0 is read through ATA and must retain the BIOS boot signature `0x55AA`.
+- LBA9 is read into the bounded heap and compared byte-for-byte with the first 512 bytes of the executing kernel at physical address `0x00010000`.
+- Releasing the sector buffer must restore the heap to its exact pre-I/O free capacity.
+- Debugcon and COM1 require model, capacity, signature, kernel-sector equality, buffer address, and heap-restoration evidence.

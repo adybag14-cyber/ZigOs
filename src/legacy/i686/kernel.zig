@@ -82,6 +82,7 @@ extern fn zigos_i686_invalidate_page(address: u32) callconv(.c) void;
 extern fn zigos_i686_cpuid_vendor(destination: [*]u8) callconv(.c) u32;
 extern fn zigos_i686_out8(port: u16, value: u8) callconv(.c) void;
 extern fn zigos_i686_in8(port: u16) callconv(.c) u8;
+extern fn zigos_i686_in16(port: u16) callconv(.c) u16;
 extern fn zigos_i686_load_idt(descriptor: *const [6]u8) callconv(.c) void;
 extern fn zigos_i686_enable_interrupts() callconv(.c) void;
 extern fn zigos_i686_disable_interrupts() callconv(.c) void;
@@ -108,6 +109,10 @@ var frame_allocator_ready = false;
 var heap_base: u32 = 0;
 var heap_bytes: u32 = 0;
 var heap_ready = false;
+var ata_model: [40]u8 = @splat(0);
+var ata_model_length: usize = 0;
+var ata_sector_count: u32 = 0;
+var ata_ready = false;
 
 pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     initCom1();
@@ -450,6 +455,126 @@ fn verifyHeap() void {
     writeAll(" frames-left 0x");
     writeHex32(free_frame_count);
     writeAll("\r\n");
+    verifyAta();
+}
+
+const ata_data_port: u16 = 0x01F0;
+const ata_sector_count_port: u16 = 0x01F2;
+const ata_lba_low_port: u16 = 0x01F3;
+const ata_lba_mid_port: u16 = 0x01F4;
+const ata_lba_high_port: u16 = 0x01F5;
+const ata_drive_port: u16 = 0x01F6;
+const ata_status_command_port: u16 = 0x01F7;
+const ata_alternate_status_port: u16 = 0x03F6;
+
+fn verifyAta() void {
+    var identify: [256]u16 = undefined;
+    if (!ataIdentify(&identify)) ataFailure("IDENTIFY");
+    if ((identify[49] & (1 << 9)) == 0) ataFailure("LBA28 unsupported");
+    ata_sector_count = @as(u32, identify[60]) | (@as(u32, identify[61]) << 16);
+    if (ata_sector_count < 10) ataFailure("capacity too small");
+    parseAtaModel(&identify);
+
+    const free_before = heapFreePayloadBytes();
+    const buffer = heapAllocate(512) orelse ataFailure("sector buffer");
+    if (!ataReadSector(0, buffer)) ataFailure("read MBR");
+    const bytes: [*]const volatile u8 = @ptrFromInt(buffer);
+    if (bytes[510] != 0x55 or bytes[511] != 0xAA) ataFailure("MBR signature");
+    if (!ataReadSector(9, buffer)) ataFailure("read kernel LBA");
+    const kernel: [*]const volatile u8 = @ptrFromInt(0x0001_0000);
+    for (0..512) |index| if (bytes[index] != kernel[index]) ataFailure("kernel sector mismatch");
+    if (!heapFree(buffer) or heapFreePayloadBytes() != free_before) ataFailure("heap restoration");
+    ata_ready = true;
+
+    writeAll("ZigOs i686 ATA verified: primary-master yes model ");
+    writeAll(ata_model[0..ata_model_length]);
+    writeAll(" LBA28 yes sectors 0x");
+    writeHex32(ata_sector_count);
+    writeAll(" MBR 0x55AA kernel-LBA 0x00000009 sector-match yes buffer 0x");
+    writeHex32(buffer);
+    writeAll(" heap-restored yes\r\n");
+}
+
+fn ataIdentify(destination: *[256]u16) bool {
+    zigos_i686_out8(ata_drive_port, 0xA0);
+    ataDelay();
+    zigos_i686_out8(ata_sector_count_port, 0);
+    zigos_i686_out8(ata_lba_low_port, 0);
+    zigos_i686_out8(ata_lba_mid_port, 0);
+    zigos_i686_out8(ata_lba_high_port, 0);
+    zigos_i686_out8(ata_status_command_port, 0xEC);
+    if (zigos_i686_in8(ata_status_command_port) == 0) return false;
+    if (!ataWaitReady()) return false;
+    if (zigos_i686_in8(ata_lba_mid_port) != 0 or zigos_i686_in8(ata_lba_high_port) != 0) return false;
+    if (!ataWaitData()) return false;
+    for (destination) |*word| word.* = zigos_i686_in16(ata_data_port);
+    return true;
+}
+
+fn ataReadSector(lba: u32, destination_address: u32) bool {
+    if (!ata_ready and ata_sector_count != 0 and lba >= ata_sector_count) return false;
+    if (lba >= 0x1000_0000) return false;
+    zigos_i686_out8(ata_drive_port, 0xE0 | @as(u8, @truncate(lba >> 24)));
+    ataDelay();
+    zigos_i686_out8(ata_sector_count_port, 1);
+    zigos_i686_out8(ata_lba_low_port, @truncate(lba));
+    zigos_i686_out8(ata_lba_mid_port, @truncate(lba >> 8));
+    zigos_i686_out8(ata_lba_high_port, @truncate(lba >> 16));
+    zigos_i686_out8(ata_status_command_port, 0x20);
+    if (!ataWaitData()) return false;
+    const destination: [*]volatile u8 = @ptrFromInt(destination_address);
+    for (0..256) |index| {
+        const word = zigos_i686_in16(ata_data_port);
+        destination[index * 2] = @truncate(word);
+        destination[index * 2 + 1] = @truncate(word >> 8);
+    }
+    return true;
+}
+
+fn ataWaitReady() bool {
+    var remaining: u32 = 1_000_000;
+    while (remaining != 0) : (remaining -= 1) {
+        const status = zigos_i686_in8(ata_status_command_port);
+        if ((status & 0x80) == 0) return (status & 0x21) == 0;
+    }
+    return false;
+}
+
+fn ataWaitData() bool {
+    var remaining: u32 = 1_000_000;
+    while (remaining != 0) : (remaining -= 1) {
+        const status = zigos_i686_in8(ata_status_command_port);
+        if ((status & 0x21) != 0) return false;
+        if ((status & 0x88) == 0x08) return true;
+    }
+    return false;
+}
+
+fn ataDelay() void {
+    _ = zigos_i686_in8(ata_alternate_status_port);
+    _ = zigos_i686_in8(ata_alternate_status_port);
+    _ = zigos_i686_in8(ata_alternate_status_port);
+    _ = zigos_i686_in8(ata_alternate_status_port);
+}
+
+fn parseAtaModel(identify: *const [256]u16) void {
+    for (0..20) |index| {
+        const word = identify[27 + index];
+        ata_model[index * 2] = @truncate(word >> 8);
+        ata_model[index * 2 + 1] = @truncate(word);
+    }
+    ata_model_length = ata_model.len;
+    while (ata_model_length != 0 and (ata_model[ata_model_length - 1] == ' ' or ata_model[ata_model_length - 1] == 0)) {
+        ata_model_length -= 1;
+    }
+    if (ata_model_length == 0) ataFailure("empty model");
+}
+
+fn ataFailure(reason: []const u8) noreturn {
+    writeAll("ZigOs i686 ATA failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
 }
 
 fn initializeHeap(base: u32, bytes: u32) void {

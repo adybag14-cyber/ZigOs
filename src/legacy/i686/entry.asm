@@ -12,6 +12,7 @@ global zigos_i686_invalidate_page
 global zigos_i686_cpuid_vendor
 global zigos_i686_out8
 global zigos_i686_in8
+global zigos_i686_in16
 global zigos_i686_load_idt
 global zigos_i686_enable_interrupts
 global zigos_i686_disable_interrupts
@@ -100,6 +101,13 @@ zigos_i686_in8:
     mov edx, [esp + 4]
     xor eax, eax
     in al, dx
+    ret
+
+; cdecl: u16 zigos_i686_in16(u16 port)
+zigos_i686_in16:
+    mov edx, [esp + 4]
+    xor eax, eax
+    in ax, dx
     ret
 
 ; cdecl: void zigos_i686_load_idt(const void *descriptor)
