@@ -1791,3 +1791,16 @@
 - Runtime geometry is LBA64, root LBA `0x53`, data LBA `0x61`, cluster 2, and end-of-chain `0x0FFF`.
 - Exact content, length, hash, and heap restoration are required on debugcon and COM1.
 - The kernel occupies 15,096 bytes across thirty sectors, staying below the enforced LBA64 partition boundary.
+
+
+## 4.48 - Add an interactive legacy i686 shell
+
+- Added a bounded 64-byte COM1 command line with printable-ASCII filtering, backspace handling, explicit overflow recovery, and no dynamic input allocation.
+- The shell starts only after exceptions, IRQs, physical frames, paging, the heap, ATA, and FAT12 have all completed their deterministic boot checks.
+- `help` reports the complete command surface; `mem` exposes live frame and heap accounting; `ticks` reports the verified PIT counter and frequency.
+- `disk` reports the ATA model, current LBA28 capacity, FAT12 mount status, and loaded file length.
+- `cat HELLO.TXT` prints the exact 86-byte file previously loaded through native ATA and FAT12 traversal.
+- `exit` emits a terminal report with five recognized operational commands, zero unknown commands, and an explicit successful exit state.
+- The QEMU harness binds COM1 to redirected standard I/O, consumes output asynchronously, and sends six commands one at a time only after the preceding exact response appears, avoiding UART FIFO overrun.
+- Debugcon and the live COM1 transcript must independently contain every command response, the FAT12 payload, and `commands 0x00000005 unknown 0x00000000 exit yes`.
+- The raw kernel is 16,568 bytes across thirty-three sectors with SHA-256 `0D43769F95B59287EDD1556DF808E57AEB09BB217BE1D5F25A2DCFDEFA64D2B8`; the partitioned 2 MiB disk image SHA-256 is `C57A61830F879B091BF7D7C4E3CCA4ECD9646014796CCE0E8605A31B73E5EB77`.

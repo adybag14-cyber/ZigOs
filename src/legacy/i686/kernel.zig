@@ -119,6 +119,8 @@ var fat_file_length: usize = 0;
 var fat_file_cluster: u16 = 0;
 var fat_file_hash: u32 = 0;
 var fat_ready = false;
+var shell_command_count: u32 = 0;
+var shell_unknown_count: u32 = 0;
 
 pub export fn zigos_legacy_kernel_main() callconv(.c) noreturn {
     initCom1();
@@ -555,6 +557,97 @@ fn verifyFat12() void {
     writeAll(" chain-end 0x");
     writeHex32(next_cluster);
     writeAll(" heap-restored yes\r\n");
+    runShell();
+}
+
+fn runShell() noreturn {
+    if (!ata_ready or !fat_ready or !heap_ready or !frame_allocator_ready) shellFailure("subsystems unavailable");
+    writeAll("ZigOs i686 shell ready: prompt zigos> commands help mem ticks disk cat HELLO.TXT exit\r\n");
+    var line: [64]u8 = undefined;
+    while (true) {
+        writeAll("zigos> ");
+        const length = readShellLine(&line);
+        const command = line[0..length];
+        if (command.len == 0) continue;
+        if (equalBytes(command, "help")) {
+            shell_command_count +|= 1;
+            writeAll("commands: help mem ticks disk cat HELLO.TXT exit\r\n");
+        } else if (equalBytes(command, "mem")) {
+            shell_command_count +|= 1;
+            writeAll("frames-free 0x");
+            writeHex32(free_frame_count);
+            writeAll(" heap-free 0x");
+            writeHex32(heapFreePayloadBytes());
+            writeAll(" heap-base 0x");
+            writeHex32(heap_base);
+            writeAll("\r\n");
+        } else if (equalBytes(command, "ticks")) {
+            shell_command_count +|= 1;
+            writeAll("ticks 0x");
+            writeHex32(timer_ticks);
+            writeAll(" PIT-Hz 0x00000064\r\n");
+        } else if (equalBytes(command, "disk")) {
+            shell_command_count +|= 1;
+            writeAll("model ");
+            writeAll(ata_model[0..ata_model_length]);
+            writeAll(" sectors 0x");
+            writeHex32(ata_sector_count);
+            writeAll(" FAT12 ");
+            writeAll(if (fat_ready) "yes" else "no");
+            writeAll(" HELLO.TXT-bytes 0x");
+            writeHex32(@as(u32, @intCast(fat_file_length)));
+            writeAll("\r\n");
+        } else if (equalBytes(command, "cat HELLO.TXT")) {
+            shell_command_count +|= 1;
+            writeAll(fat_file_content[0..fat_file_length]);
+        } else if (equalBytes(command, "exit")) {
+            writeAll("ZigOs i686 shell verified: commands 0x");
+            writeHex32(shell_command_count);
+            writeAll(" unknown 0x");
+            writeHex32(shell_unknown_count);
+            writeAll(" exit yes\r\n");
+            haltForever();
+        } else {
+            shell_unknown_count +|= 1;
+            writeAll("unknown command: ");
+            writeAll(command);
+            writeAll("\r\n");
+        }
+    }
+}
+
+fn readShellLine(buffer: *[64]u8) usize {
+    var length: usize = 0;
+    while (true) {
+        while ((zigos_i686_in8(0x03FD) & 0x01) == 0) asm volatile ("pause");
+        const character = zigos_i686_in8(0x03F8);
+        if (character == '\r' or character == '\n') {
+            writeAll("\r\n");
+            return length;
+        }
+        if (character == 0x08 or character == 0x7F) {
+            if (length != 0) {
+                length -= 1;
+                writeAll("\x08 \x08");
+            }
+            continue;
+        }
+        if (character < 0x20 or character > 0x7E) continue;
+        if (length >= buffer.len) {
+            writeAll("\r\nline too long\r\n");
+            return 0;
+        }
+        buffer[length] = character;
+        length += 1;
+        writeAll(&[_]u8{character});
+    }
+}
+
+fn shellFailure(reason: []const u8) noreturn {
+    writeAll("ZigOs i686 shell failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
 }
 
 fn readLe16(bytes: [*]const volatile u8, offset: usize) u16 {

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(2, 60)]
-    [int]$TimeoutSeconds = 10
+    [ValidateRange(5, 60)]
+    [int]$TimeoutSeconds = 20
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,37 +24,99 @@ $serialPath = Join-Path $root 'build\legacy-i686-serial.log'
 $arguments = @(
     '-m', '32M', '-machine', 'pc', '-cpu', 'qemu32', '-boot', 'c',
     '-drive', "file=$image,format=raw,if=ide,index=0",
-    '-display', 'none', '-serial', "file:$serialPath", '-monitor', 'none',
+    '-display', 'none', '-serial', 'stdio', '-monitor', 'none',
     '-no-reboot', '-no-shutdown',
     '-debugcon', "file:$debugPath",
     '-global', 'isa-debugcon.iobase=0xe9'
 )
 
-$process = Start-Process -FilePath $qemu -ArgumentList $arguments -PassThru
+$startInfo = [Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = $qemu
+$startInfo.Arguments = $arguments -join ' '
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$startInfo.RedirectStandardInput = $true
+$startInfo.RedirectStandardOutput = $true
+$startInfo.RedirectStandardError = $true
+$process = [Diagnostics.Process]::new()
+$process.StartInfo = $startInfo
+if (-not $process.Start()) { throw 'Unable to start qemu-system-i386.' }
+$serialBuilder = [Text.StringBuilder]::new()
+$stdoutReadTask = $process.StandardOutput.ReadLineAsync()
+$stderrTask = $process.StandardError.ReadToEndAsync()
+
+$readyMarker = 'ZigOs i686 shell ready: prompt zigos> commands help mem ticks disk cat HELLO.TXT exit'
+$finalMarker = 'ZigOs i686 shell verified: commands 0x00000005 unknown 0x00000000 exit yes'
+$commandPlan = @(
+    @{ Command = 'help'; Expect = 'commands: help mem ticks disk cat HELLO.TXT exit' },
+    @{ Command = 'mem'; Expect = 'frames-free 0x00001ED1 heap-free 0x00007FF0 heap-base 0x00107000' },
+    @{ Command = 'ticks'; Expect = 'ticks 0x00000005 PIT-Hz 0x00000064' },
+    @{ Command = 'disk'; Expect = 'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056' },
+    @{ Command = 'cat HELLO.TXT'; Expect = 'Loaded through ATA PIO by the i686 kernel.' },
+    @{ Command = 'exit'; Expect = $finalMarker }
+)
+$nextCommand = 0
+$commandInFlight = $false
+$commandsSent = 0
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-$output = ''
+$debug = ''
+try {
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($stdoutReadTask.IsCompleted) {
+            $line = $stdoutReadTask.Result
+            if ($null -ne $line) {
+                [void]$serialBuilder.Append($line)
+                [void]$serialBuilder.Append("`r`n")
+                $stdoutReadTask = $process.StandardOutput.ReadLineAsync()
+            }
+        }
+        $serialNow = $serialBuilder.ToString()
+        if ($nextCommand -lt $commandPlan.Count) {
+            $canSend = if ($nextCommand -eq 0) {
+                $serialNow.Contains($readyMarker)
+            } else {
+                $serialNow.Contains($commandPlan[$nextCommand - 1].Expect)
+            }
+            if (-not $commandInFlight -and $canSend) {
+                $process.StandardInput.WriteLine($commandPlan[$nextCommand].Command)
+                $process.StandardInput.Flush()
+                $commandInFlight = $true
+                $commandsSent += 1
+            }
+            if ($commandInFlight -and $serialNow.Contains($commandPlan[$nextCommand].Expect)) {
+                $nextCommand += 1
+                $commandInFlight = $false
+            }
+        }
+        if ($serialNow.Contains($finalMarker)) { break }
+        Start-Sleep -Milliseconds 10
+    }
+} finally {
+    try { $process.StandardInput.Close() } catch {}
+    if (-not $process.HasExited) {
+        $process.Kill()
+        $process.WaitForExit()
+    }
+}
+
+$serial = $serialBuilder.ToString()
+$qemuError = $stderrTask.Result
+$process.Dispose()
+[IO.File]::WriteAllText($serialPath, $serial)
+$debug = [IO.File]::ReadAllText($debugPath)
+if ($commandsSent -ne $commandPlan.Count) { throw "Only $commandsSent of $($commandPlan.Count) COM1 commands were sent. QEMU stderr: $qemuError" }
+
+$runtimeMarker = 'ZigOs i686 runtime verified: vendor GenuineIntel max-leaf 0x00000004 CR0 0x00000011 PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes'
+$exceptionMarker = 'ZigOs i686 exceptions verified: vectors 0x00000020 breakpoint-count 0x00000002 last-vector 0x00000003 error 0x00000000 eip-nonzero yes'
+$keyboardMarker = 'ZigOs i686 keyboard verified: IRQ1 0x21 make-count 0x00000001 last-make 0x1E irq-count-nonzero yes'
 $interruptMarker = 'ZigOs i686 interrupts verified: IDT 0x00000100 limit 0x000007FF IRQ0 0x20 PIC 0x20/0x28 masks 0xFE/0xFF PIT-Hz 0x00000064 divisor 0x00002E9C ticks 0x00000005'
 $frameMarker = 'ZigOs i686 frame allocator verified: managed-limit 0x04000000 frame-size 0x00001000 free-before 0x00001EE0 first 0x00100000 second 0x00101000 third 0x00102000 reuse 0x00101000 free-after 0x00001EE0 kernel-end-below-1M yes'
 $pagingMarker = 'ZigOs i686 paging verified: CR3 0x00100000 CR0 0x80000011 identity-MiB 0x00000010 tables 0x00000004 alias 0xC0000000 physical 0x00106000 value 0xA5A55A5A free-frames 0x00001ED9'
 $heapMarker = 'ZigOs i686 heap verified: base 0x00107000 bytes 0x00008000 free-before 0x00007FF0 first 0x00107010 second 0x00107060 third 0x00107470 reuse 0x00107060 coalesced 0x00007FF0 frames-left 0x00001ED1'
 $ataMarker = 'ZigOs i686 ATA verified: primary-master yes model QEMU HARDDISK LBA28 yes sectors 0x00001000 MBR 0x55AA kernel-LBA 0x00000009 sector-match yes buffer 0x00107010 heap-restored yes'
-$finalMarker = 'ZigOs i686 FAT12 verified: volume-LBA 0x00000040 sectors 0x00000B40 bytes-sector 0x00000200 root-start 0x00000053 data-start 0x00000061 file HELLO.TXT cluster 0x00000002 bytes 0x00000056 hash 0xA9F660F2 chain-end 0x00000FFF heap-restored yes'
-try {
-    while ([DateTime]::UtcNow -lt $deadline) {
-        Start-Sleep -Milliseconds 100
-        try { $output = [IO.File]::ReadAllText($debugPath) } catch { continue }
-        if ($output.Contains($finalMarker)) { break }
-        if ($process.HasExited) { break }
-    }
-} finally {
-    if (-not $process.HasExited) {
-        Stop-Process -Id $process.Id -Force
-        $process.WaitForExit()
-    }
-}
+$fatMarker = 'ZigOs i686 FAT12 verified: volume-LBA 0x00000040 sectors 0x00000B40 bytes-sector 0x00000200 root-start 0x00000053 data-start 0x00000061 file HELLO.TXT cluster 0x00000002 bytes 0x00000056 hash 0xA9F660F2 chain-end 0x00000FFF heap-restored yes'
 
-$output = [IO.File]::ReadAllText($debugPath)
-$required = @(
+$debugMarkers = @(
     'ZigOs legacy BIOS stage0 online',
     'ZigOs BIOS stage0 verified: drive 0x80 EDD yes signature 0x55AA',
     'ZigOs BIOS stage0 loaded stage1: LBA 1 sectors 8 address 0x00008000',
@@ -63,41 +125,41 @@ $required = @(
     'ZigOs BIOS stage1 loaded kernel: LBA 9 address 0x00010000',
     'ZigOs BIOS stage1 protected mode verified: CS 0x0008 CR0.PE yes kernel 0x00010000',
     'ZigOs i686 freestanding kernel image built',
-    'ZigOs i686 runtime verified: vendor GenuineIntel max-leaf 0x00000004 CR0 0x00000011 PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes',
-    'ZigOs i686 exceptions verified: vectors 0x00000020 breakpoint-count 0x00000002 last-vector 0x00000003 error 0x00000000 eip-nonzero yes',
+    $runtimeMarker, $exceptionMarker,
     'ZigOs i686 keyboard waiting: IRQ1 0x21 controller-command 0xD2 expected-make 0x1E',
-    'ZigOs i686 keyboard verified: IRQ1 0x21 make-count 0x00000001 last-make 0x1E irq-count-nonzero yes',
-    $interruptMarker,
-    $frameMarker,
-    $pagingMarker,
-    $heapMarker,
-    $ataMarker,
+    $keyboardMarker, $interruptMarker, $frameMarker, $pagingMarker, $heapMarker, $ataMarker, $fatMarker,
+    $readyMarker,
+    'commands: help mem ticks disk cat HELLO.TXT exit',
+    'frames-free 0x00001ED1 heap-free 0x00007FF0 heap-base 0x00107000',
+    'ticks 0x00000005 PIT-Hz 0x00000064',
+    'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056',
+    'ZigOs legacy FAT12 filesystem is online.',
+    'Loaded through ATA PIO by the i686 kernel.',
     $finalMarker
 )
-foreach ($marker in $required) {
-    if (-not $output.Contains($marker)) { throw "Missing legacy marker: $marker. Output: $output" }
+foreach ($marker in $debugMarkers) {
+    if (-not $debug.Contains($marker)) { throw "Missing debugcon marker: $marker. Output: $debug" }
 }
 
 $e820Pattern = 'ZigOs i686 E820 verified: boot-info 0x00005000 version 0x00000001 entries 0x00000006 usable-regions 0x00000002 usable-bytes 0x0000000001F7FC00 highest 0x0000000100000000 drive 0x80 kernel 0x00010000/0x[0-9A-F]{8}/0x[0-9A-F]{8}'
-if (-not [regex]::IsMatch($output, $e820Pattern)) { throw "E820 debugcon contract missing. Output: $output" }
-$serial = [IO.File]::ReadAllText($serialPath)
+if (-not [regex]::IsMatch($debug, $e820Pattern)) { throw "E820 debugcon contract missing. Output: $debug" }
 if (-not [regex]::IsMatch($serial, $e820Pattern)) { throw "E820 COM1 contract missing. Serial: $serial" }
-foreach ($marker in @(
-    'ZigOs i686 runtime verified: vendor GenuineIntel',
-    'PE yes stack 0x0009F000 aligned16 yes BSS64 zero yes VGA yes COM1 yes',
-    'ZigOs i686 exceptions verified: vectors 0x00000020 breakpoint-count 0x00000002 last-vector 0x00000003 error 0x00000000 eip-nonzero yes',
-    'ZigOs i686 keyboard verified: IRQ1 0x21 make-count 0x00000001 last-make 0x1E irq-count-nonzero yes',
-    $interruptMarker,
-    $frameMarker,
-    $pagingMarker,
-    $heapMarker,
-    $ataMarker,
-    $finalMarker
-)) {
-    if (-not $serial.Contains($marker)) { throw "COM1 marker missing: $marker. Serial: $serial" }
+
+$serialMarkers = @(
+    $runtimeMarker, $exceptionMarker, $keyboardMarker, $interruptMarker, $frameMarker,
+    $pagingMarker, $heapMarker, $ataMarker, $fatMarker, $readyMarker,
+    'help', 'commands: help mem ticks disk cat HELLO.TXT exit',
+    'mem', 'frames-free 0x00001ED1 heap-free 0x00007FF0 heap-base 0x00107000',
+    'ticks', 'ticks 0x00000005 PIT-Hz 0x00000064',
+    'disk', 'model QEMU HARDDISK sectors 0x00001000 FAT12 yes HELLO.TXT-bytes 0x00000056',
+    'cat HELLO.TXT', 'ZigOs legacy FAT12 filesystem is online.',
+    'Loaded through ATA PIO by the i686 kernel.', 'exit', $finalMarker
+)
+foreach ($marker in $serialMarkers) {
+    if (-not $serial.Contains($marker)) { throw "Missing COM1 marker: $marker. Serial: $serial" }
 }
 
-Write-Host $output.Trim()
-Write-Host '--- COM1 ---'
+Write-Host $debug.Trim()
+Write-Host '--- COM1 SESSION ---'
 Write-Host $serial.Trim()
 Write-Host 'Legacy BIOS i686 QEMU test passed.'
