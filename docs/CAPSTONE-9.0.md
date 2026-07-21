@@ -59,6 +59,8 @@ The probe boundary restores the caller PID before `INIT.ELF` runs, preventing va
 
 At mount time, the kernel reads all nine sectors of the primary FAT into an aligned memory cache and compares every sector against the secondary FAT. All FAT12 entry reads then use the cache, eliminating command-boundary races from repeated metadata PIO. Entry mutations update the packed 12-bit cache first and write each affected sector to both FAT copies through the existing ATA read-after-write verification path. Both final shell sessions require the mirrored cache to remain loaded.
 
+Every ATA read and write is a two-attempt transaction. Polling uses the alternate-status register with a 1,024-read bound. A failed command boundary triggers primary-channel software reset (`SRST`), drive reselection, and one complete sector retry; writes still require cache flush and byte-for-byte readback before success. This prevents a slow emulator from spending the entire session in an opaque 65,536-read poll.
+
 On the first boot, the kernel performs this reversible sequence before entering the shell:
 
 ```text
@@ -91,10 +93,10 @@ The QEMU harness requires all of the following:
 - Kernel physical entry: `0x00010000`.
 - FAT12 partition start: LBA 256.
 - Protected maximum kernel area: 247 sectors.
-- Capstone 9 kernel: 50,748 bytes / 100 sectors at LBA 9-108.
-- Kernel checksum16: `0x7205`.
-- Kernel SHA-256: `7DE44A7AF0547A14F05D8B67983384887D8EC866FE33F16CDB10321F68F1DCA1`.
-- Initial image SHA-256: `28B1D02B58A1E6261ADC155F2867687ABF3A0BF9F96D8884355075208764563C`.
-- Persisted image SHA-256: `7B2C1D777F8D0A119B6B9877063EC475F65DBDAF9980DFD73BCFDD2FE38C00BF`.
+- Capstone 9 kernel: 51,212 bytes / 101 sectors at LBA 9-109.
+- Kernel checksum16: `0xC8CC`.
+- Kernel SHA-256: `D1E2E983B8ECAB63B0B14A2A42BEA90574FD223EEF722E908E6CF810A93842A3`.
+- Initial image SHA-256: `5C2C6E0A6543BEC8FB1E74E0DD637AA356CC0B402BA62BC1D5086BEBA0A19602`.
+- Persisted image SHA-256: `4AB05D6DF42FE9452AAB917434312834CFD2B4E25F39A028B61C2E2850835728`.
 
 The independent x86-64 UEFI regression artifact must remain 888,832 bytes with SHA-256 `ABA23A4C97F504146B1633D846A3F5A46242BC6360CDE9DDA8909A98941F45C2`.

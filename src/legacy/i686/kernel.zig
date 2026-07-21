@@ -297,6 +297,9 @@ var fat_allocation_count: u32 = 0;
 var fat_free_count: u32 = 0;
 var fat_entry_write_count: u32 = 0;
 var ata_write_count: u32 = 0;
+var ata_retry_count: u32 = 0;
+var ata_reset_count: u32 = 0;
+var ata_last_status: u8 = 0;
 var vfs_rename_count: u32 = 0;
 var vfs_unlink_count: u32 = 0;
 var namespace_verified = false;
@@ -3157,7 +3160,11 @@ fn verifyAta() void {
     writeHex32(ata_sector_count);
     writeAll(" MBR 0x55AA kernel-LBA 0x00000009 sector-match yes buffer 0x");
     writeHex32(buffer);
-    writeAll(" heap-restored yes\r\n");
+    writeAll(" heap-restored yes retries 0x");
+    writeHex32(ata_retry_count);
+    writeAll(" resets 0x");
+    writeHex32(ata_reset_count);
+    writeAll("\r\n");
     verifyFat12();
 }
 
@@ -3180,7 +3187,18 @@ fn ataIdentify(destination: *[256]u16) bool {
 
 fn ataReadSector(lba: u32, destination_address: u32) bool {
     if (ata_sector_count != 0 and lba >= ata_sector_count) return false;
-    if (lba >= 0x1000_0000 or !ataWaitIdle()) return false;
+    if (lba >= 0x1000_0000) return false;
+    var attempt: u32 = 0;
+    while (attempt < 2) : (attempt += 1) {
+        if (ataTryReadSector(lba, destination_address)) return true;
+        if (attempt != 0 or !ataRecover()) return false;
+        ata_retry_count +|= 1;
+    }
+    return false;
+}
+
+fn ataTryReadSector(lba: u32, destination_address: u32) bool {
+    if (!ataWaitIdle()) return false;
     zigos_i686_out8(ata_drive_port, 0xE0 | @as(u8, @truncate(lba >> 24)));
     ataDelay();
     zigos_i686_out8(ata_sector_count_port, 1);
@@ -3195,13 +3213,28 @@ fn ataReadSector(lba: u32, destination_address: u32) bool {
         destination[index * 2] = @truncate(word);
         destination[index * 2 + 1] = @truncate(word >> 8);
     }
-    // The next ATA command performs the completion wait before programming task-file registers.
+    // A following command serializes completion. If that boundary does not
+    // settle within the bounded poll, ataRecover resets and retries it.
     return true;
 }
 
 fn ataWriteSector(lba: u32, source_address: u32) bool {
     if (ata_sector_count != 0 and lba >= ata_sector_count) return false;
-    if (lba >= 0x1000_0000 or !ataWaitIdle()) return false;
+    if (lba >= 0x1000_0000) return false;
+    var attempt: u32 = 0;
+    while (attempt < 2) : (attempt += 1) {
+        if (ataTryWriteSector(lba, source_address)) {
+            ata_write_count +|= 1;
+            return true;
+        }
+        if (attempt != 0 or !ataRecover()) return false;
+        ata_retry_count +|= 1;
+    }
+    return false;
+}
+
+fn ataTryWriteSector(lba: u32, source_address: u32) bool {
+    if (!ataWaitIdle()) return false;
     zigos_i686_out8(ata_drive_port, 0xE0 | @as(u8, @truncate(lba >> 24)));
     ataDelay();
     zigos_i686_out8(ata_sector_count_port, 1);
@@ -3215,25 +3248,38 @@ fn ataWriteSector(lba: u32, source_address: u32) bool {
         const word = @as(u16, source[index * 2]) | (@as(u16, source[index * 2 + 1]) << 8);
         zigos_i686_out16(ata_data_port, word);
     }
-    // The device may assert BSY after the final data word. Complete the
-    // WRITE SECTORS command before issuing the independent FLUSH CACHE command.
     if (!ataWaitIdle()) return false;
     zigos_i686_out8(ata_status_command_port, 0xE7);
     if (!ataWaitIdle()) return false;
-    if (!ataReadSector(lba, @intCast(@intFromPtr(&ata_verify_buffer)))) return false;
+    if (!ataTryReadSector(lba, @intCast(@intFromPtr(&ata_verify_buffer)))) return false;
     for (0..512) |index| {
         if (ata_verify_buffer[index] != source[index]) return false;
     }
-    ata_write_count +|= 1;
     return true;
 }
 
-const ata_poll_limit: u32 = 65_536;
+const ata_poll_limit: u32 = 1024;
+
+fn ataRecover() bool {
+    // SRST aborts any incomplete PIO phase and returns the selected device to
+    // a command boundary. IRQ14 remains masked, so nIEN is not required here.
+    zigos_i686_out8(ata_alternate_status_port, 0x04);
+    for (0..32) |_| _ = zigos_i686_in8(ata_alternate_status_port);
+    zigos_i686_out8(ata_alternate_status_port, 0x00);
+    ataDelay();
+    if (!ataWaitReady()) return false;
+    zigos_i686_out8(ata_drive_port, 0xE0);
+    ataDelay();
+    if (!ataWaitIdle()) return false;
+    ata_reset_count +|= 1;
+    return true;
+}
 
 fn ataWaitReady() bool {
     var remaining: u32 = ata_poll_limit;
     while (remaining != 0) : (remaining -= 1) {
-        const status = zigos_i686_in8(ata_status_command_port);
+        const status = zigos_i686_in8(ata_alternate_status_port);
+        ata_last_status = status;
         if ((status & 0x21) != 0) return false;
         if ((status & 0x80) == 0) return true;
     }
@@ -3243,7 +3289,8 @@ fn ataWaitReady() bool {
 fn ataWaitIdle() bool {
     var remaining: u32 = ata_poll_limit;
     while (remaining != 0) : (remaining -= 1) {
-        const status = zigos_i686_in8(ata_status_command_port);
+        const status = zigos_i686_in8(ata_alternate_status_port);
+        ata_last_status = status;
         if ((status & 0x21) != 0) return false;
         if ((status & 0x88) == 0) return true;
     }
@@ -3253,7 +3300,8 @@ fn ataWaitIdle() bool {
 fn ataWaitData() bool {
     var remaining: u32 = ata_poll_limit;
     while (remaining != 0) : (remaining -= 1) {
-        const status = zigos_i686_in8(ata_status_command_port);
+        const status = zigos_i686_in8(ata_alternate_status_port);
+        ata_last_status = status;
         if ((status & 0x21) != 0) return false;
         if ((status & 0x88) == 0x08) return true;
     }
