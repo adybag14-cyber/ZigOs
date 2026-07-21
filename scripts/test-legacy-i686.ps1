@@ -49,6 +49,7 @@ function Invoke-LegacySession {
     if (-not $process.Start()) { throw "Unable to start qemu-system-i386 for $Name." }
     $serialBuilder = [Text.StringBuilder]::new()
     $stdoutReadTask = $process.StandardOutput.ReadLineAsync()
+    $stdoutClosed = $false
     $stderrTask = $process.StandardError.ReadToEndAsync()
     $nextCommand = 0
     $commandInFlight = $false
@@ -56,16 +57,20 @@ function Invoke-LegacySession {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     try {
         while ([DateTime]::UtcNow -lt $deadline) {
-            if ($stdoutReadTask.IsCompleted) {
-                $line = $stdoutReadTask.Result
-                if ($null -ne $line) {
-                    [void]$serialBuilder.Append($line)
-                    [void]$serialBuilder.Append("`r`n")
-                    $stdoutReadTask = $process.StandardOutput.ReadLineAsync()
-                } elseif ($process.HasExited) {
+            # Drain every line already buffered by the redirected COM1 pipe.
+            # Reading only one line per polling interval can fill the pipe on a
+            # slow hosted runner and block the guest UART before debugcon runs.
+            while (-not $stdoutClosed -and $stdoutReadTask.IsCompleted) {
+                $line = $stdoutReadTask.GetAwaiter().GetResult()
+                if ($null -eq $line) {
+                    $stdoutClosed = $true
                     break
                 }
+                [void]$serialBuilder.Append($line)
+                [void]$serialBuilder.Append("`r`n")
+                $stdoutReadTask = $process.StandardOutput.ReadLineAsync()
             }
+            if ($stdoutClosed -and $process.HasExited) { break }
             $serialNow = $serialBuilder.ToString()
             if ($nextCommand -lt $CommandPlan.Count) {
                 $canSend = if ($nextCommand -eq 0) {
@@ -85,7 +90,7 @@ function Invoke-LegacySession {
                 }
             }
             if ($serialNow.Contains($FinalMarker)) { break }
-            Start-Sleep -Milliseconds 10
+            Start-Sleep -Milliseconds 1
         }
     } finally {
         try { $process.StandardInput.Close() } catch {}

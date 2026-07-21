@@ -87,6 +87,7 @@ The QEMU harness requires all of the following:
 - A second boot reads, hashes, and stats `NOTES.TXT` using the same raw image.
 - The second boot performs zero filesystem writes and zero allocations.
 - The complete image SHA-256 is unchanged by the second boot.
+- The COM1 harness drains every currently buffered line before sleeping, preventing redirected-stdio backpressure from blocking the guest UART on slow hosted runners.
 
 ## Artifact identity
 

@@ -1947,6 +1947,7 @@
 - The namespace lifecycle writes 600 deterministic bytes with hash `A6F87E15`, reclaims clusters `14 -> 15`, reuses cluster 14, removes every temporary root entry, and resets accounting before the existing writer workload.
 - FAT mount now caches all nine primary FAT sectors, verifies every byte against the secondary copy, serves entry reads from memory, and writes cache mutations to both mirrors with ATA read-after-write verification.
 - ATA PIO now uses 1,024-read alternate-status bounds, primary-channel software reset, drive reselection, and one complete transaction retry instead of an opaque 65,536-read stall.
+- The COM1 QEMU driver now drains all buffered stdout lines per iteration and polls at 1 ms, preventing host pipe backpressure from stalling guest serial output.
 - The second boot verifies the temporary namespace is absent and performs zero namespace writes.
 - Cumulative shell release accounting is 26 goals (`0x1A`), of which 16 (`0x10`) are new in Capstone 9.
 - Reference kernel: 51,212 bytes, 101 sectors at LBA9-109, checksum16 `0xC8CC`, SHA-256 `D1E2E983B8ECAB63B0B14A2A42BEA90574FD223EEF722E908E6CF810A93842A3`.
