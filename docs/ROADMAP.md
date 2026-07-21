@@ -2080,7 +2080,7 @@ Status: complete.
 - The live workload executes 50 successful-path syscalls, 13 expected rejections, five pointer faults, a 34-byte output, a 24-byte pipe payload, four descriptor opens/closes, one signal, one yield, and three sleep ticks.
 - Added two real recoverable CPL3 page faults: NX instruction fetch at `0x0000008000102000` with error `0x15`, and unmapped guard read at `0x0000008000108000` with error `0x04`.
 - Added exact text, BSS, heap, anonymous, stack, descriptor, pipe, mapping, allocator, CR3, and kernel-return restoration checks.
-- Promoted the complete x86-64 UEFI hardware/network boot to a mandatory GitHub Actions step and uploads `service-user.elf` beside `BOOTX64.EFI`.
+- Promoted a deterministic x86-64 UEFI service/hardware boot to a mandatory GitHub Actions step and uploads `service-user.elf` beside `BOOTX64.EFI`; full network regressions remain separate release gates.
 - Cumulative verified accounting is 209 goals (`0xD1`), with 64 (`0x40`) new in Capstone 15.
 - `BOOTX64.EFI`: 913,920 bytes, SHA-256 `0BED23A310182BCEF969F01BA925D9537A84D7055DB06611139AB951FC81EE42`.
 - `service-user.elf`: 10,240 bytes, SHA-256 `A166FAE8BCFD94663CA1CE0904AE2BF5D2044E831179910C173F9E4BCA1A8E28`.

@@ -280,6 +280,7 @@ try {
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $marker = 'ZigOs boot sequence complete'
 $captured = $false
+$qemuExitCode = $null
 $keyInjected = $false
 $inputMarker = 'HID input transfer armed:'
 $shellInjected = $false
@@ -305,7 +306,10 @@ try {
             }
         }
         $process.Refresh()
-        if ($process.HasExited) { break }
+        if ($process.HasExited) {
+            $qemuExitCode = $process.ExitCode
+            break
+        }
     }
 }
 finally {
@@ -313,6 +317,8 @@ finally {
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force
         $process.WaitForExit()
+    } elseif ($null -eq $qemuExitCode) {
+        $qemuExitCode = $process.ExitCode
     }
     $process.Dispose()
 }
@@ -328,6 +334,9 @@ Write-Host $output
 
 if (-not $captured) {
     $errorText = if (Test-Path $qemuStderr) { Get-Content $qemuStderr -Raw } else { '' }
+    if ($null -ne $qemuExitCode) {
+        throw "QEMU exited before the ZigOs boot marker with exit code $qemuExitCode. $errorText"
+    }
     throw "ZigOs boot marker was not captured within $TimeoutSeconds seconds. $errorText"
 }
 if (-not $output.Contains('CPU vendor:')) {
