@@ -2048,3 +2048,21 @@ Status: complete.
 - Cumulative verified accounting is 113 goals (`0x71`), with 27 (`0x1B`) new in Capstone 13.
 - Reference kernel: 89,500 bytes, 175 sectors at LBA9-183, checksum16 `0x5588`, SHA-256 `98814EB307863036AB704C2B22A35D58A18E993999E57FB4626D1A6A665846C5`.
 - Initial image SHA-256: `0B859BD6F671FCFEE7E655D3777EE10AEAFCD4C19619898A84539194ABF3ED96`; persisted image SHA-256: `B1FC794EB460020D99F52B1C10565F990E1D1FE845101B7C97DBED31247535FF`.
+
+## Capstone 14.0 - recyclable task generations, scheduled fork, and atomic exec
+
+Status: complete.
+
+- Added generation-tagged handles for four recyclable scheduled task slots, with stale poll/wait/signal rejection and sixteen bounded terminal tombstones.
+- Expanded the bounded process table to twenty-four records and descriptors to sixteen; ten internal task records are reclaimed during one live workload.
+- Extended the CPL3 ABI with syscalls 49-55 for handle spawn, scheduled fork, in-place exec, current handle, handle poll, handle wait, and handle signal.
+- Added exact saved-frame, code-page, user-stack, private page-directory/table, cwd, process-group, descriptor, pipe-reference, and ring-0 stack inheritance.
+- Added transactional single-page exec replacement with temporary-frame validation, exact failed-exec rollback, code hash verification, zeroed stack, reset registers, updated process name, preserved identity, and CLOEXEC closure.
+- Extended the exception return stub so a faulting scheduled CPL3 task can be terminated and another selected user/kernel context restored immediately.
+- Added `GENRUN.ELF` (2,864 bytes, FNV-1a32 `D84697C0`), `REUSE.ELF` (664 bytes, `30A2BF85`), `FORKER.ELF` (1,144 bytes, `ADB21589`), `EXECA.ELF` (660 bytes, `8E043930`), and `EXECB.ELF` (660 bytes, `21F7AB51`).
+- The live proof executes 107 CPL3 calls, nine spawns, one fork, two successful and two failed execs, eight slot reuses, five stale-handle rejections, one page fault, ten tombstones/reclaims, one adoption/auto-reap, and exact frame restoration.
+- The initial FAT12 inventory grows to twenty-one files; `PATHS.ELF` moves to clusters 49-56 and writable allocation begins at cluster 57.
+- The inherited persistent hierarchy remains green with `LOG.TXT` at `59 -> 60` and `NOTES.TXT` at `62 -> 63`; the second boot performs zero writes and allocations.
+- Cumulative verified accounting is 145 goals (`0x91`), with 32 (`0x20`) new in Capstone 14.
+- Reference kernel: 103,624 bytes, 203 sectors at LBA9-211, checksum16 `0xB785`, SHA-256 `59D2A2FE18CB34F83EFEB493D268FA29092696E256211E148A0DDFB0758EA702`.
+- Initial image SHA-256: `3F162475D39DE25A2B3F50FE6D9FF8857DAC231191AA0B046D8A64C2B93881A2`; persisted image SHA-256: `9CD89D88469CDF05E0155D1AC2DF007B4474329D148FE01158DE08153A8009C3`.

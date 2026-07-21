@@ -272,6 +272,7 @@ const AsyncRunState = enum(u8) {
     running,
     sleeping,
     exited,
+    faulted,
 };
 
 const AsyncWaitMode = enum(u8) {
@@ -279,16 +280,20 @@ const AsyncWaitMode = enum(u8) {
     pid,
     any,
     drain,
+    handle,
 };
 
 const AsyncChildContext = struct {
     frames: [4]u32 = @splat(0),
     frame_identity: [4]u32 = @splat(0),
     name: [11]u8 = @splat(' '),
+    handle: u32 = 0,
+    parent_handle: u32 = 0,
     pid: u32 = 0,
     parent_pid: u32 = 0,
     process_group: u32 = 0,
     process_index: u8 = 0,
+    generation: u16 = 0,
     stack_pointer: u32 = 0,
     kernel_top: u32 = 0,
     wake_tick: u32 = 0,
@@ -297,10 +302,40 @@ const AsyncChildContext = struct {
     exit_code: u32 = 0,
     completion_order: u32 = 0,
     frames_before: u32 = 0,
+    fault_address: u32 = 0,
+    exec_count: u8 = 0,
+    inherited_count: u8 = 0,
+    cloexec_closed: u8 = 0,
+    fault_vector: u8 = 0,
     occupied: bool = false,
     adopted: bool = false,
+    forked: bool = false,
     resources_released: bool = false,
     auto_reaped: bool = false,
+    state: AsyncRunState = .free,
+};
+
+const TaskTombstone = struct {
+    frames: [4]u32 = @splat(0),
+    name: [11]u8 = @splat(' '),
+    handle: u32 = 0,
+    parent_handle: u32 = 0,
+    pid: u32 = 0,
+    parent_pid: u32 = 0,
+    process_group: u32 = 0,
+    kernel_top: u32 = 0,
+    quanta: u32 = 0,
+    syscalls: u32 = 0,
+    exit_code: u32 = 0,
+    completion_order: u32 = 0,
+    fault_address: u32 = 0,
+    generation: u16 = 0,
+    slot: u8 = 0,
+    exec_count: u8 = 0,
+    inherited_count: u8 = 0,
+    cloexec_closed: u8 = 0,
+    fault_vector: u8 = 0,
+    flags: u8 = 0,
     state: AsyncRunState = .free,
 };
 
@@ -421,12 +456,17 @@ var async_elf_size: u32 = 0;
 var worka_elf_size: u32 = 0;
 var workb_elf_size: u32 = 0;
 var leaf_elf_size: u32 = 0;
+var genrun_elf_size: u32 = 0;
+var reuse_elf_size: u32 = 0;
+var forker_elf_size: u32 = 0;
+var execa_elf_size: u32 = 0;
+var execb_elf_size: u32 = 0;
 var paths_elf_size: u32 = 0;
 var fault_elf_size: u32 = 0;
 var big_file_size: u32 = 0;
 var vfs_nodes: [24]VfsNode = @splat(.{});
 var vfs_node_count: u32 = 0;
-var vfs_descriptors: [8]VfsDescriptor = @splat(.{});
+var vfs_descriptors: [16]VfsDescriptor = @splat(.{});
 var pipe_objects: [4]PipeObject = @splat(.{});
 const fat_cache_sector_count: usize = 9;
 var fat_cache: [fat_cache_sector_count * 512]u8 align(16) = @splat(0);
@@ -477,7 +517,7 @@ var hierarchy_mkdir_count: u32 = 0;
 var hierarchy_rmdir_count: u32 = 0;
 var hierarchy_rename_count: u32 = 0;
 var hierarchy_unlink_count: u32 = 0;
-var process_table: [16]ProcessRecord = @splat(.{});
+var process_table: [24]ProcessRecord = @splat(.{});
 var process_count: u32 = 0;
 var next_pid: u32 = 2;
 var current_pid: u32 = 1;
@@ -507,7 +547,13 @@ var fork_tree_signal: u32 = 0;
 var fork_tree_pipe_bytes: u32 = 0;
 const async_child_limit: usize = 4;
 const async_status_bytes: u32 = 32;
+const task_status_bytes: u32 = 48;
+const task_tombstone_limit: usize = 16;
 var async_children: [async_child_limit]AsyncChildContext = @splat(.{});
+var async_generations: [async_child_limit]u16 = @splat(1);
+var task_tombstones: [task_tombstone_limit]TaskTombstone = @splat(.{});
+var task_tombstone_count: u8 = 0;
+var async_recycle_enabled = false;
 var async_kernel_stacks: [async_child_limit][4096]u8 align(16) = @splat(@splat(0));
 var async_idle_stack: [4096]u8 align(16) = @splat(0);
 var async_idle_stack_pointer: u32 = 0;
@@ -548,6 +594,35 @@ var async_second_pid: u32 = 0;
 var async_leaf_pid: u32 = 0;
 var async_exit_order: [3]u32 = @splat(0);
 var async_frames_baseline: u32 = 0;
+var taskgen_verified = false;
+var taskgen_spawn_count: u32 = 0;
+var taskgen_fork_count: u32 = 0;
+var taskgen_exec_count: u32 = 0;
+var taskgen_exec_failure_count: u32 = 0;
+var taskgen_exec_atomic_count: u32 = 0;
+var taskgen_code_replace_count: u32 = 0;
+var taskgen_stack_reset_count: u32 = 0;
+var taskgen_register_reset_count: u32 = 0;
+var taskgen_identity_preserve_count: u32 = 0;
+var taskgen_name_update_count: u32 = 0;
+var taskgen_fork_copy_count: u32 = 0;
+var taskgen_private_space_count: u32 = 0;
+var taskgen_handle_poll_count: u32 = 0;
+var taskgen_handle_wait_count: u32 = 0;
+var taskgen_handle_signal_count: u32 = 0;
+var taskgen_stale_rejection_count: u32 = 0;
+var taskgen_slot_reuse_count: u32 = 0;
+var taskgen_process_reclaim_count: u32 = 0;
+var taskgen_fault_count: u32 = 0;
+var taskgen_descriptor_inherit_count: u32 = 0;
+var taskgen_cloexec_close_count: u32 = 0;
+var taskgen_last_fork_child_handle: u32 = 0;
+var taskgen_first_handle: u32 = 0;
+var taskgen_last_handle: u32 = 0;
+var taskgen_frames_baseline: u32 = 0;
+var taskgen_parent_syscalls: u32 = 0;
+var taskgen_child_syscalls: u32 = 0;
+var taskgen_reclaimed_prior_records: u32 = 0;
 var pci_device_count: u32 = 0;
 var pci_host_id: u32 = 0;
 var pci_class_code: u8 = 0;
@@ -659,6 +734,13 @@ var syscall_async_poll_count: u32 = 0;
 var syscall_async_waitpid_count: u32 = 0;
 var syscall_async_waitany_count: u32 = 0;
 var syscall_async_drain_count: u32 = 0;
+var syscall_task_spawn_count: u32 = 0;
+var syscall_task_fork_count: u32 = 0;
+var syscall_task_exec_count: u32 = 0;
+var syscall_task_handle_count: u32 = 0;
+var syscall_task_poll_count: u32 = 0;
+var syscall_task_wait_count: u32 = 0;
+var syscall_task_signal_count: u32 = 0;
 var syscall_rejected: u32 = 0;
 var syscall_exit_code: u32 = 0;
 var syscall_exited = false;
@@ -723,6 +805,13 @@ pub export fn zigos_i686_exception_dispatch(frame: *const TrapFrame) callconv(.c
             vm_fault_recovery_count +|= 1;
             return 0;
         }
+    }
+    if ((frame.cs & 3) == 3 and async_scheduler_active and async_current_slot < async_child_limit) {
+        const index: usize = async_current_slot;
+        const address = if (frame.vector == 14) zigos_i686_read_cr2() else frame.eip;
+        vm_fault_containment_count +|= 1;
+        asyncMarkFaulted(index, frame.vector, address);
+        return asyncDispatchNext();
     }
     if ((frame.cs & 3) == 3 and current_pid != 0) {
         process_faulted = true;
@@ -815,8 +904,10 @@ pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) 
         const slot: usize = async_current_slot;
         async_children[slot].syscalls +|= 1;
         async_child_syscalls +|= 1;
+        if (async_recycle_enabled) taskgen_child_syscalls +|= 1;
     } else if (current_pid != 0) {
         async_parent_syscalls +|= 1;
+        if (async_recycle_enabled) taskgen_parent_syscalls +|= 1;
     }
     switch (frame.eax) {
         1 => {
@@ -1477,6 +1568,99 @@ pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) 
             async_drain_count +|= 1;
             return selected;
         },
+        49 => {
+            const name = userReadableSlice(frame.ebx, frame.ecx, 11) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (name.len != 11) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            }
+            const handle = asyncSpawnHandle(name) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF5;
+                return 0;
+            };
+            syscall_task_spawn_count +|= 1;
+            frame.eax = handle;
+            return 0;
+        },
+        50 => {
+            _ = asyncForkCurrent(frame) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF5;
+                return 0;
+            };
+            syscall_task_fork_count +|= 1;
+            return 0;
+        },
+        51 => {
+            const name = userReadableSlice(frame.ebx, frame.ecx, 11) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (name.len != 11 or !asyncExecCurrent(frame, name)) {
+                taskgen_exec_failure_count +|= 1;
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            }
+            syscall_task_exec_count +|= 1;
+            return 0;
+        },
+        52 => {
+            const handle = asyncCurrentHandle() orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFD;
+                return 0;
+            };
+            syscall_task_handle_count +|= 1;
+            frame.eax = handle;
+            return 0;
+        },
+        53 => {
+            const destination = userWritableSlice(frame.ecx, task_status_bytes, task_status_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (!asyncPollHandle(frame.ebx, destination)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFD;
+                return 0;
+            }
+            syscall_task_poll_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        54 => {
+            _ = userWritableSlice(frame.ecx, task_status_bytes, task_status_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const selected = asyncWaitHandle(frame, frame.ebx, frame.ecx) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF6;
+                return 0;
+            };
+            syscall_task_wait_count +|= 1;
+            return selected;
+        },
+        55 => {
+            if (!asyncSignalHandle(frame.ebx, frame.ecx)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFD;
+                return 0;
+            }
+            syscall_task_signal_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
         else => {
             syscall_rejected +|= 1;
             frame.eax = 0xFFFF_FFDA;
@@ -1896,9 +2080,21 @@ fn forkWaitChild(pid: u32, status: []u8) ?u32 {
     return pid;
 }
 
-fn resetAsyncRuntime() void {
+fn resetAsyncRuntime(recycle: bool) void {
     if (async_scheduler_active) processFailure("async reset active");
+    for (async_children) |context| {
+        if (!context.occupied or !context.resources_released) continue;
+        const process_index: usize = context.process_index;
+        if (process_index < process_table.len and process_table[process_index].waited) {
+            process_table[process_index] = .{};
+            taskgen_reclaimed_prior_records +|= 1;
+        }
+    }
     async_children = @splat(.{});
+    async_generations = @splat(1);
+    task_tombstones = @splat(.{});
+    task_tombstone_count = 0;
+    async_recycle_enabled = recycle;
     async_idle_stack_pointer = initializeKernelTask(&async_idle_stack, @intCast(@intFromPtr(&asyncIdleLoop)));
     async_idle_kernel_top = @intCast(@intFromPtr(&async_idle_stack) + async_idle_stack.len);
     async_current_slot = 0xFF;
@@ -1928,7 +2124,7 @@ fn resetAsyncRuntime() void {
     async_reap_count = 0;
     async_auto_reap_count = 0;
     async_signal_observed = 0;
-    async_verified = false;
+    if (!recycle) async_verified = false;
     async_parent_syscalls = 0;
     async_child_syscalls = 0;
     async_first_pid = 0;
@@ -1936,10 +2132,42 @@ fn resetAsyncRuntime() void {
     async_leaf_pid = 0;
     async_exit_order = @splat(0);
     async_frames_baseline = free_frame_count;
+    taskgen_verified = false;
+    taskgen_spawn_count = 0;
+    taskgen_fork_count = 0;
+    taskgen_exec_count = 0;
+    taskgen_exec_failure_count = 0;
+    taskgen_exec_atomic_count = 0;
+    taskgen_code_replace_count = 0;
+    taskgen_stack_reset_count = 0;
+    taskgen_register_reset_count = 0;
+    taskgen_identity_preserve_count = 0;
+    taskgen_name_update_count = 0;
+    taskgen_fork_copy_count = 0;
+    taskgen_private_space_count = 0;
+    taskgen_handle_poll_count = 0;
+    taskgen_handle_wait_count = 0;
+    taskgen_handle_signal_count = 0;
+    taskgen_stale_rejection_count = 0;
+    taskgen_slot_reuse_count = 0;
+    taskgen_process_reclaim_count = 0;
+    taskgen_fault_count = 0;
+    taskgen_descriptor_inherit_count = 0;
+    taskgen_cloexec_close_count = 0;
+    taskgen_last_fork_child_handle = 0;
+    taskgen_first_handle = 0;
+    taskgen_last_handle = 0;
+    taskgen_frames_baseline = free_frame_count;
+    taskgen_parent_syscalls = 0;
+    taskgen_child_syscalls = 0;
 }
 
 fn asyncIdleLoop() callconv(.c) noreturn {
     while (true) zigos_i686_halt();
+}
+
+fn asyncMakeHandle(index: usize) u32 {
+    return (@as(u32, async_generations[index]) << 16) | @as(u32, @intCast(index + 1));
 }
 
 fn asyncContextIndex(pid: u32) ?usize {
@@ -1947,6 +2175,19 @@ fn asyncContextIndex(pid: u32) ?usize {
         if (context.occupied and context.pid == pid) return index;
     }
     return null;
+}
+
+fn asyncContextIndexHandle(handle: u32) ?usize {
+    const encoded_slot = handle & 0xFFFF;
+    if (encoded_slot == 0 or encoded_slot > async_child_limit) return null;
+    const index: usize = @intCast(encoded_slot - 1);
+    const context = &async_children[index];
+    if (!context.occupied or context.handle != handle or context.generation != @as(u16, @truncate(handle >> 16))) return null;
+    return index;
+}
+
+fn asyncTerminal(context: *const AsyncChildContext) bool {
+    return context.occupied and (context.state == .exited or context.state == .faulted);
 }
 
 fn asyncContextLive(context: *const AsyncChildContext) bool {
@@ -2003,18 +2244,23 @@ fn asyncSwitchToIdle() u32 {
     return async_idle_stack_pointer;
 }
 
+fn asyncStatusFlags(context: *const AsyncChildContext, record: *const ProcessRecord) u32 {
+    var flags: u32 = 0;
+    if (context.adopted) flags |= 1;
+    if (context.resources_released) flags |= 2;
+    if (record.waited) flags |= 4;
+    if (context.auto_reaped) flags |= 8;
+    if (context.forked) flags |= 0x10;
+    if (record.pending_signal != 0) flags |= @as(u32, record.pending_signal) << 8;
+    return flags;
+}
+
 fn asyncWriteStatus(pid: u32, destination: []u8) bool {
     if (destination.len < async_status_bytes) return false;
     const context_index = asyncContextIndex(pid) orelse return false;
     const context = &async_children[context_index];
     const process_index = processRecordIndex(pid) orelse return false;
     const record = &process_table[process_index];
-    var flags: u32 = 0;
-    if (context.adopted) flags |= 1;
-    if (context.resources_released) flags |= 2;
-    if (record.waited) flags |= 4;
-    if (context.auto_reaped) flags |= 8;
-    if (record.pending_signal != 0) flags |= @as(u32, record.pending_signal) << 8;
     writeLe32(destination, 0, pid);
     writeLe32(destination, 4, record.parent_pid);
     writeLe32(destination, 8, @intFromEnum(context.state));
@@ -2022,13 +2268,136 @@ fn asyncWriteStatus(pid: u32, destination: []u8) bool {
     writeLe32(destination, 16, context.quanta);
     writeLe32(destination, 20, context.syscalls);
     writeLe32(destination, 24, context.completion_order);
-    writeLe32(destination, 28, flags);
+    writeLe32(destination, 28, asyncStatusFlags(context, record));
+    return true;
+}
+
+fn asyncWriteTaskStatus(handle: u32, destination: []u8) bool {
+    if (destination.len < task_status_bytes) return false;
+    const context_index = asyncContextIndexHandle(handle) orelse return false;
+    const context = &async_children[context_index];
+    const process_index = processRecordIndex(context.pid) orelse return false;
+    const record = &process_table[process_index];
+    writeLe32(destination, 0, context.handle);
+    writeLe32(destination, 4, context.pid);
+    writeLe32(destination, 8, record.parent_pid);
+    writeLe32(destination, 12, @intFromEnum(context.state));
+    writeLe32(destination, 16, context.exit_code);
+    writeLe32(destination, 20, context.quanta);
+    writeLe32(destination, 24, context.syscalls);
+    writeLe32(destination, 28, context.completion_order);
+    writeLe32(destination, 32, asyncStatusFlags(context, record));
+    writeLe32(destination, 36, context.exec_count);
+    writeLe32(destination, 40, @as(u32, context.inherited_count) | (@as(u32, context.cloexec_closed) << 8) | (@as(u32, context.fault_vector) << 16));
+    writeLe32(destination, 44, context.fault_address);
+    return true;
+}
+
+fn taskTombstoneIndex(handle: u32) ?usize {
+    for (task_tombstones[0..task_tombstone_count], 0..) |tombstone, index| {
+        if (tombstone.handle == handle) return index;
+    }
+    return null;
+}
+
+fn taskWriteTombstoneStatus(handle: u32, destination: []u8) bool {
+    if (destination.len < task_status_bytes) return false;
+    const index = taskTombstoneIndex(handle) orelse return false;
+    const tombstone = &task_tombstones[index];
+    writeLe32(destination, 0, tombstone.handle);
+    writeLe32(destination, 4, tombstone.pid);
+    writeLe32(destination, 8, tombstone.parent_pid);
+    writeLe32(destination, 12, @intFromEnum(tombstone.state));
+    writeLe32(destination, 16, tombstone.exit_code);
+    writeLe32(destination, 20, tombstone.quanta);
+    writeLe32(destination, 24, tombstone.syscalls);
+    writeLe32(destination, 28, tombstone.completion_order);
+    writeLe32(destination, 32, tombstone.flags);
+    writeLe32(destination, 36, tombstone.exec_count);
+    writeLe32(destination, 40, @as(u32, tombstone.inherited_count) | (@as(u32, tombstone.cloexec_closed) << 8) | (@as(u32, tombstone.fault_vector) << 16));
+    writeLe32(destination, 44, tombstone.fault_address);
+    return true;
+}
+
+fn taskTombstoneMatches(
+    index: usize,
+    handle: u32,
+    parent_handle: u32,
+    pid: u32,
+    parent_pid: u32,
+    process_group: u32,
+    name: []const u8,
+    state: AsyncRunState,
+    exit_code: u32,
+    completion_order: u32,
+    generation: u16,
+    slot: u8,
+    exec_count: u8,
+    inherited_count: u8,
+    cloexec_closed: u8,
+    fault_vector: u8,
+    fault_address: u32,
+    flags: u8,
+) bool {
+    if (index >= task_tombstone_count or name.len != 11) return false;
+    const tombstone = &task_tombstones[index];
+    if (tombstone.handle != handle or tombstone.parent_handle != parent_handle or tombstone.pid != pid or
+        tombstone.parent_pid != parent_pid or tombstone.process_group != process_group or
+        !equalBytes(tombstone.name[0..], name) or tombstone.state != state or tombstone.exit_code != exit_code or
+        tombstone.completion_order != completion_order or tombstone.generation != generation or
+        tombstone.slot != slot or tombstone.exec_count != exec_count or tombstone.inherited_count != inherited_count or
+        tombstone.cloexec_closed != cloexec_closed or tombstone.fault_vector != fault_vector or
+        tombstone.fault_address != fault_address or tombstone.flags != flags or tombstone.kernel_top == 0)
+    {
+        return false;
+    }
+    for (tombstone.frames) |frame| if (frame == 0) return false;
+    return true;
+}
+
+fn asyncRememberTombstone(index: usize) bool {
+    if (task_tombstone_count >= task_tombstones.len) return false;
+    const context = &async_children[index];
+    const process_index: usize = context.process_index;
+    if (process_index >= process_table.len) return false;
+    const record = &process_table[process_index];
+    var flags: u8 = 0;
+    if (context.adopted) flags |= 1;
+    if (context.resources_released) flags |= 2;
+    if (record.waited) flags |= 4;
+    if (context.auto_reaped) flags |= 8;
+    if (context.forked) flags |= 0x10;
+    const target: usize = task_tombstone_count;
+    task_tombstones[target] = .{
+        .frames = context.frame_identity,
+        .name = context.name,
+        .handle = context.handle,
+        .parent_handle = context.parent_handle,
+        .pid = context.pid,
+        .parent_pid = record.parent_pid,
+        .process_group = record.process_group,
+        .kernel_top = context.kernel_top,
+        .quanta = context.quanta,
+        .syscalls = context.syscalls,
+        .exit_code = context.exit_code,
+        .completion_order = context.completion_order,
+        .fault_address = context.fault_address,
+        .generation = context.generation,
+        .slot = @intCast(index),
+        .exec_count = context.exec_count,
+        .inherited_count = context.inherited_count,
+        .cloexec_closed = context.cloexec_closed,
+        .fault_vector = context.fault_vector,
+        .flags = flags,
+        .state = context.state,
+    };
+    task_tombstone_count += 1;
     return true;
 }
 
 fn asyncReleaseResources(index: usize, automatic: bool) bool {
     const context = &async_children[index];
-    if (context.resources_released or context.state != .exited) return false;
+    if (context.resources_released or !asyncTerminal(context)) return false;
     if (vfsOpenCountOwned(context.pid) != 0) return false;
     const free_before_release = free_frame_count;
     releaseFrameSlice(context.frames[0..]);
@@ -2041,12 +2410,20 @@ fn asyncReleaseResources(index: usize, automatic: bool) bool {
     context.auto_reaped = automatic;
     async_reap_count +|= 1;
     if (automatic) async_auto_reap_count +|= 1;
+    if (async_recycle_enabled) {
+        if (!asyncRememberTombstone(index)) return false;
+        process_table[process_index] = .{};
+        taskgen_process_reclaim_count +|= 1;
+        async_generations[index] +%= 1;
+        if (async_generations[index] == 0) async_generations[index] = 1;
+        context.* = .{};
+    }
     return true;
 }
 
 fn asyncAdoptDescendants(exiting_pid: u32) void {
     for (&async_children) |*context| {
-        if (!context.occupied or context.parent_pid != exiting_pid or context.state == .exited) continue;
+        if (!context.occupied or context.parent_pid != exiting_pid or asyncTerminal(context)) continue;
         context.parent_pid = 1;
         context.adopted = true;
         const process_index = processRecordIndex(context.pid) orelse processFailure("async adopted record");
@@ -2055,15 +2432,20 @@ fn asyncAdoptDescendants(exiting_pid: u32) void {
     }
 }
 
-fn asyncMarkExited(index: usize, exit_code: u32) void {
+fn asyncRecordCompletion(index: usize) void {
     const context = &async_children[index];
-    context.state = .exited;
-    context.exit_code = exit_code;
     async_completion_sequence +|= 1;
     context.completion_order = async_completion_sequence;
     if (context.completion_order <= async_exit_order.len) {
         async_exit_order[context.completion_order - 1] = context.pid;
     }
+}
+
+fn asyncMarkExited(index: usize, exit_code: u32) void {
+    const context = &async_children[index];
+    context.state = .exited;
+    context.exit_code = exit_code;
+    asyncRecordCompletion(index);
     const process_index = processRecordIndex(context.pid) orelse processFailure("async exit record");
     process_table[process_index].state = .exited;
     process_table[process_index].exit_code = exit_code;
@@ -2074,11 +2456,31 @@ fn asyncMarkExited(index: usize, exit_code: u32) void {
     }
 }
 
+fn asyncMarkFaulted(index: usize, vector: u32, address: u32) void {
+    const context = &async_children[index];
+    context.state = .faulted;
+    context.fault_vector = @truncate(vector);
+    context.fault_address = address;
+    context.exit_code = 0x80 + vector;
+    asyncRecordCompletion(index);
+    const process_index = processRecordIndex(context.pid) orelse processFailure("async fault record");
+    process_table[process_index].state = .faulted;
+    process_table[process_index].fault_vector = vector;
+    process_table[process_index].fault_address = address;
+    process_table[process_index].exit_code = context.exit_code;
+    _ = vfsCloseAllOwned(context.pid);
+    asyncAdoptDescendants(context.pid);
+    taskgen_fault_count +|= 1;
+    if (context.adopted and context.parent_pid == 1) {
+        if (!asyncReleaseResources(index, true)) processFailure("async fault auto reap");
+    }
+}
+
 fn asyncTerminalDirectChild(parent_pid: u32) ?usize {
     var selected: ?usize = null;
     var selected_order: u32 = 0xFFFF_FFFF;
     for (async_children, 0..) |context, index| {
-        if (!context.occupied or context.parent_pid != parent_pid or context.state != .exited) continue;
+        if (!context.occupied or context.parent_pid != parent_pid or !asyncTerminal(&context)) continue;
         const process_index = processRecordIndex(context.pid) orelse continue;
         if (process_table[process_index].waited) continue;
         if (context.completion_order < selected_order) {
@@ -2098,17 +2500,24 @@ fn asyncHasDirectChild(parent_pid: u32) bool {
     return false;
 }
 
-fn asyncResumeParent(value: u32, status_pid: u32) u32 {
+fn asyncResumeParent(value: u32, status_value: u32) u32 {
+    const mode = async_wait_mode;
+    const status_address = async_wait_status_address;
     zigos_i686_write_cr3(async_parent_cr3);
     current_pid = async_parent_pid;
     kernel_tss.esp0 = async_parent_tss;
-    if (status_pid != 0) {
-        const context_index = asyncContextIndex(status_pid) orelse processFailure("async resume context");
-        if (!asyncReleaseResources(context_index, false)) processFailure("async wait reap");
-        const destination = userWritableSlice(async_wait_status_address, async_status_bytes, async_status_bytes) orelse {
-            processFailure("async status remap");
-        };
-        if (!asyncWriteStatus(status_pid, destination)) processFailure("async wait status");
+    if (status_value != 0) {
+        if (mode == .handle) {
+            const context_index = asyncContextIndexHandle(status_value) orelse processFailure("task resume context");
+            if (!asyncReleaseResources(context_index, false)) processFailure("task wait reap");
+            const destination = userWritableSlice(status_address, task_status_bytes, task_status_bytes) orelse processFailure("task status remap");
+            if (!taskWriteTombstoneStatus(status_value, destination)) processFailure("task wait status");
+        } else {
+            const context_index = asyncContextIndex(status_value) orelse processFailure("async resume context");
+            if (!asyncReleaseResources(context_index, false)) processFailure("async wait reap");
+            const destination = userWritableSlice(status_address, async_status_bytes, async_status_bytes) orelse processFailure("async status remap");
+            if (!asyncWriteStatus(status_value, destination)) processFailure("async wait status");
+        }
     }
     const parent_frame: *UserReturnFrame = @ptrFromInt(async_parent_stack);
     parent_frame.eax = value;
@@ -2128,7 +2537,7 @@ fn asyncReadyForParent() ?u32 {
         .none => return null,
         .pid => {
             const index = asyncContextIndex(async_wait_target) orelse return 0xFFFF_FFF6;
-            if (async_children[index].state == .exited) return async_wait_target;
+            if (asyncTerminal(&async_children[index])) return async_wait_target;
         },
         .any => {
             const index = asyncTerminalDirectChild(async_parent_pid) orelse return null;
@@ -2137,6 +2546,10 @@ fn asyncReadyForParent() ?u32 {
         .drain => {
             if (!asyncAnyLive()) return async_auto_reap_count -% async_drain_baseline;
         },
+        .handle => {
+            const index = asyncContextIndexHandle(async_wait_target) orelse return 0xFFFF_FFF6;
+            if (asyncTerminal(&async_children[index])) return async_wait_target;
+        },
     }
     return null;
 }
@@ -2144,8 +2557,8 @@ fn asyncReadyForParent() ?u32 {
 fn asyncDispatchNext() u32 {
     asyncWakeSleeping();
     if (asyncReadyForParent()) |value| {
-        const status_pid = if (async_wait_mode == .pid or async_wait_mode == .any) value else 0;
-        return asyncResumeParent(value, status_pid);
+        const status_value = if (async_wait_mode == .pid or async_wait_mode == .any or async_wait_mode == .handle) value else 0;
+        return asyncResumeParent(value, status_value);
     }
     if (asyncSelectReady()) |next| return asyncSwitchTo(next);
     if (asyncAnySleeping()) {
@@ -2192,27 +2605,23 @@ fn asyncBeginBlocking(frame: *UserReturnFrame, mode: AsyncWaitMode, target: u32,
     return null;
 }
 
+fn asyncFindFreeContext() ?usize {
+    for (async_children, 0..) |context, index| if (!context.occupied) return index;
+    return null;
+}
+
+fn asyncFindFreeProcess() ?usize {
+    for (process_table, 0..) |record, index| if (record.state == .free) return index;
+    return null;
+}
+
 fn asyncSpawnProcess(name: []const u8) ?u32 {
     if (current_pid == 0 or name.len != 11) return null;
     const node_index = vfsFindNode(name) orelse return null;
     const node = &vfs_nodes[node_index];
     if (node.size < 84 or node.size > 4096) return null;
-    var context_slot: ?usize = null;
-    for (async_children, 0..) |context, index| {
-        if (!context.occupied) {
-            context_slot = index;
-            break;
-        }
-    }
-    const resolved_context = context_slot orelse return null;
-    var process_slot: ?usize = null;
-    for (process_table, 0..) |record, index| {
-        if (record.state == .free) {
-            process_slot = index;
-            break;
-        }
-    }
-    const resolved_process = process_slot orelse return null;
+    const resolved_context = asyncFindFreeContext() orelse return null;
+    const resolved_process = asyncFindFreeProcess() orelse return null;
     var frames: [4]u32 = @splat(0);
     for (&frames) |*frame| {
         frame.* = allocateFrame() orelse {
@@ -2226,21 +2635,25 @@ fn asyncSpawnProcess(name: []const u8) ?u32 {
         return null;
     };
     const pid = next_pid;
-    next_pid +|= 1;
     const parent_index = processRecordIndex(current_pid) orelse {
         releaseFrameSlice(frames[0..]);
         return null;
     };
     const parent_group = if (process_table[parent_index].process_group == 0) current_pid else process_table[parent_index].process_group;
     const kernel_top: u32 = @intCast(@intFromPtr(&async_kernel_stacks[resolved_context]) + async_kernel_stacks[resolved_context].len);
+    const generation = async_generations[resolved_context];
+    const handle = asyncMakeHandle(resolved_context);
+    if (generation > 1) taskgen_slot_reuse_count +|= 1;
     async_children[resolved_context] = .{
         .frames = frames,
         .frame_identity = frames,
         .name = @as([11]u8, name[0..11].*),
+        .handle = handle,
         .pid = pid,
         .parent_pid = current_pid,
         .process_group = parent_group,
         .process_index = @intCast(resolved_process),
+        .generation = generation,
         .stack_pointer = initializeUserTask(&async_kernel_stacks[resolved_context]),
         .kernel_top = kernel_top,
         .frames_before = free_frame_count + @as(u32, @intCast(frames.len)),
@@ -2255,9 +2668,22 @@ fn asyncSpawnProcess(name: []const u8) ?u32 {
         .name = @as([11]u8, name[0..11].*),
         .state = .running,
     };
+    next_pid +|= 1;
     process_count +|= 1;
     async_spawn_count +|= 1;
+    if (async_recycle_enabled) taskgen_spawn_count +|= 1;
     return pid;
+}
+
+fn asyncSpawnHandle(name: []const u8) ?u32 {
+    const pid = asyncSpawnProcess(name) orelse return null;
+    const index = asyncContextIndex(pid) orelse return null;
+    const handle = async_children[index].handle;
+    if (async_recycle_enabled) {
+        if (taskgen_first_handle == 0) taskgen_first_handle = handle;
+        taskgen_last_handle = handle;
+    }
+    return handle;
 }
 
 fn asyncYieldCurrent(frame: *UserReturnFrame) ?u32 {
@@ -2297,7 +2723,7 @@ fn asyncWaitPid(frame: *UserReturnFrame, pid: u32, status_address: u32) ?u32 {
     const context = &async_children[context_index];
     const process_index = processRecordIndex(pid) orelse return null;
     if (context.parent_pid != current_pid or process_table[process_index].waited) return null;
-    if (context.state == .exited) {
+    if (asyncTerminal(context)) {
         if (!asyncReleaseResources(context_index, false)) return null;
         const destination = userWritableSlice(status_address, async_status_bytes, async_status_bytes) orelse return null;
         if (!asyncWriteStatus(pid, destination)) return null;
@@ -2327,6 +2753,271 @@ fn asyncDrain(frame: *UserReturnFrame) ?u32 {
         return 0;
     }
     return asyncBeginBlocking(frame, .drain, 0, 0);
+}
+
+fn asyncCurrentHandle() ?u32 {
+    if (!async_scheduler_active or async_current_slot >= async_child_limit) return null;
+    return async_children[async_current_slot].handle;
+}
+
+fn asyncPollHandle(handle: u32, destination: []u8) bool {
+    if (!asyncWriteTaskStatus(handle, destination)) {
+        taskgen_stale_rejection_count +|= 1;
+        return false;
+    }
+    taskgen_handle_poll_count +|= 1;
+    return true;
+}
+
+fn asyncWaitHandle(frame: *UserReturnFrame, handle: u32, status_address: u32) ?u32 {
+    const context_index = asyncContextIndexHandle(handle) orelse {
+        taskgen_stale_rejection_count +|= 1;
+        return null;
+    };
+    const context = &async_children[context_index];
+    const process_index = processRecordIndex(context.pid) orelse return null;
+    if (context.parent_pid != current_pid or process_table[process_index].waited) return null;
+    if (asyncTerminal(context)) {
+        if (!asyncReleaseResources(context_index, false)) return null;
+        const destination = userWritableSlice(status_address, task_status_bytes, task_status_bytes) orelse return null;
+        if (!taskWriteTombstoneStatus(handle, destination)) return null;
+        frame.eax = handle;
+        taskgen_handle_wait_count +|= 1;
+        return 0;
+    }
+    taskgen_handle_wait_count +|= 1;
+    return asyncBeginBlocking(frame, .handle, handle, status_address);
+}
+
+fn asyncSignalHandle(handle: u32, signal: u32) bool {
+    if (signal == 0 or signal > 31) return false;
+    const context_index = asyncContextIndexHandle(handle) orelse {
+        taskgen_stale_rejection_count +|= 1;
+        return false;
+    };
+    const context = &async_children[context_index];
+    if (!asyncContextLive(context)) return false;
+    const process_index = processRecordIndex(context.pid) orelse return false;
+    process_table[process_index].pending_signal = @truncate(signal);
+    taskgen_handle_signal_count +|= 1;
+    return true;
+}
+
+fn asyncCloneDescriptors(parent_pid: u32, child_pid: u32) ?u8 {
+    var needed: usize = 0;
+    var free_slots: usize = 0;
+    for (vfs_descriptors) |descriptor| {
+        if (!descriptor.open) {
+            free_slots += 1;
+        } else if (descriptor.owner_pid == parent_pid) {
+            if (descriptor.kind == .pipe_read or descriptor.kind == .pipe_write) {
+                const pipe_index: usize = descriptor.pipe_index;
+                if (pipe_index >= pipe_objects.len or !pipe_objects[pipe_index].active) return null;
+            }
+            needed += 1;
+        }
+    }
+    if (free_slots < needed or needed > 0xFF) return null;
+    for (vfs_descriptors) |source| {
+        if (!source.open or source.owner_pid != parent_pid) continue;
+        var target: ?usize = null;
+        for (vfs_descriptors, 0..) |candidate, index| {
+            if (!candidate.open) {
+                target = index;
+                break;
+            }
+        }
+        const target_index = target orelse return null;
+        vfs_descriptors[target_index] = source;
+        vfs_descriptors[target_index].owner_pid = child_pid;
+        if (source.kind == .pipe_read) pipe_objects[source.pipe_index].readers +|= 1;
+        if (source.kind == .pipe_write) pipe_objects[source.pipe_index].writers +|= 1;
+    }
+    taskgen_descriptor_inherit_count +|= @intCast(needed);
+    return @intCast(needed);
+}
+
+fn asyncForkCurrent(frame: *UserReturnFrame) ?u32 {
+    if (!async_recycle_enabled or !async_scheduler_active or async_current_slot >= async_child_limit) return null;
+    const parent_slot: usize = async_current_slot;
+    const parent = &async_children[parent_slot];
+    if (parent.state != .running) return null;
+    const child_slot = asyncFindFreeContext() orelse return null;
+    const process_slot = asyncFindFreeProcess() orelse return null;
+    var frames: [4]u32 = @splat(0);
+    for (&frames) |*physical| {
+        physical.* = allocateFrame() orelse {
+            releaseFrameSlice(frames[0..]);
+            return null;
+        };
+    }
+    buildUserAddressSpace(frames[0], frames[1], frames[2], frames[3]);
+    copyPhysicalFrame(parent.frames[2], frames[2]);
+    copyPhysicalFrame(parent.frames[3], frames[3]);
+    const child_pid = next_pid;
+    const inherited_count = asyncCloneDescriptors(parent.pid, child_pid) orelse {
+        releaseFrameSlice(frames[0..]);
+        return null;
+    };
+    const generation = async_generations[child_slot];
+    const handle = asyncMakeHandle(child_slot);
+    if (generation > 1) taskgen_slot_reuse_count +|= 1;
+    const kernel_top: u32 = @intCast(@intFromPtr(&async_kernel_stacks[child_slot]) + async_kernel_stacks[child_slot].len);
+    const child_stack_pointer = kernel_top - @sizeOf(UserReturnFrame);
+    const child_frame: *UserReturnFrame = @ptrFromInt(child_stack_pointer);
+    child_frame.* = frame.*;
+    child_frame.eax = 0;
+    if (physicalFrameHash(parent.frames[2]) != physicalFrameHash(frames[2]) or
+        physicalFrameHash(parent.frames[3]) != physicalFrameHash(frames[3]) or
+        child_frame.eip != frame.eip or child_frame.user_esp != frame.user_esp or child_frame.cs != frame.cs or
+        frames[0] == parent.frames[0] or frames[1] == parent.frames[1] or frames[2] == parent.frames[2] or frames[3] == parent.frames[3])
+    {
+        releaseFrameSlice(frames[0..]);
+        _ = vfsCloseAllOwned(child_pid);
+        return null;
+    }
+    taskgen_fork_copy_count +|= 1;
+    taskgen_private_space_count +|= 1;
+    async_children[child_slot] = .{
+        .frames = frames,
+        .frame_identity = frames,
+        .name = parent.name,
+        .handle = handle,
+        .parent_handle = parent.handle,
+        .pid = child_pid,
+        .parent_pid = parent.pid,
+        .process_group = parent.process_group,
+        .process_index = @intCast(process_slot),
+        .generation = generation,
+        .stack_pointer = child_stack_pointer,
+        .kernel_top = kernel_top,
+        .frames_before = free_frame_count + @as(u32, @intCast(frames.len)),
+        .inherited_count = inherited_count,
+        .occupied = true,
+        .forked = true,
+        .state = .ready,
+    };
+    const parent_process_index: usize = parent.process_index;
+    process_table[process_slot] = .{
+        .pid = child_pid,
+        .parent_pid = parent.pid,
+        .process_group = parent.process_group,
+        .cwd_cluster = process_table[parent_process_index].cwd_cluster,
+        .name = parent.name,
+        .state = .running,
+    };
+    next_pid +|= 1;
+    process_count +|= 1;
+    taskgen_fork_count +|= 1;
+    taskgen_last_fork_child_handle = handle;
+    frame.eax = handle;
+    return handle;
+}
+
+fn physicalFrameHash(frame: u32) u32 {
+    const bytes: [*]const volatile u8 = @ptrFromInt(frame);
+    var value: u32 = 0x811C_9DC5;
+    for (0..frame_size) |index| value = (value ^ bytes[index]) *% 0x0100_0193;
+    return value;
+}
+
+fn physicalFrameZero(frame: u32) bool {
+    const bytes: [*]const volatile u8 = @ptrFromInt(frame);
+    for (0..frame_size) |index| if (bytes[index] != 0) return false;
+    return true;
+}
+
+fn sameFrameIdentity(left: *const [4]u32, right: *const [4]u32) bool {
+    for (left, right) |a, b| if (a != b) return false;
+    return true;
+}
+
+fn asyncExecCurrent(frame: *UserReturnFrame, name: []const u8) bool {
+    if (!async_recycle_enabled or !async_scheduler_active or async_current_slot >= async_child_limit or name.len != 11) return false;
+    const index: usize = async_current_slot;
+    const context = &async_children[index];
+    if (context.state != .running) return false;
+    var replacement_name: [11]u8 = undefined;
+    for (name, 0..) |byte, offset| replacement_name[offset] = byte;
+    const original_code_hash = physicalFrameHash(context.frames[2]);
+    const original_stack_hash = physicalFrameHash(context.frames[3]);
+    const original_name = context.name;
+    const original_handle = context.handle;
+    const original_pid = context.pid;
+    const original_frames = context.frames;
+    const original_descriptor_count = vfsOpenCountOwned(context.pid);
+    const free_before = free_frame_count;
+    const temporary_frame = allocateFrame() orelse return false;
+    _ = loadElfSegmentIntoFrame(replacement_name[0..], temporary_frame) orelse {
+        if (!freeFrame(temporary_frame) or free_frame_count != free_before or
+            physicalFrameHash(context.frames[2]) != original_code_hash or
+            physicalFrameHash(context.frames[3]) != original_stack_hash or !equalBytes(context.name[0..], original_name[0..]) or
+            context.handle != original_handle or context.pid != original_pid or !sameFrameIdentity(&context.frames, &original_frames) or
+            vfsOpenCountOwned(context.pid) != original_descriptor_count)
+        {
+            processFailure("task exec failure atomicity");
+        }
+        taskgen_exec_atomic_count +|= 1;
+        return false;
+    };
+    const replacement_hash = physicalFrameHash(temporary_frame);
+    for (vfs_descriptors) |descriptor| {
+        if (!descriptor.open or descriptor.owner_pid != context.pid or (descriptor.flags & vfs_open_cloexec) == 0) continue;
+        if (descriptor.kind == .pipe_read or descriptor.kind == .pipe_write) {
+            const pipe_index: usize = descriptor.pipe_index;
+            if (pipe_index >= pipe_objects.len or !pipe_objects[pipe_index].active) {
+                _ = freeFrame(temporary_frame);
+                return false;
+            }
+        }
+    }
+    copyPhysicalFrame(temporary_frame, context.frames[2]);
+    if (!freeFrame(temporary_frame) or physicalFrameHash(context.frames[2]) != replacement_hash) return false;
+    taskgen_code_replace_count +|= 1;
+    zeroPhysicalFrame(context.frames[3]);
+    if (!physicalFrameZero(context.frames[3])) return false;
+    taskgen_stack_reset_count +|= 1;
+    var closed: u8 = 0;
+    for (0..vfs_descriptors.len) |descriptor_index| {
+        const descriptor = vfs_descriptors[descriptor_index];
+        if (!descriptor.open or descriptor.owner_pid != context.pid or (descriptor.flags & vfs_open_cloexec) == 0) continue;
+        if (!vfsCloseOwned(@intCast(descriptor_index), context.pid)) return false;
+        closed +|= 1;
+    }
+    context.name = replacement_name;
+    context.exec_count +|= 1;
+    context.cloexec_closed +|= closed;
+    const process_index: usize = context.process_index;
+    process_table[process_index].name = replacement_name;
+    frame.* = .{
+        .edi = 0,
+        .esi = 0,
+        .ebp = 0,
+        .interrupted_esp = 0,
+        .ebx = 0,
+        .edx = 0,
+        .ecx = 0,
+        .eax = 0,
+        .eip = 0x0040_0000,
+        .cs = 0x001B,
+        .eflags = 0x0000_0202,
+        .user_esp = 0x0040_3000,
+        .user_ss = 0x0023,
+    };
+    if (frame.eip != 0x0040_0000 or frame.user_esp != 0x0040_3000 or frame.eax != 0 or frame.ebx != 0 or
+        frame.ecx != 0 or frame.edx != 0 or frame.esi != 0 or frame.edi != 0)
+    {
+        return false;
+    }
+    taskgen_register_reset_count +|= 1;
+    context.stack_pointer = @intCast(@intFromPtr(frame));
+    if (context.handle != original_handle or context.pid != original_pid or !sameFrameIdentity(&context.frames, &original_frames)) return false;
+    taskgen_identity_preserve_count +|= 1;
+    if (!equalBytes(context.name[0..], replacement_name[0..]) or !equalBytes(process_table[process_index].name[0..], replacement_name[0..])) return false;
+    taskgen_name_update_count +|= 1;
+    taskgen_exec_count +|= 1;
+    taskgen_cloexec_close_count +|= closed;
+    return true;
 }
 
 fn verifyAndReportBootInfo() void {
@@ -3466,6 +4157,11 @@ fn initializeVfsAndProcesses() void {
     const worka_index = vfsFindNode("WORKA   ELF") orelse vfsFailure("WORKA.ELF node");
     const workb_index = vfsFindNode("WORKB   ELF") orelse vfsFailure("WORKB.ELF node");
     const leaf_index = vfsFindNode("LEAF    ELF") orelse vfsFailure("LEAF.ELF node");
+    const genrun_index = vfsFindNode("GENRUN  ELF") orelse vfsFailure("GENRUN.ELF node");
+    const reuse_index = vfsFindNode("REUSE   ELF") orelse vfsFailure("REUSE.ELF node");
+    const forker_index = vfsFindNode("FORKER  ELF") orelse vfsFailure("FORKER.ELF node");
+    const execa_index = vfsFindNode("EXECA   ELF") orelse vfsFailure("EXECA.ELF node");
+    const execb_index = vfsFindNode("EXECB   ELF") orelse vfsFailure("EXECB.ELF node");
     const paths_index = vfsFindNode("PATHS   ELF") orelse vfsFailure("PATHS.ELF node");
     notes_present_at_boot = vfsFindNode("NOTES   TXT") != null;
     cat_elf_size = vfs_nodes[cat_index].size;
@@ -3479,16 +4175,23 @@ fn initializeVfsAndProcesses() void {
     worka_elf_size = vfs_nodes[worka_index].size;
     workb_elf_size = vfs_nodes[workb_index].size;
     leaf_elf_size = vfs_nodes[leaf_index].size;
+    genrun_elf_size = vfs_nodes[genrun_index].size;
+    reuse_elf_size = vfs_nodes[reuse_index].size;
+    forker_elf_size = vfs_nodes[forker_index].size;
+    execa_elf_size = vfs_nodes[execa_index].size;
+    execb_elf_size = vfs_nodes[execb_index].size;
     paths_elf_size = vfs_nodes[paths_index].size;
     runtime_first_cluster = vfs_nodes[paths_index].cluster + @as(u16, @intCast((paths_elf_size + 511) / 512));
     hierarchy_present_at_boot = pathFindEntry(0, "HOME       ") != null;
-    const expected_nodes: u32 = if (notes_present_at_boot) 17 else 16;
+    const expected_nodes: u32 = if (notes_present_at_boot) 22 else 21;
     if (vfs_node_count != expected_nodes or vfs_nodes[hello_index].size != expected_fat_file.len or
         vfs_nodes[init_index].size != init_elf_size or cat_elf_size != 510 or
         big_file_size != expected_big_bytes or fault_elf_size != 262 or writer_elf_size != 1488 or
         service_elf_size != 1362 or orch_elf_size != 1937 or child_elf_size != 913 or
         async_elf_size != 2336 or worka_elf_size != 824 or workb_elf_size != 784 or leaf_elf_size != 692 or
-        paths_elf_size != 4024 or runtime_first_cluster != 42 or hierarchy_present_at_boot != notes_present_at_boot)
+        genrun_elf_size != 2864 or reuse_elf_size != 664 or forker_elf_size != 1144 or
+        execa_elf_size != 660 or execb_elf_size != 660 or paths_elf_size != 4024 or
+        runtime_first_cluster != 57 or hierarchy_present_at_boot != notes_present_at_boot)
     {
         vfsFailure("root inventory");
     }
@@ -3541,7 +4244,7 @@ fn initializeVfsAndProcesses() void {
 
     writeAll("ZigOs i686 writable VFS ready: root-files 0x");
     writeHex32(vfs_node_count);
-    writeAll(" descriptors 0x00000008 pipes 0x00000004 BIG.TXT bytes 0x");
+    writeAll(" descriptors 0x00000010 pipes 0x00000004 BIG.TXT bytes 0x");
     writeHex32(big_file_size);
     writeAll(" hash 0x");
     writeHex32(big_hash);
@@ -4918,7 +5621,7 @@ fn verifyNamespaceLifecycle() void {
     if (namespace_reused_cluster != first_cluster) vfsFailure("namespace first-fit reuse");
     if (!vfsUnlinkNode(reused) or fatReadEntry(namespace_reused_cluster) != 0) vfsFailure("namespace reuse unlink");
     reloadVfsRoot();
-    if (vfs_node_count != 16 or vfsFindNode(temporary) != null or vfsFindNode(moved) != null or vfsFindNode(reused) != null) {
+    if (vfs_node_count != 21 or vfsFindNode(temporary) != null or vfsFindNode(moved) != null or vfsFindNode(reused) != null) {
         vfsFailure("namespace root restoration");
     }
     if (vfs_rename_count != 1 or vfs_unlink_count != 2 or fat_allocation_count != 3 or fat_free_count != 3) {
@@ -5087,7 +5790,7 @@ fn initializeProcessServices() void {
     fork_tree_cloexec = 0;
     fork_tree_signal = 0;
     fork_tree_pipe_bytes = 0;
-    resetAsyncRuntime();
+    resetAsyncRuntime(false);
     writeAll("ZigOs i686 process services ready: brk 0x00403000-0x00405000 mmap 0x00405000 pipes 0x00000004 fork-frames 0x00000007 signals pending PCI-devices 0x");
     writeHex32(pci_device_count);
     writeAll("\r\n");
@@ -5153,6 +5856,13 @@ fn resetSyscallAccounting() void {
     syscall_async_waitpid_count = 0;
     syscall_async_waitany_count = 0;
     syscall_async_drain_count = 0;
+    syscall_task_spawn_count = 0;
+    syscall_task_fork_count = 0;
+    syscall_task_exec_count = 0;
+    syscall_task_handle_count = 0;
+    syscall_task_poll_count = 0;
+    syscall_task_wait_count = 0;
+    syscall_task_signal_count = 0;
     syscall_rejected = 0;
     syscall_exit_code = 0;
     syscall_exited = false;
@@ -5213,7 +5923,8 @@ fn spawnElfProcess(name: [11]u8, parent_pid: u32) ?SpawnResult {
     zigos_i686_invalidate_page(0x0040_0000);
     resetSyscallAccounting();
     resetUserServiceMappings();
-    if (equalBytes(name[0..], "ASYNC   ELF")) resetAsyncRuntime();
+    if (equalBytes(name[0..], "ASYNC   ELF")) resetAsyncRuntime(false);
+    if (equalBytes(name[0..], "GENRUN  ELF")) resetAsyncRuntime(true);
     current_pid = pid;
     zigos_i686_enter_user(0x0040_0000, 0x0040_2000);
     current_pid = 0;
@@ -5468,6 +6179,144 @@ fn spawnElfProcess(name: [11]u8, parent_pid: u32) ?SpawnResult {
         async_first_pid = a_pid;
         async_second_pid = b_pid;
         async_leaf_pid = leaf_pid;
+    } else if (equalBytes(name[0..], "GENRUN  ELF")) {
+        const results: [*]const volatile u32 = @ptrFromInt(user_code_frame + 0x800);
+        const final_status: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0xA00);
+        const expected_results = [_]u32{
+            pid,
+            parent_pid,
+            0xFFFF_FFFD,
+            0x0001_0001,
+            0x0002_0001,
+            0x0003_0001,
+            0x0004_0001,
+            0x0005_0001,
+            0x0006_0001,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0x0001_0001,
+            0x0002_0001,
+            0x0003_0001,
+            0x0004_0001,
+            0x0005_0001,
+            0x0006_0001,
+            0,
+            0xFFFF_FFFD,
+            0xFFFF_FFFD,
+            0xFFFF_FFF5,
+            0x0007_0001,
+            0x0007_0001,
+            1,
+            0xFFFF_FFFD,
+            0x0008_0001,
+            0x0008_0001,
+            0xFFFF_FFFD,
+            0xFFFF_FFF6,
+            0x0009_0001,
+            0x0009_0001,
+            pid,
+            parent_pid,
+        };
+        var results_match = true;
+        for (expected_results, 0..) |expected, index| {
+            if (results[index] != expected) results_match = false;
+        }
+        var reuse_tombstones_match = true;
+        for (0..6) |index| {
+            const generation: u16 = @intCast(index + 1);
+            const handle = (@as(u32, generation) << 16) | 1;
+            if (!taskTombstoneMatches(
+                index,
+                handle,
+                0,
+                pid + @as(u32, @intCast(index + 1)),
+                pid,
+                pid,
+                "REUSE   ELF",
+                .exited,
+                0x90,
+                @intCast(index + 1),
+                generation,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0x06,
+            )) reuse_tombstones_match = false;
+            if (task_tombstones[index].syscalls != 7) reuse_tombstones_match = false;
+        }
+        var contexts_clear = true;
+        for (async_children) |context| {
+            if (context.occupied or context.state != .free or context.handle != 0 or context.pid != 0) contexts_clear = false;
+        }
+        var pipes_closed = true;
+        for (pipe_objects) |pipe| {
+            if (pipe.active) pipes_closed = false;
+        }
+        var task_descriptors_closed = true;
+        for (vfs_descriptors) |descriptor| {
+            if (descriptor.open and descriptor.owner_pid >= pid + 1 and descriptor.owner_pid <= pid + 10) {
+                task_descriptors_closed = false;
+            }
+        }
+        var task_process_records_reclaimed = true;
+        var task_pid = pid + 1;
+        while (task_pid <= pid + 10) : (task_pid += 1) {
+            if (processRecordIndex(task_pid) != null) task_process_records_reclaimed = false;
+        }
+        if (syscall_exit_code != 0x74 or syscall_count != 107 or syscall_rejected != 9 or
+            taskgen_parent_syscalls != 38 or taskgen_child_syscalls != 69 or
+            syscall_task_spawn_count != 9 or syscall_task_fork_count != 1 or syscall_task_exec_count != 2 or
+            syscall_task_handle_count != 9 or syscall_task_poll_count != 6 or syscall_task_wait_count != 9 or
+            syscall_task_signal_count != 1 or syscall_async_yield_count != 7 or syscall_async_sleep_count != 9 or
+            syscall_async_drain_count != 1 or syscall_signal_pending_count != 7 or
+            syscall_getppid_count != 11 or syscall_getpgid_count != 2 or syscall_file_opens != 2 or
+            syscall_pipe_count != 1 or !results_match or !reuse_tombstones_match or
+            taskgen_spawn_count != 9 or taskgen_fork_count != 1 or taskgen_exec_count != 2 or
+            taskgen_exec_failure_count != 2 or taskgen_exec_atomic_count != 2 or taskgen_code_replace_count != 2 or
+            taskgen_stack_reset_count != 2 or taskgen_register_reset_count != 2 or
+            taskgen_identity_preserve_count != 2 or taskgen_name_update_count != 2 or
+            taskgen_fork_copy_count != 1 or taskgen_private_space_count != 1 or
+            taskgen_handle_poll_count != 6 or taskgen_handle_wait_count != 9 or taskgen_handle_signal_count != 1 or
+            taskgen_stale_rejection_count != 5 or taskgen_slot_reuse_count != 8 or
+            taskgen_process_reclaim_count != 10 or taskgen_fault_count != 1 or
+            taskgen_descriptor_inherit_count != 4 or taskgen_cloexec_close_count != 2 or
+            taskgen_last_fork_child_handle != 0x0001_0002 or taskgen_first_handle != 0x0001_0001 or
+            taskgen_last_handle != 0x0009_0001 or taskgen_reclaimed_prior_records != 3 or
+            task_tombstone_count != 10 or async_generations[0] != 10 or async_generations[1] != 2 or
+            async_generations[2] != 1 or async_generations[3] != 1 or
+            async_spawn_count != 9 or async_yield_count != 7 or async_sleep_count != 9 or async_wake_count != 9 or
+            async_block_count != 10 or async_parent_restore_count != 10 or async_drain_count != 1 or
+            async_idle_switch_count == 0 or async_switch_count < 20 or async_adoption_count != 1 or
+            async_reap_count != 10 or async_auto_reap_count != 1 or async_signal_observed != 1 or
+            async_completion_sequence != 10 or async_scheduler_active or async_current_slot != 0xFF or
+            async_wait_mode != .none or async_parent_pid != pid or async_parent_cr3 != kernel_page_directory or
+            zigos_i686_read_cr3() != kernel_page_directory or kernel_tss.esp0 != async_parent_tss or current_pid != 0 or
+            free_frame_count != taskgen_frames_baseline or !contexts_clear or !pipes_closed or
+            !task_descriptors_closed or !task_process_records_reclaimed or vfsOpenCountOwned(pid) != 0 or
+            !taskTombstoneMatches(6, 0x0007_0001, 0, pid + 7, pid, pid, "EXECA   ELF", .exited, 0xA1, 7, 7, 0, 1, 0, 1, 0, 0, 0x06) or
+            task_tombstones[6].syscalls != 12 or
+            !taskTombstoneMatches(7, 0x0001_0002, 0x0007_0001, pid + 8, 1, pid, "EXECB   ELF", .exited, 0xB2, 8, 1, 1, 1, 4, 1, 0, 0, 0x1F) or
+            task_tombstones[7].syscalls != 8 or task_tombstones[7].kernel_top == task_tombstones[6].kernel_top or
+            !taskTombstoneMatches(8, 0x0008_0001, 0, pid + 9, pid, pid, "FAULT   ELF", .faulted, 0x8E, 9, 8, 0, 0, 0, 0, 14, 0x0080_0000, 0x06) or
+            task_tombstones[8].syscalls != 0 or
+            !taskTombstoneMatches(9, 0x0009_0001, 0, pid + 10, pid, pid, "REUSE   ELF", .exited, 0x90, 10, 9, 0, 0, 0, 0, 0, 0, 0x06) or
+            task_tombstones[9].syscalls != 7 or
+            readLe32(final_status, 0) != 0x0009_0001 or readLe32(final_status, 4) != pid + 10 or
+            readLe32(final_status, 8) != pid or readLe32(final_status, 12) != @intFromEnum(AsyncRunState.exited) or
+            readLe32(final_status, 16) != 0x90 or readLe32(final_status, 24) != 7 or
+            readLe32(final_status, 28) != 10 or readLe32(final_status, 32) != 0x06 or
+            readLe32(final_status, 36) != 0 or readLe32(final_status, 40) != 0 or readLe32(final_status, 44) != 0)
+        {
+            processFailure("GENRUN generation lifecycle contract");
+        }
+        taskgen_verified = true;
     } else if (equalBytes(name[0..], "PATHS   ELF")) {
         const results: [*]const volatile u32 = @ptrFromInt(user_code_frame + 0x740);
         const cwd_root: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x7C0);
@@ -5640,11 +6489,11 @@ fn processFailure(reason: []const u8) noreturn {
 }
 
 fn runShell() noreturn {
-    const expected_nodes: u32 = if (notes_present_at_boot) 17 else 16;
+    const expected_nodes: u32 = if (notes_present_at_boot) 22 else 21;
     if (!ata_ready or !fat_ready or !heap_ready or !frame_allocator_ready or vfs_node_count != expected_nodes) {
         shellFailure("subsystems unavailable");
     }
-    writeAll("ZigOs i686 Capstone 13 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode ");
+    writeAll("ZigOs i686 Capstone 14 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode ");
     writeAll(if (notes_present_at_boot) "persistence" else "first");
     writeAll("\r\n");
     var line: [64]u8 = undefined;
@@ -5697,6 +6546,16 @@ fn runShell() noreturn {
             writeHex32(workb_elf_size);
             writeAll(" LEAF.ELF-bytes 0x");
             writeHex32(leaf_elf_size);
+            writeAll(" GENRUN.ELF-bytes 0x");
+            writeHex32(genrun_elf_size);
+            writeAll(" REUSE.ELF-bytes 0x");
+            writeHex32(reuse_elf_size);
+            writeAll(" FORKER.ELF-bytes 0x");
+            writeHex32(forker_elf_size);
+            writeAll(" EXECA.ELF-bytes 0x");
+            writeHex32(execa_elf_size);
+            writeAll(" EXECB.ELF-bytes 0x");
+            writeHex32(execb_elf_size);
             writeAll(" PATHS.ELF-bytes 0x");
             writeHex32(paths_elf_size);
             writeAll(" WRITER.ELF-bytes 0x");
@@ -5774,6 +6633,9 @@ fn runShell() noreturn {
                 writeHex32(async_exit_order[2]);
                 writeAll(" preempt yes idle yes adoption yes auto-reap yes frames-restored yes");
             }
+            if (equalBytes(name[0..], "GENRUN  ELF")) {
+                writeAll(" taskgen-goals 0x00000020 calls 0x0000006B handles 0x00010001->0x00090001 generations 0x0000000A/0x00000002 fork yes exec yes stale yes fault-contained yes frames-restored yes");
+            }
             if (equalBytes(name[0..], "PATHS   ELF")) {
                 writeAll(" hierarchy-goals 0x00000017 home 0x");
                 writeHex32(hierarchy_home_cluster);
@@ -5826,25 +6688,25 @@ fn runShell() noreturn {
                 verifyNotesFile();
                 var fault_ok = false;
                 for (process_table) |record| {
-                    if (record.pid == 15 and record.state == .faulted and record.fault_vector == 14 and
+                    if (record.pid == 26 and record.state == .faulted and record.fault_vector == 14 and
                         record.fault_address == 0x0080_0000) fault_ok = true;
                 }
-                if (vfs_node_count != 17 or process_count != 15 or last_spawned_pid != 15 or
-                    process_wait_count != 5 or last_waited_pid != 14 or !fault_ok or shell_command_count != 17 or
+                if (vfs_node_count != 22 or process_count != 26 or last_spawned_pid != 26 or
+                    process_wait_count != 15 or last_waited_pid != 25 or !fault_ok or shell_command_count != 18 or
                     vfs_create_count != 1 or vfs_truncate_count != 1 or vfs_write_count != 2 or
                     vfs_seek_count != 1 or fat_allocation_count != 2 or notes_hash != expected_notes_hash or
-                    !namespace_verified or !service_verified or !fork_tree_verified or !async_verified or !hierarchy_verified or
+                    !namespace_verified or !service_verified or !fork_tree_verified or !async_verified or !taskgen_verified or !hierarchy_verified or
                     hierarchy_syscalls != 31 or hierarchy_rejections != 2 or hierarchy_home_cluster != runtime_first_cluster or
                     hierarchy_docs_cluster != runtime_first_cluster + 1 or hierarchy_log_first_cluster != runtime_first_cluster + 2 or
                     hierarchy_log_second_cluster != runtime_first_cluster + 3 or hierarchy_archive_cluster != runtime_first_cluster + 4 or
                     hierarchy_reused_cluster != runtime_first_cluster + 5 or hierarchy_hash != expected_path_payload_hash or
                     service_syscalls != 30 or service_pipe_bytes != service_payload.len or
-                    vm_fault_recovery_count != 1 or vm_fault_containment_count != 4 or
+                    vm_fault_recovery_count != 1 or vm_fault_containment_count != 5 or
                     advanced_scheduler_exit_count != 4 or keyboard_ring_dropped != 0 or !fat_cache_loaded)
                 {
                     shellFailure("first-session accounting");
                 }
-                writeAll("ZigOs i686 Capstone 13 first session verified: goals 0x00000071 new-goals 0x0000001B root-files 0x");
+                writeAll("ZigOs i686 Capstone 14 first session verified: goals 0x00000091 new-goals 0x00000020 root-files 0x");
                 writeHex32(vfs_node_count);
                 writeAll(" processes 0x");
                 writeHex32(process_count);
@@ -5872,12 +6734,12 @@ fn runShell() noreturn {
                 writeHex32(hierarchy_log_second_cluster);
                 writeAll(" hierarchy-hash 0x");
                 writeHex32(hierarchy_hash);
-                writeAll(" async yes fault-contained yes descriptors-closed yes commands 0x");
+                writeAll(" async yes taskgen yes fault-contained yes descriptors-closed yes commands 0x");
                 writeHex32(shell_command_count);
                 writeAll("\r\n");
             } else {
                 verifyNotesFile();
-                if (vfs_node_count != 17 or process_count != 3 or shell_command_count != 3 or
+                if (vfs_node_count != 22 or process_count != 3 or shell_command_count != 3 or
                     vfs_create_count != 0 or vfs_truncate_count != 0 or vfs_write_count != 0 or
                     fat_allocation_count != 0 or notes_hash != expected_notes_hash or
                     !namespace_verified or !hierarchy_verified or hierarchy_hash != expected_path_payload_hash or
@@ -5888,7 +6750,7 @@ fn runShell() noreturn {
                 {
                     shellFailure("persistence-session accounting");
                 }
-                writeAll("ZigOs i686 Capstone 13 persistence session verified: goals 0x00000071 inherited-goals 0x00000056 root-files 0x00000011 notes 0x000002D0 hash 0x");
+                writeAll("ZigOs i686 Capstone 14 persistence session verified: goals 0x00000091 inherited-goals 0x00000071 root-files 0x00000016 notes 0x000002D0 hash 0x");
                 writeHex32(notes_hash);
                 writeAll(" chain 0x");
                 writeHex32(notes_cluster);

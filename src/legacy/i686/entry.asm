@@ -410,7 +410,25 @@ zigos_i686_exception_common:
     cld
     call zigos_i686_exception_dispatch
     test eax, eax
-    jnz .exception_exit_to_kernel
+    jz .exception_resume_current
+    cmp eax, 1
+    je .exception_exit_to_kernel
+    mov edx, [eax + 36]
+    test dl, 3
+    jz .exception_selected_kernel_segments
+    mov dx, 0x23
+    jmp .exception_load_selected_segments
+.exception_selected_kernel_segments:
+    mov dx, 0x10
+.exception_load_selected_segments:
+    mov ds, dx
+    mov es, dx
+    mov fs, dx
+    mov gs, dx
+    mov esp, eax
+    popad
+    iretd
+.exception_resume_current:
     mov esp, ebp
     popad
     add esp, 8

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Capstone 13 nested FAT12 and NOTES.TXT persistence."""
+"""Verify Capstone 14 nested FAT12 and NOTES.TXT persistence."""
 from __future__ import annotations
 
 import argparse
@@ -68,48 +68,48 @@ def main() -> None:
         fail("persistent FAT12 copies differ")
 
     root = volume[ROOT_START * BPS : ROOT_START * BPS + 14 * BPS]
-    paths_offset = 15 * 32
+    paths_offset = 20 * 32
     if root[paths_offset : paths_offset + 11] != b"PATHS   ELF":
         fail("PATHS.ELF static root slot invalid")
-    home_offset = 16 * 32
-    check_dir_entry(root, 16, b"HOME       ", 0x10, 42)
-    notes_offset = 17 * 32
-    check_dir_entry(root, 17, b"NOTES   TXT", 0x20, 47, 720)
-    if root[18 * 32] != 0:
+    home_offset = 21 * 32
+    check_dir_entry(root, 21, b"HOME       ", 0x10, 57)
+    notes_offset = 22 * 32
+    check_dir_entry(root, 22, b"NOTES   TXT", 0x20, 62, 720)
+    if root[23 * 32] != 0:
         fail("unexpected root entry beyond HOME and NOTES.TXT")
 
-    home = cluster_sector(volume, 42)
-    check_dir_entry(home, 0, b".          ", 0x10, 42)
+    home = cluster_sector(volume, 57)
+    check_dir_entry(home, 0, b".          ", 0x10, 57)
     check_dir_entry(home, 1, b"..         ", 0x10, 0)
-    check_dir_entry(home, 2, b"DOCS       ", 0x10, 43)
+    check_dir_entry(home, 2, b"DOCS       ", 0x10, 58)
     if home[3 * 32] != 0xE5:
         fail("cross-directory source slot was not deleted")
-    check_dir_entry(home, 4, b"ARCHIVE    ", 0x10, 46)
+    check_dir_entry(home, 4, b"ARCHIVE    ", 0x10, 61)
     if home[5 * 32] != 0:
         fail("unexpected HOME directory residue")
 
-    docs = cluster_sector(volume, 43)
-    check_dir_entry(docs, 0, b".          ", 0x10, 43)
-    check_dir_entry(docs, 1, b"..         ", 0x10, 42)
+    docs = cluster_sector(volume, 58)
+    check_dir_entry(docs, 0, b".          ", 0x10, 58)
+    check_dir_entry(docs, 1, b"..         ", 0x10, 57)
     if docs[2 * 32] != 0xE5 or docs[3 * 32] != 0:
         fail("DOCS temporary reuse residue invalid")
 
-    archive = cluster_sector(volume, 46)
-    check_dir_entry(archive, 0, b".          ", 0x10, 46)
-    check_dir_entry(archive, 1, b"..         ", 0x10, 42)
-    check_dir_entry(archive, 2, b"LOG     TXT", 0x20, 44, 600)
+    archive = cluster_sector(volume, 61)
+    check_dir_entry(archive, 0, b".          ", 0x10, 61)
+    check_dir_entry(archive, 1, b"..         ", 0x10, 57)
+    check_dir_entry(archive, 2, b"LOG     TXT", 0x20, 59, 600)
     if archive[3 * 32] != 0:
         fail("unexpected ARCHIVE directory residue")
 
     expected_fat = {
-        42: 0xFFF,
-        43: 0xFFF,
-        44: 45,
-        45: 0xFFF,
-        46: 0xFFF,
-        47: 48,
-        48: 0xFFF,
-        49: 0,
+        57: 0xFFF,
+        58: 0xFFF,
+        59: 60,
+        60: 0xFFF,
+        61: 0xFFF,
+        62: 63,
+        63: 0xFFF,
+        64: 0,
     }
     for cluster, expected in expected_fat.items():
         actual = entry(fat1, cluster)
@@ -118,17 +118,17 @@ def main() -> None:
         if actual != expected:
             fail(f"persistent FAT entry {cluster} invalid: {actual:#x} != {expected:#x}")
 
-    log = read_two_clusters(volume, 44, 45, 600)
+    log = read_two_clusters(volume, 59, 60, 600)
     if log != PATH_PAYLOAD or fnv1a32(log) != PATH_HASH:
         fail("persistent /HOME/ARCHIVE/LOG.TXT content invalid")
-    notes = read_two_clusters(volume, 47, 48, 720)
+    notes = read_two_clusters(volume, 62, 63, 720)
     if notes != NOTES or fnv1a32(notes) != NOTES_HASH:
         fail("persistent NOTES.TXT content invalid")
 
-    print("Verified Capstone 13 persistent FAT12 hierarchy")
-    print("  /HOME: cluster 42, DOCS 43, ARCHIVE 46")
-    print("  /HOME/ARCHIVE/LOG.TXT: 600 bytes, clusters 44->45->EOC, FNV-1a32 0x36F73195")
-    print("  NOTES.TXT: root slot 17, 720 bytes, clusters 47->48->EOC, FNV-1a32 0xC6181D2F")
+    print("Verified Capstone 14 persistent FAT12 hierarchy")
+    print("  /HOME: cluster 57, DOCS 58, ARCHIVE 61")
+    print("  /HOME/ARCHIVE/LOG.TXT: 600 bytes, clusters 59->60->EOC, FNV-1a32 0x36F73195")
+    print("  NOTES.TXT: root slot 22, 720 bytes, clusters 62->63->EOC, FNV-1a32 0xC6181D2F")
     print(f"  image sha256: {hashlib.sha256(image).hexdigest().upper()}")
 
 

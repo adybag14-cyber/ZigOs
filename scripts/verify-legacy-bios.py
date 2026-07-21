@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the complete Capstone 13 BIOS, kernel, and deterministic FAT12 image."""
+"""Verify the complete Capstone 14 BIOS, kernel, and deterministic FAT12 image."""
 from __future__ import annotations
 
 import argparse
@@ -31,7 +31,12 @@ EXPECTED = {
     b"WORKA   ELF": (28, 824, 0xC83AFC14, (28, 29)),
     b"WORKB   ELF": (30, 784, 0xCD43E95A, (30, 31)),
     b"LEAF    ELF": (32, 692, 0x769A282E, (32, 33)),
-    b"PATHS   ELF": (34, 4024, 0x38C1C0AD, (34, 35, 36, 37, 38, 39, 40, 41)),
+    b"GENRUN  ELF": (34, 2864, 0xD84697C0, (34, 35, 36, 37, 38, 39)),
+    b"REUSE   ELF": (40, 664, 0x30A2BF85, (40, 41)),
+    b"FORKER  ELF": (42, 1144, 0xADB21589, (42, 43, 44)),
+    b"EXECA   ELF": (45, 660, 0x8E043930, (45, 46)),
+    b"EXECB   ELF": (47, 660, 0x21F7AB51, (47, 48)),
+    b"PATHS   ELF": (49, 4024, 0x38C1C0AD, (49, 50, 51, 52, 53, 54, 55, 56)),
 }
 
 
@@ -183,7 +188,7 @@ def main() -> None:
     notes_slot = root_offset + len(EXPECTED) * 32
     if volume[notes_slot] != 0:
         fail("initial NOTES.TXT root slot is not free")
-    for cluster in range(42, 49):
+    for cluster in range(57, 64):
         if fat_entry(fat1, cluster) != 0:
             fail(f"runtime-reserved cluster {cluster} is not initially free")
 
@@ -231,7 +236,44 @@ def main() -> None:
     if leaf.count(b"\xBB\x14\x00\x00\x00") != 10 or leaf.count(b"\xB8\x2C\x00\x00\x00\xCD\x80") != 10:
         fail("LEAF.ELF bounded sleep sequence invalid")
 
-    paths, _ = read_chain(volume, 34, 4024)
+    genrun, _ = read_chain(volume, 34, 2864)
+    if genrun[0x800:0x80B] != b"REUSE   ELF" or genrun[0x810:0x81B] != b"FORKER  ELF":
+        fail("GENRUN.ELF reusable/forker names invalid")
+    if genrun[0x820:0x82B] != b"FAULT   ELF" or genrun[0x830:0x83B] != b"MISSING ELF":
+        fail("GENRUN.ELF fault/rejection names invalid")
+    if genrun.count(b"\xB8\x31\x00\x00\x00\xCD\x80") != 10:
+        fail("GENRUN.ELF handle-spawn sequence invalid")
+    if genrun.count(b"\xB8\x35\x00\x00\x00\xCD\x80") != 9:
+        fail("GENRUN.ELF handle-poll sequence invalid")
+    if genrun.count(b"\xB8\x36\x00\x00\x00\xCD\x80") != 10:
+        fail("GENRUN.ELF handle-wait sequence invalid")
+    if genrun.count(b"\xB8\x37\x00\x00\x00\xCD\x80") != 2:
+        fail("GENRUN.ELF handle-signal sequence invalid")
+
+    reuse, _ = read_chain(volume, 40, 664)
+    if reuse.count(b"\xB8\x34\x00\x00\x00\xCD\x80") != 1:
+        fail("REUSE.ELF current-handle call invalid")
+    if reuse.count(b"\xB8\x2B\x00\x00\x00\xCD\x80") != 1 or reuse.count(b"\xB8\x2C\x00\x00\x00\xCD\x80") != 1:
+        fail("REUSE.ELF yield/sleep sequence invalid")
+
+    forker, _ = read_chain(volume, 42, 1144)
+    if forker[0x400:0x40B] != b"HELLO   TXT" or forker[0x410:0x41B] != b"MISSING ELF":
+        fail("FORKER.ELF inherited/rejection names invalid")
+    if forker[0x420:0x42B] != b"EXECA   ELF" or forker[0x430:0x43B] != b"EXECB   ELF":
+        fail("FORKER.ELF replacement names invalid")
+    if forker.count(b"\xB8\x32\x00\x00\x00\xCD\x80") != 1:
+        fail("FORKER.ELF fork-current sequence invalid")
+    if forker.count(b"\xB8\x33\x00\x00\x00\xCD\x80") != 4:
+        fail("FORKER.ELF atomic exec sequence invalid")
+
+    execa, _ = read_chain(volume, 45, 660)
+    execb, _ = read_chain(volume, 47, 660)
+    if b"\xBB\xA1\x00\x00\x00" not in execa or b"\xBB\x01\x00\x00\x00" not in execa:
+        fail("EXECA.ELF exit/sleep contract invalid")
+    if b"\xBB\xB2\x00\x00\x00" not in execb or b"\xBB\x05\x00\x00\x00" not in execb:
+        fail("EXECB.ELF exit/sleep contract invalid")
+
+    paths, _ = read_chain(volume, 49, 4024)
     if paths[0x700:0x701] != b"/" or paths[0x710:0x715] != b"/HOME" or paths[0x720:0x724] != b"DOCS":
         fail("PATHS.ELF root/home/docs strings invalid")
     if paths[0x730:0x736] != b"./DOCS" or paths[0x740:0x748] != b"../EMPTY":
@@ -257,11 +299,11 @@ def main() -> None:
     if any(image[(9 + kernel_sectors) * BPS : FAT_LBA * BPS]):
         fail("protected kernel/FAT gap is not zero")
 
-    print(f"Verified Capstone 13 legacy BIOS/FAT12 image: {args.image}")
+    print(f"Verified Capstone 14 legacy BIOS/FAT12 image: {args.image}")
     print("  stage0: 512 bytes, signature 0x55AA, partition type 0x01")
     print("  stage1: 4096 bytes, LBA 1..8, address 0x00008000")
     print(f"  kernel: {len(kernel)} bytes, {kernel_sectors} sectors, LBA 9..{kernel_end_lba}, checksum16 0x{checksum:04X}")
-    print("  FAT12: 16 files, mirrored FATs, ASYNC.ELF 23->24->25->26->27, WORKA.ELF 28->29, WORKB.ELF 30->31, LEAF.ELF 32->33, PATHS.ELF 34->35->36->37->38->39->40->41, clusters 42-48 free")
+    print("  FAT12: 21 files, mirrored FATs, GENRUN.ELF 34->35->36->37->38->39, REUSE.ELF 40->41, FORKER.ELF 42->43->44, EXECA.ELF 45->46, EXECB.ELF 47->48, PATHS.ELF 49->50->51->52->53->54->55->56, clusters 57-63 free")
     print(f"  image sha256: {hashlib.sha256(image).hexdigest().upper()}")
 
 

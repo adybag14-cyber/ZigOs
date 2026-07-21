@@ -16,4 +16,4 @@ $verifier = Join-Path $PSScriptRoot 'verify-legacy-bios.py'
     --kernel $KernelPath `
     --fat $FatVolumePath `
     --image $DiskImagePath
-if ($LASTEXITCODE -ne 0) { throw 'Capstone 13 legacy BIOS/FAT12 image verification failed.' }
+if ($LASTEXITCODE -ne 0) { throw 'Capstone 14 legacy BIOS/FAT12 image verification failed.' }

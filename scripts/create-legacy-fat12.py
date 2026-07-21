@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create the deterministic ZigOs Capstone 13 FAT12 volume."""
+"""Create the deterministic ZigOs Capstone 14 FAT12 volume."""
 from __future__ import annotations
 
 import argparse
@@ -45,6 +45,11 @@ ASYNC_NAME = b"ASYNC   ELF"
 WORKA_NAME = b"WORKA   ELF"
 WORKB_NAME = b"WORKB   ELF"
 LEAF_NAME = b"LEAF    ELF"
+GENRUN_NAME = b"GENRUN  ELF"
+REUSE_NAME = b"REUSE   ELF"
+FORKER_NAME = b"FORKER  ELF"
+EXECA_NAME = b"EXECA   ELF"
+EXECB_NAME = b"EXECB   ELF"
 PATHS_NAME = b"PATHS   ELF"
 NOTES_NAME = b"NOTES   TXT"
 
@@ -542,6 +547,202 @@ def build_async_elf() -> bytes:
     return build_elf(bytes(segment), memory_size=0x1000)
 
 
+def build_reuse_elf() -> bytes:
+    base = 0x00400000
+    results_offset = 0x180
+    results_va = base + results_offset
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", results_va + index * 4))
+
+    syscall(52); store(0)
+    syscall(2); store(1)
+    syscall(12); store(2)
+    syscall(22); store(3)
+    syscall(43); store(4)
+    code += mov_imm(0xBB, 1)
+    syscall(44); store(5)
+    code += mov_imm(0xBB, 0x90)
+    syscall(3)
+    code += b"\xF4"
+    if len(code) > results_offset:
+        raise RuntimeError(f"REUSE.ELF code overlaps data: {len(code)}")
+    segment = bytearray(results_offset + 6 * 4)
+    segment[:len(code)] = code
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+
+def build_exec_elf(exit_code: int, sleep_ticks: int) -> bytes:
+    base = 0x00400000
+    results_offset = 0x180
+    results_va = base + results_offset
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", results_va + index * 4))
+
+    syscall(52); store(0)
+    syscall(2); store(1)
+    syscall(12); store(2)
+    code += mov_imm(0xBB, 0)
+    syscall(29); store(3)
+    code += mov_imm(0xBB, sleep_ticks)
+    syscall(44); store(4)
+    code += mov_imm(0xBB, exit_code)
+    syscall(3)
+    code += b"\xF4"
+    if len(code) > results_offset:
+        raise RuntimeError(f"exec workload overlaps data: {len(code)}")
+    segment = bytearray(results_offset + 5 * 4)
+    segment[:len(code)] = code
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+
+def build_forker_elf() -> bytes:
+    base = 0x00400000
+    offsets = {
+        "hello": 0x300,
+        "missing": 0x310,
+        "execa": 0x320,
+        "execb": 0x330,
+        "pipe": 0x340,
+        "results": 0x360,
+    }
+    results_va = base + offsets["results"]
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", results_va + index * 4))
+
+    code += mov_imm(0xBB, base + offsets["hello"]) + mov_imm(0xB9, 11) + mov_imm(0xBA, OPEN_READ)
+    syscall(4); store(0)
+    code += mov_imm(0xBB, base + offsets["hello"]) + mov_imm(0xB9, 11) + mov_imm(0xBA, OPEN_READ | OPEN_CLOEXEC)
+    syscall(4); store(1)
+    code += mov_imm(0xBB, base + offsets["pipe"])
+    syscall(18); store(2)
+    syscall(50); store(3)
+    code += b"\x85\xC0"
+    child_jump = len(code)
+    code += b"\x0F\x84\x00\x00\x00\x00"
+
+    # Parent branch: failed exec must leave the image intact, then EXECA replaces it.
+    code += mov_imm(0xBB, base + offsets["missing"]) + mov_imm(0xB9, 11)
+    syscall(51); store(4)
+    code += mov_imm(0xBB, base + offsets["execa"]) + mov_imm(0xB9, 11)
+    syscall(51)
+    code += b"\xF4"
+
+    child_target = len(code)
+    struct.pack_into("<i", code, child_jump + 2, child_target - (child_jump + 6))
+    # Child branch: same atomic failure proof, then a different replacement image.
+    code += mov_imm(0xBB, base + offsets["missing"]) + mov_imm(0xB9, 11)
+    syscall(51); store(5)
+    code += mov_imm(0xBB, base + offsets["execb"]) + mov_imm(0xB9, 11)
+    syscall(51)
+    code += b"\xF4"
+
+    if len(code) > offsets["hello"]:
+        raise RuntimeError(f"FORKER.ELF code overlaps data: {len(code)}")
+    segment = bytearray(offsets["results"] + 6 * 4)
+    segment[:len(code)] = code
+    segment[offsets["hello"]:offsets["hello"] + 11] = HELLO_NAME
+    segment[offsets["missing"]:offsets["missing"] + 11] = b"MISSING ELF"
+    segment[offsets["execa"]:offsets["execa"] + 11] = EXECA_NAME
+    segment[offsets["execb"]:offsets["execb"] + 11] = EXECB_NAME
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+
+def build_genrun_elf() -> bytes:
+    base = 0x00400000
+    offsets = {
+        "reuse": 0x700,
+        "forker": 0x710,
+        "fault": 0x720,
+        "missing": 0x730,
+        "results": 0x800,
+        "status": 0xA00,
+    }
+    results_va = base + offsets["results"]
+    status_va = base + offsets["status"]
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", results_va + index * 4))
+
+    def load_handle(index: int) -> None:
+        code.extend(b"\x8B\x1D" + struct.pack("<I", results_va + index * 4))
+
+    def spawn(name_key: str, result_index: int) -> None:
+        code.extend(mov_imm(0xBB, base + offsets[name_key]))
+        code.extend(mov_imm(0xB9, 11))
+        syscall(49); store(result_index)
+
+    syscall(2); store(0)
+    syscall(12); store(1)
+    syscall(52); store(2)  # outer synchronous parent has no task handle
+
+    # Six sequential generations all reuse slot zero.
+    for generation in range(6):
+        handle_index = 3 + generation
+        poll_index = 9 + generation
+        wait_index = 15 + generation
+        spawn("reuse", handle_index)
+        load_handle(handle_index); code.extend(mov_imm(0xB9, status_va)); syscall(53); store(poll_index)
+        if generation == 2:
+            load_handle(handle_index); code.extend(mov_imm(0xB9, 7)); syscall(55); store(21)
+        load_handle(handle_index); code.extend(mov_imm(0xB9, status_va)); syscall(54); store(wait_index)
+        if generation == 0:
+            load_handle(handle_index); code.extend(mov_imm(0xB9, status_va)); syscall(53); store(22)
+        if generation == 5:
+            load_handle(handle_index); code.extend(mov_imm(0xB9, status_va)); syscall(53); store(23)
+
+    spawn("missing", 24)
+    spawn("forker", 25)
+    load_handle(25); code.extend(mov_imm(0xB9, status_va)); syscall(54); store(26)
+    syscall(48); store(27)
+    load_handle(25); code.extend(mov_imm(0xB9, status_va)); syscall(53); store(28)
+
+    spawn("fault", 29)
+    load_handle(29); code.extend(mov_imm(0xB9, status_va)); syscall(54); store(30)
+    load_handle(29); code.extend(mov_imm(0xB9, 9)); syscall(55); store(31)
+    load_handle(29); code.extend(mov_imm(0xB9, status_va)); syscall(54); store(32)
+
+    spawn("reuse", 33)
+    load_handle(33); code.extend(mov_imm(0xB9, status_va)); syscall(54); store(34)
+    syscall(2); store(35)
+    syscall(12); store(36)
+    code += mov_imm(0xBB, 0x74)
+    syscall(3)
+    code += b"\xF4"
+
+    if len(code) > offsets["reuse"]:
+        raise RuntimeError(f"GENRUN.ELF code overlaps data: {len(code)}")
+    segment = bytearray(offsets["status"] + 48)
+    segment[:len(code)] = code
+    segment[offsets["reuse"]:offsets["reuse"] + 11] = REUSE_NAME
+    segment[offsets["forker"]:offsets["forker"] + 11] = FORKER_NAME
+    segment[offsets["fault"]:offsets["fault"] + 11] = FAULT_NAME
+    segment[offsets["missing"]:offsets["missing"] + 11] = b"MISSING ELF"
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+
 def build_paths_elf() -> bytes:
     base = 0x00400000
     offsets = {
@@ -842,6 +1043,11 @@ ASYNC_ELF = build_async_elf()
 WORKA_ELF = build_worka_elf()
 WORKB_ELF = build_workb_elf()
 LEAF_ELF = build_leaf_elf()
+GENRUN_ELF = build_genrun_elf()
+REUSE_ELF = build_reuse_elf()
+FORKER_ELF = build_forker_elf()
+EXECA_ELF = build_exec_elf(0xA1, 1)
+EXECB_ELF = build_exec_elf(0xB2, 5)
 PATHS_ELF = build_paths_elf()
 
 FILES = (
@@ -860,6 +1066,11 @@ FILES = (
     (WORKA_NAME, WORKA_ELF),
     (WORKB_NAME, WORKB_ELF),
     (LEAF_NAME, LEAF_ELF),
+    (GENRUN_NAME, GENRUN_ELF),
+    (REUSE_NAME, REUSE_ELF),
+    (FORKER_NAME, FORKER_ELF),
+    (EXECA_NAME, EXECA_ELF),
+    (EXECB_NAME, EXECB_ELF),
     (PATHS_NAME, PATHS_ELF),
 )
 
@@ -893,7 +1104,7 @@ def build_volume(hidden_sectors: int) -> bytes:
     struct.pack_into("<I", boot, 39, 0x5A49474F)
     boot[43:54] = b"ZIGOS FAT12"
     boot[54:62] = b"FAT12   "
-    message = b"ZigOs Capstone 13 FAT12"
+    message = b"ZigOs Capstone 14 FAT12"
     boot[62 : 62 + len(message)] = message
     boot[510:512] = b"\x55\xAA"
 
@@ -937,7 +1148,7 @@ def main() -> None:
         f"{name.decode('ascii').strip()}={len(data)}/{fnv1a32(data):08X}" for name, data in FILES
     )
     print(
-        f"Created Capstone 13 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
+        f"Created Capstone 14 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
         f"sectors={TOTAL} root={ROOT_START} data={DATA_START} {details} "
         f"notes-result={len(WRITER_RESULT)}/{fnv1a32(WRITER_RESULT):08X}"
     )
