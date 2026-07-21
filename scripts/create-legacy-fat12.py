@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create the deterministic ZigOs Capstone 9 FAT12 volume."""
+"""Create the deterministic ZigOs Capstone 10 FAT12 volume."""
 from __future__ import annotations
 
 import argparse
@@ -37,6 +37,7 @@ SPINA_NAME = b"SPINA   ELF"
 SPINB_NAME = b"SPINB   ELF"
 FAULT_NAME = b"FAULT   ELF"
 WRITER_NAME = b"WRITER  ELF"
+SERVICE_NAME = b"SERVICE ELF"
 NOTES_NAME = b"NOTES   TXT"
 
 BIG_PREFIX = b"ZigOs multi-cluster FAT12 read contract.\r\n"
@@ -218,12 +219,143 @@ def build_writer_elf() -> bytes:
     return build_elf(bytes(segment), memory_size=0x1000)
 
 
+def build_service_elf() -> bytes:
+    base = 0x00400000
+    old_name_offset = 0x350
+    new_name_offset = 0x360
+    payload_offset = 0x380
+    pipe_fds_offset = 0x3A0
+    stat_offset = 0x3B0
+    results_offset = 0x3D0
+    read_buffer_offset = 0x440
+    old_name_va = base + old_name_offset
+    new_name_va = base + new_name_offset
+    payload_va = base + payload_offset
+    pipe_fds_va = base + pipe_fds_offset
+    stat_va = base + stat_offset
+    results_va = base + results_offset
+    read_buffer_va = base + read_buffer_offset
+    payload = b"SERVICE-PIPE-OK!\r\n"
+
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store_result(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", results_va + index * 4))
+
+    code += mov_imm(0xBB, 0)
+    syscall(9); store_result(0)
+    code += mov_imm(0xBB, 0x00405000)
+    syscall(9); store_result(1)
+    code += b"\xC7\x05" + struct.pack("<I", 0x00403000) + struct.pack("<I", 0xDEADBEEF)
+
+    code += mov_imm(0xBB, 0x00405000)
+    code += mov_imm(0xB9, 0x1000)
+    code += mov_imm(0xBA, 3)
+    syscall(10); store_result(2)
+    code += b"\xC7\x05" + struct.pack("<I", 0x00405000) + struct.pack("<I", 0xCAFEBABE)
+    code += mov_imm(0xBB, 0x00405000)
+    code += mov_imm(0xB9, 0x1000)
+    syscall(11); store_result(3)
+
+    syscall(12); store_result(4)
+    syscall(13); store_result(5)
+    code += mov_imm(0xBB, 2)
+    syscall(14); store_result(6)
+    syscall(13); store_result(7)
+
+    code += mov_imm(0xBB, old_name_va)
+    code += mov_imm(0xB9, 11)
+    code += mov_imm(0xBA, OPEN_READ | OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE)
+    syscall(4)
+    code += b"\xA3" + struct.pack("<I", pipe_fds_va + 8)
+    code += b"\x89\xC3"
+    code += mov_imm(0xB9, payload_va)
+    code += mov_imm(0xBA, len(payload))
+    syscall(7); store_result(8)
+    code += mov_imm(0xB8, 6)
+    code += b"\x8B\x1D" + struct.pack("<I", pipe_fds_va + 8)
+    code += b"\xCD\x80"
+    code += mov_imm(0xBB, old_name_va)
+    code += mov_imm(0xB9, 11)
+    code += mov_imm(0xBA, stat_va)
+    syscall(15); store_result(9)
+    code += mov_imm(0xBB, old_name_va)
+    code += mov_imm(0xB9, 11)
+    code += mov_imm(0xBA, new_name_va)
+    code += mov_imm(0xBE, 11)
+    syscall(16); store_result(10)
+    code += mov_imm(0xBB, new_name_va)
+    code += mov_imm(0xB9, 11)
+    code += mov_imm(0xBA, stat_va)
+    syscall(15); store_result(11)
+    code += mov_imm(0xBB, new_name_va)
+    code += mov_imm(0xB9, 11)
+    syscall(17); store_result(12)
+
+    code += mov_imm(0xBB, pipe_fds_va)
+    syscall(18); store_result(13)
+    code += mov_imm(0xB8, 7)
+    code += b"\x8B\x1D" + struct.pack("<I", pipe_fds_va + 4)
+    code += mov_imm(0xB9, payload_va)
+    code += mov_imm(0xBA, len(payload))
+    code += b"\xCD\x80"; store_result(14)
+    code += mov_imm(0xB8, 19)
+    code += b"\x8B\x1D" + struct.pack("<I", pipe_fds_va)
+    code += b"\xCD\x80"; store_result(15)
+    code += mov_imm(0xB8, 20)
+    code += b"\x8B\x1D" + struct.pack("<I", pipe_fds_va + 4)
+    code += mov_imm(0xB9, 7)
+    code += b"\xCD\x80"; store_result(16)
+    code += mov_imm(0xB8, 5)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 15 * 4)
+    code += mov_imm(0xB9, read_buffer_va)
+    code += mov_imm(0xBA, len(payload))
+    code += b"\xCD\x80"; store_result(17)
+    for fd_address in (pipe_fds_va, pipe_fds_va + 4):
+        code += mov_imm(0xB8, 6)
+        code += b"\x8B\x1D" + struct.pack("<I", fd_address)
+        code += b"\xCD\x80"
+    code += mov_imm(0xB8, 6) + mov_imm(0xBB, 7) + b"\xCD\x80"
+    code += mov_imm(0xB8, 5)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 15 * 4)
+    code += mov_imm(0xB9, read_buffer_va)
+    code += mov_imm(0xBA, 1)
+    code += b"\xCD\x80"; store_result(18)
+    code += mov_imm(0xB8, 6)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 15 * 4)
+    code += b"\xCD\x80"
+
+    syscall(2); store_result(19)
+    code += b"\x89\xC3" + mov_imm(0xB9, 9)
+    syscall(21); store_result(20)
+    syscall(22); store_result(21)
+    code += mov_imm(0xBB, 0x00403000)
+    syscall(9); store_result(22)
+    code += mov_imm(0xBB, 0x66)
+    syscall(3)
+    code += b"\xF4"
+
+    if len(code) > old_name_offset:
+        raise RuntimeError(f"SERVICE.ELF code overlaps data: {len(code)}")
+    segment = bytearray(read_buffer_offset + len(payload))
+    segment[: len(code)] = code
+    segment[old_name_offset : old_name_offset + 11] = b"TEMP2   BIN"
+    segment[new_name_offset : new_name_offset + 11] = b"RENAMED BIN"
+    segment[payload_offset : payload_offset + len(payload)] = payload
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+
 INIT_ELF = build_init_elf()
 CAT_ELF = build_cat_elf()
 SPINA_ELF = build_spin_elf()
 SPINB_ELF = build_spin_elf()
 FAULT_ELF = build_fault_elf()
 WRITER_ELF = build_writer_elf()
+SERVICE_ELF = build_service_elf()
 
 FILES = (
     (HELLO_NAME, HELLO),
@@ -234,6 +366,7 @@ FILES = (
     (SPINB_NAME, SPINB_ELF),
     (FAULT_NAME, FAULT_ELF),
     (WRITER_NAME, WRITER_ELF),
+    (SERVICE_NAME, SERVICE_ELF),
 )
 
 
@@ -266,7 +399,7 @@ def build_volume(hidden_sectors: int) -> bytes:
     struct.pack_into("<I", boot, 39, 0x5A49474F)
     boot[43:54] = b"ZIGOS FAT12"
     boot[54:62] = b"FAT12   "
-    message = b"ZigOs Capstone 9 FAT12"
+    message = b"ZigOs Capstone 10 FAT12"
     boot[62 : 62 + len(message)] = message
     boot[510:512] = b"\x55\xAA"
 
@@ -310,7 +443,7 @@ def main() -> None:
         f"{name.decode('ascii').strip()}={len(data)}/{fnv1a32(data):08X}" for name, data in FILES
     )
     print(
-        f"Created Capstone 9 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
+        f"Created Capstone 10 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
         f"sectors={TOTAL} root={ROOT_START} data={DATA_START} {details} "
         f"notes-result={len(WRITER_RESULT)}/{fnv1a32(WRITER_RESULT):08X}"
     )

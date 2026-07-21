@@ -30,6 +30,11 @@ const vfs_open_write: u8 = 0x02;
 const vfs_open_create: u8 = 0x04;
 const vfs_open_truncate: u8 = 0x08;
 const vfs_open_append: u8 = 0x10;
+const user_heap_base: u32 = 0x0040_3000;
+const user_heap_limit: u32 = 0x0040_5000;
+const user_mmap_address: u32 = 0x0040_5000;
+const user_service_limit: u32 = 0x0040_6000;
+const service_payload = "SERVICE-PIPE-OK!\r\n";
 const frame_bitmap_bytes: usize = managed_frame_count / 8;
 
 const BootInfo = extern struct {
@@ -140,12 +145,31 @@ const VfsNode = struct {
     present: bool = false,
 };
 
+const DescriptorKind = enum(u8) {
+    free,
+    file,
+    pipe_read,
+    pipe_write,
+};
+
 const VfsDescriptor = struct {
     node_index: u8 = 0,
+    pipe_index: u8 = 0,
     flags: u8 = 0,
+    kind: DescriptorKind = .free,
     offset: u32 = 0,
     owner_pid: u32 = 0,
     open: bool = false,
+};
+
+const PipeObject = struct {
+    buffer: [256]u8 = @splat(0),
+    head: u16 = 0,
+    tail: u16 = 0,
+    count: u16 = 0,
+    readers: u8 = 0,
+    writers: u8 = 0,
+    active: bool = false,
 };
 
 const ProcessState = enum(u8) {
@@ -163,6 +187,7 @@ const ProcessRecord = struct {
     fault_vector: u32 = 0,
     fault_address: u32 = 0,
     waited: bool = false,
+    pending_signal: u8 = 0,
     state: ProcessState = .free,
 };
 
@@ -211,8 +236,10 @@ extern fn zigos_i686_invalidate_page(address: u32) callconv(.c) void;
 extern fn zigos_i686_cpuid_vendor(destination: [*]u8) callconv(.c) u32;
 extern fn zigos_i686_out8(port: u16, value: u8) callconv(.c) void;
 extern fn zigos_i686_out16(port: u16, value: u16) callconv(.c) void;
+extern fn zigos_i686_out32(port: u16, value: u32) callconv(.c) void;
 extern fn zigos_i686_in8(port: u16) callconv(.c) u8;
 extern fn zigos_i686_in16(port: u16) callconv(.c) u16;
+extern fn zigos_i686_in32(port: u16) callconv(.c) u32;
 extern fn zigos_i686_load_idt(descriptor: *const [6]u8) callconv(.c) void;
 extern fn zigos_i686_load_gdt(descriptor: *const [6]u8) callconv(.c) void;
 extern fn zigos_i686_load_tr(selector: u16) callconv(.c) void;
@@ -273,11 +300,13 @@ var init_elf_hash: u32 = 0;
 var init_elf_exit: u32 = 0;
 var cat_elf_size: u32 = 0;
 var writer_elf_size: u32 = 0;
+var service_elf_size: u32 = 0;
 var fault_elf_size: u32 = 0;
 var big_file_size: u32 = 0;
 var vfs_nodes: [16]VfsNode = @splat(.{});
 var vfs_node_count: u32 = 0;
 var vfs_descriptors: [8]VfsDescriptor = @splat(.{});
+var pipe_objects: [4]PipeObject = @splat(.{});
 const fat_cache_sector_count: usize = 9;
 var fat_cache: [fat_cache_sector_count * 512]u8 align(16) = @splat(0);
 var fat_cache_loaded = false;
@@ -322,6 +351,17 @@ var process_faulted = false;
 var process_fault_vector: u32 = 0;
 var process_fault_address: u32 = 0;
 var process_fault_error: u32 = 0;
+var user_service_frames: [3]u32 = @splat(0);
+var user_break_current: u32 = user_heap_base;
+var user_mmap_active = false;
+var service_verified = false;
+var service_syscalls: u32 = 0;
+var service_pipe_bytes: u32 = 0;
+var service_sleep_ticks: u32 = 0;
+var service_signal: u32 = 0;
+var pci_device_count: u32 = 0;
+var pci_host_id: u32 = 0;
+var pci_class_code: u8 = 0;
 var demand_page_active = false;
 var demand_page_virtual: u32 = 0;
 var demand_page_frame: u32 = 0;
@@ -388,6 +428,22 @@ var syscall_file_write_bytes: u32 = 0;
 var syscall_file_seeks: u32 = 0;
 var syscall_file_closes: u32 = 0;
 var syscall_exit_cleanup_closes: u32 = 0;
+var syscall_brk_count: u32 = 0;
+var syscall_mmap_count: u32 = 0;
+var syscall_munmap_count: u32 = 0;
+var syscall_getppid_count: u32 = 0;
+var syscall_uptime_count: u32 = 0;
+var syscall_sleep_count: u32 = 0;
+var syscall_stat_count: u32 = 0;
+var syscall_rename_count: u32 = 0;
+var syscall_unlink_count: u32 = 0;
+var syscall_pipe_count: u32 = 0;
+var syscall_pipe_read_count: u32 = 0;
+var syscall_pipe_write_count: u32 = 0;
+var syscall_dup_count: u32 = 0;
+var syscall_dup2_count: u32 = 0;
+var syscall_signal_send_count: u32 = 0;
+var syscall_signal_pending_count: u32 = 0;
 var syscall_rejected: u32 = 0;
 var syscall_exit_code: u32 = 0;
 var syscall_exited = false;
@@ -592,7 +648,7 @@ pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) 
                 frame.eax = 0xFFFF_FFF2;
                 return 0;
             };
-            const amount = vfsReadOwned(@truncate(frame.ebx), current_pid, destination) orelse {
+            const amount = descriptorReadOwned(@truncate(frame.ebx), current_pid, destination) orelse {
                 syscall_rejected +|= 1;
                 frame.eax = 0xFFFF_FFF7;
                 return 0;
@@ -623,7 +679,7 @@ pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) 
                 frame.eax = 0xFFFF_FFF2;
                 return 0;
             };
-            const amount = vfsWriteOwned(@truncate(frame.ebx), current_pid, source) orelse {
+            const amount = descriptorWriteOwned(@truncate(frame.ebx), current_pid, source) orelse {
                 syscall_rejected +|= 1;
                 frame.eax = 0xFFFF_FFF7;
                 return 0;
@@ -648,6 +704,176 @@ pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) 
             frame.eax = position;
             return 0;
         },
+        9 => {
+            const result = setUserBreak(frame.ebx) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFEA;
+                return 0;
+            };
+            syscall_brk_count +|= 1;
+            frame.eax = result;
+            return 0;
+        },
+        10 => {
+            const result = mapUserAnonymous(frame.ebx, frame.ecx, frame.edx) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFEA;
+                return 0;
+            };
+            syscall_mmap_count +|= 1;
+            frame.eax = result;
+            return 0;
+        },
+        11 => {
+            if (!unmapUserAnonymous(frame.ebx, frame.ecx)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFEA;
+                return 0;
+            }
+            syscall_munmap_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        12 => {
+            syscall_getppid_count +|= 1;
+            frame.eax = currentParentPid();
+            return 0;
+        },
+        13 => {
+            syscall_uptime_count +|= 1;
+            frame.eax = timer_ticks;
+            return 0;
+        },
+        14 => {
+            const elapsed = sleepUserTicks(frame.ebx) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFEA;
+                return 0;
+            };
+            syscall_sleep_count +|= 1;
+            frame.eax = elapsed;
+            return 0;
+        },
+        15 => {
+            const name = userReadableSlice(frame.ebx, frame.ecx, 11) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const destination = userWritableSlice(frame.edx, 16, 16) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (name.len != 11 or current_pid == 0 or !vfsStatToBuffer(name, destination)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            }
+            syscall_stat_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        16 => {
+            const old_name = userReadableSlice(frame.ebx, frame.ecx, 11) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const new_name = userReadableSlice(frame.edx, frame.esi, 11) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (old_name.len != 11 or new_name.len != 11 or current_pid == 0 or !vfsRenameNode(old_name, new_name)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            }
+            syscall_rename_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        17 => {
+            const name = userReadableSlice(frame.ebx, frame.ecx, 11) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (name.len != 11 or current_pid == 0 or !vfsUnlinkNode(name)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            }
+            syscall_unlink_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        18 => {
+            const output = userWritableSlice(frame.ebx, 8, 8) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (current_pid == 0 or !pipeCreateOwned(current_pid, output)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFE8;
+                return 0;
+            }
+            syscall_pipe_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        19 => {
+            if (frame.ebx > 0xFF or current_pid == 0) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF7;
+                return 0;
+            }
+            const duplicated = duplicateDescriptorOwned(@truncate(frame.ebx), current_pid, null) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFE8;
+                return 0;
+            };
+            syscall_dup_count +|= 1;
+            frame.eax = duplicated;
+            return 0;
+        },
+        20 => {
+            if (frame.ebx > 0xFF or frame.ecx > 0xFF or current_pid == 0) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF7;
+                return 0;
+            }
+            const duplicated = duplicateDescriptorOwned(@truncate(frame.ebx), current_pid, @truncate(frame.ecx)) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFE8;
+                return 0;
+            };
+            syscall_dup2_count +|= 1;
+            frame.eax = duplicated;
+            return 0;
+        },
+        21 => {
+            if (current_pid == 0 or frame.ecx == 0 or frame.ecx > 31 or !sendProcessSignal(frame.ebx, @truncate(frame.ecx))) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFD;
+                return 0;
+            }
+            syscall_signal_send_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        22 => {
+            if (current_pid == 0) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFD;
+                return 0;
+            }
+            syscall_signal_pending_count +|= 1;
+            frame.eax = takePendingSignal(current_pid);
+            return 0;
+        },
         else => {
             syscall_rejected +|= 1;
             frame.eax = 0xFFFF_FFDA;
@@ -656,18 +882,115 @@ pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) 
     }
 }
 
-fn userReadableSlice(start: u32, length: u32, maximum: u32) ?[]const u8 {
+fn userRangeMapped(start: u32, length: u32, writable: bool) bool {
     const end = start +% length;
-    if (length > maximum or end < start or start < 0x0040_0000 or end > 0x0040_1000) return null;
+    if (end < start or start < 0x0040_0000 or end > user_service_limit) return false;
+    if (length == 0) return true;
+    var page = start & 0xFFFF_F000;
+    const final_page = (end - 1) & 0xFFFF_F000;
+    while (true) {
+        const entry = queryPageEntry(kernel_page_directory, page) orelse return false;
+        if ((entry & 0x005) != 0x005 or (writable and (entry & 0x002) == 0)) return false;
+        if (page == final_page) break;
+        page +%= frame_size;
+    }
+    return true;
+}
+
+fn userReadableSlice(start: u32, length: u32, maximum: u32) ?[]const u8 {
+    if (length > maximum or !userRangeMapped(start, length, false)) return null;
     const bytes: [*]const u8 = @ptrFromInt(start);
     return bytes[0..@intCast(length)];
 }
 
 fn userWritableSlice(start: u32, length: u32, maximum: u32) ?[]u8 {
-    const end = start +% length;
-    if (length > maximum or end < start or start < 0x0040_0000 or end > 0x0040_1000) return null;
+    if (length > maximum or !userRangeMapped(start, length, true)) return null;
     const bytes: [*]u8 = @ptrFromInt(start);
     return bytes[0..@intCast(length)];
+}
+
+fn setUserBreak(requested: u32) ?u32 {
+    if (requested == 0) return user_break_current;
+    if (requested < user_heap_base or requested > user_heap_limit) return null;
+    const required_pages: usize = @intCast((requested - user_heap_base + frame_size - 1) / frame_size);
+    for (0..user_service_frames[0..2].len) |index| {
+        const virtual = user_heap_base + @as(u32, @intCast(index)) * frame_size;
+        const mapped = queryPageEntry(kernel_page_directory, virtual) != null;
+        if (index < required_pages and !mapped) {
+            zeroPhysicalFrame(user_service_frames[index]);
+            if (!mapPageExisting(kernel_page_directory, virtual, user_service_frames[index], 0x006)) return null;
+        } else if (index >= required_pages and mapped) {
+            _ = unmapPageExisting(kernel_page_directory, virtual) orelse return null;
+        }
+    }
+    user_break_current = requested;
+    return requested;
+}
+
+fn mapUserAnonymous(address: u32, length: u32, protection: u32) ?u32 {
+    if (address != user_mmap_address or length != frame_size or (protection & 0x03) != 0x03 or user_mmap_active) return null;
+    zeroPhysicalFrame(user_service_frames[2]);
+    if (!mapPageExisting(kernel_page_directory, address, user_service_frames[2], 0x006)) return null;
+    user_mmap_active = true;
+    return address;
+}
+
+fn unmapUserAnonymous(address: u32, length: u32) bool {
+    if (address != user_mmap_address or length != frame_size or !user_mmap_active) return false;
+    _ = unmapPageExisting(kernel_page_directory, address) orelse return false;
+    user_mmap_active = false;
+    return true;
+}
+
+fn resetUserServiceMappings() void {
+    for (0..2) |index| {
+        const virtual = user_heap_base + @as(u32, @intCast(index)) * frame_size;
+        _ = unmapPageExisting(kernel_page_directory, virtual);
+        if (user_service_frames[index] != 0) zeroPhysicalFrame(user_service_frames[index]);
+    }
+    _ = unmapPageExisting(kernel_page_directory, user_mmap_address);
+    if (user_service_frames[2] != 0) zeroPhysicalFrame(user_service_frames[2]);
+    user_break_current = user_heap_base;
+    user_mmap_active = false;
+}
+
+fn currentParentPid() u32 {
+    for (process_table) |record| if (record.state != .free and record.pid == current_pid) return record.parent_pid;
+    return 0;
+}
+
+fn sendProcessSignal(pid: u32, signal: u8) bool {
+    for (&process_table) |*record| {
+        if (record.state == .free or record.pid != pid) continue;
+        record.pending_signal = signal;
+        return true;
+    }
+    return false;
+}
+
+fn takePendingSignal(pid: u32) u32 {
+    for (&process_table) |*record| {
+        if (record.state == .free or record.pid != pid) continue;
+        const signal = record.pending_signal;
+        record.pending_signal = 0;
+        return signal;
+    }
+    return 0;
+}
+
+fn sleepUserTicks(requested: u32) ?u32 {
+    if (requested > 10) return null;
+    if (requested == 0) return 0;
+    const start = timer_ticks;
+    configurePic();
+    configurePit100Hz();
+    zigos_i686_out8(0x0021, 0xFE);
+    zigos_i686_enable_interrupts();
+    while (timer_ticks -% start < requested) zigos_i686_halt();
+    zigos_i686_disable_interrupts();
+    zigos_i686_out8(0x0021, 0xFF);
+    zigos_i686_out8(0x00A1, 0xFF);
+    return timer_ticks -% start;
 }
 
 fn verifyAndReportBootInfo() void {
@@ -991,6 +1314,7 @@ fn verifyHeap() void {
     writeAll(" frames-left 0x");
     writeHex32(free_frame_count);
     writeAll("\r\n");
+    verifyPci();
     verifyAta();
 }
 
@@ -1777,6 +2101,7 @@ fn schedulerFailure(reason: []const u8) noreturn {
 
 fn initializeVfsAndProcesses() void {
     vfs_descriptors = @splat(.{});
+    pipe_objects = @splat(.{});
     vfs_open_count = 0;
     vfs_read_count = 0;
     vfs_write_count = 0;
@@ -1798,15 +2123,18 @@ fn initializeVfsAndProcesses() void {
     _ = vfsFindNode("SPINB   ELF") orelse vfsFailure("SPINB.ELF node");
     const fault_index = vfsFindNode("FAULT   ELF") orelse vfsFailure("FAULT.ELF node");
     const writer_index = vfsFindNode("WRITER  ELF") orelse vfsFailure("WRITER.ELF node");
+    const service_index = vfsFindNode("SERVICE ELF") orelse vfsFailure("SERVICE.ELF node");
     notes_present_at_boot = vfsFindNode("NOTES   TXT") != null;
     cat_elf_size = vfs_nodes[cat_index].size;
     big_file_size = vfs_nodes[big_index].size;
     fault_elf_size = vfs_nodes[fault_index].size;
     writer_elf_size = vfs_nodes[writer_index].size;
-    const expected_nodes: u32 = if (notes_present_at_boot) 9 else 8;
+    service_elf_size = vfs_nodes[service_index].size;
+    const expected_nodes: u32 = if (notes_present_at_boot) 10 else 9;
     if (vfs_node_count != expected_nodes or vfs_nodes[hello_index].size != expected_fat_file.len or
         vfs_nodes[init_index].size != init_elf_size or cat_elf_size != 510 or
-        big_file_size != expected_big_bytes or fault_elf_size != 262 or writer_elf_size != 1488)
+        big_file_size != expected_big_bytes or fault_elf_size != 262 or writer_elf_size != 1488 or
+        service_elf_size != 1362)
     {
         vfsFailure("root inventory");
     }
@@ -1853,10 +2181,11 @@ fn initializeVfsAndProcesses() void {
     last_spawned_pid = 0;
     process_wait_count = 0;
     last_waited_pid = 0;
+    initializeProcessServices();
 
     writeAll("ZigOs i686 writable VFS ready: root-files 0x");
     writeHex32(vfs_node_count);
-    writeAll(" descriptors 0x00000008 BIG.TXT bytes 0x");
+    writeAll(" descriptors 0x00000008 pipes 0x00000004 BIG.TXT bytes 0x");
     writeHex32(big_file_size);
     writeAll(" hash 0x");
     writeHex32(big_hash);
@@ -2369,6 +2698,7 @@ fn vfsOpenOwned(name: []const u8, owner_pid: u32, flags: u8) ?u8 {
         descriptor.* = .{
             .node_index = @intCast(resolved),
             .flags = flags,
+            .kind = .file,
             .offset = if ((flags & vfs_open_append) != 0) vfs_nodes[resolved].size else 0,
             .owner_pid = owner_pid,
             .open = true,
@@ -2387,7 +2717,8 @@ fn vfsReadOwned(fd: u8, owner_pid: u32, destination: []u8) ?usize {
     const index: usize = fd;
     if (index >= vfs_descriptors.len) return null;
     var descriptor = &vfs_descriptors[index];
-    if (!descriptor.open or descriptor.owner_pid != owner_pid or (descriptor.flags & vfs_open_read) == 0) return null;
+    if (!descriptor.open or descriptor.owner_pid != owner_pid or descriptor.kind != .file or
+        (descriptor.flags & vfs_open_read) == 0) return null;
     const node_index: usize = descriptor.node_index;
     if (node_index >= vfs_nodes.len or !vfs_nodes[node_index].present) return null;
     const node = &vfs_nodes[node_index];
@@ -2418,7 +2749,8 @@ fn vfsWriteOwned(fd: u8, owner_pid: u32, source: []const u8) ?usize {
     const index: usize = fd;
     if (index >= vfs_descriptors.len) return null;
     var descriptor = &vfs_descriptors[index];
-    if (!descriptor.open or descriptor.owner_pid != owner_pid or (descriptor.flags & vfs_open_write) == 0) return null;
+    if (!descriptor.open or descriptor.owner_pid != owner_pid or descriptor.kind != .file or
+        (descriptor.flags & vfs_open_write) == 0) return null;
     const node_index: usize = descriptor.node_index;
     if (node_index >= vfs_nodes.len or !vfs_nodes[node_index].present) return null;
     var node = &vfs_nodes[node_index];
@@ -2451,7 +2783,7 @@ fn vfsSeekOwned(fd: u8, owner_pid: u32, offset: u32, whence: u32) ?u32 {
     const index: usize = fd;
     if (index >= vfs_descriptors.len) return null;
     var descriptor = &vfs_descriptors[index];
-    if (!descriptor.open or descriptor.owner_pid != owner_pid) return null;
+    if (!descriptor.open or descriptor.owner_pid != owner_pid or descriptor.kind != .file) return null;
     const node_index: usize = descriptor.node_index;
     if (node_index >= vfs_nodes.len or !vfs_nodes[node_index].present) return null;
     const base: u32 = switch (whence) {
@@ -2478,6 +2810,20 @@ fn vfsCloseOwned(fd: u8, owner_pid: u32) bool {
     {
         return false;
     }
+    const descriptor = vfs_descriptors[index];
+    if (descriptor.kind == .pipe_read or descriptor.kind == .pipe_write) {
+        const pipe_index: usize = descriptor.pipe_index;
+        if (pipe_index >= pipe_objects.len or !pipe_objects[pipe_index].active) return false;
+        var pipe = &pipe_objects[pipe_index];
+        if (descriptor.kind == .pipe_read) {
+            if (pipe.readers == 0) return false;
+            pipe.readers -= 1;
+        } else {
+            if (pipe.writers == 0) return false;
+            pipe.writers -= 1;
+        }
+        if (pipe.readers == 0 and pipe.writers == 0) pipe.* = .{};
+    }
     vfs_descriptors[index] = .{};
     vfs_close_count +|= 1;
     return true;
@@ -2485,10 +2831,9 @@ fn vfsCloseOwned(fd: u8, owner_pid: u32) bool {
 
 fn vfsCloseAllOwned(owner_pid: u32) u32 {
     var closed: u32 = 0;
-    for (&vfs_descriptors) |*descriptor| {
-        if (!descriptor.open or descriptor.owner_pid != owner_pid) continue;
-        descriptor.* = .{};
-        vfs_close_count +|= 1;
+    for (0..vfs_descriptors.len) |index| {
+        if (!vfs_descriptors[index].open or vfs_descriptors[index].owner_pid != owner_pid) continue;
+        if (!vfsCloseOwned(@intCast(index), owner_pid)) return closed;
         closed +|= 1;
     }
     return closed;
@@ -2500,6 +2845,129 @@ fn vfsOpenCountOwned(owner_pid: u32) u32 {
         if (descriptor.open and descriptor.owner_pid == owner_pid) count +|= 1;
     }
     return count;
+}
+
+fn vfsStatToBuffer(name: []const u8, destination: []u8) bool {
+    if (name.len != 11 or destination.len < 16) return false;
+    const node_index = vfsFindNode(name) orelse return false;
+    const node = &vfs_nodes[node_index];
+    writeLe32(destination, 0, node.size);
+    writeLe32(destination, 4, node.cluster);
+    writeLe32(destination, 8, node.attributes);
+    writeLe32(destination, 12, 1);
+    return true;
+}
+
+fn pipeCreateOwned(owner_pid: u32, output: []u8) bool {
+    if (owner_pid == 0 or output.len < 8) return false;
+    var pipe_slot: ?usize = null;
+    for (&pipe_objects, 0..) |*pipe, index| {
+        if (!pipe.active) {
+            pipe_slot = index;
+            break;
+        }
+    }
+    const resolved_pipe = pipe_slot orelse return false;
+    var descriptor_slots: [2]usize = undefined;
+    var found: usize = 0;
+    for (vfs_descriptors, 0..) |descriptor, index| {
+        if (!descriptor.open) {
+            descriptor_slots[found] = index;
+            found += 1;
+            if (found == descriptor_slots.len) break;
+        }
+    }
+    if (found != descriptor_slots.len) return false;
+    pipe_objects[resolved_pipe] = .{ .readers = 1, .writers = 1, .active = true };
+    vfs_descriptors[descriptor_slots[0]] = .{
+        .pipe_index = @intCast(resolved_pipe),
+        .kind = .pipe_read,
+        .owner_pid = owner_pid,
+        .open = true,
+    };
+    vfs_descriptors[descriptor_slots[1]] = .{
+        .pipe_index = @intCast(resolved_pipe),
+        .kind = .pipe_write,
+        .owner_pid = owner_pid,
+        .open = true,
+    };
+    writeLe32(output, 0, @intCast(descriptor_slots[0]));
+    writeLe32(output, 4, @intCast(descriptor_slots[1]));
+    return true;
+}
+
+fn descriptorReadOwned(fd: u8, owner_pid: u32, destination: []u8) ?usize {
+    const index: usize = fd;
+    if (index >= vfs_descriptors.len or !vfs_descriptors[index].open or
+        vfs_descriptors[index].owner_pid != owner_pid) return null;
+    if (vfs_descriptors[index].kind == .file) return vfsReadOwned(fd, owner_pid, destination);
+    if (vfs_descriptors[index].kind != .pipe_read) return null;
+    const pipe_index: usize = vfs_descriptors[index].pipe_index;
+    if (pipe_index >= pipe_objects.len or !pipe_objects[pipe_index].active) return null;
+    var pipe = &pipe_objects[pipe_index];
+    const amount = @min(destination.len, @as(usize, pipe.count));
+    for (0..amount) |offset| {
+        destination[offset] = pipe.buffer[pipe.head];
+        pipe.head = @intCast((@as(usize, pipe.head) + 1) % pipe.buffer.len);
+        pipe.count -= 1;
+    }
+    syscall_pipe_read_count +|= 1;
+    return amount;
+}
+
+fn descriptorWriteOwned(fd: u8, owner_pid: u32, source: []const u8) ?usize {
+    const index: usize = fd;
+    if (index >= vfs_descriptors.len or !vfs_descriptors[index].open or
+        vfs_descriptors[index].owner_pid != owner_pid) return null;
+    if (vfs_descriptors[index].kind == .file) return vfsWriteOwned(fd, owner_pid, source);
+    if (vfs_descriptors[index].kind != .pipe_write) return null;
+    const pipe_index: usize = vfs_descriptors[index].pipe_index;
+    if (pipe_index >= pipe_objects.len or !pipe_objects[pipe_index].active) return null;
+    var pipe = &pipe_objects[pipe_index];
+    if (pipe.readers == 0 or source.len > pipe.buffer.len - pipe.count) return null;
+    for (source) |byte| {
+        pipe.buffer[pipe.tail] = byte;
+        pipe.tail = @intCast((@as(usize, pipe.tail) + 1) % pipe.buffer.len);
+        pipe.count += 1;
+    }
+    syscall_pipe_write_count +|= 1;
+    return source.len;
+}
+
+fn duplicateDescriptorOwned(source_fd: u8, owner_pid: u32, requested_target: ?u8) ?u8 {
+    const source_index: usize = source_fd;
+    if (source_index >= vfs_descriptors.len or !vfs_descriptors[source_index].open or
+        vfs_descriptors[source_index].owner_pid != owner_pid) return null;
+    if (requested_target != null and requested_target.? == source_fd) return source_fd;
+    var target_index: usize = undefined;
+    if (requested_target) |target_fd| {
+        target_index = target_fd;
+        if (target_index >= vfs_descriptors.len) return null;
+        if (vfs_descriptors[target_index].open) {
+            if (vfs_descriptors[target_index].owner_pid != owner_pid or
+                !vfsCloseOwned(target_fd, owner_pid)) return null;
+        }
+    } else {
+        var target: ?usize = null;
+        for (vfs_descriptors, 0..) |descriptor, index| {
+            if (!descriptor.open) {
+                target = index;
+                break;
+            }
+        }
+        target_index = target orelse return null;
+    }
+    const source = vfs_descriptors[source_index];
+    vfs_descriptors[target_index] = source;
+    if (source.kind == .pipe_read or source.kind == .pipe_write) {
+        const pipe_index: usize = source.pipe_index;
+        if (pipe_index >= pipe_objects.len or !pipe_objects[pipe_index].active) {
+            vfs_descriptors[target_index] = .{};
+            return null;
+        }
+        if (source.kind == .pipe_read) pipe_objects[pipe_index].readers +|= 1 else pipe_objects[pipe_index].writers +|= 1;
+    }
+    return @intCast(target_index);
 }
 
 fn vfsReadWhole(name: []const u8, destination: []u8) ?usize {
@@ -2527,6 +2995,9 @@ fn resetNamespaceAccounting() void {
     fat_free_count = 0;
     fat_entry_write_count = 0;
     ata_write_count = 0;
+    vfs_rename_count = 0;
+    vfs_unlink_count = 0;
+    pipe_objects = @splat(.{});
 }
 
 fn verifyNamespaceLifecycle() void {
@@ -2558,7 +3029,7 @@ fn verifyNamespaceLifecycle() void {
     const first_cluster = vfs_nodes[temporary_index].cluster;
     const second_cluster = fatReadEntry(first_cluster) orelse vfsFailure("namespace second cluster");
     const chain_end = fatReadEntry(second_cluster) orelse vfsFailure("namespace chain end");
-    if (first_cluster != 14 or second_cluster != 15 or chain_end < 0x0FF8) vfsFailure("namespace deterministic chain");
+    if (first_cluster != 17 or second_cluster != 18 or chain_end < 0x0FF8) vfsFailure("namespace deterministic chain");
 
     if (!vfsRenameNode(temporary, moved) or vfsFindNode(temporary) != null) vfsFailure("namespace rename");
     const moved_index = vfsFindNode(moved) orelse vfsFailure("namespace moved node");
@@ -2581,7 +3052,7 @@ fn verifyNamespaceLifecycle() void {
     if (namespace_reused_cluster != first_cluster) vfsFailure("namespace first-fit reuse");
     if (!vfsUnlinkNode(reused) or fatReadEntry(namespace_reused_cluster) != 0) vfsFailure("namespace reuse unlink");
     reloadVfsRoot();
-    if (vfs_node_count != 8 or vfsFindNode(temporary) != null or vfsFindNode(moved) != null or vfsFindNode(reused) != null) {
+    if (vfs_node_count != 9 or vfsFindNode(temporary) != null or vfsFindNode(moved) != null or vfsFindNode(reused) != null) {
         vfsFailure("namespace root restoration");
     }
     if (vfs_rename_count != 1 or vfs_unlink_count != 2 or fat_allocation_count != 3 or fat_free_count != 3) {
@@ -2590,7 +3061,7 @@ fn verifyNamespaceLifecycle() void {
     namespace_verified = true;
     writeAll("ZigOs i686 FAT12 namespace verified: mode cleanup rename 0x00000001 unlink 0x00000002 bytes 0x00000258 hash 0x");
     writeHex32(namespace_hash);
-    writeAll(" chain 0x0000000E->0x0000000F reclaimed yes reused 0x");
+    writeAll(" chain 0x00000011->0x00000012 reclaimed yes reused 0x");
     writeHex32(namespace_reused_cluster);
     writeAll(" residue none root-restored yes\r\n");
     writeAll("ZigOs i686 Capstone 9 verified: new-goals 0x00000010 VM 0x00000008 threads 0x00000006 IRQ-queues 0x00000001 namespace 0x00000001 mode first\r\n");
@@ -2610,7 +3081,7 @@ fn verifyNotesFile() void {
     notes_cluster = vfs_nodes[node_index].cluster;
     const second = fatReadEntry(notes_cluster) orelse vfsFailure("NOTES first FAT entry");
     const end = fatReadEntry(second) orelse vfsFailure("NOTES second FAT entry");
-    if (notes_hash != expected_notes_hash or notes_cluster != 14 or second != 15 or end < 0x0FF8) {
+    if (notes_hash != expected_notes_hash or notes_cluster != 17 or second != 18 or end < 0x0FF8) {
         vfsFailure("NOTES.TXT deterministic chain");
     }
 }
@@ -2677,6 +3148,23 @@ fn statVfsFile(name: []const u8) bool {
     return true;
 }
 
+fn initializeProcessServices() void {
+    for (&user_service_frames) |*frame| {
+        if (frame.* == 0) frame.* = allocateFrame() orelse processFailure("service frame allocation");
+        zeroPhysicalFrame(frame.*);
+    }
+    resetUserServiceMappings();
+    pipe_objects = @splat(.{});
+    service_verified = false;
+    service_syscalls = 0;
+    service_pipe_bytes = 0;
+    service_sleep_ticks = 0;
+    service_signal = 0;
+    writeAll("ZigOs i686 process services ready: brk 0x00403000-0x00405000 mmap 0x00405000 pipes 0x00000004 signals pending PCI-devices 0x");
+    writeHex32(pci_device_count);
+    writeAll("\r\n");
+}
+
 const SpawnResult = struct {
     pid: u32,
     exit_code: u32,
@@ -2695,6 +3183,22 @@ fn resetSyscallAccounting() void {
     syscall_file_seeks = 0;
     syscall_file_closes = 0;
     syscall_exit_cleanup_closes = 0;
+    syscall_brk_count = 0;
+    syscall_mmap_count = 0;
+    syscall_munmap_count = 0;
+    syscall_getppid_count = 0;
+    syscall_uptime_count = 0;
+    syscall_sleep_count = 0;
+    syscall_stat_count = 0;
+    syscall_rename_count = 0;
+    syscall_unlink_count = 0;
+    syscall_pipe_count = 0;
+    syscall_pipe_read_count = 0;
+    syscall_pipe_write_count = 0;
+    syscall_dup_count = 0;
+    syscall_dup2_count = 0;
+    syscall_signal_send_count = 0;
+    syscall_signal_pending_count = 0;
     syscall_rejected = 0;
     syscall_exit_code = 0;
     syscall_exited = false;
@@ -2751,6 +3255,7 @@ fn spawnElfProcess(name: [11]u8, parent_pid: u32) ?SpawnResult {
     for (0..file_bytes) |offset| code[offset] = image[file_offset + offset];
     zigos_i686_invalidate_page(0x0040_0000);
     resetSyscallAccounting();
+    resetUserServiceMappings();
     current_pid = pid;
     zigos_i686_enter_user(0x0040_0000, 0x0040_2000);
     current_pid = 0;
@@ -2776,6 +3281,53 @@ fn spawnElfProcess(name: [11]u8, parent_pid: u32) ?SpawnResult {
         {
             processFailure("CAT contract");
         }
+    } else if (equalBytes(name[0..], "SERVICE ELF")) {
+        const results: [*]const volatile u32 = @ptrFromInt(user_code_frame + 0x3D0);
+        const stat: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x3B0);
+        const readback: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x440);
+        const heap_sentinel: *const volatile u32 = @ptrFromInt(user_service_frames[0]);
+        const mmap_sentinel: *const volatile u32 = @ptrFromInt(user_service_frames[2]);
+        var payload_match = true;
+        for (service_payload, 0..) |byte, index| {
+            if (readback[index] != byte) payload_match = false;
+        }
+        var pipes_closed = true;
+        for (pipe_objects) |pipe| {
+            if (pipe.active) pipes_closed = false;
+        }
+        if (syscall_exit_code != 0x66 or syscall_count != 30 or syscall_rejected != 0 or
+            syscall_brk_count != 3 or syscall_mmap_count != 1 or syscall_munmap_count != 1 or
+            syscall_getppid_count != 1 or syscall_uptime_count != 2 or syscall_sleep_count != 1 or
+            syscall_stat_count != 2 or syscall_rename_count != 1 or syscall_unlink_count != 1 or
+            syscall_pipe_count != 1 or syscall_pipe_write_count != 1 or syscall_pipe_read_count != 2 or
+            syscall_dup_count != 1 or syscall_dup2_count != 1 or syscall_signal_send_count != 1 or
+            syscall_signal_pending_count != 1 or syscall_file_opens != 1 or syscall_file_writes != 2 or
+            syscall_file_write_bytes != service_payload.len * 2 or syscall_file_reads != 2 or
+            syscall_file_read_bytes != service_payload.len or syscall_file_closes != 5 or
+            syscall_exit_cleanup_closes != 0 or results[0] != user_heap_base or results[1] != user_heap_limit or
+            results[2] != user_mmap_address or results[3] != 0 or results[4] != parent_pid or
+            results[6] < 2 or results[7] -% results[5] < 2 or results[8] != service_payload.len or
+            results[9] != 0 or results[10] != 0 or results[11] != 0 or results[12] != 0 or results[13] != 0 or
+            results[14] != service_payload.len or results[15] >= vfs_descriptors.len or results[16] != 7 or
+            results[17] != service_payload.len or results[18] != 0 or results[19] != pid or results[20] != 0 or
+            results[21] != 9 or results[22] != user_heap_base or readLe32(stat, 0) != service_payload.len or
+            readLe32(stat, 4) != 17 or readLe32(stat, 8) != 0x20 or readLe32(stat, 12) != 1 or
+            heap_sentinel.* != 0xDEAD_BEEF or mmap_sentinel.* != 0xCAFE_BABE or !payload_match or !pipes_closed or
+            queryPageEntry(kernel_page_directory, user_heap_base) != null or
+            queryPageEntry(kernel_page_directory, user_heap_base + frame_size) != null or
+            queryPageEntry(kernel_page_directory, user_mmap_address) != null or vfsOpenCountOwned(pid) != 0 or
+            vfsFindNode("TEMP2   BIN") != null or vfsFindNode("RENAMED BIN") != null or
+            fatReadEntry(17) != 0 or vfs_create_count != 1 or vfs_rename_count != 1 or vfs_unlink_count != 1 or
+            fat_allocation_count != 1 or fat_free_count != 1 or process_table[process_index].pending_signal != 0)
+        {
+            processFailure("SERVICE contract");
+        }
+        service_verified = true;
+        service_syscalls = syscall_count;
+        service_pipe_bytes = syscall_file_read_bytes;
+        service_sleep_ticks = results[6];
+        service_signal = results[21];
+        resetNamespaceAccounting();
     } else if (equalBytes(name[0..], "WRITER  ELF")) {
         if (syscall_exit_code != 0x55 or syscall_count != 9 or syscall_file_opens != 2 or
             syscall_file_writes != 2 or syscall_file_write_bytes != expected_notes_bytes or
@@ -2864,11 +3416,11 @@ fn processFailure(reason: []const u8) noreturn {
 }
 
 fn runShell() noreturn {
-    const expected_nodes: u32 = if (notes_present_at_boot) 9 else 8;
+    const expected_nodes: u32 = if (notes_present_at_boot) 10 else 9;
     if (!ata_ready or !fat_ready or !heap_ready or !frame_allocator_ready or vfs_node_count != expected_nodes) {
         shellFailure("subsystems unavailable");
     }
-    writeAll("ZigOs i686 Capstone 9 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode ");
+    writeAll("ZigOs i686 Capstone 10 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode ");
     writeAll(if (notes_present_at_boot) "persistence" else "first");
     writeAll("\r\n");
     var line: [64]u8 = undefined;
@@ -2907,6 +3459,8 @@ fn runShell() noreturn {
             writeHex32(vfs_node_count);
             writeAll(" BIG.TXT-bytes 0x");
             writeHex32(big_file_size);
+            writeAll(" SERVICE.ELF-bytes 0x");
+            writeHex32(service_elf_size);
             writeAll(" WRITER.ELF-bytes 0x");
             writeHex32(writer_elf_size);
             writeAll(" persistent-notes ");
@@ -2941,6 +3495,15 @@ fn runShell() noreturn {
                 writeAll(" syscalls 0x");
                 writeHex32(result.syscalls);
             }
+            if (equalBytes(name[0..], "SERVICE ELF")) {
+                writeAll(" services 0x00000012 pipe-bytes 0x");
+                writeHex32(service_pipe_bytes);
+                writeAll(" sleep-ticks 0x");
+                writeHex32(service_sleep_ticks);
+                writeAll(" signal 0x");
+                writeHex32(service_signal);
+                writeAll(" cleanup yes");
+            }
             if (equalBytes(name[0..], "WRITER  ELF")) {
                 writeAll(" wrote 0x");
                 writeHex32(syscall_file_write_bytes);
@@ -2948,7 +3511,7 @@ fn runShell() noreturn {
                 writeHex32(syscall_file_read_bytes);
                 writeAll(" notes-hash 0x");
                 writeHex32(notes_hash);
-                writeAll(" chain 0x0000000E->0x0000000F");
+                writeAll(" chain 0x00000011->0x00000012");
             }
             writeAll("\r\n");
         } else if (command.len > 5 and equalBytes(command[0..5], "wait ")) {
@@ -2973,19 +3536,20 @@ fn runShell() noreturn {
                 verifyNotesFile();
                 var fault_ok = false;
                 for (process_table) |record| {
-                    if (record.pid == 7 and record.state == .faulted and record.fault_vector == 14 and
+                    if (record.pid == 8 and record.state == .faulted and record.fault_vector == 14 and
                         record.fault_address == 0x0080_0000) fault_ok = true;
                 }
-                if (vfs_node_count != 9 or process_count != 7 or last_spawned_pid != 7 or
-                    process_wait_count != 1 or last_waited_pid != 6 or !fault_ok or shell_command_count != 13 or
+                if (vfs_node_count != 10 or process_count != 8 or last_spawned_pid != 8 or
+                    process_wait_count != 1 or last_waited_pid != 7 or !fault_ok or shell_command_count != 14 or
                     vfs_create_count != 1 or vfs_truncate_count != 1 or vfs_write_count != 2 or
                     vfs_seek_count != 1 or fat_allocation_count != 2 or notes_hash != expected_notes_hash or
-                    !namespace_verified or vm_fault_recovery_count != 1 or vm_fault_containment_count != 4 or
+                    !namespace_verified or !service_verified or service_syscalls != 30 or service_pipe_bytes != service_payload.len or
+                    vm_fault_recovery_count != 1 or vm_fault_containment_count != 4 or
                     advanced_scheduler_exit_count != 4 or keyboard_ring_dropped != 0 or !fat_cache_loaded)
                 {
                     shellFailure("first-session accounting");
                 }
-                writeAll("ZigOs i686 Capstone 9 first session verified: goals 0x0000001A new-goals 0x00000010 root-files 0x");
+                writeAll("ZigOs i686 Capstone 10 first session verified: goals 0x0000002C new-goals 0x00000012 root-files 0x");
                 writeHex32(vfs_node_count);
                 writeAll(" processes 0x");
                 writeHex32(process_count);
@@ -3003,12 +3567,12 @@ fn runShell() noreturn {
                 writeHex32(fat_allocation_count);
                 writeAll(" notes 0x000002D0 hash 0x");
                 writeHex32(notes_hash);
-                writeAll(" chain 0x0000000E->0x0000000F fault-contained yes descriptors-closed yes commands 0x");
+                writeAll(" chain 0x00000011->0x00000012 fault-contained yes descriptors-closed yes commands 0x");
                 writeHex32(shell_command_count);
                 writeAll("\r\n");
             } else {
                 verifyNotesFile();
-                if (vfs_node_count != 9 or process_count != 3 or shell_command_count != 3 or
+                if (vfs_node_count != 10 or process_count != 3 or shell_command_count != 3 or
                     vfs_create_count != 0 or vfs_truncate_count != 0 or vfs_write_count != 0 or
                     fat_allocation_count != 0 or notes_hash != expected_notes_hash or
                     !namespace_verified or vm_fault_recovery_count != 1 or vm_fault_containment_count != 3 or
@@ -3016,9 +3580,9 @@ fn runShell() noreturn {
                 {
                     shellFailure("persistence-session accounting");
                 }
-                writeAll("ZigOs i686 Capstone 9 persistence session verified: goals 0x0000001A new-goals 0x00000010 root-files 0x00000009 notes 0x000002D0 hash 0x");
+                writeAll("ZigOs i686 Capstone 10 persistence session verified: goals 0x0000002C inherited-goals 0x0000001A root-files 0x0000000A notes 0x000002D0 hash 0x");
                 writeHex32(notes_hash);
-                writeAll(" chain 0x0000000E->0x0000000F writes 0x00000000 allocations 0x00000000 descriptors-closed yes commands 0x");
+                writeAll(" chain 0x00000011->0x00000012 writes 0x00000000 allocations 0x00000000 descriptors-closed yes commands 0x");
                 writeHex32(shell_command_count);
                 writeAll("\r\n");
             }
@@ -3124,6 +3688,43 @@ fn fatFailure(reason: []const u8) noreturn {
     writeAll(reason);
     writeAll("\r\n");
     haltForever();
+}
+
+fn pciConfigRead32(bus: u8, device: u8, function: u8, offset: u8) u32 {
+    const address = 0x8000_0000 | (@as(u32, bus) << 16) | (@as(u32, device) << 11) |
+        (@as(u32, function) << 8) | (@as(u32, offset) & 0xFC);
+    zigos_i686_out32(0x0CF8, address);
+    return zigos_i686_in32(0x0CFC);
+}
+
+fn verifyPci() void {
+    pci_host_id = pciConfigRead32(0, 0, 0, 0);
+    if ((pci_host_id & 0xFFFF) != 0x8086 or (pci_host_id >> 16) != 0x1237) {
+        writeAll("ZigOs i686 PCI failed: host-id 0x");
+        writeHex32(pci_host_id);
+        writeAll("\r\n");
+        haltForever();
+    }
+    pci_device_count = 0;
+    for (0..32) |device| {
+        const identity = pciConfigRead32(0, @intCast(device), 0, 0);
+        if ((identity & 0xFFFF) != 0xFFFF) pci_device_count +|= 1;
+    }
+    const class_register = pciConfigRead32(0, 0, 0, 8);
+    pci_class_code = @truncate(class_register >> 24);
+    if (pci_device_count < 3 or pci_class_code != 0x06) {
+        writeAll("ZigOs i686 PCI failed: devices 0x");
+        writeHex32(pci_device_count);
+        writeAll(" class 0x");
+        writeHex8(pci_class_code);
+        writeAll("\r\n");
+        haltForever();
+    }
+    writeAll("ZigOs i686 PCI verified: mechanism-1 yes bus 0x00000000 devices 0x");
+    writeHex32(pci_device_count);
+    writeAll(" host 8086:1237 class 0x");
+    writeHex8(pci_class_code);
+    writeAll(" config-ports 0x0CF8/0x0CFC\r\n");
 }
 
 const ata_data_port: u16 = 0x01F0;

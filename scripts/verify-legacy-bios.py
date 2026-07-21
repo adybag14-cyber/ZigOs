@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the complete Capstone 9 BIOS, kernel, and deterministic FAT12 image."""
+"""Verify the complete Capstone 10 BIOS, kernel, and deterministic FAT12 image."""
 from __future__ import annotations
 
 import argparse
@@ -24,6 +24,7 @@ EXPECTED = {
     b"SPINB   ELF": (9, 264, 0xFD5D48A0, (9,)),
     b"FAULT   ELF": (10, 262, 0x3A59C4D6, (10,)),
     b"WRITER  ELF": (11, 1488, 0x267B866B, (11, 12, 13)),
+    b"SERVICE ELF": (14, 1362, 0x7C65C5CE, (14, 15, 16)),
 }
 
 
@@ -172,10 +173,10 @@ def main() -> None:
             fail(f"hash mismatch for {name!r}: {fnv1a32(data):08X}")
         if name.endswith(b"ELF"):
             verify_elf(name, data)
-    ninth = root_offset + len(EXPECTED) * 32
-    if volume[ninth] != 0:
+    notes_slot = root_offset + len(EXPECTED) * 32
+    if volume[notes_slot] != 0:
         fail("initial NOTES.TXT root slot is not free")
-    for cluster in (14, 15):
+    for cluster in (17, 18):
         if fat_entry(fat1, cluster) != 0:
             fail(f"runtime-reserved cluster {cluster} is not initially free")
 
@@ -188,6 +189,11 @@ def main() -> None:
     writer, _ = read_chain(volume, 11, 1488)
     if writer[0x280:0x28B] != b"NOTES   TXT":
         fail("WRITER.ELF embedded filename invalid")
+    service, _ = read_chain(volume, 14, 1362)
+    if service[0x450:0x45B] != b"TEMP2   BIN" or service[0x460:0x46B] != b"RENAMED BIN":
+        fail("SERVICE.ELF embedded namespace names invalid")
+    if service[0x480:0x492] != b"SERVICE-PIPE-OK!\r\n":
+        fail("SERVICE.ELF embedded payload invalid")
 
     kernel_sectors = math.ceil(len(kernel) / BPS)
     padded = kernel + bytes(kernel_sectors * BPS - len(kernel))
@@ -198,11 +204,11 @@ def main() -> None:
     if any(image[(9 + kernel_sectors) * BPS : FAT_LBA * BPS]):
         fail("protected kernel/FAT gap is not zero")
 
-    print(f"Verified Capstone 9 legacy BIOS/FAT12 image: {args.image}")
+    print(f"Verified Capstone 10 legacy BIOS/FAT12 image: {args.image}")
     print("  stage0: 512 bytes, signature 0x55AA, partition type 0x01")
     print("  stage1: 4096 bytes, LBA 1..8, address 0x00008000")
     print(f"  kernel: {len(kernel)} bytes, {kernel_sectors} sectors, LBA 9..{kernel_end_lba}, checksum16 0x{checksum:04X}")
-    print("  FAT12: 8 files, mirrored FATs, BIG.TXT 5->6->7, WRITER.ELF 11->12->13, clusters 14/15 free")
+    print("  FAT12: 9 files, mirrored FATs, BIG.TXT 5->6->7, WRITER.ELF 11->12->13, SERVICE.ELF 14->15->16, clusters 17/18 free")
     print(f"  image sha256: {hashlib.sha256(image).hexdigest().upper()}")
 
 

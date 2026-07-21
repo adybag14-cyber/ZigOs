@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the on-disk NOTES.TXT mutation produced by Capstone 9 userspace."""
+"""Verify the on-disk NOTES.TXT mutation produced by Capstone 10 userspace."""
 from __future__ import annotations
 
 import argparse
@@ -41,19 +41,19 @@ def main() -> None:
     fat2 = volume[(1 + SPF) * BPS : (1 + 2 * SPF) * BPS]
     if fat1 != fat2:
         raise SystemExit("persistent FAT12 copies differ")
-    root = ROOT_START * BPS + 8 * 32
+    root = ROOT_START * BPS + 9 * 32
     if volume[root : root + 11] != b"NOTES   TXT" or volume[root + 11] != 0x20:
         raise SystemExit("persistent NOTES.TXT root entry invalid")
     first = struct.unpack_from("<H", volume, root + 26)[0]
     size = struct.unpack_from("<I", volume, root + 28)[0]
-    if first != 14 or size != 720:
+    if first != 17 or size != 720:
         raise SystemExit(f"persistent NOTES.TXT geometry invalid: cluster={first} size={size}")
     second = entry(fat1, first)
     end = entry(fat1, second)
-    if second != 15 or end < 0xFF8:
+    if second != 18 or end < 0xFF8:
         raise SystemExit(f"persistent NOTES.TXT chain invalid: {first}->{second}->{end:#x}")
     content = bytearray()
-    for cluster in (14, 15):
+    for cluster in (17, 18):
         offset = (DATA_START + cluster - 2) * BPS
         content += volume[offset : offset + BPS]
     content = bytes(content[:size])
@@ -62,10 +62,10 @@ def main() -> None:
     digest = fnv1a32(content)
     if digest != EXPECTED_HASH:
         raise SystemExit(f"persistent NOTES.TXT hash invalid: {digest:08X}")
-    if entry(fat1, 16) != 0:
+    if entry(fat1, 19) != 0:
         raise SystemExit("unexpected allocation beyond deterministic two-cluster file")
-    print("Verified Capstone 9 persistent FAT12 mutation")
-    print("  NOTES.TXT: root slot 8, 720 bytes, clusters 14->15->EOC")
+    print("Verified Capstone 10 persistent FAT12 mutation")
+    print("  NOTES.TXT: root slot 9, 720 bytes, clusters 17->18->EOC")
     print(f"  FNV-1a32: 0x{digest:08X}")
     print(f"  image sha256: {hashlib.sha256(image).hexdigest().upper()}")
 

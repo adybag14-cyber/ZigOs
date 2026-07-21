@@ -14,8 +14,10 @@ global zigos_i686_invalidate_page
 global zigos_i686_cpuid_vendor
 global zigos_i686_out8
 global zigos_i686_out16
+global zigos_i686_out32
 global zigos_i686_in8
 global zigos_i686_in16
+global zigos_i686_in32
 global zigos_i686_load_idt
 global zigos_i686_load_gdt
 global zigos_i686_load_tr
@@ -143,6 +145,13 @@ zigos_i686_out16:
     out dx, ax
     ret
 
+; cdecl: void zigos_i686_out32(u16 port, u32 value)
+zigos_i686_out32:
+    mov edx, [esp + 4]
+    mov eax, [esp + 8]
+    out dx, eax
+    ret
+
 ; cdecl: u8 zigos_i686_in8(u16 port)
 zigos_i686_in8:
     mov edx, [esp + 4]
@@ -155,6 +164,12 @@ zigos_i686_in16:
     mov edx, [esp + 4]
     xor eax, eax
     in ax, dx
+    ret
+
+; cdecl: u32 zigos_i686_in32(u16 port)
+zigos_i686_in32:
+    mov edx, [esp + 4]
+    in eax, dx
     ret
 
 ; cdecl: void zigos_i686_load_idt(const void *descriptor)

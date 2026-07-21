@@ -1952,3 +1952,31 @@
 - Cumulative shell release accounting is 26 goals (`0x1A`), of which 16 (`0x10`) are new in Capstone 9.
 - Reference kernel: 51,212 bytes, 101 sectors at LBA9-109, checksum16 `0xC8CC`, SHA-256 `D1E2E983B8ECAB63B0B14A2A42BEA90574FD223EEF722E908E6CF810A93842A3`.
 - Initial image SHA-256: `5C2C6E0A6543BEC8FB1E74E0DD637AA356CC0B402BA62BC1D5086BEBA0A19602`; persisted image SHA-256: `4AB05D6DF42FE9452AAB917434312834CFD2B4E25F39A028B61C2E2850835728`.
+## 10.0 - Capstone process services, IPC, namespace syscalls, and PCI discovery
+
+- Goal 1: Generalized user-buffer validation across every mapped page, with present/user permission checks, writable-PTE enforcement, wrap rejection, and a bounded `0x00400000..0x00406000` service range.
+- Goal 2: Added syscall 9 to query and grow `brk` from `0x00403000` to `0x00405000` through two zeroed user mappings.
+- Goal 3: Added `brk` contraction with exact unmapping, TLB invalidation, and preserved physical sentinels for cleanup verification.
+- Goal 4: Added syscall 10 for one fixed anonymous read/write mapping at `0x00405000`.
+- Goal 5: Added syscall 11 for exact anonymous unmapping and malformed/double-unmap rejection.
+- Goal 6: Added syscall 12 for process-table-backed parent PID queries.
+- Goal 7: Added syscall 13 for monotonic PIT uptime reads.
+- Goal 8: Added syscall 14 for interrupt-driven sleeps using real 100 Hz IRQ0 delivery.
+- Goal 9: Added one bounded pending signal per process plus syscall 21 send and syscall 22 consume-and-clear semantics.
+- Goal 10: Added syscall 15 for a bounded 16-byte FAT12 stat record.
+- Goal 11: Added syscall 16 for validated userspace FAT 8.3 rename.
+- Goal 12: Added syscall 17 for validated userspace unlink, mirrored FAT reclamation, and root reload.
+- Goal 13: Added four fixed-capacity 256-byte pipes and syscall 18 for process-owned read/write descriptor creation.
+- Goal 14: Routed existing read/write calls through descriptor kinds, preserving ordered pipe transfer and close-driven EOF.
+- Goal 15: Added syscall 19 for first-free descriptor duplication with exact pipe reference accounting.
+- Goal 16: Added syscall 20 for transactional target-descriptor replacement (`dup2`).
+- Goal 17: Unified process-exit cleanup through normal file/pipe close semantics so all endpoint references are released exactly.
+- Goal 18: Added 32-bit port I/O and native PCI configuration mechanism #1 enumeration through `0xCF8/0xCFC`, validating QEMU host bridge `8086:1237`, class `0x06`, and four bus-0 function-0 devices.
+- Added `SERVICE.ELF`, a 1,362-byte ELF32 i386 program at clusters `14 -> 15 -> 16`, FNV-1a32 `7C65C5CE`, which executes 30 syscalls and exits `0x66`.
+- The service program proves `DEADBEEF` through its grown heap, `CAFEBABE` through its anonymous mapping, an exact 18-byte pipe payload, `dup`/`dup2`, two-tick sleep, signal 9 delivery, two stat calls, rename/unlink, EOF, and complete cleanup.
+- The initial FAT12 inventory expands to nine files; reversible and persistent runtime allocation moves to clusters `17 -> 18`.
+- `WRITER.ELF` still creates 720-byte `NOTES.TXT` with FNV-1a32 `C6181D2F`; offline inspection verifies root slot 9 and chain `17 -> 18 -> EOC`.
+- The second boot performs zero filesystem writes and allocations and leaves the persisted image SHA-256 unchanged.
+- Cumulative shell release accounting is 44 goals (`0x2C`), of which 18 (`0x12`) are new in Capstone 10.
+- Reference kernel: 58,144 bytes, 114 sectors at LBA9-122, checksum16 `0x3874`, SHA-256 `255441B1F42100DFF7E319D96659731F07270FA2155D8BFF24DA04ABD07B4340`.
+- Initial image SHA-256: `864CB1E1C3AD79A06A336F9CE76E4B59CD940F2D69298B4EB4CDF0527E189C42`; persisted image SHA-256: `A1514EF5B466DB72906C7253F88A520613578E2484211C7D0E3039CECF8CC44D`.
