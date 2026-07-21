@@ -166,6 +166,22 @@ const ProcessRecord = struct {
     state: ProcessState = .free,
 };
 
+const KernelThreadState = enum(u8) {
+    free,
+    ready,
+    running,
+    sleeping,
+    blocked,
+    exited,
+};
+
+const KernelThread = struct {
+    stack_pointer: u32 = 0,
+    wake_tick: u32 = 0,
+    quanta: u32 = 0,
+    state: KernelThreadState = .free,
+};
+
 const HeapBlock = extern struct {
     payload_bytes: u32,
     next_address: u32,
@@ -223,6 +239,11 @@ var last_exception_eip: u32 = 0;
 var keyboard_irq_count: u32 = 0;
 var keyboard_make_count: u32 = 0;
 var keyboard_last_make: u8 = 0;
+var keyboard_ring: [16]u8 = @splat(0);
+var keyboard_ring_head: u8 = 0;
+var keyboard_ring_tail: u8 = 0;
+var keyboard_ring_count: u8 = 0;
+var keyboard_ring_dropped: u32 = 0;
 var frame_bitmap: [frame_bitmap_bytes]u8 = @splat(0xFF);
 var free_frame_count: u32 = 0;
 var frame_allocator_ready = false;
@@ -273,6 +294,11 @@ var fat_allocation_count: u32 = 0;
 var fat_free_count: u32 = 0;
 var fat_entry_write_count: u32 = 0;
 var ata_write_count: u32 = 0;
+var vfs_rename_count: u32 = 0;
+var vfs_unlink_count: u32 = 0;
+var namespace_verified = false;
+var namespace_reused_cluster: u16 = 0;
+var namespace_hash: u32 = 0;
 var fat_sectors_per_fat: u16 = 0;
 var fat_root_sectors: u16 = 0;
 var fat_cluster_count: u16 = 0;
@@ -289,6 +315,12 @@ var last_waited_pid: u32 = 0;
 var process_faulted = false;
 var process_fault_vector: u32 = 0;
 var process_fault_address: u32 = 0;
+var process_fault_error: u32 = 0;
+var demand_page_active = false;
+var demand_page_virtual: u32 = 0;
+var demand_page_frame: u32 = 0;
+var demand_page_faults: u32 = 0;
+var demand_page_error: u32 = 0;
 var shell_command_count: u32 = 0;
 var shell_unknown_count: u32 = 0;
 var scheduler_stacks: [3]u32 = @splat(0);
@@ -300,6 +332,19 @@ var scheduler_active = false;
 var scheduler_done = false;
 var scheduler_stack_a: [4096]u8 align(16) = @splat(0);
 var scheduler_stack_b: [4096]u8 align(16) = @splat(0);
+var advanced_threads: [5]KernelThread = @splat(.{});
+var advanced_thread_stacks: [4][4096]u8 align(16) = @splat(@splat(0));
+var advanced_thread_iterations: [4]u32 = @splat(0);
+var advanced_scheduler_current: u32 = 0;
+var advanced_scheduler_switches: u32 = 0;
+var advanced_scheduler_dispatches: u32 = 0;
+var advanced_scheduler_sleep_count: u32 = 0;
+var advanced_scheduler_block_count: u32 = 0;
+var advanced_scheduler_signal_count: u32 = 0;
+var advanced_scheduler_wake_count: u32 = 0;
+var advanced_scheduler_exit_count: u32 = 0;
+var advanced_scheduler_active = false;
+var advanced_scheduler_done = false;
 var user_scheduler_stacks: [3]u32 = @splat(0);
 var user_scheduler_cr3: [3]u32 = @splat(0);
 var user_scheduler_kernel_tops: [3]u32 = @splat(0);
@@ -312,6 +357,12 @@ var user_scheduler_kernel_stack_a: [4096]u8 align(16) = @splat(0);
 var user_scheduler_kernel_stack_b: [4096]u8 align(16) = @splat(0);
 var kernel_page_directory: u32 = 0;
 var kernel_identity_tables: [4]u32 = @splat(0);
+var kernel_alias_table: u32 = 0;
+var vm_map_count: u32 = 0;
+var vm_remap_count: u32 = 0;
+var vm_unmap_count: u32 = 0;
+var vm_fault_recovery_count: u32 = 0;
+var vm_fault_containment_count: u32 = 0;
 var kernel_gdt: [6][8]u8 align(8) = @splat(@splat(0));
 var kernel_tss: Tss align(16) = .{};
 var user_transition_stack: [4096]u8 align(16) = @splat(0);
@@ -383,10 +434,25 @@ pub export fn zigos_i686_exception_dispatch(frame: *const TrapFrame) callconv(.c
         last_exception_eip = frame.eip;
         return 0;
     }
+    if (frame.vector == 14 and (frame.cs & 3) == 3 and demand_page_active) {
+        const fault_address = zigos_i686_read_cr2();
+        if (fault_address == demand_page_virtual and (frame.error_code & 0x01) == 0) {
+            if (!mapPageExisting(kernel_page_directory, demand_page_virtual, demand_page_frame, 0x006)) {
+                pagingFailure("demand-zero map");
+            }
+            demand_page_active = false;
+            demand_page_faults +|= 1;
+            demand_page_error = frame.error_code;
+            vm_fault_recovery_count +|= 1;
+            return 0;
+        }
+    }
     if ((frame.cs & 3) == 3 and current_pid != 0) {
         process_faulted = true;
         process_fault_vector = frame.vector;
         process_fault_address = if (frame.vector == 14) zigos_i686_read_cr2() else frame.eip;
+        process_fault_error = frame.error_code;
+        vm_fault_containment_count +|= 1;
         syscall_exit_cleanup_closes = vfsCloseAllOwned(current_pid);
         return 1;
     }
@@ -402,6 +468,7 @@ pub export fn zigos_i686_exception_dispatch(frame: *const TrapFrame) callconv(.c
 
 pub export fn zigos_i686_timer_interrupt(current_esp: u32) callconv(.c) u32 {
     timer_ticks +|= 1;
+    if (advanced_scheduler_active) return scheduleAdvancedThreads(current_esp);
     if (user_scheduler_active) {
         user_scheduler_stacks[user_scheduler_current] = current_esp;
         if (user_scheduler_current != 0) user_scheduler_quanta[user_scheduler_current] +|= 1;
@@ -444,6 +511,13 @@ pub export fn zigos_i686_timer_interrupt(current_esp: u32) callconv(.c) u32 {
 pub export fn zigos_i686_keyboard_interrupt() callconv(.c) void {
     const scancode = zigos_i686_in8(0x0060);
     keyboard_irq_count +|= 1;
+    if (keyboard_ring_count < keyboard_ring.len) {
+        keyboard_ring[keyboard_ring_tail] = scancode;
+        keyboard_ring_tail = @intCast((@as(usize, keyboard_ring_tail) + 1) % keyboard_ring.len);
+        keyboard_ring_count += 1;
+    } else {
+        keyboard_ring_dropped +|= 1;
+    }
     if ((scancode & 0x80) == 0) {
         keyboard_make_count +|= 1;
         keyboard_last_make = scancode;
@@ -722,9 +796,50 @@ fn verifyInterruptTimer() u32 {
     writeAll(" irq-count-nonzero ");
     writeAll(if (keyboard_irq_count != 0) "yes" else "no");
     writeAll("\r\n");
+    verifyKeyboardRing();
     return ticks.*;
 }
 
+fn keyboardRingPop() ?u8 {
+    if (keyboard_ring_count == 0) return null;
+    const value = keyboard_ring[keyboard_ring_head];
+    keyboard_ring_head = @intCast((@as(usize, keyboard_ring_head) + 1) % keyboard_ring.len);
+    keyboard_ring_count -= 1;
+    return value;
+}
+
+fn verifyKeyboardRing() void {
+    keyboard_ring = @splat(0);
+    keyboard_ring_head = 0;
+    keyboard_ring_tail = 0;
+    keyboard_ring_count = 0;
+    keyboard_ring_dropped = 0;
+    const start_irqs = keyboard_irq_count;
+    const sequence = [_]u8{ 0x1E, 0x9E, 0x30, 0xB0 };
+    zigos_i686_out8(0x0021, 0xFD);
+    for (sequence, 0..) |scancode, index| {
+        injectPs2Scancode(scancode);
+        const target = start_irqs + @as(u32, @intCast(index)) + 1;
+        const interrupts: *volatile u32 = &keyboard_irq_count;
+        zigos_i686_enable_interrupts();
+        while (interrupts.* < target) zigos_i686_halt();
+        zigos_i686_disable_interrupts();
+    }
+    zigos_i686_out8(0x0021, 0xFF);
+    for (sequence) |expected| {
+        if (keyboardRingPop() != expected) keyboardFailure("ring ordering");
+    }
+    if (keyboard_ring_count != 0 or keyboard_ring_dropped != 0) keyboardFailure("ring accounting");
+    writeAll("ZigOs i686 keyboard ring verified: capacity 0x00000010 events 0x00000004 order 0x1E/0x9E/0x30/0xB0 dropped 0x00000000\r\n");
+}
+
+fn keyboardFailure(reason: []const u8) noreturn {
+    zigos_i686_disable_interrupts();
+    writeAll("ZigOs i686 keyboard ring failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
+}
 fn verifyFrameAllocator() void {
     initializeFrameAllocator();
     const free_before = free_frame_count;
@@ -772,6 +887,7 @@ fn verifyPaging() void {
     for (&identity_tables) |*table| table.* = allocateFrame() orelse frameAllocatorFailure("identity table");
     kernel_identity_tables = identity_tables;
     const alias_table = allocateFrame() orelse frameAllocatorFailure("alias table");
+    kernel_alias_table = alias_table;
     const test_frame = allocateFrame() orelse frameAllocatorFailure("paging test frame");
 
     zeroPhysicalFrame(page_directory);
@@ -1138,7 +1254,169 @@ fn verifySyscallAbi() void {
     writeAll(" exit-code 0x");
     writeHex32(syscall_exit_code);
     writeAll(" kernel-pointer-denied yes\r\n");
-    verifyElfLoader();
+    verifyAdvancedVirtualMemory();
+}
+
+fn pageEntryPointer(directory_address: u32, virtual_address: u32) ?*volatile u32 {
+    const directory: [*]volatile u32 = @ptrFromInt(directory_address);
+    const directory_index: usize = @intCast(virtual_address >> 22);
+    const directory_entry = directory[directory_index];
+    if ((directory_entry & 0x001) == 0) return null;
+    const table: [*]volatile u32 = @ptrFromInt(directory_entry & 0xFFFF_F000);
+    const table_index: usize = @intCast((virtual_address >> 12) & 0x03FF);
+    return &table[table_index];
+}
+
+fn queryPageEntry(directory_address: u32, virtual_address: u32) ?u32 {
+    const entry = pageEntryPointer(directory_address, virtual_address) orelse return null;
+    if ((entry.* & 0x001) == 0) return null;
+    return entry.*;
+}
+
+fn mapPageExisting(directory_address: u32, virtual_address: u32, physical_address: u32, flags: u32) bool {
+    if ((virtual_address & 0x0FFF) != 0 or (physical_address & 0x0FFF) != 0) return false;
+    const entry = pageEntryPointer(directory_address, virtual_address) orelse return false;
+    if ((entry.* & 0x001) == 0) {
+        vm_map_count +|= 1;
+    } else {
+        vm_remap_count +|= 1;
+    }
+    entry.* = physical_address | (flags & 0x0FFE) | 0x001;
+    zigos_i686_invalidate_page(virtual_address);
+    return true;
+}
+
+fn unmapPageExisting(directory_address: u32, virtual_address: u32) ?u32 {
+    const entry = pageEntryPointer(directory_address, virtual_address) orelse return null;
+    if ((entry.* & 0x001) == 0) return null;
+    const previous = entry.*;
+    entry.* = 0;
+    zigos_i686_invalidate_page(virtual_address);
+    vm_unmap_count +|= 1;
+    return previous;
+}
+
+fn resetUserFaultProbe() void {
+    process_faulted = false;
+    process_fault_vector = 0;
+    process_fault_address = 0;
+    process_fault_error = 0;
+    user_return_eax = 0;
+    user_return_cs = 0;
+    user_return_ss = 0;
+    user_return_esp = 0;
+}
+
+fn installUserProbe(program: []const u8) void {
+    const code: [*]volatile u8 = @ptrFromInt(user_code_frame);
+    for (0..512) |index| code[index] = 0;
+    for (program, 0..) |byte, index| code[index] = byte;
+    zigos_i686_invalidate_page(0x0040_0000);
+}
+
+fn runUserFaultProbe(pid: u32) void {
+    current_pid = pid;
+    zigos_i686_enter_user(0x0040_0000, 0x0040_2000);
+    current_pid = 0;
+}
+
+fn verifyAdvancedVirtualMemory() void {
+    const saved_pid = current_pid;
+    const free_before = free_frame_count;
+    vm_map_count = 0;
+    vm_remap_count = 0;
+    vm_unmap_count = 0;
+    vm_fault_recovery_count = 0;
+    vm_fault_containment_count = 0;
+    const first_frame = allocateFrame() orelse pagingFailure("advanced first frame");
+    const second_frame = allocateFrame() orelse pagingFailure("advanced second frame");
+    const zero_frame = allocateFrame() orelse pagingFailure("demand-zero frame");
+    zeroPhysicalFrame(first_frame);
+    zeroPhysicalFrame(second_frame);
+    zeroPhysicalFrame(zero_frame);
+
+    const alias_virtual: u32 = 0xC000_1000;
+    const first_value: *volatile u32 = @ptrFromInt(first_frame);
+    const second_value: *volatile u32 = @ptrFromInt(second_frame);
+    first_value.* = 0x1111_AAAA;
+    second_value.* = 0x2222_BBBB;
+    if (!mapPageExisting(kernel_page_directory, alias_virtual, first_frame, 0x002)) pagingFailure("advanced map");
+    const alias: *volatile u32 = @ptrFromInt(alias_virtual);
+    if (alias.* != first_value.*) pagingFailure("advanced mapped read");
+    const first_entry = queryPageEntry(kernel_page_directory, alias_virtual) orelse pagingFailure("advanced query");
+    if ((first_entry & 0xFFFF_F000) != first_frame or (first_entry & 0x007) != 0x003) pagingFailure("advanced flags");
+    if (!mapPageExisting(kernel_page_directory, alias_virtual, second_frame, 0x002)) pagingFailure("advanced remap");
+    if (alias.* != second_value.* or first_value.* != 0x1111_AAAA) pagingFailure("advanced TLB coherence");
+    const removed = unmapPageExisting(kernel_page_directory, alias_virtual) orelse pagingFailure("advanced unmap");
+    if ((removed & 0xFFFF_F000) != second_frame or queryPageEntry(kernel_page_directory, alias_virtual) != null) {
+        pagingFailure("advanced unmap query");
+    }
+
+    const user_table: [*]volatile u32 = @ptrFromInt(kernel_identity_tables[1]);
+    _ = unmapPageExisting(kernel_page_directory, 0x0040_3000);
+    demand_page_active = true;
+    demand_page_virtual = 0x0040_3000;
+    demand_page_frame = zero_frame;
+    demand_page_faults = 0;
+    demand_page_error = 0;
+    resetUserFaultProbe();
+    const demand_program = [_]u8{
+        0xC7, 0x05, 0x00, 0x30, 0x40, 0x00, 0xED, 0xFE, 0x0D, 0xD0,
+        0xA1, 0x00, 0x30, 0x40, 0x00, 0xCD, 0x30, 0xF4,
+    };
+    installUserProbe(&demand_program);
+    runUserFaultProbe(0xF0);
+    const demand_value: *const volatile u32 = @ptrFromInt(zero_frame);
+    if (process_faulted or demand_page_active or demand_page_faults != 1 or demand_page_error != 0x06 or
+        demand_value.* != 0xD00D_FEED or user_return_eax != 0xD00D_FEED)
+    {
+        pagingFailure("demand-zero recovery");
+    }
+    _ = unmapPageExisting(kernel_page_directory, 0x0040_3000) orelse pagingFailure("demand unmap");
+
+    const read_only_program = [_]u8{
+        0xC7, 0x05, 0x00, 0x02, 0x40, 0x00, 0x44, 0x33, 0x22, 0x11,
+        0xCD, 0x30, 0xF4,
+    };
+    installUserProbe(&read_only_program);
+    user_table[0] = user_code_frame | 0x005;
+    zigos_i686_invalidate_page(0x0040_0000);
+    resetUserFaultProbe();
+    runUserFaultProbe(0xF1);
+    if (!process_faulted or process_fault_vector != 14 or process_fault_address != 0x0040_0200 or process_fault_error != 0x07) {
+        pagingFailure("read-only containment");
+    }
+    user_table[0] = user_code_frame | 0x007;
+    zigos_i686_invalidate_page(0x0040_0000);
+
+    const supervisor_program = [_]u8{ 0xA1, 0x00, 0x00, 0x01, 0x00, 0xCD, 0x30, 0xF4 };
+    installUserProbe(&supervisor_program);
+    resetUserFaultProbe();
+    runUserFaultProbe(0xF2);
+    if (!process_faulted or process_fault_vector != 14 or process_fault_address != 0x0001_0000 or process_fault_error != 0x05) {
+        pagingFailure("supervisor isolation");
+    }
+
+    user_table[4] = 0;
+    zigos_i686_invalidate_page(0x0040_4000);
+    const guard_program = [_]u8{
+        0xC7, 0x05, 0x00, 0x40, 0x40, 0x00, 0x78, 0x56, 0x34, 0x12,
+        0xCD, 0x30, 0xF4,
+    };
+    installUserProbe(&guard_program);
+    resetUserFaultProbe();
+    runUserFaultProbe(0xF3);
+    if (!process_faulted or process_fault_vector != 14 or process_fault_address != 0x0040_4000 or process_fault_error != 0x06) {
+        pagingFailure("guard-page containment");
+    }
+    resetUserFaultProbe();
+    current_pid = saved_pid;
+
+    if (!freeFrame(zero_frame) or !freeFrame(second_frame) or !freeFrame(first_frame) or free_frame_count != free_before) {
+        pagingFailure("advanced frame restoration");
+    }
+    writeAll("ZigOs i686 advanced VM verified: map 0x00000001 remap 0x00000001 unmap 0x00000002 flags-RW yes TLB-coherent yes demand-zero 0x00000001 error 0x00000006 readonly-error 0x00000007 supervisor-error 0x00000005 guard-error 0x00000006 frames-restored yes\r\n");
+    verifyAdvancedThreading();
 }
 
 fn verifyElfLoader() void {
@@ -1327,6 +1605,165 @@ fn schedulerTaskB() callconv(.c) noreturn {
     }
 }
 
+fn advancedThreadLoop(comptime index: usize) noreturn {
+    const iterations: *volatile u32 = &advanced_thread_iterations[index];
+    while (true) {
+        iterations.* +|= 1;
+        zigos_i686_halt();
+    }
+}
+
+fn advancedThreadA() callconv(.c) noreturn {
+    advancedThreadLoop(0);
+}
+
+fn advancedThreadB() callconv(.c) noreturn {
+    advancedThreadLoop(1);
+}
+
+fn advancedThreadC() callconv(.c) noreturn {
+    advancedThreadLoop(2);
+}
+
+fn advancedThreadD() callconv(.c) noreturn {
+    advancedThreadLoop(3);
+}
+
+fn allAdvancedThreadsExited() bool {
+    for (advanced_threads[1..]) |thread| if (thread.state != .exited) return false;
+    return true;
+}
+
+fn scheduleAdvancedThreads(current_esp: u32) u32 {
+    const current: usize = @intCast(advanced_scheduler_current);
+    advanced_threads[current].stack_pointer = current_esp;
+    if (current != 0) {
+        var thread = &advanced_threads[current];
+        thread.quanta +|= 1;
+        if (current == 1 and thread.quanta == 1) {
+            thread.state = .sleeping;
+            thread.wake_tick = timer_ticks +% 4;
+            advanced_scheduler_sleep_count +|= 1;
+        } else if (current == 2 and thread.quanta == 1) {
+            thread.state = .blocked;
+            advanced_scheduler_block_count +|= 1;
+        } else if (thread.quanta >= 3) {
+            thread.state = .exited;
+            advanced_scheduler_exit_count +|= 1;
+        } else {
+            thread.state = .ready;
+        }
+        if (current == 3 and thread.quanta == 2 and advanced_threads[2].state == .blocked) {
+            advanced_threads[2].state = .ready;
+            advanced_scheduler_signal_count +|= 1;
+            advanced_scheduler_wake_count +|= 1;
+        }
+    }
+
+    for (advanced_threads[1..]) |*thread| {
+        if (thread.state == .sleeping and timer_ticks >= thread.wake_tick) {
+            thread.state = .ready;
+            advanced_scheduler_wake_count +|= 1;
+        }
+    }
+    if (allAdvancedThreadsExited()) {
+        advanced_scheduler_active = false;
+        advanced_scheduler_done = true;
+        advanced_scheduler_current = 0;
+        advanced_scheduler_switches +|= 1;
+        return advanced_threads[0].stack_pointer;
+    }
+
+    var distance: u32 = 1;
+    while (distance <= 4) : (distance += 1) {
+        const candidate: usize = @intCast(((advanced_scheduler_current + distance - 1) % 4) + 1);
+        if (advanced_threads[candidate].state != .ready) continue;
+        advanced_threads[candidate].state = .running;
+        advanced_scheduler_current = @intCast(candidate);
+        advanced_scheduler_switches +|= 1;
+        advanced_scheduler_dispatches +|= 1;
+        return advanced_threads[candidate].stack_pointer;
+    }
+    advancedSchedulerFailure("no runnable thread");
+}
+
+fn prepareAdvancedThread(index: usize, entry: u32) void {
+    const stack_index = index - 1;
+    const canary: u8 = 0xA0 + @as(u8, @intCast(index));
+    @memset(advanced_thread_stacks[stack_index][0..32], canary);
+    advanced_threads[index] = .{
+        .stack_pointer = initializeKernelTask(&advanced_thread_stacks[stack_index], entry),
+        .state = .ready,
+    };
+}
+
+fn verifyAdvancedThreading() void {
+    advanced_threads = @splat(.{});
+    advanced_thread_iterations = @splat(0);
+    advanced_scheduler_current = 0;
+    advanced_scheduler_switches = 0;
+    advanced_scheduler_dispatches = 0;
+    advanced_scheduler_sleep_count = 0;
+    advanced_scheduler_block_count = 0;
+    advanced_scheduler_signal_count = 0;
+    advanced_scheduler_wake_count = 0;
+    advanced_scheduler_exit_count = 0;
+    advanced_scheduler_done = false;
+    advanced_threads[0].state = .running;
+    prepareAdvancedThread(1, @intCast(@intFromPtr(&advancedThreadA)));
+    prepareAdvancedThread(2, @intCast(@intFromPtr(&advancedThreadB)));
+    prepareAdvancedThread(3, @intCast(@intFromPtr(&advancedThreadC)));
+    prepareAdvancedThread(4, @intCast(@intFromPtr(&advancedThreadD)));
+    const start_ticks = timer_ticks;
+
+    configurePic();
+    configurePit100Hz();
+    zigos_i686_out8(0x0021, 0xFE);
+    advanced_scheduler_active = true;
+    const done: *volatile bool = &advanced_scheduler_done;
+    zigos_i686_enable_interrupts();
+    while (!done.*) zigos_i686_halt();
+    zigos_i686_disable_interrupts();
+    zigos_i686_out8(0x0021, 0xFF);
+    zigos_i686_out8(0x00A1, 0xFF);
+
+    const elapsed = timer_ticks -% start_ticks;
+    var failure_mask: u32 = 0;
+    if (advanced_scheduler_active or !advanced_scheduler_done or advanced_scheduler_current != 0) failure_mask |= 1 << 0;
+    if (elapsed != 13 or advanced_scheduler_switches != 13 or advanced_scheduler_dispatches != 12) failure_mask |= 1 << 1;
+    if (advanced_scheduler_sleep_count != 1 or advanced_scheduler_block_count != 1 or
+        advanced_scheduler_signal_count != 1 or advanced_scheduler_wake_count != 2)
+    {
+        failure_mask |= 1 << 2;
+    }
+    if (advanced_scheduler_exit_count != 4) failure_mask |= 1 << 3;
+    for (advanced_threads[1..], 1..) |thread, index| {
+        if (thread.state != .exited or thread.quanta != 3) failure_mask |= 1 << 4;
+        if (advanced_thread_iterations[index - 1] == 0) failure_mask |= 1 << 5;
+        const expected: u8 = 0xA0 + @as(u8, @intCast(index));
+        for (advanced_thread_stacks[index - 1][0..32]) |byte| {
+            if (byte != expected) failure_mask |= 1 << 6;
+        }
+    }
+    if (failure_mask != 0) {
+        writeAll("ZigOs i686 advanced scheduler failed: predicate-mask 0x");
+        writeHex32(failure_mask);
+        writeAll("\r\n");
+        haltForever();
+    }
+    writeAll("ZigOs i686 advanced scheduler verified: threads 0x00000004 quanta 0x00000003/0x00000003/0x00000003/0x00000003 switches 0x0000000D dispatches 0x0000000C sleep 0x00000001 block 0x00000001 signal 0x00000001 wakes 0x00000002 exits 0x00000004 stack-canaries yes bootstrap-restored yes\r\n");
+    verifyElfLoader();
+}
+
+fn advancedSchedulerFailure(reason: []const u8) noreturn {
+    advanced_scheduler_active = false;
+    zigos_i686_disable_interrupts();
+    writeAll("ZigOs i686 advanced scheduler failed: ");
+    writeAll(reason);
+    writeAll("\r\n");
+    haltForever();
+}
+
 fn schedulerFailure(reason: []const u8) noreturn {
     scheduler_active = false;
     zigos_i686_disable_interrupts();
@@ -1397,6 +1834,7 @@ fn initializeVfsAndProcesses() void {
         vfsFailure("descriptor owner isolation");
     }
 
+    verifyNamespaceLifecycle();
     if (notes_present_at_boot) verifyNotesFile();
 
     process_table = @splat(.{});
@@ -1831,6 +2269,37 @@ fn vfsCreateNode(name: []const u8) ?usize {
     return null;
 }
 
+fn vfsRenameNode(old_name: []const u8, new_name: []const u8) bool {
+    if (old_name.len != 11 or new_name.len != 11 or vfsFindNode(new_name) != null) return false;
+    const node_index = vfsFindNode(old_name) orelse return false;
+    var node = &vfs_nodes[node_index];
+    if (!ataReadSector(node.root_lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
+    const offset: usize = node.root_offset;
+    for (0..11) |index| vfs_sector_buffer[offset + index] = new_name[index];
+    if (!ataWriteSector(node.root_lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
+    for (0..11) |index| node.name[index] = new_name[index];
+    vfs_rename_count +|= 1;
+    return true;
+}
+
+fn vfsUnlinkNode(name: []const u8) bool {
+    const node_index = vfsFindNode(name) orelse return false;
+    for (vfs_descriptors) |descriptor| {
+        if (descriptor.open and descriptor.node_index == node_index) return false;
+    }
+    const node = vfs_nodes[node_index];
+    if (!ataReadSector(node.root_lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
+    const offset: usize = node.root_offset;
+    vfs_sector_buffer[offset] = 0xE5;
+    writeLe16(&vfs_sector_buffer, offset + 26, 0);
+    writeLe32(&vfs_sector_buffer, offset + 28, 0);
+    if (!ataWriteSector(node.root_lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
+    if (!fatFreeChain(node.cluster)) return false;
+    vfs_unlink_count +|= 1;
+    reloadVfsRoot();
+    return true;
+}
+
 fn vfsUpdateNode(node_index: usize) bool {
     if (node_index >= vfs_nodes.len or !vfs_nodes[node_index].present) return false;
     const node = &vfs_nodes[node_index];
@@ -2040,6 +2509,89 @@ fn vfsReadWhole(name: []const u8, destination: []u8) ?usize {
     };
     if (!vfsClose(fd) or amount != vfs_nodes[node_index].size) return null;
     return amount;
+}
+
+fn resetNamespaceAccounting() void {
+    vfs_descriptors = @splat(.{});
+    vfs_open_count = 0;
+    vfs_read_count = 0;
+    vfs_write_count = 0;
+    vfs_seek_count = 0;
+    vfs_close_count = 0;
+    vfs_create_count = 0;
+    vfs_truncate_count = 0;
+    fat_allocation_count = 0;
+    fat_free_count = 0;
+    fat_entry_write_count = 0;
+    ata_write_count = 0;
+}
+
+fn verifyNamespaceLifecycle() void {
+    namespace_verified = false;
+    namespace_reused_cluster = 0;
+    namespace_hash = 0;
+    vfs_rename_count = 0;
+    vfs_unlink_count = 0;
+    const temporary = "TEMP    BIN";
+    const moved = "MOVED   BIN";
+    const reused = "REUSE   BIN";
+    if (vfsFindNode(temporary) != null or vfsFindNode(moved) != null or vfsFindNode(reused) != null) {
+        vfsFailure("namespace residue");
+    }
+    if (notes_present_at_boot) {
+        namespace_verified = true;
+        writeAll("ZigOs i686 FAT12 namespace verified: mode readonly rename 0x00000000 unlink 0x00000000 residue none disk-writes 0x00000000 preserved yes\r\n");
+        writeAll("ZigOs i686 Capstone 9 verified: new-goals 0x00000010 VM 0x00000008 threads 0x00000006 IRQ-queues 0x00000001 namespace 0x00000001 mode persistence\r\n");
+        return;
+    }
+
+    var payload: [600]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @intCast((index * 37 + 11) & 0xFF);
+    const expected_hash = fnv1a32(payload[0..]);
+    const fd = vfsOpenOwned(temporary, 0, vfs_open_read | vfs_open_write | vfs_open_create) orelse
+        vfsFailure("namespace create");
+    if (vfsWriteOwned(fd, 0, payload[0..]) != payload.len or !vfsClose(fd)) vfsFailure("namespace write");
+    const temporary_index = vfsFindNode(temporary) orelse vfsFailure("namespace temporary node");
+    const first_cluster = vfs_nodes[temporary_index].cluster;
+    const second_cluster = fatReadEntry(first_cluster) orelse vfsFailure("namespace second cluster");
+    const chain_end = fatReadEntry(second_cluster) orelse vfsFailure("namespace chain end");
+    if (first_cluster != 14 or second_cluster != 15 or chain_end < 0x0FF8) vfsFailure("namespace deterministic chain");
+
+    if (!vfsRenameNode(temporary, moved) or vfsFindNode(temporary) != null) vfsFailure("namespace rename");
+    const moved_index = vfsFindNode(moved) orelse vfsFailure("namespace moved node");
+    if (vfs_nodes[moved_index].cluster != first_cluster or vfs_nodes[moved_index].size != payload.len) {
+        vfsFailure("namespace rename metadata");
+    }
+    const moved_amount = vfsReadWhole(moved, vfs_large_buffer[0..]) orelse vfsFailure("namespace moved read");
+    namespace_hash = fnv1a32(vfs_large_buffer[0..moved_amount]);
+    if (moved_amount != payload.len or namespace_hash != expected_hash) vfsFailure("namespace content");
+
+    if (!vfsUnlinkNode(moved) or vfsFindNode(moved) != null) vfsFailure("namespace unlink");
+    if (fatReadEntry(first_cluster) != 0 or fatReadEntry(second_cluster) != 0) vfsFailure("namespace reclaim");
+
+    const reuse_fd = vfsOpenOwned(reused, 0, vfs_open_read | vfs_open_write | vfs_open_create) orelse
+        vfsFailure("namespace reuse create");
+    const reuse_byte = [_]u8{0x5A};
+    if (vfsWriteOwned(reuse_fd, 0, &reuse_byte) != 1 or !vfsClose(reuse_fd)) vfsFailure("namespace reuse write");
+    const reuse_index = vfsFindNode(reused) orelse vfsFailure("namespace reuse node");
+    namespace_reused_cluster = vfs_nodes[reuse_index].cluster;
+    if (namespace_reused_cluster != first_cluster) vfsFailure("namespace first-fit reuse");
+    if (!vfsUnlinkNode(reused) or fatReadEntry(namespace_reused_cluster) != 0) vfsFailure("namespace reuse unlink");
+    reloadVfsRoot();
+    if (vfs_node_count != 8 or vfsFindNode(temporary) != null or vfsFindNode(moved) != null or vfsFindNode(reused) != null) {
+        vfsFailure("namespace root restoration");
+    }
+    if (vfs_rename_count != 1 or vfs_unlink_count != 2 or fat_allocation_count != 3 or fat_free_count != 3) {
+        vfsFailure("namespace accounting");
+    }
+    namespace_verified = true;
+    writeAll("ZigOs i686 FAT12 namespace verified: mode cleanup rename 0x00000001 unlink 0x00000002 bytes 0x00000258 hash 0x");
+    writeHex32(namespace_hash);
+    writeAll(" chain 0x0000000E->0x0000000F reclaimed yes reused 0x");
+    writeHex32(namespace_reused_cluster);
+    writeAll(" residue none root-restored yes\r\n");
+    writeAll("ZigOs i686 Capstone 9 verified: new-goals 0x00000010 VM 0x00000008 threads 0x00000006 IRQ-queues 0x00000001 namespace 0x00000001 mode first\r\n");
+    resetNamespaceAccounting();
 }
 
 fn verifyNotesFile() void {
@@ -2313,7 +2865,7 @@ fn runShell() noreturn {
     if (!ata_ready or !fat_ready or !heap_ready or !frame_allocator_ready or vfs_node_count != expected_nodes) {
         shellFailure("subsystems unavailable");
     }
-    writeAll("ZigOs i686 Capstone 8 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode ");
+    writeAll("ZigOs i686 Capstone 9 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode ");
     writeAll(if (notes_present_at_boot) "persistence" else "first");
     writeAll("\r\n");
     var line: [64]u8 = undefined;
@@ -2424,11 +2976,13 @@ fn runShell() noreturn {
                 if (vfs_node_count != 9 or process_count != 7 or last_spawned_pid != 7 or
                     process_wait_count != 1 or last_waited_pid != 6 or !fault_ok or shell_command_count != 13 or
                     vfs_create_count != 1 or vfs_truncate_count != 1 or vfs_write_count != 2 or
-                    vfs_seek_count != 1 or fat_allocation_count != 2 or notes_hash != expected_notes_hash)
+                    vfs_seek_count != 1 or fat_allocation_count != 2 or notes_hash != expected_notes_hash or
+                    !namespace_verified or vm_fault_recovery_count != 1 or vm_fault_containment_count != 4 or
+                    advanced_scheduler_exit_count != 4 or keyboard_ring_dropped != 0)
                 {
                     shellFailure("first-session accounting");
                 }
-                writeAll("ZigOs i686 Capstone 8 first session verified: goals 0x0000000A root-files 0x");
+                writeAll("ZigOs i686 Capstone 9 first session verified: goals 0x0000001A new-goals 0x00000010 root-files 0x");
                 writeHex32(vfs_node_count);
                 writeAll(" processes 0x");
                 writeHex32(process_count);
@@ -2453,11 +3007,13 @@ fn runShell() noreturn {
                 verifyNotesFile();
                 if (vfs_node_count != 9 or process_count != 3 or shell_command_count != 3 or
                     vfs_create_count != 0 or vfs_truncate_count != 0 or vfs_write_count != 0 or
-                    fat_allocation_count != 0 or notes_hash != expected_notes_hash)
+                    fat_allocation_count != 0 or notes_hash != expected_notes_hash or
+                    !namespace_verified or vm_fault_recovery_count != 1 or vm_fault_containment_count != 3 or
+                    advanced_scheduler_exit_count != 4 or keyboard_ring_dropped != 0)
                 {
                     shellFailure("persistence-session accounting");
                 }
-                writeAll("ZigOs i686 Capstone 8 persistence session verified: root-files 0x00000009 notes 0x000002D0 hash 0x");
+                writeAll("ZigOs i686 Capstone 9 persistence session verified: goals 0x0000001A new-goals 0x00000010 root-files 0x00000009 notes 0x000002D0 hash 0x");
                 writeHex32(notes_hash);
                 writeAll(" chain 0x0000000E->0x0000000F writes 0x00000000 allocations 0x00000000 descriptors-closed yes commands 0x");
                 writeHex32(shell_command_count);

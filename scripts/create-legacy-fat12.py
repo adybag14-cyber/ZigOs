@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create the deterministic ZigOs Capstone 8 FAT12 volume."""
+"""Create the deterministic ZigOs Capstone 9 FAT12 volume."""
 from __future__ import annotations
 
 import argparse
@@ -266,7 +266,7 @@ def build_volume(hidden_sectors: int) -> bytes:
     struct.pack_into("<I", boot, 39, 0x5A49474F)
     boot[43:54] = b"ZIGOS FAT12"
     boot[54:62] = b"FAT12   "
-    message = b"ZigOs Capstone 8 FAT12"
+    message = b"ZigOs Capstone 9 FAT12"
     boot[62 : 62 + len(message)] = message
     boot[510:512] = b"\x55\xAA"
 
@@ -310,7 +310,7 @@ def main() -> None:
         f"{name.decode('ascii').strip()}={len(data)}/{fnv1a32(data):08X}" for name, data in FILES
     )
     print(
-        f"Created Capstone 8 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
+        f"Created Capstone 9 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
         f"sectors={TOTAL} root={ROOT_START} data={DATA_START} {details} "
         f"notes-result={len(WRITER_RESULT)}/{fnv1a32(WRITER_RESULT):08X}"
     )

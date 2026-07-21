@@ -1923,3 +1923,29 @@
 - A second QEMU boot uses the same image without rebuilding, reads/hashes/stats `NOTES.TXT`, performs zero writes and allocations, and must leave the complete disk SHA-256 unchanged.
 - Reference kernel: 41,948 bytes, 82 sectors at LBA9-90, checksum16 `0xEE2D`, SHA-256 `E626432D97EA8A42CAB9BAC1B519A0AEBEBC2096F7B3E3E3D8BD62720A2F5AD2`.
 - Initial image SHA-256: `0A478B127FF14E3D3D13F83D3A3E2E321F018C89AB91131B4844CE058E5184E2`; persisted image SHA-256: `47080279C1A72F053E3715CCE2B499CEE8D4FCB31807F300C7B8773934F6E6C2`.
+
+## 9.0 - Capstone virtual memory, threading, IRQ queues, and FAT namespace
+
+- Goal 1: Added reusable aligned page mapping into existing i686 page tables with explicit PTE flags.
+- Goal 2: Added present-page queries that expose physical frame and permission state.
+- Goal 3: Added page unmapping with removed-entry return and mandatory `invlpg`.
+- Goal 4: Proved live remapping is TLB-coherent while the old physical frame remains unchanged.
+- Goal 5: Added recoverable CPL3 demand-zero faults at `0x00403000`, including instruction retry and error-code validation.
+- Goal 6: Contained a user write to a read-only page with page-fault error `0x07`.
+- Goal 7: Contained user access to the supervisor-only kernel image with error `0x05`.
+- Goal 8: Contained a write to an unmapped guard page with error `0x06`.
+- Goal 9: Added kernel-thread control blocks with ready/running/sleeping/blocked/exited states.
+- Goal 10: Added four-worker PIT preemption with exactly three quanta per worker.
+- Goal 11: Added timer-deadline sleeping without keeping the sleeping thread runnable.
+- Goal 12: Added wait-queue blocking as a distinct non-runnable state.
+- Goal 13: Added event-driven signaling that wakes a blocked worker.
+- Goal 14: Added clean worker retirement, bootstrap-frame restoration, and four independent stack-canary checks.
+- Goal 15: Added a bounded 16-byte IRQ1 scan-code ring and verified ordered make/break delivery with zero drops.
+- Goal 16: Added FAT12 rename and unlink/reclaim/reuse verification through a reversible `TEMP.BIN -> MOVED.BIN -> REUSE.BIN` lifecycle.
+- The advanced VM gate reports one map, one remap, two unmaps, one recovered demand fault, three contained validation faults, and exact frame restoration.
+- The advanced scheduler reports four threads, three quanta each, 13 switches, 12 dispatches, one sleep, one block, one signal, two wakes, and four exits.
+- The namespace lifecycle writes 600 deterministic bytes with hash `A6F87E15`, reclaims clusters `14 -> 15`, reuses cluster 14, removes every temporary root entry, and resets accounting before the existing writer workload.
+- The second boot verifies the temporary namespace is absent and performs zero namespace writes.
+- Cumulative shell release accounting is 26 goals (`0x1A`), of which 16 (`0x10`) are new in Capstone 9.
+- Reference kernel: 50,796 bytes, 100 sectors at LBA9-108, checksum16 `0xE293`, SHA-256 `2C13B7D69D567B69F138910B272BDA177546CEBA76E478AFE33297C1B7B8950C`.
+- Initial image SHA-256: `675922B4FD7AA867D8888FA7F89D1490FDDEA3657607083DFFE9C4B2A40A4878`; persisted image SHA-256: `D9CA6F828F4E7415A3E3EA6622751819974E4B71E13D1B0836342AB4EA1A11D5`.

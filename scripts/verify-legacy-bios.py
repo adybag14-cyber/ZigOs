@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the complete Capstone 8 BIOS, kernel, and deterministic FAT12 image."""
+"""Verify the complete Capstone 9 BIOS, kernel, and deterministic FAT12 image."""
 from __future__ import annotations
 
 import argparse
@@ -198,7 +198,7 @@ def main() -> None:
     if any(image[(9 + kernel_sectors) * BPS : FAT_LBA * BPS]):
         fail("protected kernel/FAT gap is not zero")
 
-    print(f"Verified Capstone 8 legacy BIOS/FAT12 image: {args.image}")
+    print(f"Verified Capstone 9 legacy BIOS/FAT12 image: {args.image}")
     print("  stage0: 512 bytes, signature 0x55AA, partition type 0x01")
     print("  stage1: 4096 bytes, LBA 1..8, address 0x00008000")
     print(f"  kernel: {len(kernel)} bytes, {kernel_sectors} sectors, LBA 9..{kernel_end_lba}, checksum16 0x{checksum:04X}")

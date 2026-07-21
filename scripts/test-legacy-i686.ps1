@@ -115,8 +115,8 @@ function Invoke-LegacySession {
     [PSCustomObject]@{ Serial = $serial; Debug = $debug; SerialPath = $serialPath; DebugPath = $debugPath }
 }
 
-$firstReady = 'ZigOs i686 Capstone 8 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode first'
-$firstFinal = 'ZigOs i686 Capstone 8 first session verified: goals 0x0000000A root-files 0x00000009 processes 0x00000007 waits 0x00000001 creates 0x00000001 truncates 0x00000001 writes 0x00000002 seeks 0x00000001 allocations 0x00000002 notes 0x000002D0 hash 0xC6181D2F chain 0x0000000E->0x0000000F fault-contained yes descriptors-closed yes commands 0x0000000D'
+$firstReady = 'ZigOs i686 Capstone 9 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode first'
+$firstFinal = 'ZigOs i686 Capstone 9 first session verified: goals 0x0000001A new-goals 0x00000010 root-files 0x00000009 processes 0x00000007 waits 0x00000001 creates 0x00000001 truncates 0x00000001 writes 0x00000002 seeks 0x00000001 allocations 0x00000002 notes 0x000002D0 hash 0xC6181D2F chain 0x0000000E->0x0000000F fault-contained yes descriptors-closed yes commands 0x0000000D'
 $firstPlan = @(
     @{ Command = 'help'; Expect = 'commands: help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit' },
     @{ Command = 'ls'; Expect = 'WRITER.ELF 0x000005D0 cluster 0x0000000B' },
@@ -140,8 +140,8 @@ $python = Get-Command python -ErrorAction Stop | Select-Object -ExpandProperty S
 if ($LASTEXITCODE -ne 0) { throw 'Offline persistent FAT12 verification failed after first boot.' }
 $mutatedHash = (Get-FileHash $image -Algorithm SHA256).Hash
 
-$secondReady = 'ZigOs i686 Capstone 8 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode persistence'
-$secondFinal = 'ZigOs i686 Capstone 8 persistence session verified: root-files 0x00000009 notes 0x000002D0 hash 0xC6181D2F chain 0x0000000E->0x0000000F writes 0x00000000 allocations 0x00000000 descriptors-closed yes commands 0x00000003'
+$secondReady = 'ZigOs i686 Capstone 9 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode persistence'
+$secondFinal = 'ZigOs i686 Capstone 9 persistence session verified: goals 0x0000001A new-goals 0x00000010 root-files 0x00000009 notes 0x000002D0 hash 0xC6181D2F chain 0x0000000E->0x0000000F writes 0x00000000 allocations 0x00000000 descriptors-closed yes commands 0x00000003'
 $secondPlan = @(
     @{ Command = 'ls'; Expect = 'NOTES.TXT 0x000002D0 cluster 0x0000000E' },
     @{ Command = 'hash NOTES.TXT'; Expect = 'hash NOTES.TXT bytes 0x000002D0 fnv1a32 0xC6181D2F' },
@@ -174,9 +174,9 @@ foreach ($marker in $baseMarkers) {
     if (-not $second.Debug.Contains($marker)) { throw "Persistence boot missing regression marker: $marker" }
 }
 
-Write-Host '=== CAPSTONE 8 FIRST SESSION ==='
+Write-Host '=== CAPSTONE 9 FIRST SESSION ==='
 Write-Host $first.Serial.Trim()
-Write-Host '=== CAPSTONE 8 PERSISTENCE SESSION ==='
+Write-Host '=== CAPSTONE 9 PERSISTENCE SESSION ==='
 Write-Host $second.Serial.Trim()
 Write-Host "Persistent image SHA256: $mutatedHash"
-Write-Host 'Legacy BIOS i686 Capstone 8 two-boot test passed.'
+Write-Host 'Legacy BIOS i686 Capstone 9 two-boot test passed.'

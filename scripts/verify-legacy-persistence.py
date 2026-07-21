@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the on-disk NOTES.TXT mutation produced by Capstone 8 userspace."""
+"""Verify the on-disk NOTES.TXT mutation produced by Capstone 9 userspace."""
 from __future__ import annotations
 
 import argparse
@@ -64,7 +64,7 @@ def main() -> None:
         raise SystemExit(f"persistent NOTES.TXT hash invalid: {digest:08X}")
     if entry(fat1, 16) != 0:
         raise SystemExit("unexpected allocation beyond deterministic two-cluster file")
-    print("Verified Capstone 8 persistent FAT12 mutation")
+    print("Verified Capstone 9 persistent FAT12 mutation")
     print("  NOTES.TXT: root slot 8, 720 bytes, clusters 14->15->EOC")
     print(f"  FNV-1a32: 0x{digest:08X}")
     print(f"  image sha256: {hashlib.sha256(image).hexdigest().upper()}")
