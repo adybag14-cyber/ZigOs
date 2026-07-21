@@ -54,9 +54,10 @@ function Invoke-LegacySession {
     $nextCommand = 0
     $commandInFlight = $false
     $commandsSent = 0
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $progressDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     try {
-        while ([DateTime]::UtcNow -lt $deadline) {
+        while ([DateTime]::UtcNow -lt $progressDeadline) {
+            $madeProgress = $false
             # Drain every line already buffered by the redirected COM1 pipe.
             # Reading only one line per polling interval can fill the pipe on a
             # slow hosted runner and block the guest UART before debugcon runs.
@@ -68,6 +69,7 @@ function Invoke-LegacySession {
                 }
                 [void]$serialBuilder.Append($line)
                 [void]$serialBuilder.Append("`r`n")
+                $madeProgress = $true
                 $stdoutReadTask = $process.StandardOutput.ReadLineAsync()
             }
             if ($stdoutClosed -and $process.HasExited) { break }
@@ -83,13 +85,18 @@ function Invoke-LegacySession {
                     $process.StandardInput.Flush()
                     $commandInFlight = $true
                     $commandsSent += 1
+                    $madeProgress = $true
                 }
                 if ($commandInFlight -and $serialNow.Contains($CommandPlan[$nextCommand].Expect)) {
                     $nextCommand += 1
                     $commandInFlight = $false
+                    $madeProgress = $true
                 }
             }
             if ($serialNow.Contains($FinalMarker)) { break }
+            if ($madeProgress) {
+                $progressDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+            }
             Start-Sleep -Milliseconds 1
         }
     } finally {
