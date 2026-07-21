@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the complete Capstone 11 BIOS, kernel, and deterministic FAT12 image."""
+"""Verify the complete Capstone 12 BIOS, kernel, and deterministic FAT12 image."""
 from __future__ import annotations
 
 import argparse
@@ -27,6 +27,7 @@ EXPECTED = {
     b"SERVICE ELF": (14, 1362, 0x7C65C5CE, (14, 15, 16)),
     b"ORCH    ELF": (17, 1937, 0x11986FD8, (17, 18, 19, 20)),
     b"CHILD   ELF": (21, 913, 0x7E1C062C, (21, 22)),
+    b"PATHS   ELF": (23, 4024, 0x38C1C0AD, (23, 24, 25, 26, 27, 28, 29, 30)),
 }
 
 
@@ -178,7 +179,7 @@ def main() -> None:
     notes_slot = root_offset + len(EXPECTED) * 32
     if volume[notes_slot] != 0:
         fail("initial NOTES.TXT root slot is not free")
-    for cluster in (23, 24):
+    for cluster in range(31, 38):
         if fat_entry(fat1, cluster) != 0:
             fail(f"runtime-reserved cluster {cluster} is not initially free")
 
@@ -205,6 +206,23 @@ def main() -> None:
     if child[0x380:0x391] != b"CHILD-TO-PARENT\r\n":
         fail("CHILD.ELF embedded reply invalid")
 
+    paths, _ = read_chain(volume, 23, 4024)
+    if paths[0x700:0x701] != b"/" or paths[0x710:0x715] != b"/HOME" or paths[0x720:0x724] != b"DOCS":
+        fail("PATHS.ELF root/home/docs strings invalid")
+    if paths[0x730:0x736] != b"./DOCS" or paths[0x740:0x748] != b"../EMPTY":
+        fail("PATHS.ELF relative path strings invalid")
+    if paths[0x750:0x758] != b"TEMP.BIN" or paths[0x770:0x77C] != b"../MOVED.BIN":
+        fail("PATHS.ELF move source/target strings invalid")
+    if paths[0x7B0:0x7BB] != b"RENAMED.BIN":
+        fail("PATHS.ELF same-directory rename string invalid")
+    if paths[0x780:0x787] != b"ARCHIVE" or paths[0x7A0:0x7AF] != b"ARCHIVE/LOG.TXT":
+        fail("PATHS.ELF archive strings invalid")
+    if paths[0x7F0:0x808] != b"/HOME//ARCHIVE///LOG.TXT":
+        fail("PATHS.ELF absolute log path invalid")
+    path_payload = paths[0xB00:0xB00 + 600]
+    if fnv1a32(path_payload) != 0x36F73195:
+        fail("PATHS.ELF embedded payload invalid")
+
     kernel_sectors = math.ceil(len(kernel) / BPS)
     padded = kernel + bytes(kernel_sectors * BPS - len(kernel))
     checksum = sum(struct.unpack_from("<H", padded, offset)[0] for offset in range(0, len(padded), 2)) & 0xFFFF
@@ -214,11 +232,11 @@ def main() -> None:
     if any(image[(9 + kernel_sectors) * BPS : FAT_LBA * BPS]):
         fail("protected kernel/FAT gap is not zero")
 
-    print(f"Verified Capstone 11 legacy BIOS/FAT12 image: {args.image}")
+    print(f"Verified Capstone 12 legacy BIOS/FAT12 image: {args.image}")
     print("  stage0: 512 bytes, signature 0x55AA, partition type 0x01")
     print("  stage1: 4096 bytes, LBA 1..8, address 0x00008000")
     print(f"  kernel: {len(kernel)} bytes, {kernel_sectors} sectors, LBA 9..{kernel_end_lba}, checksum16 0x{checksum:04X}")
-    print("  FAT12: 11 files, mirrored FATs, SERVICE.ELF 14->15->16, ORCH.ELF 17->18->19->20, CHILD.ELF 21->22, clusters 23/24 free")
+    print("  FAT12: 12 files, mirrored FATs, ORCH.ELF 17->18->19->20, CHILD.ELF 21->22, PATHS.ELF 23->24->25->26->27->28->29->30, clusters 31-37 free")
     print(f"  image sha256: {hashlib.sha256(image).hexdigest().upper()}")
 
 

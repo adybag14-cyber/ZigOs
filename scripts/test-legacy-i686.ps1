@@ -149,24 +149,25 @@ function Invoke-LegacySession {
     [PSCustomObject]@{ Serial = $serial; Debug = $debug; SerialPath = $serialPath; DebugPath = $debugPath }
 }
 
-$firstReady = 'ZigOs i686 Capstone 11 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode first'
-$firstFinal = 'ZigOs i686 Capstone 11 first session verified: goals 0x0000003F new-goals 0x00000013 root-files 0x0000000C processes 0x0000000A waits 0x00000002 creates 0x00000001 truncates 0x00000001 writes 0x00000002 seeks 0x00000001 allocations 0x00000002 notes 0x000002D0 hash 0xC6181D2F chain 0x00000017->0x00000018 fault-contained yes descriptors-closed yes commands 0x0000000F'
+$firstReady = 'ZigOs i686 Capstone 12 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode first'
+$firstFinal = 'ZigOs i686 Capstone 12 first session verified: goals 0x00000056 new-goals 0x00000017 root-files 0x0000000D processes 0x0000000B waits 0x00000002 creates 0x00000001 truncates 0x00000001 writes 0x00000002 seeks 0x00000001 allocations 0x00000002 notes 0x000002D0 hash 0xC6181D2F chain 0x00000024->0x00000025 hierarchy 0x00000021->0x00000022 hierarchy-hash 0x36F73195 fault-contained yes descriptors-closed yes commands 0x00000010'
 $firstPlan = @(
     @{ Command = 'help'; Expect = 'commands: help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit' },
-    @{ Command = 'ls'; Expect = 'CHILD.ELF 0x00000391 cluster 0x00000015' },
+    @{ Command = 'ls'; Expect = 'PATHS.ELF 0x00000FB8 cluster 0x00000017' },
     @{ Command = 'mem'; Expect = 'frames-free 0x' },
     @{ Command = 'ticks'; Expect = 'PIT-Hz 0x00000064' },
-    @{ Command = 'disk'; Expect = 'FAT12 writable yes root-files 0x0000000B BIG.TXT-bytes 0x00000514 SERVICE.ELF-bytes 0x00000552 ORCH.ELF-bytes 0x00000791 CHILD.ELF-bytes 0x00000391 WRITER.ELF-bytes 0x000005D0 persistent-notes no' },
+    @{ Command = 'disk'; Expect = 'FAT12 writable yes root-files 0x0000000C BIG.TXT-bytes 0x00000514 SERVICE.ELF-bytes 0x00000552 ORCH.ELF-bytes 0x00000791 CHILD.ELF-bytes 0x00000391 PATHS.ELF-bytes 0x00000FB8 WRITER.ELF-bytes 0x000005D0 persistent-notes no persistent-hierarchy no' },
     @{ Command = 'hash BIG.TXT'; Expect = 'hash BIG.TXT bytes 0x00000514 fnv1a32 0xE5D120DF' },
     @{ Command = 'run INIT.ELF'; Expect = 'process PID 0x00000004 INIT.ELF exited 0x00000033 syscalls 0x00000003' },
     @{ Command = 'run CAT.ELF'; Expect = 'process PID 0x00000005 CAT.ELF exited 0x00000044 syscalls 0x00000005' },
     @{ Command = 'run SERVICE.ELF'; Expect = 'process PID 0x00000006 SERVICE.ELF exited 0x00000066 syscalls 0x0000001E services 0x00000012 pipe-bytes 0x00000012' },
     @{ Command = 'run ORCH.ELF'; Expect = 'process PID 0x00000007 ORCH.ELF exited 0x00000070 syscalls 0x0000001E child 0x00000008 child-syscalls 0x00000007 inherited 0x00000003 cloexec 0x00000001 signal 0x0000000C pipe-bytes 0x00000011 cleanup yes' },
-    @{ Command = 'run WRITER.ELF'; Expect = 'process PID 0x00000009 WRITER.ELF exited 0x00000055 syscalls 0x00000009 wrote 0x000002D0 readback 0x000002BC notes-hash 0xC6181D2F chain 0x00000017->0x00000018' },
-    @{ Command = 'stat NOTES.TXT'; Expect = 'stat NOTES.TXT bytes 0x000002D0 first-cluster 0x00000017 clusters 0x00000002' },
-    @{ Command = 'wait 9'; Expect = 'wait PID 0x00000009 exit 0x00000055 reaped yes' },
-    @{ Command = 'run FAULT.ELF'; Expect = 'process PID 0x0000000A FAULT.ELF faulted vector 0x0000000E address 0x00800000 contained yes exit 0x0000008E' },
-    @{ Command = 'ps'; Expect = 'PID 0x0000000A PPID 0x00000000 FAULTED vector 0x0000000E address 0x00800000 exit 0x0000008E FAULT.ELF waited no' },
+    @{ Command = 'run PATHS.ELF'; Expect = 'process PID 0x00000009 PATHS.ELF exited 0x00000072 syscalls 0x0000001F hierarchy-goals 0x00000017 home 0x0000001F docs 0x00000020 log 0x00000021->0x00000022 archive 0x00000023 reuse 0x00000024 hash 0x36F73195 cleanup yes' },
+    @{ Command = 'run WRITER.ELF'; Expect = 'process PID 0x0000000A WRITER.ELF exited 0x00000055 syscalls 0x00000009 wrote 0x000002D0 readback 0x000002BC notes-hash 0xC6181D2F chain 0x00000024->0x00000025' },
+    @{ Command = 'stat NOTES.TXT'; Expect = 'stat NOTES.TXT bytes 0x000002D0 first-cluster 0x00000024 clusters 0x00000002' },
+    @{ Command = 'wait 10'; Expect = 'wait PID 0x0000000A exit 0x00000055 reaped yes' },
+    @{ Command = 'run FAULT.ELF'; Expect = 'process PID 0x0000000B FAULT.ELF faulted vector 0x0000000E address 0x00800000 contained yes exit 0x0000008E' },
+    @{ Command = 'ps'; Expect = 'PID 0x0000000B PPID 0x00000000 FAULTED vector 0x0000000E address 0x00800000 exit 0x0000008E FAULT.ELF waited no' },
     @{ Command = 'exit'; Expect = $firstFinal }
 )
 $first = Invoke-LegacySession -Name 'first' -ReadyMarker $firstReady -FinalMarker $firstFinal -CommandPlan $firstPlan
@@ -176,12 +177,12 @@ $python = Get-Command python -ErrorAction Stop | Select-Object -ExpandProperty S
 if ($LASTEXITCODE -ne 0) { throw 'Offline persistent FAT12 verification failed after first boot.' }
 $mutatedHash = (Get-FileHash $image -Algorithm SHA256).Hash
 
-$secondReady = 'ZigOs i686 Capstone 11 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode persistence'
-$secondFinal = 'ZigOs i686 Capstone 11 persistence session verified: goals 0x0000003F inherited-goals 0x0000002C root-files 0x0000000C notes 0x000002D0 hash 0xC6181D2F chain 0x00000017->0x00000018 writes 0x00000000 allocations 0x00000000 descriptors-closed yes commands 0x00000003'
+$secondReady = 'ZigOs i686 Capstone 12 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode persistence'
+$secondFinal = 'ZigOs i686 Capstone 12 persistence session verified: goals 0x00000056 inherited-goals 0x00000043 root-files 0x0000000D notes 0x000002D0 hash 0xC6181D2F chain 0x00000024->0x00000025 hierarchy 0x00000021->0x00000022 hierarchy-hash 0x36F73195 writes 0x00000000 allocations 0x00000000 descriptors-closed yes commands 0x00000003'
 $secondPlan = @(
-    @{ Command = 'ls'; Expect = 'NOTES.TXT 0x000002D0 cluster 0x00000017' },
+    @{ Command = 'ls'; Expect = 'NOTES.TXT 0x000002D0 cluster 0x00000024' },
     @{ Command = 'hash NOTES.TXT'; Expect = 'hash NOTES.TXT bytes 0x000002D0 fnv1a32 0xC6181D2F' },
-    @{ Command = 'stat NOTES.TXT'; Expect = 'stat NOTES.TXT bytes 0x000002D0 first-cluster 0x00000017 clusters 0x00000002' },
+    @{ Command = 'stat NOTES.TXT'; Expect = 'stat NOTES.TXT bytes 0x000002D0 first-cluster 0x00000024 clusters 0x00000002' },
     @{ Command = 'exit'; Expect = $secondFinal }
 )
 $second = Invoke-LegacySession -Name 'persistence' -ReadyMarker $secondReady -FinalMarker $secondFinal -CommandPlan $secondPlan
@@ -204,6 +205,7 @@ $baseMarkers = @(
     'ZigOs i686 syscalls verified:',
     'ZigOs i686 ELF verified:',
     'ZigOs i686 writable VFS ready:',
+    'ZigOs i686 hierarchical FAT12 ready:',
     'ZigOs i686 process services ready:',
     'ZigOs i686 user scheduler verified: disk-ELF tasks SPINA.ELF/SPINB.ELF'
 )
@@ -212,9 +214,9 @@ foreach ($marker in $baseMarkers) {
     if (-not $second.Debug.Contains($marker)) { throw "Persistence boot missing regression marker: $marker" }
 }
 
-Write-Host '=== CAPSTONE 11 FIRST SESSION ==='
+Write-Host '=== CAPSTONE 12 FIRST SESSION ==='
 Write-Host $first.Serial.Trim()
-Write-Host '=== CAPSTONE 11 PERSISTENCE SESSION ==='
+Write-Host '=== CAPSTONE 12 PERSISTENCE SESSION ==='
 Write-Host $second.Serial.Trim()
 Write-Host "Persistent image SHA256: $mutatedHash"
-Write-Host 'Legacy BIOS i686 Capstone 11 two-boot test passed.'
+Write-Host 'Legacy BIOS i686 Capstone 12 two-boot test passed.'

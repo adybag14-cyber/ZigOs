@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create the deterministic ZigOs Capstone 11 FAT12 volume."""
+"""Create the deterministic ZigOs Capstone 12 FAT12 volume."""
 from __future__ import annotations
 
 import argparse
@@ -41,6 +41,7 @@ WRITER_NAME = b"WRITER  ELF"
 SERVICE_NAME = b"SERVICE ELF"
 ORCH_NAME = b"ORCH    ELF"
 CHILD_NAME = b"CHILD   ELF"
+PATHS_NAME = b"PATHS   ELF"
 NOTES_NAME = b"NOTES   TXT"
 
 BIG_PREFIX = b"ZigOs multi-cluster FAT12 read contract.\r\n"
@@ -354,6 +355,147 @@ def build_service_elf() -> bytes:
     return build_elf(bytes(segment), memory_size=0x1000)
 
 
+
+def build_paths_elf() -> bytes:
+    base = 0x00400000
+    offsets = {
+        "root": 0x600,
+        "home": 0x610,
+        "docs": 0x620,
+        "dot_docs": 0x630,
+        "empty": 0x640,
+        "temp": 0x650,
+        "dot_temp": 0x660,
+        "moved_up": 0x670,
+        "archive": 0x680,
+        "moved": 0x690,
+        "log_target": 0x6A0,
+        "renamed": 0x6B0,
+        "scratch": 0x6C0,
+        "reuse": 0x6D8,
+        "log_abs": 0x6F0,
+        "results": 0x740,
+        "cwd0": 0x7C0,
+        "cwd1": 0x7F0,
+        "cwd2": 0x820,
+        "stat": 0x850,
+        "list0": 0x880,
+        "list1": 0x900,
+        "payload": 0xA00,
+        "readback": 0xC60,
+    }
+    strings = {
+        "root": b"/",
+        "home": b"/HOME",
+        "docs": b"DOCS",
+        "dot_docs": b"./DOCS",
+        "empty": b"../EMPTY",
+        "temp": b"TEMP.BIN",
+        "dot_temp": b"./TEMP.BIN",
+        "moved_up": b"../MOVED.BIN",
+        "archive": b"ARCHIVE",
+        "moved": b"MOVED.BIN",
+        "log_target": b"ARCHIVE/LOG.TXT",
+        "renamed": b"RENAMED.BIN",
+        "scratch": b"DOCS/SCRATCH.BIN",
+        "reuse": b"DOCS/REUSE.BIN",
+        "log_abs": b"/HOME//ARCHIVE///LOG.TXT",
+    }
+    payload = bytes(((index * 29 + 7) & 0xFF) for index in range(600))
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", base + offsets["results"] + index * 4))
+
+    def path_args(key: str) -> None:
+        code.extend(mov_imm(0xBB, base + offsets[key]))
+        code.extend(mov_imm(0xB9, len(strings[key])))
+
+    # getcwd("/")
+    code += mov_imm(0xBB, base + offsets["cwd0"]) + mov_imm(0xB9, 48)
+    syscall(32); store(0)
+    path_args("home"); syscall(34); store(1)
+    path_args("home"); syscall(33); store(2)
+    code += mov_imm(0xBB, base + offsets["cwd1"]) + mov_imm(0xB9, 48)
+    syscall(32); store(3)
+    path_args("docs"); syscall(34); store(4)
+    path_args("dot_docs"); syscall(33); store(5)
+    code += mov_imm(0xBB, base + offsets["cwd2"]) + mov_imm(0xB9, 48)
+    syscall(32); store(6)
+    path_args("empty"); syscall(34); store(7)
+    path_args("empty"); syscall(35); store(8)
+
+    # Create/truncate and write 600 bytes through a relative path.
+    path_args("temp")
+    code += mov_imm(0xBA, base + offsets["payload"])
+    code += mov_imm(0xBE, len(payload)) + mov_imm(0xBF, 3)
+    syscall(37); store(9)
+    path_args("dot_temp")
+    code += mov_imm(0xBA, base + offsets["stat"])
+    syscall(36); store(10)
+    path_args("temp")
+    code += mov_imm(0xBA, base + offsets["readback"]) + mov_imm(0xBE, len(payload))
+    syscall(38); store(11)
+
+    # Cross-directory move to parent, then into a newly created sibling directory.
+    path_args("temp")
+    code += mov_imm(0xBA, base + offsets["renamed"]) + mov_imm(0xBE, len(strings["renamed"]))
+    syscall(39); store(12)
+    path_args("renamed")
+    code += mov_imm(0xBA, base + offsets["moved_up"]) + mov_imm(0xBE, len(strings["moved_up"]))
+    syscall(39); store(13)
+    path_args("empty"); syscall(33); store(14)  # expected failure: EMPTY was removed
+    path_args("root"); syscall(33); store(15)
+    path_args("home"); syscall(33); store(16)
+    path_args("archive"); syscall(34); store(17)
+    path_args("moved")
+    code += mov_imm(0xBA, base + offsets["log_target"]) + mov_imm(0xBE, len(strings["log_target"]))
+    syscall(39); store(18)
+    path_args("archive"); syscall(35); store(19)  # expected ENOTEMPTY
+
+    # Enumerate parent and child directories, then read/stat the persistent file absolutely.
+    code += mov_imm(0xBB, base + offsets["home"]) + mov_imm(0xB9, len(strings["home"]))
+    code += mov_imm(0xBA, base + offsets["list0"]) + mov_imm(0xBE, 128)
+    syscall(41); store(20)
+    path_args("archive")
+    code += mov_imm(0xBA, base + offsets["list1"]) + mov_imm(0xBE, 128)
+    syscall(41); store(21)
+    path_args("log_abs")
+    code += mov_imm(0xBA, base + offsets["stat"])
+    syscall(36); store(22)
+    path_args("log_abs")
+    code += mov_imm(0xBA, base + offsets["readback"]) + mov_imm(0xBE, len(payload))
+    syscall(38); store(23)
+
+    # Reclaim and first-fit reuse one temporary cluster.
+    path_args("scratch")
+    code += mov_imm(0xBA, base + offsets["payload"]) + mov_imm(0xBE, 1) + mov_imm(0xBF, 3)
+    syscall(37); store(24)
+    path_args("scratch"); syscall(40); store(25)
+    path_args("reuse")
+    code += mov_imm(0xBA, base + offsets["payload"]) + mov_imm(0xBE, 1) + mov_imm(0xBF, 3)
+    syscall(37); store(26)
+    path_args("reuse"); syscall(40); store(27)
+    path_args("root"); syscall(33); store(28)
+    code += mov_imm(0xBB, base + offsets["cwd0"]) + mov_imm(0xB9, 48)
+    syscall(32); store(29)
+    code += mov_imm(0xBB, 0x72); syscall(3)
+    code += b"\xF4"
+
+    if len(code) > offsets["root"]:
+        raise RuntimeError(f"PATHS.ELF code overlaps data: {len(code)}")
+    segment = bytearray(offsets["readback"] + len(payload))
+    segment[:len(code)] = code
+    for key, value in strings.items():
+        segment[offsets[key]:offsets[key] + len(value)] = value
+    segment[offsets["payload"]:offsets["payload"] + len(payload)] = payload
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+
 def build_child_elf() -> bytes:
     base = 0x00400000
     patch_offset = 0x200
@@ -510,6 +652,7 @@ WRITER_ELF = build_writer_elf()
 SERVICE_ELF = build_service_elf()
 ORCH_ELF = build_orch_elf()
 CHILD_ELF = build_child_elf()
+PATHS_ELF = build_paths_elf()
 
 FILES = (
     (HELLO_NAME, HELLO),
@@ -523,6 +666,7 @@ FILES = (
     (SERVICE_NAME, SERVICE_ELF),
     (ORCH_NAME, ORCH_ELF),
     (CHILD_NAME, CHILD_ELF),
+    (PATHS_NAME, PATHS_ELF),
 )
 
 
@@ -555,7 +699,7 @@ def build_volume(hidden_sectors: int) -> bytes:
     struct.pack_into("<I", boot, 39, 0x5A49474F)
     boot[43:54] = b"ZIGOS FAT12"
     boot[54:62] = b"FAT12   "
-    message = b"ZigOs Capstone 11 FAT12"
+    message = b"ZigOs Capstone 12 FAT12"
     boot[62 : 62 + len(message)] = message
     boot[510:512] = b"\x55\xAA"
 
@@ -599,7 +743,7 @@ def main() -> None:
         f"{name.decode('ascii').strip()}={len(data)}/{fnv1a32(data):08X}" for name, data in FILES
     )
     print(
-        f"Created Capstone 11 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
+        f"Created Capstone 12 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
         f"sectors={TOTAL} root={ROOT_START} data={DATA_START} {details} "
         f"notes-result={len(WRITER_RESULT)}/{fnv1a32(WRITER_RESULT):08X}"
     )

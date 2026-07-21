@@ -38,6 +38,13 @@ const user_service_limit: u32 = 0x0040_6000;
 const service_payload = "SERVICE-PIPE-OK!\r\n";
 const orch_request = "PARENT-TO-CHILD\r\n";
 const child_reply = "CHILD-TO-PARENT\r\n";
+const path_max_bytes: u32 = 48;
+const path_max_components: usize = 4;
+const path_write_create: u32 = 0x01;
+const path_write_truncate: u32 = 0x02;
+const path_write_append: u32 = 0x04;
+const expected_path_payload_bytes: u32 = 600;
+const expected_path_payload_hash: u32 = 0x36F7_3195;
 const frame_bitmap_bytes: usize = managed_frame_count / 8;
 
 const BootInfo = extern struct {
@@ -148,6 +155,42 @@ const VfsNode = struct {
     present: bool = false,
 };
 
+const PathTokenKind = enum(u8) {
+    name,
+    parent,
+};
+
+const PathToken = struct {
+    name: [11]u8 = @splat(' '),
+    kind: PathTokenKind = .name,
+};
+
+const ParsedPath = struct {
+    tokens: [path_max_components]PathToken = @splat(.{}),
+    count: u8 = 0,
+    absolute: bool = false,
+};
+
+const PathEntry = struct {
+    name: [11]u8 = @splat(' '),
+    cluster: u16 = 0,
+    parent_cluster: u16 = 0,
+    entry_lba: u32 = 0,
+    size: u32 = 0,
+    entry_offset: u16 = 0,
+    attributes: u8 = 0,
+};
+
+const PathParent = struct {
+    directory_cluster: u16 = 0,
+    leaf: [11]u8 = @splat(' '),
+};
+
+const DirectorySlot = struct {
+    lba: u32,
+    offset: u16,
+};
+
 const DescriptorKind = enum(u8) {
     free,
     file,
@@ -192,6 +235,7 @@ const ProcessRecord = struct {
     fault_address: u32 = 0,
     waited: bool = false,
     pending_signal: u8 = 0,
+    cwd_cluster: u16 = 0,
     state: ProcessState = .free,
 };
 
@@ -335,6 +379,7 @@ var writer_elf_size: u32 = 0;
 var service_elf_size: u32 = 0;
 var orch_elf_size: u32 = 0;
 var child_elf_size: u32 = 0;
+var paths_elf_size: u32 = 0;
 var fault_elf_size: u32 = 0;
 var big_file_size: u32 = 0;
 var vfs_nodes: [16]VfsNode = @splat(.{});
@@ -374,6 +419,22 @@ var fat_cluster_count: u16 = 0;
 var notes_present_at_boot = false;
 var notes_cluster: u16 = 0;
 var notes_hash: u32 = 0;
+var runtime_first_cluster: u16 = 0;
+var hierarchy_present_at_boot = false;
+var hierarchy_verified = false;
+var hierarchy_home_cluster: u16 = 0;
+var hierarchy_docs_cluster: u16 = 0;
+var hierarchy_archive_cluster: u16 = 0;
+var hierarchy_log_first_cluster: u16 = 0;
+var hierarchy_log_second_cluster: u16 = 0;
+var hierarchy_reused_cluster: u16 = 0;
+var hierarchy_hash: u32 = 0;
+var hierarchy_syscalls: u32 = 0;
+var hierarchy_rejections: u32 = 0;
+var hierarchy_mkdir_count: u32 = 0;
+var hierarchy_rmdir_count: u32 = 0;
+var hierarchy_rename_count: u32 = 0;
+var hierarchy_unlink_count: u32 = 0;
 var process_table: [16]ProcessRecord = @splat(.{});
 var process_count: u32 = 0;
 var next_pid: u32 = 2;
@@ -496,6 +557,16 @@ var syscall_setpgid_count: u32 = 0;
 var syscall_getpgid_count: u32 = 0;
 var syscall_killpg_count: u32 = 0;
 var syscall_procinfo_count: u32 = 0;
+var syscall_getcwd_count: u32 = 0;
+var syscall_chdir_count: u32 = 0;
+var syscall_mkdir_count: u32 = 0;
+var syscall_rmdir_count: u32 = 0;
+var syscall_path_stat_count: u32 = 0;
+var syscall_path_write_count: u32 = 0;
+var syscall_path_read_count: u32 = 0;
+var syscall_path_rename_count: u32 = 0;
+var syscall_path_unlink_count: u32 = 0;
+var syscall_listdir_count: u32 = 0;
 var syscall_rejected: u32 = 0;
 var syscall_exit_code: u32 = 0;
 var syscall_exited = false;
@@ -1031,6 +1102,181 @@ pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) 
             frame.eax = 0;
             return 0;
         },
+        32 => {
+            const destination = userWritableSlice(frame.ebx, frame.ecx, path_max_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const amount = pathGetCwd(current_pid, destination) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFEA;
+                return 0;
+            };
+            syscall_getcwd_count +|= 1;
+            frame.eax = @intCast(amount);
+            return 0;
+        },
+        33 => {
+            const path = userReadableSlice(frame.ebx, frame.ecx, path_max_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (current_pid == 0 or !pathChangeDirectory(current_pid, path)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            }
+            syscall_chdir_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        34 => {
+            const path = userReadableSlice(frame.ebx, frame.ecx, path_max_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const cluster = pathMakeDirectory(current_pid, path) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            };
+            syscall_mkdir_count +|= 1;
+            frame.eax = cluster;
+            return 0;
+        },
+        35 => {
+            const path = userReadableSlice(frame.ebx, frame.ecx, path_max_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (current_pid == 0 or !pathRemoveDirectory(current_pid, path)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFD9;
+                return 0;
+            }
+            syscall_rmdir_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        36 => {
+            const path = userReadableSlice(frame.ebx, frame.ecx, path_max_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const destination = userWritableSlice(frame.edx, 16, 16) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (!pathStatFile(current_pid, path, destination)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            }
+            syscall_path_stat_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        37 => {
+            const path = userReadableSlice(frame.ebx, frame.ecx, path_max_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const source = userReadableSlice(frame.edx, frame.esi, 2048) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const amount = pathWriteFile(current_pid, path, source, frame.edi) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            };
+            syscall_path_write_count +|= 1;
+            frame.eax = @intCast(amount);
+            return 0;
+        },
+        38 => {
+            const path = userReadableSlice(frame.ebx, frame.ecx, path_max_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const destination = userWritableSlice(frame.edx, frame.esi, 2048) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const amount = pathReadFile(current_pid, path, destination) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            };
+            syscall_path_read_count +|= 1;
+            frame.eax = @intCast(amount);
+            return 0;
+        },
+        39 => {
+            const old_path = userReadableSlice(frame.ebx, frame.ecx, path_max_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const new_path = userReadableSlice(frame.edx, frame.esi, path_max_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (!pathRename(current_pid, old_path, new_path)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            }
+            syscall_path_rename_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        40 => {
+            const path = userReadableSlice(frame.ebx, frame.ecx, path_max_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (!pathUnlink(current_pid, path)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            }
+            syscall_path_unlink_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        41 => {
+            const path = userReadableSlice(frame.ebx, frame.ecx, path_max_bytes) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const destination = userWritableSlice(frame.edx, frame.esi, 512) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const amount = pathListDirectory(current_pid, path, destination) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            };
+            syscall_listdir_count +|= 1;
+            frame.eax = @intCast(amount);
+            return 0;
+        },
         else => {
             syscall_rejected +|= 1;
             frame.eax = 0xFFFF_FFDA;
@@ -1257,6 +1503,7 @@ fn forkCloneCurrentProcess() ?u32 {
         .pid = child_pid,
         .parent_pid = current_pid,
         .process_group = parent_group,
+        .cwd_cluster = process_table[parent_index].cwd_cluster,
         .name = fatName("CLONE   PRC"),
         .state = .running,
     };
@@ -2578,6 +2825,7 @@ fn initializeVfsAndProcesses() void {
     const service_index = vfsFindNode("SERVICE ELF") orelse vfsFailure("SERVICE.ELF node");
     const orch_index = vfsFindNode("ORCH    ELF") orelse vfsFailure("ORCH.ELF node");
     const child_index = vfsFindNode("CHILD   ELF") orelse vfsFailure("CHILD.ELF node");
+    const paths_index = vfsFindNode("PATHS   ELF") orelse vfsFailure("PATHS.ELF node");
     notes_present_at_boot = vfsFindNode("NOTES   TXT") != null;
     cat_elf_size = vfs_nodes[cat_index].size;
     big_file_size = vfs_nodes[big_index].size;
@@ -2586,11 +2834,15 @@ fn initializeVfsAndProcesses() void {
     service_elf_size = vfs_nodes[service_index].size;
     orch_elf_size = vfs_nodes[orch_index].size;
     child_elf_size = vfs_nodes[child_index].size;
-    const expected_nodes: u32 = if (notes_present_at_boot) 12 else 11;
+    paths_elf_size = vfs_nodes[paths_index].size;
+    runtime_first_cluster = vfs_nodes[paths_index].cluster + @as(u16, @intCast((paths_elf_size + 511) / 512));
+    hierarchy_present_at_boot = pathFindEntry(0, "HOME       ") != null;
+    const expected_nodes: u32 = if (notes_present_at_boot) 13 else 12;
     if (vfs_node_count != expected_nodes or vfs_nodes[hello_index].size != expected_fat_file.len or
         vfs_nodes[init_index].size != init_elf_size or cat_elf_size != 510 or
         big_file_size != expected_big_bytes or fault_elf_size != 262 or writer_elf_size != 1488 or
-        service_elf_size != 1362 or orch_elf_size != 1937 or child_elf_size != 913)
+        service_elf_size != 1362 or orch_elf_size != 1937 or child_elf_size != 913 or
+        paths_elf_size != 4024 or runtime_first_cluster != 31 or hierarchy_present_at_boot != notes_present_at_boot)
     {
         vfsFailure("root inventory");
     }
@@ -2621,6 +2873,7 @@ fn initializeVfsAndProcesses() void {
     }
 
     verifyNamespaceLifecycle();
+    if (hierarchy_present_at_boot) verifyPersistentHierarchy();
     if (notes_present_at_boot) verifyNotesFile();
 
     process_table = @splat(.{});
@@ -2657,6 +2910,27 @@ fn initializeVfsAndProcesses() void {
         writeHex32(notes_cluster);
         writeAll(" notes-hash 0x");
         writeHex32(notes_hash);
+    }
+    writeAll("\r\n");
+    writeAll("ZigOs i686 hierarchical FAT12 ready: static-base 0x");
+    writeHex32(runtime_first_cluster);
+    writeAll(" PATHS.ELF bytes 0x");
+    writeHex32(paths_elf_size);
+    writeAll(" present ");
+    writeAll(if (hierarchy_present_at_boot) "yes" else "no");
+    if (hierarchy_present_at_boot) {
+        writeAll(" HOME 0x");
+        writeHex32(hierarchy_home_cluster);
+        writeAll(" DOCS 0x");
+        writeHex32(hierarchy_docs_cluster);
+        writeAll(" LOG 0x");
+        writeHex32(hierarchy_log_first_cluster);
+        writeAll("->0x");
+        writeHex32(hierarchy_log_second_cluster);
+        writeAll(" ARCHIVE 0x");
+        writeHex32(hierarchy_archive_cluster);
+        writeAll(" hash 0x");
+        writeHex32(hierarchy_hash);
     }
     writeAll("\r\n");
     verifyUserProcessScheduler();
@@ -3439,6 +3713,495 @@ fn vfsReadWhole(name: []const u8, destination: []u8) ?usize {
     return amount;
 }
 
+fn parsePath(path: []const u8) ?ParsedPath {
+    if (path.len == 0 or path.len > path_max_bytes) return null;
+    var result: ParsedPath = .{ .absolute = path[0] == '/' };
+    var cursor: usize = 0;
+    while (cursor < path.len) {
+        while (cursor < path.len and path[cursor] == '/') cursor += 1;
+        if (cursor == path.len) break;
+        const start = cursor;
+        while (cursor < path.len and path[cursor] != '/') cursor += 1;
+        const component = path[start..cursor];
+        if (equalBytes(component, ".")) continue;
+        if (result.count >= result.tokens.len) return null;
+        const token_index: usize = result.count;
+        if (equalBytes(component, "..")) {
+            result.tokens[token_index] = .{ .kind = .parent };
+        } else {
+            const name = parseFatDisplayName(component) orelse return null;
+            result.tokens[token_index] = .{ .name = name, .kind = .name };
+        }
+        result.count += 1;
+    }
+    return result;
+}
+
+fn pathDirectoryLba(cluster: u16, sector_index: u16) ?u32 {
+    if (cluster == 0) {
+        if (sector_index >= fat_root_sectors) return null;
+        return fat_root_lba + sector_index;
+    }
+    if (!validDataCluster(cluster) or sector_index != 0 or fat_sectors_per_cluster != 1) return null;
+    return fat_data_lba + (@as(u32, cluster) - 2);
+}
+
+fn pathFindEntry(directory_cluster: u16, name: []const u8) ?PathEntry {
+    if (name.len != 11) return null;
+    const sector_count: u16 = if (directory_cluster == 0) fat_root_sectors else 1;
+    var sector_index: u16 = 0;
+    while (sector_index < sector_count) : (sector_index += 1) {
+        const lba = pathDirectoryLba(directory_cluster, sector_index) orelse return null;
+        if (!ataReadSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return null;
+        for (0..16) |entry_index| {
+            const offset = entry_index * 32;
+            const first = vfs_sector_buffer[offset];
+            if (first == 0) return null;
+            if (first == 0xE5) continue;
+            const attributes = vfs_sector_buffer[offset + 11];
+            if (attributes == 0x0F or (attributes & 0x08) != 0) continue;
+            if (!equalBytes(vfs_sector_buffer[offset .. offset + 11], name)) continue;
+            var entry: PathEntry = .{
+                .cluster = readLe16(&vfs_sector_buffer, offset + 26),
+                .parent_cluster = directory_cluster,
+                .entry_lba = lba,
+                .size = readLe32(&vfs_sector_buffer, offset + 28),
+                .entry_offset = @intCast(offset),
+                .attributes = attributes,
+            };
+            for (0..11) |index| entry.name[index] = vfs_sector_buffer[offset + index];
+            return entry;
+        }
+    }
+    return null;
+}
+
+fn pathFindFreeSlot(directory_cluster: u16) ?DirectorySlot {
+    const sector_count: u16 = if (directory_cluster == 0) fat_root_sectors else 1;
+    var sector_index: u16 = 0;
+    while (sector_index < sector_count) : (sector_index += 1) {
+        const lba = pathDirectoryLba(directory_cluster, sector_index) orelse return null;
+        if (!ataReadSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return null;
+        for (0..16) |entry_index| {
+            const offset = entry_index * 32;
+            if (vfs_sector_buffer[offset] == 0 or vfs_sector_buffer[offset] == 0xE5) {
+                return .{ .lba = lba, .offset = @intCast(offset) };
+            }
+        }
+    }
+    return null;
+}
+
+fn pathWriteSlot(slot: DirectorySlot, name: []const u8, attributes: u8, cluster: u16, size: u32) bool {
+    if (name.len != 11 or !ataReadSector(slot.lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
+    const offset: usize = slot.offset;
+    const first = vfs_sector_buffer[offset];
+    if (first != 0 and first != 0xE5) return false;
+    @memset(vfs_sector_buffer[offset .. offset + 32], 0);
+    for (0..11) |index| vfs_sector_buffer[offset + index] = name[index];
+    vfs_sector_buffer[offset + 11] = attributes;
+    writeLe16(&vfs_sector_buffer, offset + 26, cluster);
+    writeLe32(&vfs_sector_buffer, offset + 28, size);
+    return ataWriteSector(slot.lba, @intCast(@intFromPtr(&vfs_sector_buffer)));
+}
+
+fn pathUpdateEntry(entry: PathEntry, cluster: u16, size: u32) bool {
+    if (!ataReadSector(entry.entry_lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
+    const offset: usize = entry.entry_offset;
+    if (vfs_sector_buffer[offset] == 0 or vfs_sector_buffer[offset] == 0xE5) return false;
+    writeLe16(&vfs_sector_buffer, offset + 26, cluster);
+    writeLe32(&vfs_sector_buffer, offset + 28, size);
+    return ataWriteSector(entry.entry_lba, @intCast(@intFromPtr(&vfs_sector_buffer)));
+}
+
+fn pathDeleteEntry(entry: PathEntry) bool {
+    if (!ataReadSector(entry.entry_lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
+    const offset: usize = entry.entry_offset;
+    if (vfs_sector_buffer[offset] == 0 or vfs_sector_buffer[offset] == 0xE5) return false;
+    vfs_sector_buffer[offset] = 0xE5;
+    writeLe16(&vfs_sector_buffer, offset + 26, 0);
+    writeLe32(&vfs_sector_buffer, offset + 28, 0);
+    return ataWriteSector(entry.entry_lba, @intCast(@intFromPtr(&vfs_sector_buffer)));
+}
+
+fn pathDirectoryParent(cluster: u16) ?u16 {
+    if (cluster == 0) return 0;
+    const parent = pathFindEntry(cluster, "..         ") orelse return null;
+    if ((parent.attributes & 0x10) == 0) return null;
+    return parent.cluster;
+}
+
+fn processCwdCluster(pid: u32) ?u16 {
+    if (pid == 0) return 0;
+    const index = processRecordIndex(pid) orelse return null;
+    return process_table[index].cwd_cluster;
+}
+
+fn pathSyntheticDirectory(cluster: u16) PathEntry {
+    return .{ .cluster = cluster, .parent_cluster = pathDirectoryParent(cluster) orelse 0, .attributes = 0x10 };
+}
+
+fn pathResolve(pid: u32, path: []const u8) ?PathEntry {
+    const parsed = parsePath(path) orelse return null;
+    var directory = if (parsed.absolute) @as(u16, 0) else processCwdCluster(pid) orelse return null;
+    if (parsed.count == 0) return pathSyntheticDirectory(directory);
+    for (parsed.tokens[0..parsed.count], 0..) |token, index| {
+        if (token.kind == .parent) {
+            directory = pathDirectoryParent(directory) orelse return null;
+            if (index + 1 == parsed.count) return pathSyntheticDirectory(directory);
+            continue;
+        }
+        const entry = pathFindEntry(directory, token.name[0..]) orelse return null;
+        if (index + 1 == parsed.count) return entry;
+        if ((entry.attributes & 0x10) == 0 or entry.cluster < 2) return null;
+        directory = entry.cluster;
+    }
+    return null;
+}
+
+fn pathResolveParent(pid: u32, path: []const u8) ?PathParent {
+    const parsed = parsePath(path) orelse return null;
+    if (parsed.count == 0) return null;
+    const last_index: usize = parsed.count - 1;
+    if (parsed.tokens[last_index].kind != .name) return null;
+    var directory = if (parsed.absolute) @as(u16, 0) else processCwdCluster(pid) orelse return null;
+    for (parsed.tokens[0..last_index]) |token| {
+        if (token.kind == .parent) {
+            directory = pathDirectoryParent(directory) orelse return null;
+            continue;
+        }
+        const entry = pathFindEntry(directory, token.name[0..]) orelse return null;
+        if ((entry.attributes & 0x10) == 0 or entry.cluster < 2) return null;
+        directory = entry.cluster;
+    }
+    return .{ .directory_cluster = directory, .leaf = parsed.tokens[last_index].name };
+}
+
+fn pathChildName(parent_cluster: u16, child_cluster: u16) ?[11]u8 {
+    const sector_count: u16 = if (parent_cluster == 0) fat_root_sectors else 1;
+    var sector_index: u16 = 0;
+    while (sector_index < sector_count) : (sector_index += 1) {
+        const lba = pathDirectoryLba(parent_cluster, sector_index) orelse return null;
+        if (!ataReadSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return null;
+        for (0..16) |entry_index| {
+            const offset = entry_index * 32;
+            const first = vfs_sector_buffer[offset];
+            if (first == 0) return null;
+            if (first == 0xE5) continue;
+            const attributes = vfs_sector_buffer[offset + 11];
+            if ((attributes & 0x10) == 0 or attributes == 0x0F) continue;
+            if (readLe16(&vfs_sector_buffer, offset + 26) != child_cluster) continue;
+            if (vfs_sector_buffer[offset] == '.') continue;
+            var name: [11]u8 = undefined;
+            for (0..11) |index| name[index] = vfs_sector_buffer[offset + index];
+            return name;
+        }
+    }
+    return null;
+}
+
+fn appendFatName(destination: []u8, cursor: *usize, name: *const [11]u8, directory: bool) bool {
+    var base_length: usize = 8;
+    while (base_length > 0 and name[base_length - 1] == ' ') base_length -= 1;
+    var extension_length: usize = 3;
+    while (extension_length > 0 and name[8 + extension_length - 1] == ' ') extension_length -= 1;
+    const needed = base_length + (if (extension_length == 0) @as(usize, 0) else 1 + extension_length) + (if (directory) @as(usize, 1) else 0);
+    if (cursor.* + needed > destination.len) return false;
+    for (name[0..base_length]) |byte| {
+        destination[cursor.*] = byte;
+        cursor.* += 1;
+    }
+    if (extension_length != 0) {
+        destination[cursor.*] = '.';
+        cursor.* += 1;
+        for (name[8 .. 8 + extension_length]) |byte| {
+            destination[cursor.*] = byte;
+            cursor.* += 1;
+        }
+    }
+    if (directory) {
+        destination[cursor.*] = '/';
+        cursor.* += 1;
+    }
+    return true;
+}
+
+fn pathGetCwd(pid: u32, destination: []u8) ?usize {
+    var cluster = processCwdCluster(pid) orelse return null;
+    if (cluster == 0) {
+        if (destination.len < 1) return null;
+        destination[0] = '/';
+        return 1;
+    }
+    var names: [path_max_components][11]u8 = undefined;
+    var count: usize = 0;
+    while (cluster != 0) {
+        if (count >= names.len) return null;
+        const parent = pathDirectoryParent(cluster) orelse return null;
+        names[count] = pathChildName(parent, cluster) orelse return null;
+        count += 1;
+        cluster = parent;
+    }
+    var cursor: usize = 0;
+    var index = count;
+    while (index != 0) {
+        index -= 1;
+        if (cursor >= destination.len) return null;
+        destination[cursor] = '/';
+        cursor += 1;
+        if (!appendFatName(destination, &cursor, &names[index], false)) return null;
+    }
+    return cursor;
+}
+
+fn pathChangeDirectory(pid: u32, path: []const u8) bool {
+    if (pid == 0) return false;
+    const entry = pathResolve(pid, path) orelse return false;
+    if ((entry.attributes & 0x10) == 0) return false;
+    const index = processRecordIndex(pid) orelse return false;
+    process_table[index].cwd_cluster = entry.cluster;
+    return true;
+}
+
+fn pathInitializeDirectory(cluster: u16, parent_cluster: u16) bool {
+    const lba = pathDirectoryLba(cluster, 0) orelse return false;
+    @memset(vfs_sector_buffer[0..], 0);
+    const dot = fatName(".          ");
+    const dotdot = fatName("..         ");
+    for (0..11) |index| vfs_sector_buffer[index] = dot[index];
+    vfs_sector_buffer[11] = 0x10;
+    writeLe16(&vfs_sector_buffer, 26, cluster);
+    for (0..11) |index| vfs_sector_buffer[32 + index] = dotdot[index];
+    vfs_sector_buffer[43] = 0x10;
+    writeLe16(&vfs_sector_buffer, 58, parent_cluster);
+    return ataWriteSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer)));
+}
+
+fn pathMakeDirectory(pid: u32, path: []const u8) ?u16 {
+    const parent = pathResolveParent(pid, path) orelse return null;
+    if (pathFindEntry(parent.directory_cluster, parent.leaf[0..]) != null) return null;
+    const slot = pathFindFreeSlot(parent.directory_cluster) orelse return null;
+    const cluster = fatAllocateCluster() orelse return null;
+    if (!pathInitializeDirectory(cluster, parent.directory_cluster)) {
+        _ = fatFreeChain(cluster);
+        return null;
+    }
+    if (!pathWriteSlot(slot, parent.leaf[0..], 0x10, cluster, 0)) {
+        _ = fatFreeChain(cluster);
+        return null;
+    }
+    hierarchy_mkdir_count +|= 1;
+    return cluster;
+}
+
+fn pathDirectoryEmpty(cluster: u16) bool {
+    const lba = pathDirectoryLba(cluster, 0) orelse return false;
+    if (!ataReadSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
+    for (0..16) |entry_index| {
+        const offset = entry_index * 32;
+        const first = vfs_sector_buffer[offset];
+        if (first == 0) return true;
+        if (first == 0xE5 or first == '.') continue;
+        const attributes = vfs_sector_buffer[offset + 11];
+        if (attributes == 0x0F or (attributes & 0x08) != 0) continue;
+        return false;
+    }
+    return true;
+}
+
+fn pathRemoveDirectory(pid: u32, path: []const u8) bool {
+    const entry = pathResolve(pid, path) orelse return false;
+    if ((entry.attributes & 0x10) == 0 or entry.cluster < 2 or !pathDirectoryEmpty(entry.cluster)) return false;
+    for (process_table) |record| {
+        if (record.state != .free and record.cwd_cluster == entry.cluster) return false;
+    }
+    if (!pathDeleteEntry(entry) or !fatFreeChain(entry.cluster)) return false;
+    hierarchy_rmdir_count +|= 1;
+    return true;
+}
+
+fn pathEntryClusterAt(entry: PathEntry, ordinal: u32) ?u16 {
+    if (entry.cluster == 0) return null;
+    var cluster = entry.cluster;
+    var index: u32 = 0;
+    while (index < ordinal) : (index += 1) {
+        const next = fatReadEntry(cluster) orelse return null;
+        if (next >= 0x0FF8 or !validDataCluster(next)) return null;
+        cluster = next;
+    }
+    return cluster;
+}
+
+fn pathReadEntryData(entry: PathEntry, destination: []u8) ?usize {
+    if ((entry.attributes & 0x10) != 0 or entry.size > destination.len or entry.size > 4096) return null;
+    var copied: usize = 0;
+    while (copied < entry.size) {
+        const ordinal: u32 = @intCast(copied / 512);
+        const cluster = pathEntryClusterAt(entry, ordinal) orelse return null;
+        const lba = pathDirectoryLba(cluster, 0) orelse return null;
+        if (!ataReadSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return null;
+        const chunk = @min(@as(usize, @intCast(entry.size)) - copied, 512);
+        for (0..chunk) |index| destination[copied + index] = vfs_sector_buffer[index];
+        copied += chunk;
+    }
+    return copied;
+}
+
+fn pathAllocateData(data: []const u8) ?u16 {
+    if (data.len == 0) return 0;
+    var first: u16 = 0;
+    var previous: u16 = 0;
+    var copied: usize = 0;
+    while (copied < data.len) {
+        const cluster = fatAllocateCluster() orelse {
+            if (first != 0) _ = fatFreeChain(first);
+            return null;
+        };
+        if (first == 0) first = cluster;
+        if (previous != 0 and !fatWriteEntry(previous, cluster)) {
+            _ = fatFreeChain(first);
+            return null;
+        }
+        @memset(vfs_sector_buffer[0..], 0);
+        const chunk = @min(data.len - copied, 512);
+        for (0..chunk) |index| vfs_sector_buffer[index] = data[copied + index];
+        const lba = pathDirectoryLba(cluster, 0) orelse {
+            _ = fatFreeChain(first);
+            return null;
+        };
+        if (!ataWriteSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) {
+            _ = fatFreeChain(first);
+            return null;
+        }
+        copied += chunk;
+        previous = cluster;
+    }
+    return first;
+}
+
+fn pathWriteFile(pid: u32, path: []const u8, source: []const u8, flags: u32) ?usize {
+    if ((flags & ~(path_write_create | path_write_truncate | path_write_append)) != 0 or source.len > 2048) return null;
+    const parent = pathResolveParent(pid, path) orelse return null;
+    const existing = pathFindEntry(parent.directory_cluster, parent.leaf[0..]);
+    if (existing == null and (flags & path_write_create) == 0) return null;
+    if (existing) |entry| if ((entry.attributes & 0x10) != 0) return null;
+
+    var final_data: []const u8 = source;
+    if (existing != null and (flags & path_write_append) != 0) {
+        const entry = existing.?;
+        if (entry.size + source.len > vfs_large_buffer.len) return null;
+        const old_amount = pathReadEntryData(entry, vfs_large_buffer[0..]) orelse return null;
+        for (source, 0..) |byte, index| vfs_large_buffer[old_amount + index] = byte;
+        final_data = vfs_large_buffer[0 .. old_amount + source.len];
+    } else if (existing != null and (flags & path_write_truncate) == 0) {
+        return null;
+    }
+
+    const new_cluster = pathAllocateData(final_data) orelse return null;
+    if (existing) |entry| {
+        if (!pathUpdateEntry(entry, new_cluster, @intCast(final_data.len))) {
+            _ = fatFreeChain(new_cluster);
+            return null;
+        }
+        if (entry.cluster != 0 and !fatFreeChain(entry.cluster)) return null;
+    } else {
+        const slot = pathFindFreeSlot(parent.directory_cluster) orelse {
+            _ = fatFreeChain(new_cluster);
+            return null;
+        };
+        if (!pathWriteSlot(slot, parent.leaf[0..], 0x20, new_cluster, @intCast(final_data.len))) {
+            _ = fatFreeChain(new_cluster);
+            return null;
+        }
+    }
+    return source.len;
+}
+
+fn pathReadFile(pid: u32, path: []const u8, destination: []u8) ?usize {
+    const entry = pathResolve(pid, path) orelse return null;
+    return pathReadEntryData(entry, destination);
+}
+
+fn pathStatFile(pid: u32, path: []const u8, destination: []u8) bool {
+    if (destination.len < 16) return false;
+    const entry = pathResolve(pid, path) orelse return false;
+    var clusters: u32 = 0;
+    if (entry.cluster != 0) {
+        var cluster = entry.cluster;
+        while (clusters <= fat_cluster_count) {
+            clusters += 1;
+            const next = fatReadEntry(cluster) orelse return false;
+            if (next >= 0x0FF8) break;
+            if (!validDataCluster(next)) return false;
+            cluster = next;
+        }
+    }
+    writeLe32(destination, 0, entry.size);
+    writeLe32(destination, 4, entry.cluster);
+    writeLe32(destination, 8, entry.attributes);
+    writeLe32(destination, 12, clusters);
+    return true;
+}
+
+fn pathRename(pid: u32, old_path: []const u8, new_path: []const u8) bool {
+    const old_entry = pathResolve(pid, old_path) orelse return false;
+    const target = pathResolveParent(pid, new_path) orelse return false;
+    if (pathFindEntry(target.directory_cluster, target.leaf[0..]) != null) return false;
+    if (old_entry.parent_cluster == target.directory_cluster) {
+        if (!ataReadSector(old_entry.entry_lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
+        const offset: usize = old_entry.entry_offset;
+        for (0..11) |index| vfs_sector_buffer[offset + index] = target.leaf[index];
+        if (!ataWriteSector(old_entry.entry_lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
+    } else {
+        if ((old_entry.attributes & 0x10) != 0) return false;
+        const slot = pathFindFreeSlot(target.directory_cluster) orelse return false;
+        if (!pathWriteSlot(slot, target.leaf[0..], old_entry.attributes, old_entry.cluster, old_entry.size)) return false;
+        if (!pathDeleteEntry(old_entry)) {
+            const rollback = pathFindEntry(target.directory_cluster, target.leaf[0..]) orelse return false;
+            _ = pathDeleteEntry(rollback);
+            return false;
+        }
+    }
+    hierarchy_rename_count +|= 1;
+    return true;
+}
+
+fn pathUnlink(pid: u32, path: []const u8) bool {
+    const entry = pathResolve(pid, path) orelse return false;
+    if ((entry.attributes & 0x10) != 0) return false;
+    if (!pathDeleteEntry(entry)) return false;
+    if (entry.cluster != 0 and !fatFreeChain(entry.cluster)) return false;
+    hierarchy_unlink_count +|= 1;
+    return true;
+}
+
+fn pathListDirectory(pid: u32, path: []const u8, destination: []u8) ?usize {
+    const directory = pathResolve(pid, path) orelse return null;
+    if ((directory.attributes & 0x10) == 0) return null;
+    const sector_count: u16 = if (directory.cluster == 0) fat_root_sectors else 1;
+    var cursor: usize = 0;
+    var sector_index: u16 = 0;
+    while (sector_index < sector_count) : (sector_index += 1) {
+        const lba = pathDirectoryLba(directory.cluster, sector_index) orelse return null;
+        if (!ataReadSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return null;
+        for (0..16) |entry_index| {
+            const offset = entry_index * 32;
+            const first = vfs_sector_buffer[offset];
+            if (first == 0) return cursor;
+            if (first == 0xE5 or first == '.') continue;
+            const attributes = vfs_sector_buffer[offset + 11];
+            if (attributes == 0x0F or (attributes & 0x08) != 0) continue;
+            var name: [11]u8 = undefined;
+            for (0..11) |index| name[index] = vfs_sector_buffer[offset + index];
+            if (!appendFatName(destination, &cursor, &name, (attributes & 0x10) != 0)) return null;
+            if (cursor >= destination.len) return null;
+            destination[cursor] = '\n';
+            cursor += 1;
+        }
+    }
+    return cursor;
+}
+
 fn resetNamespaceAccounting() void {
     vfs_descriptors = @splat(.{});
     vfs_open_count = 0;
@@ -3486,7 +4249,7 @@ fn verifyNamespaceLifecycle() void {
     const first_cluster = vfs_nodes[temporary_index].cluster;
     const second_cluster = fatReadEntry(first_cluster) orelse vfsFailure("namespace second cluster");
     const chain_end = fatReadEntry(second_cluster) orelse vfsFailure("namespace chain end");
-    if (first_cluster != 23 or second_cluster != 24 or chain_end < 0x0FF8) vfsFailure("namespace deterministic chain");
+    if (first_cluster != runtime_first_cluster or second_cluster != runtime_first_cluster + 1 or chain_end < 0x0FF8) vfsFailure("namespace deterministic chain");
 
     if (!vfsRenameNode(temporary, moved) or vfsFindNode(temporary) != null) vfsFailure("namespace rename");
     const moved_index = vfsFindNode(moved) orelse vfsFailure("namespace moved node");
@@ -3509,7 +4272,7 @@ fn verifyNamespaceLifecycle() void {
     if (namespace_reused_cluster != first_cluster) vfsFailure("namespace first-fit reuse");
     if (!vfsUnlinkNode(reused) or fatReadEntry(namespace_reused_cluster) != 0) vfsFailure("namespace reuse unlink");
     reloadVfsRoot();
-    if (vfs_node_count != 11 or vfsFindNode(temporary) != null or vfsFindNode(moved) != null or vfsFindNode(reused) != null) {
+    if (vfs_node_count != 12 or vfsFindNode(temporary) != null or vfsFindNode(moved) != null or vfsFindNode(reused) != null) {
         vfsFailure("namespace root restoration");
     }
     if (vfs_rename_count != 1 or vfs_unlink_count != 2 or fat_allocation_count != 3 or fat_free_count != 3) {
@@ -3518,11 +4281,63 @@ fn verifyNamespaceLifecycle() void {
     namespace_verified = true;
     writeAll("ZigOs i686 FAT12 namespace verified: mode cleanup rename 0x00000001 unlink 0x00000002 bytes 0x00000258 hash 0x");
     writeHex32(namespace_hash);
-    writeAll(" chain 0x00000017->0x00000018 reclaimed yes reused 0x");
+    writeAll(" chain 0x");
+    writeHex32(first_cluster);
+    writeAll("->0x");
+    writeHex32(second_cluster);
+    writeAll(" reclaimed yes reused 0x");
     writeHex32(namespace_reused_cluster);
     writeAll(" residue none root-restored yes\r\n");
     writeAll("ZigOs i686 Capstone 9 verified: new-goals 0x00000010 VM 0x00000008 threads 0x00000006 IRQ-queues 0x00000001 namespace 0x00000001 mode first\r\n");
     resetNamespaceAccounting();
+}
+
+fn verifyPersistentHierarchy() void {
+    const writes_before = ata_write_count;
+    const allocations_before = fat_allocation_count;
+    const frees_before = fat_free_count;
+    const home = pathFindEntry(0, "HOME       ") orelse vfsFailure("hierarchy HOME");
+    const docs = pathFindEntry(home.cluster, "DOCS       ") orelse vfsFailure("hierarchy DOCS");
+    const archive = pathFindEntry(home.cluster, "ARCHIVE    ") orelse vfsFailure("hierarchy ARCHIVE");
+    const log = pathFindEntry(archive.cluster, "LOG     TXT") orelse vfsFailure("hierarchy LOG");
+    const home_dot = pathFindEntry(home.cluster, ".          ") orelse vfsFailure("hierarchy HOME dot");
+    const home_parent = pathFindEntry(home.cluster, "..         ") orelse vfsFailure("hierarchy HOME parent");
+    const docs_parent = pathFindEntry(docs.cluster, "..         ") orelse vfsFailure("hierarchy DOCS parent");
+    const archive_parent = pathFindEntry(archive.cluster, "..         ") orelse vfsFailure("hierarchy ARCHIVE parent");
+    const second = fatReadEntry(log.cluster) orelse vfsFailure("hierarchy LOG second");
+    const end = fatReadEntry(second) orelse vfsFailure("hierarchy LOG end");
+    const amount = pathReadFile(0, "/HOME/ARCHIVE/LOG.TXT", vfs_large_buffer[0..]) orelse
+        vfsFailure("hierarchy LOG read");
+    var home_list: [128]u8 = @splat(0);
+    var archive_list: [128]u8 = @splat(0);
+    const home_list_bytes = pathListDirectory(0, "/HOME", home_list[0..]) orelse
+        vfsFailure("hierarchy HOME list");
+    const archive_list_bytes = pathListDirectory(0, "/HOME/ARCHIVE", archive_list[0..]) orelse
+        vfsFailure("hierarchy ARCHIVE list");
+    hierarchy_hash = fnv1a32(vfs_large_buffer[0..amount]);
+    hierarchy_home_cluster = home.cluster;
+    hierarchy_docs_cluster = docs.cluster;
+    hierarchy_archive_cluster = archive.cluster;
+    hierarchy_log_first_cluster = log.cluster;
+    hierarchy_log_second_cluster = second;
+    hierarchy_reused_cluster = runtime_first_cluster + 5;
+    const reuse_fat = fatReadEntry(hierarchy_reused_cluster) orelse vfsFailure("hierarchy reuse FAT");
+    const expected_reuse = if (notes_present_at_boot) runtime_first_cluster + 6 else 0;
+    if ((home.attributes & 0x10) == 0 or (docs.attributes & 0x10) == 0 or (archive.attributes & 0x10) == 0 or
+        home.cluster != runtime_first_cluster or docs.cluster != runtime_first_cluster + 1 or
+        log.cluster != runtime_first_cluster + 2 or second != runtime_first_cluster + 3 or
+        archive.cluster != runtime_first_cluster + 4 or end < 0x0FF8 or log.size != expected_path_payload_bytes or
+        hierarchy_hash != expected_path_payload_hash or home_dot.cluster != home.cluster or home_parent.cluster != 0 or
+        docs_parent.cluster != home.cluster or archive_parent.cluster != home.cluster or !pathDirectoryEmpty(docs.cluster) or
+        pathFindEntry(docs.cluster, "SCRATCH BIN") != null or pathFindEntry(docs.cluster, "REUSE   BIN") != null or
+        !equalBytes(home_list[0..home_list_bytes], "DOCS/\nARCHIVE/\n") or
+        !equalBytes(archive_list[0..archive_list_bytes], "LOG.TXT\n") or reuse_fat != expected_reuse or
+        ata_write_count != writes_before or fat_allocation_count != allocations_before or fat_free_count != frees_before)
+    {
+        vfsFailure("hierarchy persistent contract");
+    }
+    hierarchy_present_at_boot = true;
+    hierarchy_verified = true;
 }
 
 fn verifyNotesFile() void {
@@ -3538,7 +4353,7 @@ fn verifyNotesFile() void {
     notes_cluster = vfs_nodes[node_index].cluster;
     const second = fatReadEntry(notes_cluster) orelse vfsFailure("NOTES first FAT entry");
     const end = fatReadEntry(second) orelse vfsFailure("NOTES second FAT entry");
-    if (notes_hash != expected_notes_hash or notes_cluster != 23 or second != 24 or end < 0x0FF8) {
+    if (notes_hash != expected_notes_hash or notes_cluster != runtime_first_cluster + 5 or second != runtime_first_cluster + 6 or end < 0x0FF8) {
         vfsFailure("NOTES.TXT deterministic chain");
     }
 }
@@ -3674,6 +4489,16 @@ fn resetSyscallAccounting() void {
     syscall_getpgid_count = 0;
     syscall_killpg_count = 0;
     syscall_procinfo_count = 0;
+    syscall_getcwd_count = 0;
+    syscall_chdir_count = 0;
+    syscall_mkdir_count = 0;
+    syscall_rmdir_count = 0;
+    syscall_path_stat_count = 0;
+    syscall_path_write_count = 0;
+    syscall_path_read_count = 0;
+    syscall_path_rename_count = 0;
+    syscall_path_unlink_count = 0;
+    syscall_listdir_count = 0;
     syscall_rejected = 0;
     syscall_exit_code = 0;
     syscall_exited = false;
@@ -3696,10 +4521,12 @@ fn spawnElfProcess(name: [11]u8, parent_pid: u32) ?SpawnResult {
     const process_index = slot orelse return null;
     const pid = next_pid;
     next_pid +|= 1;
+    const inherited_cwd = if (parent_pid == 0) @as(u16, 0) else processCwdCluster(parent_pid) orelse 0;
     process_table[process_index] = .{
         .pid = pid,
         .parent_pid = parent_pid,
         .process_group = pid,
+        .cwd_cluster = inherited_cwd,
         .name = name,
         .state = .running,
     };
@@ -3787,13 +4614,13 @@ fn spawnElfProcess(name: [11]u8, parent_pid: u32) ?SpawnResult {
             results[14] != service_payload.len or results[15] >= vfs_descriptors.len or results[16] != 7 or
             results[17] != service_payload.len or results[18] != 0 or results[19] != pid or results[20] != 0 or
             results[21] != 9 or results[22] != user_heap_base or readLe32(stat, 0) != service_payload.len or
-            readLe32(stat, 4) != 23 or readLe32(stat, 8) != 0x20 or readLe32(stat, 12) != 1 or
+            readLe32(stat, 4) != runtime_first_cluster or readLe32(stat, 8) != 0x20 or readLe32(stat, 12) != 1 or
             heap_sentinel.* != 0xDEAD_BEEF or mmap_sentinel.* != 0xCAFE_BABE or !payload_match or !pipes_closed or
             queryPageEntry(kernel_page_directory, user_heap_base) != null or
             queryPageEntry(kernel_page_directory, user_heap_base + frame_size) != null or
             queryPageEntry(kernel_page_directory, user_mmap_address) != null or vfsOpenCountOwned(pid) != 0 or
             vfsFindNode("TEMP2   BIN") != null or vfsFindNode("RENAMED BIN") != null or
-            fatReadEntry(23) != 0 or vfs_create_count != 1 or vfs_rename_count != 1 or vfs_unlink_count != 1 or
+            fatReadEntry(runtime_first_cluster) != 0 or vfs_create_count != 1 or vfs_rename_count != 1 or vfs_unlink_count != 1 or
             fat_allocation_count != 1 or fat_free_count != 1 or process_table[process_index].pending_signal != 0)
         {
             processFailure("SERVICE contract");
@@ -3862,6 +4689,90 @@ fn spawnElfProcess(name: [11]u8, parent_pid: u32) ?SpawnResult {
         fork_tree_cloexec = fork_child.cloexec_closed;
         fork_tree_signal = fork_child.child_results[3];
         fork_tree_pipe_bytes = results[17];
+    } else if (equalBytes(name[0..], "PATHS   ELF")) {
+        const results: [*]const volatile u32 = @ptrFromInt(user_code_frame + 0x740);
+        const cwd_root: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x7C0);
+        const cwd_home: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x7F0);
+        const cwd_docs: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x820);
+        const stat: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x850);
+        const home_list: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x880);
+        const archive_list: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x900);
+        const readback: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0xC60);
+        const expected_results = [_]u32{
+            1,
+            runtime_first_cluster,
+            0,
+            5,
+            runtime_first_cluster + 1,
+            0,
+            10,
+            runtime_first_cluster + 2,
+            0,
+            expected_path_payload_bytes,
+            0,
+            expected_path_payload_bytes,
+            0,
+            0,
+            0xFFFF_FFFE,
+            0,
+            0,
+            runtime_first_cluster + 4,
+            0,
+            0xFFFF_FFD9,
+            15,
+            8,
+            0,
+            expected_path_payload_bytes,
+            1,
+            0,
+            1,
+            0,
+            0,
+            1,
+        };
+        var results_match = true;
+        for (expected_results, 0..) |expected, index| {
+            if (results[index] != expected) results_match = false;
+        }
+        var payload_match = true;
+        for (0..expected_path_payload_bytes) |index| {
+            const expected: u8 = @intCast((index * 29 + 7) & 0xFF);
+            if (readback[index] != expected) payload_match = false;
+        }
+        var cwd_match = cwd_root[0] == '/';
+        for ("/HOME", 0..) |byte, index| {
+            if (cwd_home[index] != byte) cwd_match = false;
+        }
+        for ("/HOME/DOCS", 0..) |byte, index| {
+            if (cwd_docs[index] != byte) cwd_match = false;
+        }
+        var home_list_match = true;
+        for ("DOCS/\nARCHIVE/\n", 0..) |byte, index| {
+            if (home_list[index] != byte) home_list_match = false;
+        }
+        var archive_list_match = true;
+        for ("LOG.TXT\n", 0..) |byte, index| {
+            if (archive_list[index] != byte) archive_list_match = false;
+        }
+        if (syscall_exit_code != 0x72 or syscall_count != 31 or syscall_rejected != 2 or
+            syscall_getcwd_count != 4 or syscall_chdir_count != 5 or syscall_mkdir_count != 4 or
+            syscall_rmdir_count != 1 or syscall_path_stat_count != 2 or syscall_path_write_count != 3 or
+            syscall_path_read_count != 2 or syscall_path_rename_count != 3 or syscall_path_unlink_count != 2 or
+            syscall_listdir_count != 2 or syscall_exit_cleanup_closes != 0 or !results_match or !payload_match or
+            !cwd_match or !home_list_match or !archive_list_match or readLe32(stat, 0) != expected_path_payload_bytes or
+            readLe32(stat, 4) != runtime_first_cluster + 2 or readLe32(stat, 8) != 0x20 or readLe32(stat, 12) != 2 or
+            process_table[process_index].cwd_cluster != 0 or vfsOpenCountOwned(pid) != 0 or
+            hierarchy_mkdir_count != 4 or hierarchy_rmdir_count != 1 or hierarchy_rename_count != 3 or
+            hierarchy_unlink_count != 2 or fat_allocation_count != 8 or fat_free_count != 3 or
+            fatReadEntry(runtime_first_cluster + 5) != 0)
+        {
+            processFailure("PATHS hierarchy contract");
+        }
+        hierarchy_syscalls = syscall_count;
+        hierarchy_rejections = syscall_rejected;
+        hierarchy_reused_cluster = runtime_first_cluster + 5;
+        verifyPersistentHierarchy();
+        resetNamespaceAccounting();
     } else if (equalBytes(name[0..], "WRITER  ELF")) {
         if (syscall_exit_code != 0x55 or syscall_count != 9 or syscall_file_opens != 2 or
             syscall_file_writes != 2 or syscall_file_write_bytes != expected_notes_bytes or
@@ -3950,11 +4861,11 @@ fn processFailure(reason: []const u8) noreturn {
 }
 
 fn runShell() noreturn {
-    const expected_nodes: u32 = if (notes_present_at_boot) 12 else 11;
+    const expected_nodes: u32 = if (notes_present_at_boot) 13 else 12;
     if (!ata_ready or !fat_ready or !heap_ready or !frame_allocator_ready or vfs_node_count != expected_nodes) {
         shellFailure("subsystems unavailable");
     }
-    writeAll("ZigOs i686 Capstone 11 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode ");
+    writeAll("ZigOs i686 Capstone 12 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode ");
     writeAll(if (notes_present_at_boot) "persistence" else "first");
     writeAll("\r\n");
     var line: [64]u8 = undefined;
@@ -3999,10 +4910,14 @@ fn runShell() noreturn {
             writeHex32(orch_elf_size);
             writeAll(" CHILD.ELF-bytes 0x");
             writeHex32(child_elf_size);
+            writeAll(" PATHS.ELF-bytes 0x");
+            writeHex32(paths_elf_size);
             writeAll(" WRITER.ELF-bytes 0x");
             writeHex32(writer_elf_size);
             writeAll(" persistent-notes ");
             writeAll(if (vfsFindNode("NOTES   TXT") != null) "yes" else "no");
+            writeAll(" persistent-hierarchy ");
+            writeAll(if (hierarchy_present_at_boot) "yes" else "no");
             writeAll("\r\n");
         } else if (command.len > 5 and equalBytes(command[0..5], "hash ")) {
             shell_command_count +|= 1;
@@ -4057,6 +4972,23 @@ fn runShell() noreturn {
                 writeHex32(fork_tree_pipe_bytes);
                 writeAll(" cleanup yes");
             }
+            if (equalBytes(name[0..], "PATHS   ELF")) {
+                writeAll(" hierarchy-goals 0x00000017 home 0x");
+                writeHex32(hierarchy_home_cluster);
+                writeAll(" docs 0x");
+                writeHex32(hierarchy_docs_cluster);
+                writeAll(" log 0x");
+                writeHex32(hierarchy_log_first_cluster);
+                writeAll("->0x");
+                writeHex32(hierarchy_log_second_cluster);
+                writeAll(" archive 0x");
+                writeHex32(hierarchy_archive_cluster);
+                writeAll(" reuse 0x");
+                writeHex32(hierarchy_reused_cluster);
+                writeAll(" hash 0x");
+                writeHex32(hierarchy_hash);
+                writeAll(" cleanup yes");
+            }
             if (equalBytes(name[0..], "WRITER  ELF")) {
                 writeAll(" wrote 0x");
                 writeHex32(syscall_file_write_bytes);
@@ -4064,7 +4996,10 @@ fn runShell() noreturn {
                 writeHex32(syscall_file_read_bytes);
                 writeAll(" notes-hash 0x");
                 writeHex32(notes_hash);
-                writeAll(" chain 0x00000017->0x00000018");
+                writeAll(" chain 0x");
+                writeHex32(notes_cluster);
+                writeAll("->0x");
+                writeHex32(runtime_first_cluster + 6);
             }
             writeAll("\r\n");
         } else if (command.len > 5 and equalBytes(command[0..5], "wait ")) {
@@ -4089,20 +5024,25 @@ fn runShell() noreturn {
                 verifyNotesFile();
                 var fault_ok = false;
                 for (process_table) |record| {
-                    if (record.pid == 10 and record.state == .faulted and record.fault_vector == 14 and
+                    if (record.pid == 11 and record.state == .faulted and record.fault_vector == 14 and
                         record.fault_address == 0x0080_0000) fault_ok = true;
                 }
-                if (vfs_node_count != 12 or process_count != 10 or last_spawned_pid != 10 or
-                    process_wait_count != 2 or last_waited_pid != 9 or !fault_ok or shell_command_count != 15 or
+                if (vfs_node_count != 13 or process_count != 11 or last_spawned_pid != 11 or
+                    process_wait_count != 2 or last_waited_pid != 10 or !fault_ok or shell_command_count != 16 or
                     vfs_create_count != 1 or vfs_truncate_count != 1 or vfs_write_count != 2 or
                     vfs_seek_count != 1 or fat_allocation_count != 2 or notes_hash != expected_notes_hash or
-                    !namespace_verified or !service_verified or !fork_tree_verified or service_syscalls != 30 or service_pipe_bytes != service_payload.len or
+                    !namespace_verified or !service_verified or !fork_tree_verified or !hierarchy_verified or
+                    hierarchy_syscalls != 31 or hierarchy_rejections != 2 or hierarchy_home_cluster != runtime_first_cluster or
+                    hierarchy_docs_cluster != runtime_first_cluster + 1 or hierarchy_log_first_cluster != runtime_first_cluster + 2 or
+                    hierarchy_log_second_cluster != runtime_first_cluster + 3 or hierarchy_archive_cluster != runtime_first_cluster + 4 or
+                    hierarchy_reused_cluster != runtime_first_cluster + 5 or hierarchy_hash != expected_path_payload_hash or
+                    service_syscalls != 30 or service_pipe_bytes != service_payload.len or
                     vm_fault_recovery_count != 1 or vm_fault_containment_count != 4 or
                     advanced_scheduler_exit_count != 4 or keyboard_ring_dropped != 0 or !fat_cache_loaded)
                 {
                     shellFailure("first-session accounting");
                 }
-                writeAll("ZigOs i686 Capstone 11 first session verified: goals 0x0000003F new-goals 0x00000013 root-files 0x");
+                writeAll("ZigOs i686 Capstone 12 first session verified: goals 0x00000056 new-goals 0x00000017 root-files 0x");
                 writeHex32(vfs_node_count);
                 writeAll(" processes 0x");
                 writeHex32(process_count);
@@ -4120,22 +5060,45 @@ fn runShell() noreturn {
                 writeHex32(fat_allocation_count);
                 writeAll(" notes 0x000002D0 hash 0x");
                 writeHex32(notes_hash);
-                writeAll(" chain 0x00000017->0x00000018 fault-contained yes descriptors-closed yes commands 0x");
+                writeAll(" chain 0x");
+                writeHex32(notes_cluster);
+                writeAll("->0x");
+                writeHex32(runtime_first_cluster + 6);
+                writeAll(" hierarchy 0x");
+                writeHex32(hierarchy_log_first_cluster);
+                writeAll("->0x");
+                writeHex32(hierarchy_log_second_cluster);
+                writeAll(" hierarchy-hash 0x");
+                writeHex32(hierarchy_hash);
+                writeAll(" fault-contained yes descriptors-closed yes commands 0x");
                 writeHex32(shell_command_count);
                 writeAll("\r\n");
             } else {
                 verifyNotesFile();
-                if (vfs_node_count != 12 or process_count != 3 or shell_command_count != 3 or
+                if (vfs_node_count != 13 or process_count != 3 or shell_command_count != 3 or
                     vfs_create_count != 0 or vfs_truncate_count != 0 or vfs_write_count != 0 or
                     fat_allocation_count != 0 or notes_hash != expected_notes_hash or
-                    !namespace_verified or vm_fault_recovery_count != 1 or vm_fault_containment_count != 3 or
+                    !namespace_verified or !hierarchy_verified or hierarchy_hash != expected_path_payload_hash or
+                    hierarchy_home_cluster != runtime_first_cluster or hierarchy_docs_cluster != runtime_first_cluster + 1 or
+                    hierarchy_log_first_cluster != runtime_first_cluster + 2 or hierarchy_log_second_cluster != runtime_first_cluster + 3 or
+                    hierarchy_archive_cluster != runtime_first_cluster + 4 or vm_fault_recovery_count != 1 or vm_fault_containment_count != 3 or
                     advanced_scheduler_exit_count != 4 or keyboard_ring_dropped != 0 or !fat_cache_loaded)
                 {
                     shellFailure("persistence-session accounting");
                 }
-                writeAll("ZigOs i686 Capstone 11 persistence session verified: goals 0x0000003F inherited-goals 0x0000002C root-files 0x0000000C notes 0x000002D0 hash 0x");
+                writeAll("ZigOs i686 Capstone 12 persistence session verified: goals 0x00000056 inherited-goals 0x00000043 root-files 0x0000000D notes 0x000002D0 hash 0x");
                 writeHex32(notes_hash);
-                writeAll(" chain 0x00000017->0x00000018 writes 0x00000000 allocations 0x00000000 descriptors-closed yes commands 0x");
+                writeAll(" chain 0x");
+                writeHex32(notes_cluster);
+                writeAll("->0x");
+                writeHex32(runtime_first_cluster + 6);
+                writeAll(" hierarchy 0x");
+                writeHex32(hierarchy_log_first_cluster);
+                writeAll("->0x");
+                writeHex32(hierarchy_log_second_cluster);
+                writeAll(" hierarchy-hash 0x");
+                writeHex32(hierarchy_hash);
+                writeAll(" writes 0x00000000 allocations 0x00000000 descriptors-closed yes commands 0x");
                 writeHex32(shell_command_count);
                 writeAll("\r\n");
             }

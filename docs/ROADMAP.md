@@ -2014,3 +2014,20 @@
 - Cumulative shell release accounting is 63 goals (`0x3F`), of which 19 (`0x13`) are new in Capstone 11.
 - Reference kernel: 65,112 bytes, 128 sectors at LBA9-136, checksum16 `0x9815`, SHA-256 `D36AA9E31B5554E48A40311F2E4E60B46084B0D977B12FF3C7405C216657BF12`.
 - Initial image SHA-256: `A5E0BFCC1C51785BC3108AAFCD0D8512C73D0DF0761C3581C5C34AA591BDDC53`; persisted image SHA-256: `336BCA037C47BF35EE7AC081D341976CE6B634B7F3720E9FAA729905C70BF459`.
+
+## Capstone 12.0 - hierarchical FAT12 paths and persistent directories
+
+Status: complete.
+
+- Added a bounded 48-byte, four-component FAT 8.3 path parser with absolute, relative, repeated-separator, `.`, and `..` resolution.
+- Added process-owned cwd state, canonical `getcwd`, `chdir`, and cwd inheritance across the bounded clone/exec lifecycle.
+- Added one-cluster FAT12 directory lookup, enumeration, `mkdir`, initialized `.`/`..` links, empty `rmdir`, and nonempty/cwd rejection.
+- Extended the CPL3 ABI with syscalls 32-41 for cwd, path stat/read/write, rename/move, unlink, and list operations.
+- Added transactional prepared-chain file creation/replacement and rollback for failed directory commits and cross-directory source deletion.
+- Added `PATHS.ELF` (4,024 bytes, FNV-1a32 `38C1C0AD`, clusters 23-30), which executes 31 syscalls and proves all twenty-three new goals.
+- The first boot persists `/HOME` at cluster 31, `DOCS` at 32, `LOG.TXT` at `33 -> 34`, `ARCHIVE` at 35, and root `NOTES.TXT` at `36 -> 37`.
+- Offline verification independently checks root slots 12/13, directory sectors, dot links, parent links, tombstones, both FAT copies, exact file contents, hashes, and cluster 38 remaining free.
+- The second boot performs zero writes and allocations and leaves the full image SHA-256 unchanged.
+- Cumulative verified accounting is 86 goals (`0x56`), with 23 (`0x17`) new in Capstone 12.
+- Reference kernel: 77,880 bytes, 153 sectors at LBA9-161, checksum16 `0x56BA`, SHA-256 `390CD94081AAE8153E984DA4D8EB7A4BF8DE859DFB4206C7498DFE6A77A86F19`.
+- Initial image SHA-256: `E964341A937B5F22C680BFC7CFF954D2F2FDD911A206FE2E3E8F8D027B948490`; persisted image SHA-256: `4F7C190F1729881B15D056DBDA6C37E9C4F016B77C74FE5F908519B9A7D9D7F0`.
