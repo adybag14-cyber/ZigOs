@@ -3,6 +3,7 @@ const descriptor_tables = @import("descriptor_tables.zig");
 const interrupt_context = @import("interrupt_context.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
+const user_service = @import("user_service.zig");
 
 const cc = std.os.uefi.cc;
 const report_syscall: u64 = 1;
@@ -54,6 +55,7 @@ var active_stack_virtual: usize = 0;
 
 pub fn run(allocator: *memory.FrameAllocator) ?Report {
     reset();
+    if (!paging.enableNoExecute()) return null;
 
     const code_physical = allocator.allocateBelow(memory.four_gib) orelse return null;
     const stack_physical = allocator.allocateBelow(memory.four_gib) orelse return null;
@@ -110,7 +112,7 @@ export fn zigos_user_syscall_handler(
     frame: *interrupt_context.Frame,
     fx_state: *align(16) interrupt_context.FxState,
 ) callconv(cc) u64 {
-    _ = fx_state;
+    if (user_service.isActive()) return user_service.handleSyscall(frame, fx_state);
     syscall_count +%= 1;
 
     if ((frame.cs & 3) != 3 or frame.cs != descriptor_tables.user_code_selector) {

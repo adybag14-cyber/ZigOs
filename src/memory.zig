@@ -153,11 +153,42 @@ pub fn parseLayout(memory_map: boot.MemoryMapInfo) ?Layout {
 }
 
 pub const FrameAllocator = struct {
+    pub const Checkpoint = struct {
+        region_index: usize,
+        current_frame: u64,
+        current_region_end: u64,
+        allocated_pages: u64,
+    };
+
     layout: *const Layout,
     region_index: usize = 0,
     current_frame: u64 = 0,
     current_region_end: u64 = 0,
     allocated_pages: u64 = 0,
+
+    pub fn checkpoint(self: *const FrameAllocator) Checkpoint {
+        return .{
+            .region_index = self.region_index,
+            .current_frame = self.current_frame,
+            .current_region_end = self.current_region_end,
+            .allocated_pages = self.allocated_pages,
+        };
+    }
+
+    pub fn restore(self: *FrameAllocator, saved: Checkpoint) bool {
+        if (self.allocated_pages < saved.allocated_pages) return false;
+        if (saved.region_index > self.layout.region_count or self.region_index < saved.region_index) return false;
+        if ((saved.current_frame & (page_size - 1)) != 0 or (saved.current_region_end & (page_size - 1)) != 0) return false;
+        if ((saved.current_frame == 0) != (saved.current_region_end == 0)) return false;
+        if (saved.current_frame > saved.current_region_end) return false;
+        if (self.region_index == saved.region_index and
+            (self.current_region_end != saved.current_region_end or self.current_frame < saved.current_frame)) return false;
+        self.region_index = saved.region_index;
+        self.current_frame = saved.current_frame;
+        self.current_region_end = saved.current_region_end;
+        self.allocated_pages = saved.allocated_pages;
+        return true;
+    }
 
     pub fn init(layout: *const Layout) FrameAllocator {
         return .{ .layout = layout };

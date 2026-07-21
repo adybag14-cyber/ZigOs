@@ -1526,6 +1526,27 @@ if (-not $output.Contains('int 0x80 syscall frame verified: CS=0x0033, SS=0x002B
 if (-not $output.Contains('CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.')) {
     throw 'The userspace syscall-return and kernel-restoration marker was not observed.'
 }
+if (-not $output.Contains('ELF64 userspace image loaded: bytes 10240, entry 0x0000008000100000, RX 2628, RW 2048/ 8192, parser rejects 8')) {
+    throw 'The strict two-segment ELF64 loader marker was not observed.'
+}
+if (-not $output.Contains('ELF64 hashes: file FNV-1a64 0xFB957FDFCD3FAC0F, code 0x3A81E78DA90E35D8, data 0xAC60E5A9F7D909F0')) {
+    throw 'The independently loaded ELF64 image/code/data hash marker was not observed.'
+}
+if (-not $output.Contains('x86-64 user PTE enforcement: NX yes, code read-only yes, data non-executable yes, guard unmapped yes, A/D yes')) {
+    throw 'The hardware-enforced x86-64 user PTE permission marker was not observed.'
+}
+if (-not $output.Contains('ELF64 service ABI: syscalls 50, rejected 13, pointer faults 5, output 34, pipe 24, descriptors peak/closed 4/4')) {
+    throw 'The ELF64 service syscall/descriptor contract marker was not observed.'
+}
+if (-not $output.Contains('ELF64 service scheduling/signals: deliveries 1, yields 1, slept ticks 3, clock 0x0000000000001004')) {
+    throw 'The ELF64 signal/yield/sleep/clock contract marker was not observed.'
+}
+if (-not $output.Contains('ELF64 user faults recovered: NX CR2 0x0000008000102000 error 0x0000000000000015, guard CR2 0x0000008000108000 error 0x0000000000000004')) {
+    throw 'The two recoverable CPL3 page-fault marker was not observed.'
+}
+if (-not $output.Contains('ZigOs x86-64 Capstone 15 verified: goals 0x000000D1 new-goals 0x00000040 syscalls 0x00000032 faults 0x00000002 parser-rejections 0x00000008 frames 0x00000007 page-tables 0x00000000 cleanup yes')) {
+    throw 'The complete x86-64 Capstone 15 64-goal release marker was not observed.'
+}
 if ($NoGraphics) {
     if (-not $output.Contains('Framebuffer console unavailable; serial-only diagnostics active')) {
         throw 'The final serial-only framebuffer marker was not observed.'

@@ -1,6 +1,7 @@
 const std = @import("std");
 const serial = @import("serial.zig");
 const stack_trace = @import("stack_trace.zig");
+const user_service = @import("user_service.zig");
 
 const cc = std.os.uefi.cc;
 
@@ -86,6 +87,17 @@ export fn zigos_exception_handler(frame: *ExceptionFrame) callconv(cc) void {
         recovery_succeeded = true;
         return;
     }
+
+    const fault_address = if (frame.vector == 14) zigos_read_cr2() else frame.rip;
+    if ((frame.cs & 3) == 3 and user_service.handleException(
+        frame.vector,
+        frame.error_code,
+        frame.rip,
+        frame.cs,
+        frame.interrupted_rsp,
+        fault_address,
+        &frame.rip,
+    )) return;
 
     debugWrite("\r\nZigOs fatal CPU exception: vector ");
     debugWriteU64Decimal(frame.vector);

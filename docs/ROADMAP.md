@@ -2066,3 +2066,22 @@ Status: complete.
 - Cumulative verified accounting is 145 goals (`0x91`), with 32 (`0x20`) new in Capstone 14.
 - Reference kernel: 103,624 bytes, 203 sectors at LBA9-211, checksum16 `0xB785`, SHA-256 `59D2A2FE18CB34F83EFEB493D268FA29092696E256211E148A0DDFB0758EA702`.
 - Initial image SHA-256: `3F162475D39DE25A2B3F50FE6D9FF8857DAC231191AA0B046D8A64C2B93881A2`; persisted image SHA-256: `9CD89D88469CDF05E0155D1AC2DF007B4474329D148FE01158DE08153A8009C3`.
+
+## Capstone 15.0 - bounded x86-64 ELF64 userspace services
+
+Status: complete.
+
+- Added a deterministic NASM long-mode userspace workload, host ELF64 generator, independent host verifier, and verified package-local embedding stage.
+- Added a strict kernel ELF64 parser for bounded `ET_EXEC`/`EM_X86_64`, two aligned nonoverlapping `PT_LOAD` segments, canonical addresses, W^X, and executable-entry containment.
+- Added eight live malformed-image rejection proofs and independent whole-image, code, and data FNV identities.
+- Added allocator checkpoints and generic low-canonical user PTE map/inspect/translate/unmap operations with CPUID-gated `EFER.NXE` hardware enforcement.
+- Added a fixed RX text, RW/NX data/BSS/stack/two-page heap/anonymous layout with unmapped text-gap and guard pages, seven physical frames, and zero new page-table frames.
+- Added a bounded 23-call x86-64 service ABI for process and memory status, output, hashing, `brk`, anonymous mapping, pipes, descriptors, `dup`, `dup2`, signals, deterministic yield/sleep/clock semantics, fault-handler registration, and exit.
+- The live workload executes 50 successful-path syscalls, 13 expected rejections, five pointer faults, a 34-byte output, a 24-byte pipe payload, four descriptor opens/closes, one signal, one yield, and three sleep ticks.
+- Added two real recoverable CPL3 page faults: NX instruction fetch at `0x0000008000102000` with error `0x15`, and unmapped guard read at `0x0000008000108000` with error `0x04`.
+- Added exact text, BSS, heap, anonymous, stack, descriptor, pipe, mapping, allocator, CR3, and kernel-return restoration checks.
+- Promoted the complete x86-64 UEFI hardware/network boot to a mandatory GitHub Actions step and uploads `service-user.elf` beside `BOOTX64.EFI`.
+- Cumulative verified accounting is 209 goals (`0xD1`), with 64 (`0x40`) new in Capstone 15.
+- `BOOTX64.EFI`: 913,920 bytes, SHA-256 `0BED23A310182BCEF969F01BA925D9537A84D7055DB06611139AB951FC81EE42`.
+- `service-user.elf`: 10,240 bytes, SHA-256 `A166FAE8BCFD94663CA1CE0904AE2BF5D2044E831179910C173F9E4BCA1A8E28`.
+- The inherited i686 kernel and persisted disk remain byte-identical to Capstone 14.

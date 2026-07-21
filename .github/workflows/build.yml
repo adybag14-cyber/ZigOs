@@ -22,6 +22,10 @@ jobs:
         shell: pwsh
         run: .\scripts\build.ps1 -Clean
 
+      - name: Boot-test x86-64 UEFI services
+        shell: pwsh
+        run: .\scripts\test-qemu.ps1 -Network -TimeoutSeconds 120
+
       - name: Build legacy i686 kernel with canonical Zig
         shell: pwsh
         run: .\scripts\build-legacy-i686.ps1
@@ -42,7 +46,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ZigOs-BOOTX64
-          path: zig-out/EFI/BOOT/BOOTX64.EFI
+          path: |
+            zig-out/EFI/BOOT/BOOTX64.EFI
+            build/service-user.elf
           if-no-files-found: error
 
 

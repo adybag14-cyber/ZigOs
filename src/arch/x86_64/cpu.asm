@@ -9,6 +9,7 @@ section .text
 
 global zigos_cpuid_vendor
 global zigos_cpu_has_x2apic
+global zigos_cpu_has_nx
 global zigos_read_cr0
 global zigos_read_cr3
 global zigos_read_cr4
@@ -37,6 +38,26 @@ zigos_cpu_has_x2apic:
     bt ecx, 21
     setc al
     movzx eax, al
+    pop rbx
+    ret
+
+ ; u8 zigos_cpu_has_nx(void)
+; CPUID.80000001H:EDX[20] advertises execute-disable page-table support.
+zigos_cpu_has_nx:
+    push rbx
+    mov eax, 0x80000000
+    cpuid
+    cmp eax, 0x80000001
+    jb .no_nx
+    mov eax, 0x80000001
+    cpuid
+    bt edx, 20
+    setc al
+    movzx eax, al
+    pop rbx
+    ret
+.no_nx:
+    xor eax, eax
     pop rbx
     ret
 

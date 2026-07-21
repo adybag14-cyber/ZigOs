@@ -22,6 +22,7 @@ const heap = @import("heap.zig");
 const scheduler = @import("scheduler.zig");
 const preemptive = @import("preemptive.zig");
 const user_mode = @import("user_mode.zig");
+const user_service = @import("user_service.zig");
 const xhci = @import("xhci.zig");
 const e1000e = @import("e1000e.zig");
 const ntp = @import("ntp.zig");
@@ -201,6 +202,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     testCooperativeScheduler(&frame_allocator);
     testPreemptiveScheduler(&frame_allocator, timer_setup.result.ticks_per_second);
     testUserMode(&frame_allocator);
+    testElf64UserService(&frame_allocator);
 
     if (graphical_console) |console| {
         const report = console.report();
@@ -14611,6 +14613,107 @@ fn testUserMode(allocator: *memory.FrameAllocator) void {
     debugWriteHex64(report.exit_code);
     debugWrite("\r\n");
     debugWrite("CPL3 -> kernel -> CPL3 -> kernel round trip complete; stack canary intact.\r\n");
+}
+
+fn testElf64UserService(allocator: *memory.FrameAllocator) void {
+    const maybe_report = user_service.run(allocator);
+    if (maybe_report == null) {
+        debugWrite("ELF64 userspace diagnostic: stage ");
+        debugWriteU64Decimal(user_service.lastFailureStage());
+        debugWrite(", syscalls ");
+        debugWriteU64Decimal(user_service.lastFailureSyscalls());
+        debugWrite(", exit 0x");
+        debugWriteHex64(user_service.lastFailureExitCode());
+        debugWrite(", faults ");
+        debugWriteU64Decimal(user_service.lastFailureFaults());
+        debugWrite(", rejected ");
+        debugWriteU64Decimal(user_service.lastFailureRejected());
+        debugWrite("\r\n");
+        userModeFailure("ELF64 process services, fault recovery, or cleanup failed");
+    }
+    const report = maybe_report.?;
+    if (!report.returned_to_kernel or !report.allocator_restored or !report.cr3_restored or
+        !report.mappings_removed or !report.descriptors_closed or !report.pipe_released)
+    {
+        userModeFailure("ELF64 userspace did not restore every kernel resource");
+    }
+    if (report.syscall_count != 50 or report.exit_code != 0x64 or report.fault_count != 2 or
+        report.parser_rejections != 8 or report.allocated_frames != 7 or report.page_table_frames != 0)
+    {
+        userModeFailure("ELF64 userspace accounting did not match the 64-goal contract");
+    }
+
+    debugWrite("ELF64 userspace image loaded: bytes ");
+    debugWriteUsizeDecimal(report.elf_bytes);
+    debugWrite(", entry 0x");
+    debugWriteHex64(report.entry);
+    debugWrite(", RX ");
+    debugWriteU64Decimal(report.rx_file_bytes);
+    debugWrite(", RW ");
+    debugWriteU64Decimal(report.rw_file_bytes);
+    debugWrite("/ ");
+    debugWriteU64Decimal(report.rw_memory_bytes);
+    debugWrite(", parser rejects ");
+    debugWriteU64Decimal(report.parser_rejections);
+    debugWrite("\r\n");
+
+    debugWrite("ELF64 hashes: file FNV-1a64 0x");
+    debugWriteHex64(report.elf_hash);
+    debugWrite(", code 0x");
+    debugWriteHex64(report.code_hash);
+    debugWrite(", data 0x");
+    debugWriteHex64(report.data_hash);
+    debugWrite("\r\n");
+
+    debugWrite("x86-64 user PTE enforcement: NX ");
+    debugWrite(if (report.nx_enabled) "yes" else "no");
+    debugWrite(", code read-only ");
+    debugWrite(if (report.code_read_only) "yes" else "no");
+    debugWrite(", data non-executable ");
+    debugWrite(if (report.data_non_executable) "yes" else "no");
+    debugWrite(", guard unmapped ");
+    debugWrite(if (report.guard_unmapped) "yes" else "no");
+    debugWrite(", A/D ");
+    debugWrite(if (report.accessed_dirty_verified) "yes" else "no");
+    debugWrite("\r\n");
+
+    debugWrite("ELF64 service ABI: syscalls ");
+    debugWriteU64Decimal(report.syscall_count);
+    debugWrite(", rejected ");
+    debugWriteU64Decimal(report.rejected_syscalls);
+    debugWrite(", pointer faults ");
+    debugWriteU64Decimal(report.pointer_faults);
+    debugWrite(", output ");
+    debugWriteU64Decimal(report.output_bytes);
+    debugWrite(", pipe ");
+    debugWriteU64Decimal(report.pipe_bytes);
+    debugWrite(", descriptors peak/closed ");
+    debugWriteU64Decimal(report.descriptor_peak);
+    debugWrite("/");
+    debugWriteU64Decimal(report.descriptor_closes);
+    debugWrite("\r\n");
+
+    debugWrite("ELF64 service scheduling/signals: deliveries ");
+    debugWriteU64Decimal(report.signal_deliveries);
+    debugWrite(", yields ");
+    debugWriteU64Decimal(report.yields);
+    debugWrite(", slept ticks ");
+    debugWriteU64Decimal(report.slept_ticks);
+    debugWrite(", clock 0x");
+    debugWriteHex64(report.final_clock);
+    debugWrite("\r\n");
+
+    debugWrite("ELF64 user faults recovered: NX CR2 0x");
+    debugWriteHex64(report.first_fault.address);
+    debugWrite(" error 0x");
+    debugWriteHex64(report.first_fault.error_code);
+    debugWrite(", guard CR2 0x");
+    debugWriteHex64(report.second_fault.address);
+    debugWrite(" error 0x");
+    debugWriteHex64(report.second_fault.error_code);
+    debugWrite("\r\n");
+
+    debugWrite("ZigOs x86-64 Capstone 15 verified: goals 0x000000D1 new-goals 0x00000040 syscalls 0x00000032 faults 0x00000002 parser-rejections 0x00000008 frames 0x00000007 page-tables 0x00000000 cleanup yes\r\n");
 }
 
 fn userModeFailure(reason: []const u8) noreturn {
