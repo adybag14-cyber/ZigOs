@@ -24,7 +24,7 @@ jobs:
 
       - name: Boot-test x86-64 UEFI services
         shell: pwsh
-        run: .\scripts\test-qemu.ps1 -TimeoutSeconds 120
+        run: .\scripts\test-qemu.ps1 -NoHpet -NoPs2 -CpuCount 1 -NoUsbKeyboard -NoGraphics -TimeoutSeconds 120
 
       - name: Build legacy i686 kernel with canonical Zig
         shell: pwsh

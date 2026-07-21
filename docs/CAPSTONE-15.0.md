@@ -155,7 +155,7 @@ ZigOs x86-64 Capstone 15 verified: goals 0x000000D1 new-goals 0x00000040 syscall
 - Canonical Zig formatting, NASM warning-as-error assembly, Python compilation, PowerShell parsing, and whitespace checks pass.
 - Full HPET-backed x86-64 storage, USB, SMP, networking, DNS, NTP, TCP, scheduler, inherited CPL3 smoke, and Capstone 15 service boot passes.
 - Full 24-bit ACPI PM timer fallback boot with HPET and PS/2 disabled passes the same mandatory Capstone 15 markers.
-- The GitHub Actions workflow now performs a deterministic x86-64 UEFI service/hardware boot rather than build-only validation; local release gates continue to exercise the full network matrix.
+- The GitHub Actions workflow now performs a deterministic single-CPU x86-64 UEFI service/storage boot using the 24-bit ACPI PM fallback rather than build-only validation; local release gates continue to exercise the full network matrix.
 - The inherited Capstone 14 i686 writable first boot, offline FAT12 check, and read-only second boot pass unchanged.
 
 ## Reference artifacts
