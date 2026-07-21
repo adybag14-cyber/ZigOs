@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create the deterministic ZigOs Capstone 12 FAT12 volume."""
+"""Create the deterministic ZigOs Capstone 13 FAT12 volume."""
 from __future__ import annotations
 
 import argparse
@@ -41,6 +41,10 @@ WRITER_NAME = b"WRITER  ELF"
 SERVICE_NAME = b"SERVICE ELF"
 ORCH_NAME = b"ORCH    ELF"
 CHILD_NAME = b"CHILD   ELF"
+ASYNC_NAME = b"ASYNC   ELF"
+WORKA_NAME = b"WORKA   ELF"
+WORKB_NAME = b"WORKB   ELF"
+LEAF_NAME = b"LEAF    ELF"
 PATHS_NAME = b"PATHS   ELF"
 NOTES_NAME = b"NOTES   TXT"
 
@@ -356,6 +360,188 @@ def build_service_elf() -> bytes:
 
 
 
+def build_worka_elf() -> bytes:
+    base = 0x00400000
+    leaf_name_offset = 0x200
+    results_offset = 0x220
+    leaf_name_va = base + leaf_name_offset
+    results_va = base + results_offset
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", results_va + index * 4))
+
+    syscall(2); store(0)
+    syscall(12); store(1)
+    code += mov_imm(0xBB, leaf_name_va) + mov_imm(0xB9, 11)
+    syscall(42); store(2)
+    syscall(43); store(3)
+    code += mov_imm(0xBB, 2)
+    syscall(44); store(4)
+    syscall(12); store(5)
+    code += mov_imm(0xBB, 0x81)
+    syscall(3)
+    code += b"\xF4"
+    if len(code) > leaf_name_offset:
+        raise RuntimeError(f"WORKA.ELF code overlaps data: {len(code)}")
+    segment = bytearray(results_offset + 6 * 4)
+    segment[:len(code)] = code
+    segment[leaf_name_offset:leaf_name_offset + 11] = LEAF_NAME
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+
+def build_workb_elf() -> bytes:
+    base = 0x00400000
+    results_offset = 0x200
+    results_va = base + results_offset
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", results_va + index * 4))
+
+    syscall(2); store(0)
+    syscall(12); store(1)
+    syscall(43); store(2)
+    code += mov_imm(0xB9, 100_000_000)
+    spin = len(code)
+    code += b"\x49"
+    jnz_spin = len(code)
+    code += b"\x0F\x85\x00\x00\x00\x00"
+    struct.pack_into("<i", code, jnz_spin + 2, spin - (jnz_spin + 6))
+    syscall(22); store(3)
+    code += mov_imm(0xBB, 0x8F)
+    syscall(3)
+    code += b"\xF4"
+    if len(code) > results_offset:
+        raise RuntimeError(f"WORKB.ELF code overlaps data: {len(code)}")
+    segment = bytearray(results_offset + 4 * 4)
+    segment[:len(code)] = code
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+def build_leaf_elf() -> bytes:
+    base = 0x00400000
+    results_offset = 0x180
+    results_va = base + results_offset
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", results_va + index * 4))
+
+    syscall(2); store(0)
+    syscall(12); store(1)
+    for index in range(10):
+        code += mov_imm(0xBB, 20)
+        syscall(44); store(2 + index)
+    syscall(12); store(12)
+    code += mov_imm(0xBB, 0x83)
+    syscall(3)
+    code += b"\xF4"
+    if len(code) > results_offset:
+        raise RuntimeError(f"LEAF.ELF code overlaps data: {len(code)}")
+    segment = bytearray(results_offset + 13 * 4)
+    segment[:len(code)] = code
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+def build_async_elf() -> bytes:
+    base = 0x00400000
+    offsets = {
+        "worka": 0x600,
+        "workb": 0x610,
+        "missing": 0x620,
+        "results": 0x680,
+        "status_a_poll": 0x740,
+        "status_a_wait": 0x760,
+        "status_b": 0x780,
+        "status_leaf_before": 0x7A0,
+        "info_leaf": 0x7C0,
+        "status_leaf_after": 0x7E0,
+        "scratch": 0x800,
+    }
+    results_va = base + offsets["results"]
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", results_va + index * 4))
+
+    def load_result_ebx(index: int) -> None:
+        code.extend(b"\x8B\x1D" + struct.pack("<I", results_va + index * 4))
+
+    code += mov_imm(0xBB, base + offsets["worka"]) + mov_imm(0xB9, 11)
+    syscall(42); store(0)
+    code += mov_imm(0xBB, base + offsets["workb"]) + mov_imm(0xB9, 11)
+    syscall(42); store(1)
+    code += b"\xA1" + struct.pack("<I", results_va + 4) + b"\x40"
+    store(2)
+
+    load_result_ebx(0)
+    code += mov_imm(0xB9, base + offsets["status_a_poll"])
+    syscall(45); store(3)
+
+    code += mov_imm(0xBB, base + offsets["status_a_wait"])
+    syscall(47); store(4)
+
+    load_result_ebx(2)
+    code += mov_imm(0xB9, base + offsets["info_leaf"])
+    syscall(31); store(5)
+    load_result_ebx(2)
+    code += mov_imm(0xB9, base + offsets["status_leaf_before"])
+    syscall(45); store(6)
+
+    load_result_ebx(1)
+    code += mov_imm(0xB9, 15)
+    syscall(21); store(7)
+    load_result_ebx(1)
+    code += mov_imm(0xB9, base + offsets["status_b"])
+    syscall(46); store(8)
+
+    syscall(48); store(9)
+    load_result_ebx(2)
+    code += mov_imm(0xB9, base + offsets["status_leaf_after"])
+    syscall(45); store(10)
+
+    load_result_ebx(0)
+    code += mov_imm(0xB9, base + offsets["scratch"])
+    syscall(46); store(11)
+    code += mov_imm(0xBB, base + offsets["scratch"])
+    syscall(47); store(12)
+
+    code += mov_imm(0xBB, base + offsets["missing"]) + mov_imm(0xB9, 11)
+    syscall(42); store(13)
+    code += mov_imm(0xBB, 0xFFFF) + mov_imm(0xB9, base + offsets["scratch"])
+    syscall(45); store(14)
+
+    syscall(2); store(15)
+    syscall(12); store(16)
+    code += mov_imm(0xBB, 0x73)
+    syscall(3)
+    code += b"\xF4"
+
+    if len(code) > offsets["worka"]:
+        raise RuntimeError(f"ASYNC.ELF code overlaps data: {len(code)}")
+    segment = bytearray(offsets["scratch"] + 32)
+    segment[:len(code)] = code
+    segment[offsets["worka"]:offsets["worka"] + 11] = WORKA_NAME
+    segment[offsets["workb"]:offsets["workb"] + 11] = WORKB_NAME
+    segment[offsets["missing"]:offsets["missing"] + 11] = b"MISSING ELF"
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+
 def build_paths_elf() -> bytes:
     base = 0x00400000
     offsets = {
@@ -652,6 +838,10 @@ WRITER_ELF = build_writer_elf()
 SERVICE_ELF = build_service_elf()
 ORCH_ELF = build_orch_elf()
 CHILD_ELF = build_child_elf()
+ASYNC_ELF = build_async_elf()
+WORKA_ELF = build_worka_elf()
+WORKB_ELF = build_workb_elf()
+LEAF_ELF = build_leaf_elf()
 PATHS_ELF = build_paths_elf()
 
 FILES = (
@@ -666,6 +856,10 @@ FILES = (
     (SERVICE_NAME, SERVICE_ELF),
     (ORCH_NAME, ORCH_ELF),
     (CHILD_NAME, CHILD_ELF),
+    (ASYNC_NAME, ASYNC_ELF),
+    (WORKA_NAME, WORKA_ELF),
+    (WORKB_NAME, WORKB_ELF),
+    (LEAF_NAME, LEAF_ELF),
     (PATHS_NAME, PATHS_ELF),
 )
 
@@ -699,7 +893,7 @@ def build_volume(hidden_sectors: int) -> bytes:
     struct.pack_into("<I", boot, 39, 0x5A49474F)
     boot[43:54] = b"ZIGOS FAT12"
     boot[54:62] = b"FAT12   "
-    message = b"ZigOs Capstone 12 FAT12"
+    message = b"ZigOs Capstone 13 FAT12"
     boot[62 : 62 + len(message)] = message
     boot[510:512] = b"\x55\xAA"
 
@@ -743,7 +937,7 @@ def main() -> None:
         f"{name.decode('ascii').strip()}={len(data)}/{fnv1a32(data):08X}" for name, data in FILES
     )
     print(
-        f"Created Capstone 12 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
+        f"Created Capstone 13 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
         f"sectors={TOTAL} root={ROOT_START} data={DATA_START} {details} "
         f"notes-result={len(WRITER_RESULT)}/{fnv1a32(WRITER_RESULT):08X}"
     )

@@ -253,7 +253,25 @@ zigos_i686_syscall_stub:
     cld
     call zigos_i686_syscall_dispatch
     test eax, eax
-    jnz .exit_to_kernel
+    jz .resume_current
+    cmp eax, 1
+    je .exit_to_kernel
+    mov edx, [eax + 36]
+    test dl, 3
+    jz .selected_kernel_segments
+    mov dx, 0x23
+    jmp .load_selected_segments
+.selected_kernel_segments:
+    mov dx, 0x10
+.load_selected_segments:
+    mov ds, dx
+    mov es, dx
+    mov fs, dx
+    mov gs, dx
+    mov esp, eax
+    popad
+    iretd
+.resume_current:
     mov esp, ebp
     popad
     iretd

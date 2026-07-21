@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the complete Capstone 12 BIOS, kernel, and deterministic FAT12 image."""
+"""Verify the complete Capstone 13 BIOS, kernel, and deterministic FAT12 image."""
 from __future__ import annotations
 
 import argparse
@@ -27,7 +27,11 @@ EXPECTED = {
     b"SERVICE ELF": (14, 1362, 0x7C65C5CE, (14, 15, 16)),
     b"ORCH    ELF": (17, 1937, 0x11986FD8, (17, 18, 19, 20)),
     b"CHILD   ELF": (21, 913, 0x7E1C062C, (21, 22)),
-    b"PATHS   ELF": (23, 4024, 0x38C1C0AD, (23, 24, 25, 26, 27, 28, 29, 30)),
+    b"ASYNC   ELF": (23, 2336, 0x21F68871, (23, 24, 25, 26, 27)),
+    b"WORKA   ELF": (28, 824, 0xC83AFC14, (28, 29)),
+    b"WORKB   ELF": (30, 784, 0xCD43E95A, (30, 31)),
+    b"LEAF    ELF": (32, 692, 0x769A282E, (32, 33)),
+    b"PATHS   ELF": (34, 4024, 0x38C1C0AD, (34, 35, 36, 37, 38, 39, 40, 41)),
 }
 
 
@@ -179,7 +183,7 @@ def main() -> None:
     notes_slot = root_offset + len(EXPECTED) * 32
     if volume[notes_slot] != 0:
         fail("initial NOTES.TXT root slot is not free")
-    for cluster in range(31, 38):
+    for cluster in range(42, 49):
         if fat_entry(fat1, cluster) != 0:
             fail(f"runtime-reserved cluster {cluster} is not initially free")
 
@@ -206,7 +210,28 @@ def main() -> None:
     if child[0x380:0x391] != b"CHILD-TO-PARENT\r\n":
         fail("CHILD.ELF embedded reply invalid")
 
-    paths, _ = read_chain(volume, 23, 4024)
+    async_parent, _ = read_chain(volume, 23, 2336)
+    if async_parent[0x700:0x70B] != b"WORKA   ELF" or async_parent[0x710:0x71B] != b"WORKB   ELF":
+        fail("ASYNC.ELF worker names invalid")
+    if async_parent[0x720:0x72B] != b"MISSING ELF":
+        fail("ASYNC.ELF rejection name invalid")
+    if async_parent.count(b"\xB8\x2A\x00\x00\x00\xCD\x80") != 3:
+        fail("ASYNC.ELF spawn syscall sequence invalid")
+    worka, _ = read_chain(volume, 28, 824)
+    if worka[0x300:0x30B] != b"LEAF    ELF":
+        fail("WORKA.ELF leaf name invalid")
+    if worka.count(b"\xB8\x2B\x00\x00\x00\xCD\x80") != 1:
+        fail("WORKA.ELF yield syscall invalid")
+    workb, _ = read_chain(volume, 30, 784)
+    if struct.pack("<I", 100_000_000) not in workb:
+        fail("WORKB.ELF preemption loop bound invalid")
+    if workb.count(b"\xB8\x16\x00\x00\x00\xCD\x80") != 1:
+        fail("WORKB.ELF signal consume invalid")
+    leaf, _ = read_chain(volume, 32, 692)
+    if leaf.count(b"\xBB\x14\x00\x00\x00") != 10 or leaf.count(b"\xB8\x2C\x00\x00\x00\xCD\x80") != 10:
+        fail("LEAF.ELF bounded sleep sequence invalid")
+
+    paths, _ = read_chain(volume, 34, 4024)
     if paths[0x700:0x701] != b"/" or paths[0x710:0x715] != b"/HOME" or paths[0x720:0x724] != b"DOCS":
         fail("PATHS.ELF root/home/docs strings invalid")
     if paths[0x730:0x736] != b"./DOCS" or paths[0x740:0x748] != b"../EMPTY":
@@ -232,11 +257,11 @@ def main() -> None:
     if any(image[(9 + kernel_sectors) * BPS : FAT_LBA * BPS]):
         fail("protected kernel/FAT gap is not zero")
 
-    print(f"Verified Capstone 12 legacy BIOS/FAT12 image: {args.image}")
+    print(f"Verified Capstone 13 legacy BIOS/FAT12 image: {args.image}")
     print("  stage0: 512 bytes, signature 0x55AA, partition type 0x01")
     print("  stage1: 4096 bytes, LBA 1..8, address 0x00008000")
     print(f"  kernel: {len(kernel)} bytes, {kernel_sectors} sectors, LBA 9..{kernel_end_lba}, checksum16 0x{checksum:04X}")
-    print("  FAT12: 12 files, mirrored FATs, ORCH.ELF 17->18->19->20, CHILD.ELF 21->22, PATHS.ELF 23->24->25->26->27->28->29->30, clusters 31-37 free")
+    print("  FAT12: 16 files, mirrored FATs, ASYNC.ELF 23->24->25->26->27, WORKA.ELF 28->29, WORKB.ELF 30->31, LEAF.ELF 32->33, PATHS.ELF 34->35->36->37->38->39->40->41, clusters 42-48 free")
     print(f"  image sha256: {hashlib.sha256(image).hexdigest().upper()}")
 
 

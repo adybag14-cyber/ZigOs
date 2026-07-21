@@ -2031,3 +2031,20 @@ Status: complete.
 - Cumulative verified accounting is 86 goals (`0x56`), with 23 (`0x17`) new in Capstone 12.
 - Reference kernel: 77,880 bytes, 153 sectors at LBA9-161, checksum16 `0x56BA`, SHA-256 `390CD94081AAE8153E984DA4D8EB7A4BF8DE859DFB4206C7498DFE6A77A86F19`.
 - Initial image SHA-256: `E964341A937B5F22C680BFC7CFF954D2F2FDD911A206FE2E3E8F8D027B948490`; persisted image SHA-256: `4F7C190F1729881B15D056DBDA6C37E9C4F016B77C74FE5F908519B9A7D9D7F0`.
+
+## Capstone 13.0 - bounded asynchronous multiprocess lifecycle
+
+Status: complete.
+
+- Added four bounded asynchronous child contexts with private CR3, page table, code, user stack, and ring-0 privilege stack state.
+- Extended the syscall return stub so `int 0x80` may resume the caller, exit to the kernel, or restore another selected user or idle context.
+- Added IRQ0 round-robin preemption, user yield, bounded sleep/wake, and a kernel idle context for all-sleeping intervals.
+- Extended the CPL3 ABI with syscalls 42-48 for asynchronous spawn, yield, sleep, status poll, wait-pid, wait-any, and descendant drain.
+- Added completion-ordered one-shot waits, directed signal delivery and consumption, child-created descendants, orphan adoption to PID 1, and init auto-reaping.
+- Added `ASYNC.ELF` (2,336 bytes, FNV-1a32 `21F68871`), `WORKA.ELF` (824 bytes, `C83AFC14`), `WORKB.ELF` (784 bytes, `CD43E95A`), and `LEAF.ELF` (692 bytes, `769A282E`).
+- The live tree executes 43 syscalls, exits in deterministic PID order `10 -> 11 -> 12`, proves timer preemption and idle scheduling, and restores all twelve temporary frames.
+- The static FAT12 inventory grows to sixteen files; `PATHS.ELF` moves to clusters 34-41 and writable hierarchy data begins at cluster 42.
+- The complete inherited hierarchy mutation and read-only second boot remain green with `LOG.TXT` at `44 -> 45` and `NOTES.TXT` at `47 -> 48`.
+- Cumulative verified accounting is 113 goals (`0x71`), with 27 (`0x1B`) new in Capstone 13.
+- Reference kernel: 89,500 bytes, 175 sectors at LBA9-183, checksum16 `0x5588`, SHA-256 `98814EB307863036AB704C2B22A35D58A18E993999E57FB4626D1A6A665846C5`.
+- Initial image SHA-256: `0B859BD6F671FCFEE7E655D3777EE10AEAFCD4C19619898A84539194ABF3ED96`; persisted image SHA-256: `B1FC794EB460020D99F52B1C10565F990E1D1FE845101B7C97DBED31247535FF`.
