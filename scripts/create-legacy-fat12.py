@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create the deterministic ZigOs Capstone 10 FAT12 volume."""
+"""Create the deterministic ZigOs Capstone 11 FAT12 volume."""
 from __future__ import annotations
 
 import argparse
@@ -23,6 +23,7 @@ OPEN_WRITE = 0x02
 OPEN_CREATE = 0x04
 OPEN_TRUNCATE = 0x08
 OPEN_APPEND = 0x10
+OPEN_CLOEXEC = 0x20
 
 HELLO_NAME = b"HELLO   TXT"
 HELLO = (
@@ -38,6 +39,8 @@ SPINB_NAME = b"SPINB   ELF"
 FAULT_NAME = b"FAULT   ELF"
 WRITER_NAME = b"WRITER  ELF"
 SERVICE_NAME = b"SERVICE ELF"
+ORCH_NAME = b"ORCH    ELF"
+CHILD_NAME = b"CHILD   ELF"
 NOTES_NAME = b"NOTES   TXT"
 
 BIG_PREFIX = b"ZigOs multi-cluster FAT12 read contract.\r\n"
@@ -45,6 +48,8 @@ BIG = (BIG_PREFIX + bytes((ord("A") + (i % 26)) for i in range(1300 - len(BIG_PR
 WRITER_BASE = bytes((ord("a") + (i % 26)) for i in range(700))
 WRITER_SUFFIX = b"APPEND-PERSIST-OK!\r\n"
 WRITER_RESULT = WRITER_BASE + WRITER_SUFFIX
+ORCH_REQUEST = b"PARENT-TO-CHILD\r\n"
+CHILD_REPLY = b"CHILD-TO-PARENT\r\n"
 
 
 def fnv1a32(data: bytes) -> int:
@@ -349,6 +354,153 @@ def build_service_elf() -> bytes:
     return build_elf(bytes(segment), memory_size=0x1000)
 
 
+def build_child_elf() -> bytes:
+    base = 0x00400000
+    patch_offset = 0x200
+    results_offset = 0x220
+    request_offset = 0x260
+    reply_offset = 0x280
+    patch_va = base + patch_offset
+    results_va = base + results_offset
+    request_va = base + request_offset
+    reply_va = base + reply_offset
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", results_va + index * 4))
+
+    syscall(2); store(0)
+    syscall(12); store(1)
+    code += b"\x8B\x1D" + struct.pack("<I", patch_va + 8)
+    syscall(29); store(2)
+    syscall(22); store(3)
+    code += mov_imm(0xB8, 5)
+    code += b"\x8B\x1D" + struct.pack("<I", patch_va)
+    code += mov_imm(0xB9, request_va)
+    code += mov_imm(0xBA, len(ORCH_REQUEST))
+    code += b"\xCD\x80"; store(4)
+    code += mov_imm(0xB8, 7)
+    code += b"\x8B\x1D" + struct.pack("<I", patch_va + 4)
+    code += mov_imm(0xB9, reply_va)
+    code += mov_imm(0xBA, len(CHILD_REPLY))
+    code += b"\xCD\x80"; store(5)
+    code += mov_imm(0xB8, 3) + mov_imm(0xBB, 0x77) + b"\xCD\x80\xF4"
+    if len(code) > patch_offset:
+        raise RuntimeError(f"CHILD.ELF code overlaps patch data: {len(code)}")
+    segment = bytearray(reply_offset + len(CHILD_REPLY))
+    segment[:len(code)] = code
+    segment[reply_offset:reply_offset + len(CHILD_REPLY)] = CHILD_REPLY
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+
+def build_orch_elf() -> bytes:
+    base = 0x00400000
+    child_name_offset = 0x500
+    hello_name_offset = 0x510
+    request_offset = 0x530
+    pipe_fds_offset = 0x550
+    file_fd_offset = 0x558
+    results_offset = 0x580
+    status_offset = 0x620
+    info_offset = 0x640
+    reply_offset = 0x680
+    child_name_va = base + child_name_offset
+    hello_name_va = base + hello_name_offset
+    request_va = base + request_offset
+    pipe_fds_va = base + pipe_fds_offset
+    file_fd_va = base + file_fd_offset
+    results_va = base + results_offset
+    status_va = base + status_offset
+    info_va = base + info_offset
+    reply_va = base + reply_offset
+    code = bytearray()
+
+    def syscall(number: int) -> None:
+        code.extend(mov_imm(0xB8, number))
+        code.extend(b"\xCD\x80")
+
+    def store(index: int) -> None:
+        code.extend(b"\xA3" + struct.pack("<I", results_va + index * 4))
+
+    code += mov_imm(0xBB, 0); syscall(9); store(0)
+    code += mov_imm(0xBB, 0x00405000); syscall(9); store(1)
+    code += b"\xC7\x05" + struct.pack("<I", 0x00403000) + struct.pack("<I", 0xDEADBEEF)
+    code += mov_imm(0xBB, 0x00405000) + mov_imm(0xB9, 0x1000) + mov_imm(0xBA, 3)
+    syscall(10); store(2)
+    code += b"\xC7\x05" + struct.pack("<I", 0x00405000) + struct.pack("<I", 0xCAFEBABE)
+
+    code += mov_imm(0xBB, hello_name_va) + mov_imm(0xB9, 11) + mov_imm(0xBA, OPEN_READ | OPEN_CLOEXEC)
+    syscall(4); store(3)
+    code += b"\xA3" + struct.pack("<I", file_fd_va)
+    code += mov_imm(0xBB, pipe_fds_va); syscall(18); store(4)
+    code += mov_imm(0xB8, 7)
+    code += b"\x8B\x1D" + struct.pack("<I", pipe_fds_va + 4)
+    code += mov_imm(0xB9, request_va) + mov_imm(0xBA, len(ORCH_REQUEST))
+    code += b"\xCD\x80"; store(5)
+
+    syscall(23); store(6)
+    code += mov_imm(0xB8, 24)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 6 * 4)
+    code += mov_imm(0xB9, 0x00403000) + b"\xCD\x80"; store(7)
+    code += mov_imm(0xB8, 25)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 6 * 4)
+    code += mov_imm(0xB9, 0x00403000) + mov_imm(0xBA, 0xAABBCCDD)
+    code += b"\xCD\x80"; store(8)
+    code += mov_imm(0xB8, 24)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 6 * 4)
+    code += mov_imm(0xB9, 0x00403000) + b"\xCD\x80"; store(9)
+    code += b"\xA1" + struct.pack("<I", 0x00403000); store(10)
+
+    code += mov_imm(0xB8, 28)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 6 * 4)
+    code += b"\x89\xD9\xCD\x80"; store(11)
+    code += mov_imm(0xB8, 29)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 6 * 4)
+    code += b"\xCD\x80"; store(12)
+    code += mov_imm(0xB8, 30)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 6 * 4)
+    code += mov_imm(0xB9, 12) + b"\xCD\x80"; store(13)
+
+    code += mov_imm(0xB8, 26)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 6 * 4)
+    code += mov_imm(0xB9, child_name_va) + mov_imm(0xBA, 11)
+    code += b"\xCD\x80"; store(14)
+    code += mov_imm(0xB8, 31)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 6 * 4)
+    code += mov_imm(0xB9, info_va) + b"\xCD\x80"; store(15)
+    code += mov_imm(0xB8, 27)
+    code += b"\x8B\x1D" + struct.pack("<I", results_va + 6 * 4)
+    code += mov_imm(0xB9, status_va) + b"\xCD\x80"; store(16)
+
+    code += mov_imm(0xB8, 5)
+    code += b"\x8B\x1D" + struct.pack("<I", pipe_fds_va)
+    code += mov_imm(0xB9, reply_va) + mov_imm(0xBA, len(CHILD_REPLY))
+    code += b"\xCD\x80"; store(17)
+    for fd_va in (file_fd_va, pipe_fds_va, pipe_fds_va + 4):
+        code += mov_imm(0xB8, 6)
+        code += b"\x8B\x1D" + struct.pack("<I", fd_va)
+        code += b"\xCD\x80"; store(18 + (fd_va != file_fd_va) + (fd_va == pipe_fds_va + 4))
+
+    code += mov_imm(0xBB, 0x00405000) + mov_imm(0xB9, 0x1000)
+    syscall(11); store(21)
+    code += mov_imm(0xBB, 0x00403000); syscall(9); store(22)
+    code += mov_imm(0xBB, 0x70); syscall(3)
+    code += b"\xF4"
+
+    if len(code) > child_name_offset:
+        raise RuntimeError(f"ORCH.ELF code overlaps data: {len(code)}")
+    segment = bytearray(reply_offset + len(CHILD_REPLY))
+    segment[:len(code)] = code
+    segment[child_name_offset:child_name_offset + 11] = CHILD_NAME
+    segment[hello_name_offset:hello_name_offset + 11] = HELLO_NAME
+    segment[request_offset:request_offset + len(ORCH_REQUEST)] = ORCH_REQUEST
+    return build_elf(bytes(segment), memory_size=0x1000)
+
+
 INIT_ELF = build_init_elf()
 CAT_ELF = build_cat_elf()
 SPINA_ELF = build_spin_elf()
@@ -356,6 +508,8 @@ SPINB_ELF = build_spin_elf()
 FAULT_ELF = build_fault_elf()
 WRITER_ELF = build_writer_elf()
 SERVICE_ELF = build_service_elf()
+ORCH_ELF = build_orch_elf()
+CHILD_ELF = build_child_elf()
 
 FILES = (
     (HELLO_NAME, HELLO),
@@ -367,6 +521,8 @@ FILES = (
     (FAULT_NAME, FAULT_ELF),
     (WRITER_NAME, WRITER_ELF),
     (SERVICE_NAME, SERVICE_ELF),
+    (ORCH_NAME, ORCH_ELF),
+    (CHILD_NAME, CHILD_ELF),
 )
 
 
@@ -399,7 +555,7 @@ def build_volume(hidden_sectors: int) -> bytes:
     struct.pack_into("<I", boot, 39, 0x5A49474F)
     boot[43:54] = b"ZIGOS FAT12"
     boot[54:62] = b"FAT12   "
-    message = b"ZigOs Capstone 10 FAT12"
+    message = b"ZigOs Capstone 11 FAT12"
     boot[62 : 62 + len(message)] = message
     boot[510:512] = b"\x55\xAA"
 
@@ -443,7 +599,7 @@ def main() -> None:
         f"{name.decode('ascii').strip()}={len(data)}/{fnv1a32(data):08X}" for name, data in FILES
     )
     print(
-        f"Created Capstone 10 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
+        f"Created Capstone 11 FAT12 volume: {args.output} | hidden={args.hidden_sectors} "
         f"sectors={TOTAL} root={ROOT_START} data={DATA_START} {details} "
         f"notes-result={len(WRITER_RESULT)}/{fnv1a32(WRITER_RESULT):08X}"
     )

@@ -21,8 +21,8 @@ if ($entry -ne 0x00010000) { throw ('Legacy kernel entry must be 0x00010000; got
 
 $binary = Get-Item (Resolve-Path $BinaryPath)
 if ($binary.Length -le 0) { throw 'Legacy raw kernel is empty.' }
-if ($binary.Length -gt 65024) {
-    throw "Legacy raw kernel exceeds the initial 127-sector BIOS loader ceiling: $($binary.Length) bytes."
+if ($binary.Length -gt 126464) {
+    throw "Legacy raw kernel exceeds the Capstone chunked-loader 247-sector ceiling: $($binary.Length) bytes."
 }
 $hash = (Get-FileHash $binary.FullName -Algorithm SHA256).Hash
 

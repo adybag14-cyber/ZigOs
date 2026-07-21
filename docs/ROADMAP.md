@@ -1980,3 +1980,37 @@
 - Cumulative shell release accounting is 44 goals (`0x2C`), of which 18 (`0x12`) are new in Capstone 10.
 - Reference kernel: 58,144 bytes, 114 sectors at LBA9-122, checksum16 `0x3874`, SHA-256 `255441B1F42100DFF7E319D96659731F07270FA2155D8BFF24DA04ABD07B4340`.
 - Initial image SHA-256: `864CB1E1C3AD79A06A336F9CE76E4B59CD940F2D69298B4EB4CDF0527E189C42`; persisted image SHA-256: `A1514EF5B466DB72906C7253F88A520613578E2484211C7D0E3039CECF8CC44D`.
+
+## 11.0 - Capstone bounded process hierarchy and exec lifecycle
+
+- Goal 1: Added a bounded child process-table allocation path with a running state.
+- Goal 2: Added monotonic child PID allocation and exact parent-PID identity.
+- Goal 3: Added one private 4 KiB page directory per active child lifecycle.
+- Goal 4: Added one private user page table spanning the bounded service range.
+- Goal 5: Added physical code-page cloning.
+- Goal 6: Added physical user-stack cloning.
+- Goal 7: Added cloning of two heap pages and one anonymous mapping.
+- Goal 8: Proved same-VA physical-copy isolation with `DEADBEEF` parent and `AABBCCDD` child values.
+- Goal 9: Added process-owned descriptor inheritance into independent child descriptor slots.
+- Goal 10: Added inherited pipe endpoint reference accounting.
+- Goal 11: Added descriptor flag `CLOEXEC` and exact close-on-image-replacement semantics.
+- Goal 12: Added bounded child executable replacement through validated ELF32/i386 `PT_LOAD` loading.
+- Goal 13: Added child process-group assignment.
+- Goal 14: Added process-group lookup from parent and child contexts.
+- Goal 15: Added group-directed signal delivery and child-side consume-and-clear behavior.
+- Goal 16: Added real child CPL3 execution under a private CR3, PID, TSS `esp0`, and 4 KiB kernel privilege stack while preserving the outer parent return stack.
+- Goal 17: Added a bounded 16-byte wait status containing PID, exit code, state, and syscall count.
+- Goal 18: Added one-shot child reaping with deterministic second-wait rejection.
+- Goal 19: Added exact child descriptor, pipe, seven-frame, CR3, TSS, PID, mapping, and parent-return restoration checks.
+- Added syscalls 23-31 for clone, child memory inspection, child exec, wait, process-group control, group signaling, and process metadata.
+- Added 1,937-byte `ORCH.ELF`, FNV-1a32 `11986FD8`, at clusters `17 -> 18 -> 19 -> 20`.
+- Added 913-byte `CHILD.ELF`, FNV-1a32 `7E1C062C`, at clusters `21 -> 22`.
+- `ORCH.ELF` executes 23 parent calls; `CHILD.ELF` executes seven calls under its private CR3; the aggregate contract is 30 calls.
+- The child inherits three descriptors, closes one on exec, exchanges exact 17-byte request/reply messages, consumes signal 12, exits `0x77`, and closes two pipe endpoints during exit.
+- The parent exits `0x70`; the process table records PID 7 as parent and waited PID 8 as child.
+- The initial FAT12 inventory expands to eleven files, moving reversible and persistent writable allocation to clusters `23 -> 24`.
+- `NOTES.TXT` remains 720 bytes with FNV-1a32 `C6181D2F`, now in root slot 11 and chain `23 -> 24 -> EOC`.
+- The second boot performs zero writes and allocations and leaves the persisted image unchanged.
+- Cumulative shell release accounting is 63 goals (`0x3F`), of which 19 (`0x13`) are new in Capstone 11.
+- Reference kernel: 65,112 bytes, 128 sectors at LBA9-136, checksum16 `0x9815`, SHA-256 `D36AA9E31B5554E48A40311F2E4E60B46084B0D977B12FF3C7405C216657BF12`.
+- Initial image SHA-256: `A5E0BFCC1C51785BC3108AAFCD0D8512C73D0DF0761C3581C5C34AA591BDDC53`; persisted image SHA-256: `336BCA037C47BF35EE7AC081D341976CE6B634B7F3720E9FAA729905C70BF459`.

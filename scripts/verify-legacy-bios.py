@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the complete Capstone 10 BIOS, kernel, and deterministic FAT12 image."""
+"""Verify the complete Capstone 11 BIOS, kernel, and deterministic FAT12 image."""
 from __future__ import annotations
 
 import argparse
@@ -25,6 +25,8 @@ EXPECTED = {
     b"FAULT   ELF": (10, 262, 0x3A59C4D6, (10,)),
     b"WRITER  ELF": (11, 1488, 0x267B866B, (11, 12, 13)),
     b"SERVICE ELF": (14, 1362, 0x7C65C5CE, (14, 15, 16)),
+    b"ORCH    ELF": (17, 1937, 0x11986FD8, (17, 18, 19, 20)),
+    b"CHILD   ELF": (21, 913, 0x7E1C062C, (21, 22)),
 }
 
 
@@ -176,7 +178,7 @@ def main() -> None:
     notes_slot = root_offset + len(EXPECTED) * 32
     if volume[notes_slot] != 0:
         fail("initial NOTES.TXT root slot is not free")
-    for cluster in (17, 18):
+    for cluster in (23, 24):
         if fat_entry(fat1, cluster) != 0:
             fail(f"runtime-reserved cluster {cluster} is not initially free")
 
@@ -194,6 +196,14 @@ def main() -> None:
         fail("SERVICE.ELF embedded namespace names invalid")
     if service[0x480:0x492] != b"SERVICE-PIPE-OK!\r\n":
         fail("SERVICE.ELF embedded payload invalid")
+    orch, _ = read_chain(volume, 17, 1937)
+    if orch[0x600:0x60B] != b"CHILD   ELF" or orch[0x610:0x61B] != b"HELLO   TXT":
+        fail("ORCH.ELF embedded filenames invalid")
+    if orch[0x630:0x641] != b"PARENT-TO-CHILD\r\n":
+        fail("ORCH.ELF embedded request invalid")
+    child, _ = read_chain(volume, 21, 913)
+    if child[0x380:0x391] != b"CHILD-TO-PARENT\r\n":
+        fail("CHILD.ELF embedded reply invalid")
 
     kernel_sectors = math.ceil(len(kernel) / BPS)
     padded = kernel + bytes(kernel_sectors * BPS - len(kernel))
@@ -204,11 +214,11 @@ def main() -> None:
     if any(image[(9 + kernel_sectors) * BPS : FAT_LBA * BPS]):
         fail("protected kernel/FAT gap is not zero")
 
-    print(f"Verified Capstone 10 legacy BIOS/FAT12 image: {args.image}")
+    print(f"Verified Capstone 11 legacy BIOS/FAT12 image: {args.image}")
     print("  stage0: 512 bytes, signature 0x55AA, partition type 0x01")
     print("  stage1: 4096 bytes, LBA 1..8, address 0x00008000")
     print(f"  kernel: {len(kernel)} bytes, {kernel_sectors} sectors, LBA 9..{kernel_end_lba}, checksum16 0x{checksum:04X}")
-    print("  FAT12: 9 files, mirrored FATs, BIG.TXT 5->6->7, WRITER.ELF 11->12->13, SERVICE.ELF 14->15->16, clusters 17/18 free")
+    print("  FAT12: 11 files, mirrored FATs, SERVICE.ELF 14->15->16, ORCH.ELF 17->18->19->20, CHILD.ELF 21->22, clusters 23/24 free")
     print(f"  image sha256: {hashlib.sha256(image).hexdigest().upper()}")
 
 

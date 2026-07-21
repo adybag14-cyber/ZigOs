@@ -30,11 +30,14 @@ const vfs_open_write: u8 = 0x02;
 const vfs_open_create: u8 = 0x04;
 const vfs_open_truncate: u8 = 0x08;
 const vfs_open_append: u8 = 0x10;
+const vfs_open_cloexec: u8 = 0x20;
 const user_heap_base: u32 = 0x0040_3000;
 const user_heap_limit: u32 = 0x0040_5000;
 const user_mmap_address: u32 = 0x0040_5000;
 const user_service_limit: u32 = 0x0040_6000;
 const service_payload = "SERVICE-PIPE-OK!\r\n";
+const orch_request = "PARENT-TO-CHILD\r\n";
+const child_reply = "CHILD-TO-PARENT\r\n";
 const frame_bitmap_bytes: usize = managed_frame_count / 8;
 
 const BootInfo = extern struct {
@@ -182,6 +185,7 @@ const ProcessState = enum(u8) {
 const ProcessRecord = struct {
     pid: u32 = 0,
     parent_pid: u32 = 0,
+    process_group: u32 = 0,
     name: [11]u8 = @splat(' '),
     exit_code: u32 = 0,
     fault_vector: u32 = 0,
@@ -189,6 +193,33 @@ const ProcessRecord = struct {
     waited: bool = false,
     pending_signal: u8 = 0,
     state: ProcessState = .free,
+};
+
+const ForkChildContext = struct {
+    frames: [7]u32 = @splat(0),
+    inherited_fds: [8]u8 = @splat(0xFF),
+    child_results: [6]u32 = @splat(0),
+    child_pid: u32 = 0,
+    parent_pid: u32 = 0,
+    process_group: u32 = 0,
+    process_index: u8 = 0,
+    inherited_count: u8 = 0,
+    read_fd: u8 = 0xFF,
+    write_fd: u8 = 0xFF,
+    cloexec_closed: u8 = 0,
+    child_exit_cleanup: u8 = 0,
+    child_exit_code: u32 = 0,
+    child_syscalls: u32 = 0,
+    frames_before: u32 = 0,
+    frames_after: u32 = 0,
+    request_match: bool = false,
+    active: bool = false,
+    exec_ready: bool = false,
+    executed: bool = false,
+    resources_released: bool = false,
+    parent_cr3_restored: bool = false,
+    parent_tss_restored: bool = false,
+    parent_pid_restored: bool = false,
 };
 
 const KernelThreadState = enum(u8) {
@@ -227,6 +258,7 @@ extern const __kernel_end: u8;
 extern var zigos_i686_boot_info_pointer: u32;
 extern var zigos_i686_entry_checksum_ok: u32;
 extern var zigos_i686_entry_checksum_observed: u32;
+extern var zigos_i686_kernel_return_esp: u32;
 extern fn zigos_i686_read_cr0() callconv(.c) u32;
 extern fn zigos_i686_read_cr3() callconv(.c) u32;
 extern fn zigos_i686_read_cr2() callconv(.c) u32;
@@ -301,6 +333,8 @@ var init_elf_exit: u32 = 0;
 var cat_elf_size: u32 = 0;
 var writer_elf_size: u32 = 0;
 var service_elf_size: u32 = 0;
+var orch_elf_size: u32 = 0;
+var child_elf_size: u32 = 0;
 var fault_elf_size: u32 = 0;
 var big_file_size: u32 = 0;
 var vfs_nodes: [16]VfsNode = @splat(.{});
@@ -359,6 +393,15 @@ var service_syscalls: u32 = 0;
 var service_pipe_bytes: u32 = 0;
 var service_sleep_ticks: u32 = 0;
 var service_signal: u32 = 0;
+var fork_child: ForkChildContext = .{};
+var fork_child_kernel_stack: [4096]u8 align(16) = @splat(0);
+var fork_tree_verified = false;
+var fork_tree_child_pid: u32 = 0;
+var fork_tree_child_syscalls: u32 = 0;
+var fork_tree_inherited: u32 = 0;
+var fork_tree_cloexec: u32 = 0;
+var fork_tree_signal: u32 = 0;
+var fork_tree_pipe_bytes: u32 = 0;
 var pci_device_count: u32 = 0;
 var pci_host_id: u32 = 0;
 var pci_class_code: u8 = 0;
@@ -444,6 +487,15 @@ var syscall_dup_count: u32 = 0;
 var syscall_dup2_count: u32 = 0;
 var syscall_signal_send_count: u32 = 0;
 var syscall_signal_pending_count: u32 = 0;
+var syscall_clone_count: u32 = 0;
+var syscall_child_peek_count: u32 = 0;
+var syscall_child_poke_count: u32 = 0;
+var syscall_child_exec_count: u32 = 0;
+var syscall_waitpid_count: u32 = 0;
+var syscall_setpgid_count: u32 = 0;
+var syscall_getpgid_count: u32 = 0;
+var syscall_killpg_count: u32 = 0;
+var syscall_procinfo_count: u32 = 0;
 var syscall_rejected: u32 = 0;
 var syscall_exit_code: u32 = 0;
 var syscall_exited = false;
@@ -874,6 +926,111 @@ pub export fn zigos_i686_syscall_dispatch(frame: *UserReturnFrame) callconv(.c) 
             frame.eax = takePendingSignal(current_pid);
             return 0;
         },
+        23 => {
+            const pid = forkCloneCurrentProcess() orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF5;
+                return 0;
+            };
+            syscall_clone_count +|= 1;
+            frame.eax = pid;
+            return 0;
+        },
+        24 => {
+            const value = forkChildReadWord(frame.ebx, frame.ecx) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            syscall_child_peek_count +|= 1;
+            frame.eax = value;
+            return 0;
+        },
+        25 => {
+            if (!forkChildWriteWord(frame.ebx, frame.ecx, frame.edx)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            }
+            syscall_child_poke_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        26 => {
+            const name = userReadableSlice(frame.ecx, frame.edx, 11) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (name.len != 11 or !forkExecChild(frame.ebx, name)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFE;
+                return 0;
+            }
+            syscall_child_exec_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        27 => {
+            const status = userWritableSlice(frame.ecx, 16, 16) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            const pid = forkWaitChild(frame.ebx, status) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF6;
+                return 0;
+            };
+            syscall_waitpid_count +|= 1;
+            frame.eax = pid;
+            return 0;
+        },
+        28 => {
+            if (!setProcessGroup(frame.ebx, frame.ecx)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFD;
+                return 0;
+            }
+            syscall_setpgid_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
+        29 => {
+            const group = getProcessGroup(frame.ebx) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFD;
+                return 0;
+            };
+            syscall_getpgid_count +|= 1;
+            frame.eax = group;
+            return 0;
+        },
+        30 => {
+            const delivered = signalProcessGroup(frame.ebx, frame.ecx) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFD;
+                return 0;
+            };
+            syscall_killpg_count +|= 1;
+            frame.eax = delivered;
+            return 0;
+        },
+        31 => {
+            const destination = userWritableSlice(frame.ecx, 32, 32) orelse {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFF2;
+                return 0;
+            };
+            if (!writeProcessInfo(frame.ebx, destination)) {
+                syscall_rejected +|= 1;
+                frame.eax = 0xFFFF_FFFD;
+                return 0;
+            }
+            syscall_procinfo_count +|= 1;
+            frame.eax = 0;
+            return 0;
+        },
         else => {
             syscall_rejected +|= 1;
             frame.eax = 0xFFFF_FFDA;
@@ -991,6 +1148,301 @@ fn sleepUserTicks(requested: u32) ?u32 {
     zigos_i686_out8(0x0021, 0xFF);
     zigos_i686_out8(0x00A1, 0xFF);
     return timer_ticks -% start;
+}
+
+fn processRecordIndex(pid: u32) ?usize {
+    for (process_table, 0..) |record, index| {
+        if (record.state != .free and record.pid == pid) return index;
+    }
+    return null;
+}
+
+fn copyPhysicalFrame(source: u32, destination: u32) void {
+    const source_bytes: [*]const volatile u8 = @ptrFromInt(source);
+    const destination_bytes: [*]volatile u8 = @ptrFromInt(destination);
+    for (0..frame_size) |index| destination_bytes[index] = source_bytes[index];
+}
+
+fn releaseForkFrames(frames: *[7]u32) void {
+    for (frames) |*frame| {
+        if (frame.* != 0) {
+            _ = freeFrame(frame.*);
+            frame.* = 0;
+        }
+    }
+}
+
+fn forkCloneCurrentProcess() ?u32 {
+    if (current_pid == 0 or fork_child.active) return null;
+    const parent_index = processRecordIndex(current_pid) orelse return null;
+    var process_slot: ?usize = null;
+    for (process_table, 0..) |record, index| {
+        if (record.state == .free) {
+            process_slot = index;
+            break;
+        }
+    }
+    const resolved_slot = process_slot orelse return null;
+    var parent_descriptors: usize = 0;
+    var free_descriptors: usize = 0;
+    for (vfs_descriptors) |descriptor| {
+        if (!descriptor.open) free_descriptors += 1 else if (descriptor.owner_pid == current_pid) parent_descriptors += 1;
+    }
+    if (parent_descriptors == 0 or free_descriptors < parent_descriptors) return null;
+
+    var frames: [7]u32 = @splat(0);
+    var allocated: usize = 0;
+    while (allocated < frames.len) : (allocated += 1) {
+        frames[allocated] = allocateFrame() orelse {
+            releaseForkFrames(&frames);
+            return null;
+        };
+    }
+    const frames_before = free_frame_count + @as(u32, @intCast(frames.len));
+    copyPhysicalFrame(user_code_frame, frames[2]);
+    copyPhysicalFrame(user_stack_frame, frames[3]);
+    for (0..3) |index| copyPhysicalFrame(user_service_frames[index], frames[4 + index]);
+    zeroPhysicalFrame(frames[0]);
+    zeroPhysicalFrame(frames[1]);
+    const source_directory: [*]const volatile u32 = @ptrFromInt(kernel_page_directory);
+    const child_directory: [*]volatile u32 = @ptrFromInt(frames[0]);
+    for (0..1024) |index| child_directory[index] = source_directory[index];
+    child_directory[1] = frames[1] | 0x007;
+    const child_table: [*]volatile u32 = @ptrFromInt(frames[1]);
+    child_table[0] = frames[2] | 0x007;
+    child_table[2] = frames[3] | 0x007;
+    for (0..3) |index| {
+        const virtual = user_heap_base + @as(u32, @intCast(index)) * frame_size;
+        if (queryPageEntry(kernel_page_directory, virtual) != null) child_table[3 + index] = frames[4 + index] | 0x007;
+    }
+
+    const child_pid = next_pid;
+    next_pid +|= 1;
+    const parent_group = if (process_table[parent_index].process_group != 0) process_table[parent_index].process_group else current_pid;
+    fork_child = .{
+        .frames = frames,
+        .child_pid = child_pid,
+        .parent_pid = current_pid,
+        .process_group = parent_group,
+        .process_index = @intCast(resolved_slot),
+        .frames_before = frames_before,
+        .active = true,
+    };
+    for (vfs_descriptors) |descriptor| {
+        if (!descriptor.open or descriptor.owner_pid != current_pid) continue;
+        var target: ?usize = null;
+        for (vfs_descriptors, 0..) |candidate, index| {
+            if (!candidate.open) {
+                target = index;
+                break;
+            }
+        }
+        const target_index = target orelse {
+            releaseForkFrames(&fork_child.frames);
+            fork_child = .{};
+            return null;
+        };
+        vfs_descriptors[target_index] = descriptor;
+        vfs_descriptors[target_index].owner_pid = child_pid;
+        if (descriptor.kind == .pipe_read or descriptor.kind == .pipe_write) {
+            const pipe_index: usize = descriptor.pipe_index;
+            if (pipe_index >= pipe_objects.len or !pipe_objects[pipe_index].active) return null;
+            if (descriptor.kind == .pipe_read) pipe_objects[pipe_index].readers +|= 1 else pipe_objects[pipe_index].writers +|= 1;
+            if (descriptor.kind == .pipe_read) fork_child.read_fd = @intCast(target_index) else fork_child.write_fd = @intCast(target_index);
+        }
+        fork_child.inherited_fds[fork_child.inherited_count] = @intCast(target_index);
+        fork_child.inherited_count += 1;
+    }
+    process_table[resolved_slot] = .{
+        .pid = child_pid,
+        .parent_pid = current_pid,
+        .process_group = parent_group,
+        .name = fatName("CLONE   PRC"),
+        .state = .running,
+    };
+    process_count +|= 1;
+    return child_pid;
+}
+
+fn forkChildPhysical(pid: u32, virtual: u32) ?u32 {
+    if (!fork_child.active or fork_child.child_pid != pid or virtual < 0x0040_0000 or virtual >= user_service_limit) return null;
+    const table: [*]const volatile u32 = @ptrFromInt(fork_child.frames[1]);
+    const entry = table[(virtual >> 12) & 0x3FF];
+    if ((entry & 1) == 0 or (entry & 4) == 0) return null;
+    return (entry & 0xFFFF_F000) + (virtual & 0xFFF);
+}
+
+fn forkChildReadWord(pid: u32, virtual: u32) ?u32 {
+    if ((virtual & 3) != 0) return null;
+    const physical = forkChildPhysical(pid, virtual) orelse return null;
+    const pointer: *const volatile u32 = @ptrFromInt(physical);
+    return pointer.*;
+}
+
+fn forkChildWriteWord(pid: u32, virtual: u32, value: u32) bool {
+    if ((virtual & 3) != 0) return false;
+    const physical = forkChildPhysical(pid, virtual) orelse return false;
+    const pointer: *volatile u32 = @ptrFromInt(physical);
+    pointer.* = value;
+    return true;
+}
+
+fn forkExecChild(pid: u32, name: []const u8) bool {
+    if (!fork_child.active or fork_child.child_pid != pid or fork_child.exec_ready or name.len != 11) return false;
+    _ = loadElfSegmentIntoFrame(name, fork_child.frames[2]) orelse return false;
+    zeroPhysicalFrame(fork_child.frames[3]);
+    const table: [*]volatile u32 = @ptrFromInt(fork_child.frames[1]);
+    for (3..6) |index| {
+        table[index] = 0;
+        zeroPhysicalFrame(fork_child.frames[1 + index]);
+    }
+    var closed: u8 = 0;
+    for (0..vfs_descriptors.len) |index| {
+        const descriptor = vfs_descriptors[index];
+        if (descriptor.open and descriptor.owner_pid == pid and (descriptor.flags & vfs_open_cloexec) != 0) {
+            if (!vfsCloseOwned(@intCast(index), pid)) return false;
+            closed += 1;
+        }
+    }
+    fork_child.cloexec_closed = closed;
+    fork_child.read_fd = 0xFF;
+    fork_child.write_fd = 0xFF;
+    for (vfs_descriptors, 0..) |descriptor, index| {
+        if (!descriptor.open or descriptor.owner_pid != pid) continue;
+        if (descriptor.kind == .pipe_read) fork_child.read_fd = @intCast(index);
+        if (descriptor.kind == .pipe_write) fork_child.write_fd = @intCast(index);
+    }
+    if (fork_child.read_fd == 0xFF or fork_child.write_fd == 0xFF) return false;
+    const code: [*]u8 = @ptrFromInt(fork_child.frames[2]);
+    writeLe32(code[0..4096], 0x200, fork_child.read_fd);
+    writeLe32(code[0..4096], 0x204, fork_child.write_fd);
+    writeLe32(code[0..4096], 0x208, pid);
+    writeLe32(code[0..4096], 0x20C, fork_child.parent_pid);
+    writeLe32(code[0..4096], 0x210, fork_child.process_group);
+    const process_index: usize = fork_child.process_index;
+    for (0..11) |index| process_table[process_index].name[index] = name[index];
+    fork_child.exec_ready = true;
+    return true;
+}
+
+fn setProcessGroup(pid_value: u32, group_value: u32) bool {
+    const pid = if (pid_value == 0) current_pid else pid_value;
+    const group = if (group_value == 0) pid else group_value;
+    const index = processRecordIndex(pid) orelse return false;
+    const record = &process_table[index];
+    if (current_pid == 0 or (pid != current_pid and record.parent_pid != current_pid) or record.state != .running) return false;
+    record.process_group = group;
+    if (fork_child.active and fork_child.child_pid == pid) fork_child.process_group = group;
+    return true;
+}
+
+fn getProcessGroup(pid_value: u32) ?u32 {
+    const pid = if (pid_value == 0) current_pid else pid_value;
+    const index = processRecordIndex(pid) orelse return null;
+    const group = process_table[index].process_group;
+    return if (group == 0) pid else group;
+}
+
+fn signalProcessGroup(group: u32, signal_value: u32) ?u32 {
+    if (current_pid == 0 or group == 0 or signal_value == 0 or signal_value > 31) return null;
+    var delivered: u32 = 0;
+    for (&process_table) |*record| {
+        if (record.state != .running or record.process_group != group) continue;
+        record.pending_signal = @truncate(signal_value);
+        delivered +|= 1;
+    }
+    return if (delivered == 0) null else delivered;
+}
+
+fn writeProcessInfo(pid: u32, destination: []u8) bool {
+    if (destination.len < 32) return false;
+    const index = processRecordIndex(pid) orelse return false;
+    const record = &process_table[index];
+    writeLe32(destination, 0, record.pid);
+    writeLe32(destination, 4, record.parent_pid);
+    writeLe32(destination, 8, if (record.process_group == 0) record.pid else record.process_group);
+    writeLe32(destination, 12, @intFromEnum(record.state));
+    writeLe32(destination, 16, if (fork_child.child_pid == pid) fork_child.inherited_count else 0);
+    writeLe32(destination, 20, if (fork_child.child_pid == pid) fork_child.cloexec_closed else 0);
+    writeLe32(destination, 24, if (fork_child.child_pid == pid) fork_child.frames[0] else 0);
+    writeLe32(destination, 28, if (fork_child.child_pid == pid) fork_child.frames.len else 0);
+    return true;
+}
+
+fn executeForkChild() bool {
+    if (!fork_child.active or !fork_child.exec_ready or fork_child.executed) return false;
+    const saved_cr3 = zigos_i686_read_cr3();
+    const saved_tss = kernel_tss.esp0;
+    const saved_pid = current_pid;
+    const saved_return_esp = zigos_i686_kernel_return_esp;
+    const before_syscalls = syscall_count;
+    syscall_exit_code = 0;
+    syscall_exited = false;
+    syscall_exit_cleanup_closes = 0;
+    process_faulted = false;
+    current_pid = fork_child.child_pid;
+    kernel_tss.esp0 = @intCast(@intFromPtr(&fork_child_kernel_stack) + fork_child_kernel_stack.len);
+    zigos_i686_write_cr3(fork_child.frames[0]);
+    zigos_i686_enter_user(0x0040_0000, 0x0040_3000);
+    fork_child.child_syscalls = syscall_count -% before_syscalls;
+    fork_child.child_exit_code = syscall_exit_code;
+    fork_child.child_exit_cleanup = @truncate(syscall_exit_cleanup_closes);
+    const child_code: [*]const volatile u8 = @ptrFromInt(fork_child.frames[2]);
+    for (0..fork_child.child_results.len) |index| fork_child.child_results[index] = readLe32(child_code, 0x220 + index * 4);
+    fork_child.request_match = true;
+    for (orch_request, 0..) |byte, index| {
+        if (child_code[0x260 + index] != byte) fork_child.request_match = false;
+    }
+    const process_index: usize = fork_child.process_index;
+    if (process_faulted or !syscall_exited) {
+        process_table[process_index].state = .faulted;
+        process_table[process_index].fault_vector = process_fault_vector;
+        process_table[process_index].fault_address = process_fault_address;
+        process_table[process_index].exit_code = if (process_faulted) 0x80 + process_fault_vector else 0xFF;
+    } else {
+        process_table[process_index].state = .exited;
+        process_table[process_index].exit_code = syscall_exit_code;
+    }
+    zigos_i686_write_cr3(saved_cr3);
+    kernel_tss.esp0 = saved_tss;
+    current_pid = saved_pid;
+    zigos_i686_kernel_return_esp = saved_return_esp;
+    fork_child.parent_cr3_restored = zigos_i686_read_cr3() == saved_cr3;
+    fork_child.parent_tss_restored = kernel_tss.esp0 == saved_tss;
+    fork_child.parent_pid_restored = current_pid == saved_pid;
+    syscall_exit_code = 0;
+    syscall_exited = false;
+    syscall_exit_cleanup_closes = 0;
+    process_faulted = false;
+    fork_child.executed = true;
+    return true;
+}
+
+fn releaseForkChildResources() bool {
+    if (!fork_child.active or !fork_child.executed) return false;
+    if (vfsOpenCountOwned(fork_child.child_pid) != 0) return false;
+    releaseForkFrames(&fork_child.frames);
+    fork_child.frames_after = free_frame_count;
+    fork_child.resources_released = fork_child.frames_after == fork_child.frames_before;
+    fork_child.active = false;
+    return fork_child.resources_released;
+}
+
+fn forkWaitChild(pid: u32, status: []u8) ?u32 {
+    if (!fork_child.active or fork_child.child_pid != pid or !fork_child.exec_ready or status.len < 16) return null;
+    if (!fork_child.executed and !executeForkChild()) return null;
+    const process_index: usize = fork_child.process_index;
+    const record = &process_table[process_index];
+    if (record.waited or record.state == .running) return null;
+    writeLe32(status, 0, record.pid);
+    writeLe32(status, 4, record.exit_code);
+    writeLe32(status, 8, @intFromEnum(record.state));
+    writeLe32(status, 12, fork_child.child_syscalls);
+    record.waited = true;
+    process_wait_count +|= 1;
+    last_waited_pid = pid;
+    if (!releaseForkChildResources()) return null;
+    return pid;
 }
 
 fn verifyAndReportBootInfo() void {
@@ -2124,17 +2576,21 @@ fn initializeVfsAndProcesses() void {
     const fault_index = vfsFindNode("FAULT   ELF") orelse vfsFailure("FAULT.ELF node");
     const writer_index = vfsFindNode("WRITER  ELF") orelse vfsFailure("WRITER.ELF node");
     const service_index = vfsFindNode("SERVICE ELF") orelse vfsFailure("SERVICE.ELF node");
+    const orch_index = vfsFindNode("ORCH    ELF") orelse vfsFailure("ORCH.ELF node");
+    const child_index = vfsFindNode("CHILD   ELF") orelse vfsFailure("CHILD.ELF node");
     notes_present_at_boot = vfsFindNode("NOTES   TXT") != null;
     cat_elf_size = vfs_nodes[cat_index].size;
     big_file_size = vfs_nodes[big_index].size;
     fault_elf_size = vfs_nodes[fault_index].size;
     writer_elf_size = vfs_nodes[writer_index].size;
     service_elf_size = vfs_nodes[service_index].size;
-    const expected_nodes: u32 = if (notes_present_at_boot) 10 else 9;
+    orch_elf_size = vfs_nodes[orch_index].size;
+    child_elf_size = vfs_nodes[child_index].size;
+    const expected_nodes: u32 = if (notes_present_at_boot) 12 else 11;
     if (vfs_node_count != expected_nodes or vfs_nodes[hello_index].size != expected_fat_file.len or
         vfs_nodes[init_index].size != init_elf_size or cat_elf_size != 510 or
         big_file_size != expected_big_bytes or fault_elf_size != 262 or writer_elf_size != 1488 or
-        service_elf_size != 1362)
+        service_elf_size != 1362 or orch_elf_size != 1937 or child_elf_size != 913)
     {
         vfsFailure("root inventory");
     }
@@ -2171,6 +2627,7 @@ fn initializeVfsAndProcesses() void {
     process_table[0] = .{
         .pid = 1,
         .parent_pid = 0,
+        .process_group = 1,
         .name = fatName("INIT    ELF"),
         .exit_code = init_elf_exit,
         .state = .exited,
@@ -2683,7 +3140,7 @@ fn vfsOpen(name: []const u8) ?u8 {
 }
 
 fn vfsOpenOwned(name: []const u8, owner_pid: u32, flags: u8) ?u8 {
-    if ((flags & ~(vfs_open_read | vfs_open_write | vfs_open_create | vfs_open_truncate | vfs_open_append)) != 0 or
+    if ((flags & ~(vfs_open_read | vfs_open_write | vfs_open_create | vfs_open_truncate | vfs_open_append | vfs_open_cloexec)) != 0 or
         (flags & (vfs_open_read | vfs_open_write)) == 0 or
         ((flags & (vfs_open_truncate | vfs_open_append)) != 0 and (flags & vfs_open_write) == 0))
     {
@@ -3029,7 +3486,7 @@ fn verifyNamespaceLifecycle() void {
     const first_cluster = vfs_nodes[temporary_index].cluster;
     const second_cluster = fatReadEntry(first_cluster) orelse vfsFailure("namespace second cluster");
     const chain_end = fatReadEntry(second_cluster) orelse vfsFailure("namespace chain end");
-    if (first_cluster != 17 or second_cluster != 18 or chain_end < 0x0FF8) vfsFailure("namespace deterministic chain");
+    if (first_cluster != 23 or second_cluster != 24 or chain_end < 0x0FF8) vfsFailure("namespace deterministic chain");
 
     if (!vfsRenameNode(temporary, moved) or vfsFindNode(temporary) != null) vfsFailure("namespace rename");
     const moved_index = vfsFindNode(moved) orelse vfsFailure("namespace moved node");
@@ -3052,7 +3509,7 @@ fn verifyNamespaceLifecycle() void {
     if (namespace_reused_cluster != first_cluster) vfsFailure("namespace first-fit reuse");
     if (!vfsUnlinkNode(reused) or fatReadEntry(namespace_reused_cluster) != 0) vfsFailure("namespace reuse unlink");
     reloadVfsRoot();
-    if (vfs_node_count != 9 or vfsFindNode(temporary) != null or vfsFindNode(moved) != null or vfsFindNode(reused) != null) {
+    if (vfs_node_count != 11 or vfsFindNode(temporary) != null or vfsFindNode(moved) != null or vfsFindNode(reused) != null) {
         vfsFailure("namespace root restoration");
     }
     if (vfs_rename_count != 1 or vfs_unlink_count != 2 or fat_allocation_count != 3 or fat_free_count != 3) {
@@ -3061,7 +3518,7 @@ fn verifyNamespaceLifecycle() void {
     namespace_verified = true;
     writeAll("ZigOs i686 FAT12 namespace verified: mode cleanup rename 0x00000001 unlink 0x00000002 bytes 0x00000258 hash 0x");
     writeHex32(namespace_hash);
-    writeAll(" chain 0x00000011->0x00000012 reclaimed yes reused 0x");
+    writeAll(" chain 0x00000017->0x00000018 reclaimed yes reused 0x");
     writeHex32(namespace_reused_cluster);
     writeAll(" residue none root-restored yes\r\n");
     writeAll("ZigOs i686 Capstone 9 verified: new-goals 0x00000010 VM 0x00000008 threads 0x00000006 IRQ-queues 0x00000001 namespace 0x00000001 mode first\r\n");
@@ -3081,7 +3538,7 @@ fn verifyNotesFile() void {
     notes_cluster = vfs_nodes[node_index].cluster;
     const second = fatReadEntry(notes_cluster) orelse vfsFailure("NOTES first FAT entry");
     const end = fatReadEntry(second) orelse vfsFailure("NOTES second FAT entry");
-    if (notes_hash != expected_notes_hash or notes_cluster != 17 or second != 18 or end < 0x0FF8) {
+    if (notes_hash != expected_notes_hash or notes_cluster != 23 or second != 24 or end < 0x0FF8) {
         vfsFailure("NOTES.TXT deterministic chain");
     }
 }
@@ -3160,7 +3617,16 @@ fn initializeProcessServices() void {
     service_pipe_bytes = 0;
     service_sleep_ticks = 0;
     service_signal = 0;
-    writeAll("ZigOs i686 process services ready: brk 0x00403000-0x00405000 mmap 0x00405000 pipes 0x00000004 signals pending PCI-devices 0x");
+    fork_child = .{};
+    fork_child_kernel_stack = @splat(0);
+    fork_tree_verified = false;
+    fork_tree_child_pid = 0;
+    fork_tree_child_syscalls = 0;
+    fork_tree_inherited = 0;
+    fork_tree_cloexec = 0;
+    fork_tree_signal = 0;
+    fork_tree_pipe_bytes = 0;
+    writeAll("ZigOs i686 process services ready: brk 0x00403000-0x00405000 mmap 0x00405000 pipes 0x00000004 fork-frames 0x00000007 signals pending PCI-devices 0x");
     writeHex32(pci_device_count);
     writeAll("\r\n");
 }
@@ -3199,6 +3665,15 @@ fn resetSyscallAccounting() void {
     syscall_dup2_count = 0;
     syscall_signal_send_count = 0;
     syscall_signal_pending_count = 0;
+    syscall_clone_count = 0;
+    syscall_child_peek_count = 0;
+    syscall_child_poke_count = 0;
+    syscall_child_exec_count = 0;
+    syscall_waitpid_count = 0;
+    syscall_setpgid_count = 0;
+    syscall_getpgid_count = 0;
+    syscall_killpg_count = 0;
+    syscall_procinfo_count = 0;
     syscall_rejected = 0;
     syscall_exit_code = 0;
     syscall_exited = false;
@@ -3224,6 +3699,7 @@ fn spawnElfProcess(name: [11]u8, parent_pid: u32) ?SpawnResult {
     process_table[process_index] = .{
         .pid = pid,
         .parent_pid = parent_pid,
+        .process_group = pid,
         .name = name,
         .state = .running,
     };
@@ -3311,13 +3787,13 @@ fn spawnElfProcess(name: [11]u8, parent_pid: u32) ?SpawnResult {
             results[14] != service_payload.len or results[15] >= vfs_descriptors.len or results[16] != 7 or
             results[17] != service_payload.len or results[18] != 0 or results[19] != pid or results[20] != 0 or
             results[21] != 9 or results[22] != user_heap_base or readLe32(stat, 0) != service_payload.len or
-            readLe32(stat, 4) != 17 or readLe32(stat, 8) != 0x20 or readLe32(stat, 12) != 1 or
+            readLe32(stat, 4) != 23 or readLe32(stat, 8) != 0x20 or readLe32(stat, 12) != 1 or
             heap_sentinel.* != 0xDEAD_BEEF or mmap_sentinel.* != 0xCAFE_BABE or !payload_match or !pipes_closed or
             queryPageEntry(kernel_page_directory, user_heap_base) != null or
             queryPageEntry(kernel_page_directory, user_heap_base + frame_size) != null or
             queryPageEntry(kernel_page_directory, user_mmap_address) != null or vfsOpenCountOwned(pid) != 0 or
             vfsFindNode("TEMP2   BIN") != null or vfsFindNode("RENAMED BIN") != null or
-            fatReadEntry(17) != 0 or vfs_create_count != 1 or vfs_rename_count != 1 or vfs_unlink_count != 1 or
+            fatReadEntry(23) != 0 or vfs_create_count != 1 or vfs_rename_count != 1 or vfs_unlink_count != 1 or
             fat_allocation_count != 1 or fat_free_count != 1 or process_table[process_index].pending_signal != 0)
         {
             processFailure("SERVICE contract");
@@ -3328,6 +3804,64 @@ fn spawnElfProcess(name: [11]u8, parent_pid: u32) ?SpawnResult {
         service_sleep_ticks = results[6];
         service_signal = results[21];
         resetNamespaceAccounting();
+    } else if (equalBytes(name[0..], "ORCH    ELF")) {
+        const results: [*]const volatile u32 = @ptrFromInt(user_code_frame + 0x580);
+        const status: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x620);
+        const info: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x640);
+        const reply: [*]const volatile u8 = @ptrFromInt(user_code_frame + 0x680);
+        const child_pid = results[6];
+        const child_index = processRecordIndex(child_pid) orelse processFailure("ORCH child record");
+        var reply_match = true;
+        for (child_reply, 0..) |byte, index| {
+            if (reply[index] != byte) reply_match = false;
+        }
+        var pipes_closed = true;
+        for (pipe_objects) |pipe| {
+            if (pipe.active) pipes_closed = false;
+        }
+        if (syscall_exit_code != 0x70 or syscall_count != 30 or syscall_rejected != 0 or
+            syscall_brk_count != 3 or syscall_mmap_count != 1 or syscall_munmap_count != 1 or
+            syscall_file_opens != 1 or syscall_pipe_count != 1 or syscall_file_writes != 2 or
+            syscall_file_write_bytes != orch_request.len + child_reply.len or syscall_file_reads != 2 or
+            syscall_file_read_bytes != orch_request.len + child_reply.len or syscall_file_closes != 3 or
+            syscall_clone_count != 1 or syscall_child_peek_count != 2 or syscall_child_poke_count != 1 or
+            syscall_child_exec_count != 1 or syscall_waitpid_count != 1 or syscall_setpgid_count != 1 or
+            syscall_getpgid_count != 2 or syscall_killpg_count != 1 or syscall_procinfo_count != 1 or
+            syscall_signal_pending_count != 1 or results[0] != user_heap_base or results[1] != user_heap_limit or
+            results[2] != user_mmap_address or results[4] != 0 or results[5] != orch_request.len or
+            results[7] != 0xDEAD_BEEF or results[8] != 0 or results[9] != 0xAABB_CCDD or
+            results[10] != 0xDEAD_BEEF or results[11] != 0 or results[12] != child_pid or results[13] != 1 or
+            results[14] != 0 or results[15] != 0 or results[16] != child_pid or results[17] != child_reply.len or
+            results[18] != 0 or results[19] != 0 or results[20] != 0 or results[21] != 0 or
+            results[22] != user_heap_base or readLe32(status, 0) != child_pid or readLe32(status, 4) != 0x77 or
+            readLe32(status, 8) != @intFromEnum(ProcessState.exited) or readLe32(status, 12) != 7 or
+            readLe32(info, 0) != child_pid or readLe32(info, 4) != pid or readLe32(info, 8) != child_pid or
+            readLe32(info, 12) != @intFromEnum(ProcessState.running) or readLe32(info, 16) != 3 or
+            readLe32(info, 20) != 1 or readLe32(info, 24) == 0 or readLe32(info, 24) == kernel_page_directory or
+            readLe32(info, 28) != 7 or !reply_match or !fork_child.request_match or
+            fork_child.child_results[0] != child_pid or fork_child.child_results[1] != pid or
+            fork_child.child_results[2] != child_pid or fork_child.child_results[3] != 12 or
+            fork_child.child_results[4] != orch_request.len or fork_child.child_results[5] != child_reply.len or
+            fork_child.child_exit_code != 0x77 or fork_child.child_syscalls != 7 or fork_child.child_exit_cleanup != 2 or
+            fork_child.inherited_count != 3 or fork_child.cloexec_closed != 1 or !fork_child.resources_released or
+            !fork_child.parent_cr3_restored or !fork_child.parent_tss_restored or !fork_child.parent_pid_restored or
+            fork_child.frames_after != fork_child.frames_before or vfsOpenCountOwned(pid) != 0 or
+            process_table[child_index].state != .exited or !process_table[child_index].waited or
+            process_table[child_index].parent_pid != pid or process_table[child_index].process_group != child_pid or
+            process_table[child_index].pending_signal != 0 or waitProcess(pid, child_pid) != null or !pipes_closed or
+            queryPageEntry(kernel_page_directory, user_heap_base) != null or
+            queryPageEntry(kernel_page_directory, user_heap_base + frame_size) != null or
+            queryPageEntry(kernel_page_directory, user_mmap_address) != null)
+        {
+            processFailure("ORCH process-tree contract");
+        }
+        fork_tree_verified = true;
+        fork_tree_child_pid = child_pid;
+        fork_tree_child_syscalls = fork_child.child_syscalls;
+        fork_tree_inherited = fork_child.inherited_count;
+        fork_tree_cloexec = fork_child.cloexec_closed;
+        fork_tree_signal = fork_child.child_results[3];
+        fork_tree_pipe_bytes = results[17];
     } else if (equalBytes(name[0..], "WRITER  ELF")) {
         if (syscall_exit_code != 0x55 or syscall_count != 9 or syscall_file_opens != 2 or
             syscall_file_writes != 2 or syscall_file_write_bytes != expected_notes_bytes or
@@ -3416,11 +3950,11 @@ fn processFailure(reason: []const u8) noreturn {
 }
 
 fn runShell() noreturn {
-    const expected_nodes: u32 = if (notes_present_at_boot) 10 else 9;
+    const expected_nodes: u32 = if (notes_present_at_boot) 12 else 11;
     if (!ata_ready or !fat_ready or !heap_ready or !frame_allocator_ready or vfs_node_count != expected_nodes) {
         shellFailure("subsystems unavailable");
     }
-    writeAll("ZigOs i686 Capstone 10 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode ");
+    writeAll("ZigOs i686 Capstone 11 shell ready: commands help ls mem ticks disk hash FILE stat FILE run FILE wait PID ps exit mode ");
     writeAll(if (notes_present_at_boot) "persistence" else "first");
     writeAll("\r\n");
     var line: [64]u8 = undefined;
@@ -3461,6 +3995,10 @@ fn runShell() noreturn {
             writeHex32(big_file_size);
             writeAll(" SERVICE.ELF-bytes 0x");
             writeHex32(service_elf_size);
+            writeAll(" ORCH.ELF-bytes 0x");
+            writeHex32(orch_elf_size);
+            writeAll(" CHILD.ELF-bytes 0x");
+            writeHex32(child_elf_size);
             writeAll(" WRITER.ELF-bytes 0x");
             writeHex32(writer_elf_size);
             writeAll(" persistent-notes ");
@@ -3504,6 +4042,21 @@ fn runShell() noreturn {
                 writeHex32(service_signal);
                 writeAll(" cleanup yes");
             }
+            if (equalBytes(name[0..], "ORCH    ELF")) {
+                writeAll(" child 0x");
+                writeHex32(fork_tree_child_pid);
+                writeAll(" child-syscalls 0x");
+                writeHex32(fork_tree_child_syscalls);
+                writeAll(" inherited 0x");
+                writeHex32(fork_tree_inherited);
+                writeAll(" cloexec 0x");
+                writeHex32(fork_tree_cloexec);
+                writeAll(" signal 0x");
+                writeHex32(fork_tree_signal);
+                writeAll(" pipe-bytes 0x");
+                writeHex32(fork_tree_pipe_bytes);
+                writeAll(" cleanup yes");
+            }
             if (equalBytes(name[0..], "WRITER  ELF")) {
                 writeAll(" wrote 0x");
                 writeHex32(syscall_file_write_bytes);
@@ -3511,7 +4064,7 @@ fn runShell() noreturn {
                 writeHex32(syscall_file_read_bytes);
                 writeAll(" notes-hash 0x");
                 writeHex32(notes_hash);
-                writeAll(" chain 0x00000011->0x00000012");
+                writeAll(" chain 0x00000017->0x00000018");
             }
             writeAll("\r\n");
         } else if (command.len > 5 and equalBytes(command[0..5], "wait ")) {
@@ -3536,20 +4089,20 @@ fn runShell() noreturn {
                 verifyNotesFile();
                 var fault_ok = false;
                 for (process_table) |record| {
-                    if (record.pid == 8 and record.state == .faulted and record.fault_vector == 14 and
+                    if (record.pid == 10 and record.state == .faulted and record.fault_vector == 14 and
                         record.fault_address == 0x0080_0000) fault_ok = true;
                 }
-                if (vfs_node_count != 10 or process_count != 8 or last_spawned_pid != 8 or
-                    process_wait_count != 1 or last_waited_pid != 7 or !fault_ok or shell_command_count != 14 or
+                if (vfs_node_count != 12 or process_count != 10 or last_spawned_pid != 10 or
+                    process_wait_count != 2 or last_waited_pid != 9 or !fault_ok or shell_command_count != 15 or
                     vfs_create_count != 1 or vfs_truncate_count != 1 or vfs_write_count != 2 or
                     vfs_seek_count != 1 or fat_allocation_count != 2 or notes_hash != expected_notes_hash or
-                    !namespace_verified or !service_verified or service_syscalls != 30 or service_pipe_bytes != service_payload.len or
+                    !namespace_verified or !service_verified or !fork_tree_verified or service_syscalls != 30 or service_pipe_bytes != service_payload.len or
                     vm_fault_recovery_count != 1 or vm_fault_containment_count != 4 or
                     advanced_scheduler_exit_count != 4 or keyboard_ring_dropped != 0 or !fat_cache_loaded)
                 {
                     shellFailure("first-session accounting");
                 }
-                writeAll("ZigOs i686 Capstone 10 first session verified: goals 0x0000002C new-goals 0x00000012 root-files 0x");
+                writeAll("ZigOs i686 Capstone 11 first session verified: goals 0x0000003F new-goals 0x00000013 root-files 0x");
                 writeHex32(vfs_node_count);
                 writeAll(" processes 0x");
                 writeHex32(process_count);
@@ -3567,12 +4120,12 @@ fn runShell() noreturn {
                 writeHex32(fat_allocation_count);
                 writeAll(" notes 0x000002D0 hash 0x");
                 writeHex32(notes_hash);
-                writeAll(" chain 0x00000011->0x00000012 fault-contained yes descriptors-closed yes commands 0x");
+                writeAll(" chain 0x00000017->0x00000018 fault-contained yes descriptors-closed yes commands 0x");
                 writeHex32(shell_command_count);
                 writeAll("\r\n");
             } else {
                 verifyNotesFile();
-                if (vfs_node_count != 10 or process_count != 3 or shell_command_count != 3 or
+                if (vfs_node_count != 12 or process_count != 3 or shell_command_count != 3 or
                     vfs_create_count != 0 or vfs_truncate_count != 0 or vfs_write_count != 0 or
                     fat_allocation_count != 0 or notes_hash != expected_notes_hash or
                     !namespace_verified or vm_fault_recovery_count != 1 or vm_fault_containment_count != 3 or
@@ -3580,9 +4133,9 @@ fn runShell() noreturn {
                 {
                     shellFailure("persistence-session accounting");
                 }
-                writeAll("ZigOs i686 Capstone 10 persistence session verified: goals 0x0000002C inherited-goals 0x0000001A root-files 0x0000000A notes 0x000002D0 hash 0x");
+                writeAll("ZigOs i686 Capstone 11 persistence session verified: goals 0x0000003F inherited-goals 0x0000002C root-files 0x0000000C notes 0x000002D0 hash 0x");
                 writeHex32(notes_hash);
-                writeAll(" chain 0x00000011->0x00000012 writes 0x00000000 allocations 0x00000000 descriptors-closed yes commands 0x");
+                writeAll(" chain 0x00000017->0x00000018 writes 0x00000000 allocations 0x00000000 descriptors-closed yes commands 0x");
                 writeHex32(shell_command_count);
                 writeAll("\r\n");
             }
