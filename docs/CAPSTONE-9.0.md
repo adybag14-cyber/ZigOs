@@ -87,7 +87,7 @@ The QEMU harness requires all of the following:
 - A second boot reads, hashes, and stats `NOTES.TXT` using the same raw image.
 - The second boot performs zero filesystem writes and zero allocations.
 - The complete image SHA-256 is unchanged by the second boot.
-- The COM1 harness drains every currently buffered line before sleeping and applies the 90-second limit to inactivity rather than total wall-clock runtime; every output line, command send, and matched result refreshes the deadline without weakening any exact marker assertion.
+- The COM1 harness uses a dedicated loopback TCP chardev instead of QEMU `-serial stdio`, drains every currently buffered socket line before sleeping, and applies the 90-second limit to inactivity rather than total wall-clock runtime; every output line, command send, and matched result refreshes the deadline without weakening any exact marker assertion.
 
 ## Artifact identity
 

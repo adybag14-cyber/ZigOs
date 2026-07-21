@@ -28,10 +28,14 @@ function Invoke-LegacySession {
     $serialPath = Join-Path $root "build\legacy-i686-$Name-serial.log"
     [IO.File]::WriteAllText($debugPath, '')
     [IO.File]::WriteAllText($serialPath, '')
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    $serialPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    $acceptTask = $listener.AcceptTcpClientAsync()
     $arguments = @(
         '-m', '32M', '-machine', 'pc', '-cpu', 'qemu32', '-boot', 'c',
         '-drive', "file=$image,format=raw,if=ide,index=0,cache=unsafe",
-        '-display', 'none', '-serial', 'stdio', '-monitor', 'none',
+        '-display', 'none', '-serial', "tcp:127.0.0.1:$serialPort,nodelay=on", '-monitor', 'none',
         '-no-reboot', '-no-shutdown',
         '-debugcon', "file:$debugPath",
         '-global', 'isa-debugcon.iobase=0xe9'
@@ -41,16 +45,32 @@ function Invoke-LegacySession {
     $startInfo.Arguments = $arguments -join ' '
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardInput = $false
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
-    if (-not $process.Start()) { throw "Unable to start qemu-system-i386 for $Name." }
-    $serialBuilder = [Text.StringBuilder]::new()
-    $stdoutReadTask = $process.StandardOutput.ReadLineAsync()
-    $stdoutClosed = $false
+    if (-not $process.Start()) {
+        $listener.Stop()
+        throw "Unable to start qemu-system-i386 for $Name."
+    }
+    $qemuOutputTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (-not $acceptTask.Wait(10000)) {
+        if (-not $process.HasExited) { $process.Kill() }
+        $listener.Stop()
+        throw "QEMU did not connect its COM1 TCP channel for $Name."
+    }
+    $serialClient = $acceptTask.GetAwaiter().GetResult()
+    $listener.Stop()
+    $serialStream = $serialClient.GetStream()
+    $serialReader = [IO.StreamReader]::new($serialStream, [Text.Encoding]::ASCII, $false, 4096, $true)
+    $serialWriter = [IO.StreamWriter]::new($serialStream, [Text.Encoding]::ASCII, 4096, $true)
+    $serialWriter.NewLine = "`n"
+    $serialWriter.AutoFlush = $true
+    $serialBuilder = [Text.StringBuilder]::new()
+    $serialReadTask = $serialReader.ReadLineAsync()
+    $serialClosed = $false
     $nextCommand = 0
     $commandInFlight = $false
     $commandsSent = 0
@@ -58,21 +78,20 @@ function Invoke-LegacySession {
     try {
         while ([DateTime]::UtcNow -lt $progressDeadline) {
             $madeProgress = $false
-            # Drain every line already buffered by the redirected COM1 pipe.
-            # Reading only one line per polling interval can fill the pipe on a
-            # slow hosted runner and block the guest UART before debugcon runs.
-            while (-not $stdoutClosed -and $stdoutReadTask.IsCompleted) {
-                $line = $stdoutReadTask.GetAwaiter().GetResult()
+            # COM1 uses a dedicated loopback TCP chardev. Drain every line
+            # already buffered by the socket before evaluating command markers.
+            while (-not $serialClosed -and $serialReadTask.IsCompleted) {
+                $line = $serialReadTask.GetAwaiter().GetResult()
                 if ($null -eq $line) {
-                    $stdoutClosed = $true
+                    $serialClosed = $true
                     break
                 }
                 [void]$serialBuilder.Append($line)
                 [void]$serialBuilder.Append("`r`n")
                 $madeProgress = $true
-                $stdoutReadTask = $process.StandardOutput.ReadLineAsync()
+                $serialReadTask = $serialReader.ReadLineAsync()
             }
-            if ($stdoutClosed -and $process.HasExited) { break }
+            if ($serialClosed -and $process.HasExited) { break }
             $serialNow = $serialBuilder.ToString()
             if ($nextCommand -lt $CommandPlan.Count) {
                 $canSend = if ($nextCommand -eq 0) {
@@ -81,8 +100,7 @@ function Invoke-LegacySession {
                     $serialNow.Contains($CommandPlan[$nextCommand - 1].Expect)
                 }
                 if (-not $commandInFlight -and $canSend) {
-                    $process.StandardInput.WriteLine($CommandPlan[$nextCommand].Command)
-                    $process.StandardInput.Flush()
+                    $serialWriter.WriteLine($CommandPlan[$nextCommand].Command)
                     $commandInFlight = $true
                     $commandsSent += 1
                     $madeProgress = $true
@@ -100,7 +118,10 @@ function Invoke-LegacySession {
             Start-Sleep -Milliseconds 1
         }
     } finally {
-        try { $process.StandardInput.Close() } catch {}
+        try { $serialWriter.Close() } catch {}
+        try { $serialReader.Close() } catch {}
+        try { $serialClient.Close() } catch {}
+        try { $listener.Stop() } catch {}
         Start-Sleep -Milliseconds 100
         if (-not $process.HasExited) {
             $process.Kill()
@@ -108,15 +129,16 @@ function Invoke-LegacySession {
         }
     }
     $serial = $serialBuilder.ToString()
-    $qemuError = $stderrTask.Result
+    $qemuOutput = $qemuOutputTask.GetAwaiter().GetResult()
+    $qemuError = $stderrTask.GetAwaiter().GetResult()
     $process.Dispose()
     [IO.File]::WriteAllText($serialPath, $serial)
     $debug = [IO.File]::ReadAllText($debugPath)
     if ($commandsSent -ne $CommandPlan.Count) {
-        throw "$Name sent $commandsSent of $($CommandPlan.Count) commands. QEMU stderr: $qemuError`nSERIAL:`n$serial`nDEBUG:`n$debug"
+        throw "$Name sent $commandsSent of $($CommandPlan.Count) commands. QEMU stdout: $qemuOutput`nQEMU stderr: $qemuError`nSERIAL:`n$serial`nDEBUG:`n$debug"
     }
     if (-not $serial.Contains($FinalMarker)) {
-        throw "$Name did not reach final marker. QEMU stderr: $qemuError`nSERIAL:`n$serial`nDEBUG:`n$debug"
+        throw "$Name did not reach final marker. QEMU stdout: $qemuOutput`nQEMU stderr: $qemuError`nSERIAL:`n$serial`nDEBUG:`n$debug"
     }
     foreach ($step in $CommandPlan) {
         if (-not $serial.Contains($step.Expect)) { throw "$Name missing command result: $($step.Expect)" }
