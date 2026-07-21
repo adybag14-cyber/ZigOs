@@ -1945,7 +1945,8 @@
 - The advanced VM gate reports one map, one remap, two unmaps, one recovered demand fault, three contained validation faults, and exact frame restoration.
 - The advanced scheduler reports four threads, three quanta each, 13 switches, 12 dispatches, one sleep, one block, one signal, two wakes, and four exits.
 - The namespace lifecycle writes 600 deterministic bytes with hash `A6F87E15`, reclaims clusters `14 -> 15`, reuses cluster 14, removes every temporary root entry, and resets accounting before the existing writer workload.
+- FAT mount now caches all nine primary FAT sectors, verifies every byte against the secondary copy, serves entry reads from memory, and writes cache mutations to both mirrors with ATA read-after-write verification.
 - The second boot verifies the temporary namespace is absent and performs zero namespace writes.
 - Cumulative shell release accounting is 26 goals (`0x1A`), of which 16 (`0x10`) are new in Capstone 9.
-- Reference kernel: 50,796 bytes, 100 sectors at LBA9-108, checksum16 `0xE293`, SHA-256 `2C13B7D69D567B69F138910B272BDA177546CEBA76E478AFE33297C1B7B8950C`.
-- Initial image SHA-256: `675922B4FD7AA867D8888FA7F89D1490FDDEA3657607083DFFE9C4B2A40A4878`; persisted image SHA-256: `D9CA6F828F4E7415A3E3EA6622751819974E4B71E13D1B0836342AB4EA1A11D5`.
+- Reference kernel: 50,748 bytes, 100 sectors at LBA9-108, checksum16 `0x7205`, SHA-256 `7DE44A7AF0547A14F05D8B67983384887D8EC866FE33F16CDB10321F68F1DCA1`.
+- Initial image SHA-256: `28B1D02B58A1E6261ADC155F2867687ABF3A0BF9F96D8884355075208764563C`; persisted image SHA-256: `7B2C1D777F8D0A119B6B9877063EC475F65DBDAF9980DFD73BCFDD2FE38C00BF`.

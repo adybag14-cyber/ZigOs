@@ -278,6 +278,9 @@ var big_file_size: u32 = 0;
 var vfs_nodes: [16]VfsNode = @splat(.{});
 var vfs_node_count: u32 = 0;
 var vfs_descriptors: [8]VfsDescriptor = @splat(.{});
+const fat_cache_sector_count: usize = 9;
+var fat_cache: [fat_cache_sector_count * 512]u8 align(16) = @splat(0);
+var fat_cache_loaded = false;
 var vfs_sector_buffer: [512]u8 align(16) = @splat(0);
 var vfs_aux_buffer: [512]u8 align(16) = @splat(0);
 var vfs_root_buffer: [512]u8 align(16) = @splat(0);
@@ -1029,6 +1032,7 @@ fn verifyFat12() void {
     fat_sectors_per_fat = sectors_per_fat;
     fat_root_sectors = @intCast(root_sectors);
     fat_cluster_count = @intCast((@as(u32, total_sectors) - (data_start - volume_lba)) / sectors_per_cluster);
+    if (!loadFatCache()) fatFailure("FAT cache or mirror mismatch");
     var found = false;
     var file_size: u32 = 0;
     search: for (0..root_sectors) |sector_index| {
@@ -1051,12 +1055,7 @@ fn verifyFat12() void {
         fatFailure("HELLO.TXT root entry");
     }
 
-    const fat_offset: u32 = @as(u32, fat_file_cluster) + @as(u32, fat_file_cluster) / 2;
-    const fat_sector_lba = fat_start + fat_offset / bytes_per_sector;
-    const fat_byte_offset: usize = @intCast(fat_offset % bytes_per_sector);
-    if (fat_byte_offset >= 511 or !ataReadSector(fat_sector_lba, buffer)) fatFailure("read FAT");
-    const pair = @as(u16, sector[fat_byte_offset]) | (@as(u16, sector[fat_byte_offset + 1]) << 8);
-    const next_cluster: u16 = if ((fat_file_cluster & 1) == 0) pair & 0x0FFF else pair >> 4;
+    const next_cluster = fatReadEntry(fat_file_cluster) orelse fatFailure("read cached FAT");
     if (next_cluster < 0x0FF8) fatFailure("multi-cluster chain not expected");
 
     const cluster_lba = data_start + (@as(u32, fat_file_cluster) - 2) * sectors_per_cluster;
@@ -1087,7 +1086,7 @@ fn verifyFat12() void {
     writeHex32(fat_file_hash);
     writeAll(" chain-end 0x");
     writeHex32(next_cluster);
-    writeAll(" heap-restored yes\r\n");
+    writeAll(" FAT-cache mirrored heap-restored yes\r\n");
     verifyPreemptiveScheduler();
 }
 
@@ -2151,50 +2150,51 @@ fn validDataCluster(cluster: u16) bool {
     return cluster >= 2 and cluster <= fat_cluster_count + 1;
 }
 
+fn loadFatCache() bool {
+    if (fat_sectors_per_fat != fat_cache_sector_count or fat_bytes_per_sector != 512) return false;
+    fat_cache_loaded = false;
+    for (0..fat_cache_sector_count) |sector_index| {
+        const cache_address: u32 = @intCast(@intFromPtr(&fat_cache) + sector_index * 512);
+        if (!ataReadSector(fat_start_lba + @as(u32, @intCast(sector_index)), cache_address)) return false;
+        const mirror_lba = fat_start_lba + fat_sectors_per_fat + @as(u32, @intCast(sector_index));
+        if (!ataReadSector(mirror_lba, @intCast(@intFromPtr(&vfs_aux_buffer)))) return false;
+        const cache_offset = sector_index * 512;
+        if (!equalBytes(fat_cache[cache_offset .. cache_offset + 512], vfs_aux_buffer[0..])) return false;
+    }
+    fat_cache_loaded = true;
+    return true;
+}
+
 fn fatReadEntry(cluster: u16) ?u16 {
-    if (!validDataCluster(cluster)) return null;
-    const fat_offset: u32 = @as(u32, cluster) + @as(u32, cluster) / 2;
-    const lba = fat_start_lba + fat_offset / fat_bytes_per_sector;
-    const byte_offset: usize = @intCast(fat_offset % fat_bytes_per_sector);
-    if (!ataReadSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return null;
-    const first = vfs_sector_buffer[byte_offset];
-    const second: u8 = if (byte_offset == 511) blk: {
-        if (!ataReadSector(lba + 1, @intCast(@intFromPtr(&vfs_aux_buffer)))) return null;
-        break :blk vfs_aux_buffer[0];
-    } else vfs_sector_buffer[byte_offset + 1];
-    const pair = @as(u16, first) | (@as(u16, second) << 8);
+    if (!validDataCluster(cluster) or !fat_cache_loaded) return null;
+    const fat_offset: usize = @as(usize, cluster) + @as(usize, cluster) / 2;
+    if (fat_offset + 1 >= fat_cache.len) return null;
+    const pair = @as(u16, fat_cache[fat_offset]) | (@as(u16, fat_cache[fat_offset + 1]) << 8);
     return if ((cluster & 1) == 0) pair & 0x0FFF else pair >> 4;
 }
 
 fn fatWriteEntry(cluster: u16, value: u16) bool {
-    if (!validDataCluster(cluster) or value > 0x0FFF) return false;
-    const fat_offset: u32 = @as(u32, cluster) + @as(u32, cluster) / 2;
-    const relative_sector = fat_offset / fat_bytes_per_sector;
-    const byte_offset: usize = @intCast(fat_offset % fat_bytes_per_sector);
+    if (!validDataCluster(cluster) or value > 0x0FFF or !fat_cache_loaded) return false;
+    const fat_offset: usize = @as(usize, cluster) + @as(usize, cluster) / 2;
+    if (fat_offset + 1 >= fat_cache.len) return false;
+    const pair = @as(u16, fat_cache[fat_offset]) | (@as(u16, fat_cache[fat_offset + 1]) << 8);
+    const updated = if ((cluster & 1) == 0)
+        (pair & 0xF000) | value
+    else
+        (pair & 0x000F) | (value << 4);
+    fat_cache[fat_offset] = @truncate(updated);
+    fat_cache[fat_offset + 1] = @truncate(updated >> 8);
+
+    const first_sector = fat_offset / 512;
+    const last_sector = (fat_offset + 1) / 512;
     for (0..2) |copy_index| {
-        const lba = fat_start_lba + @as(u32, @intCast(copy_index)) * fat_sectors_per_fat + relative_sector;
-        if (!ataReadSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
-        var second: u8 = undefined;
-        if (byte_offset == 511) {
-            if (!ataReadSector(lba + 1, @intCast(@intFromPtr(&vfs_aux_buffer)))) return false;
-            second = vfs_aux_buffer[0];
-        } else {
-            second = vfs_sector_buffer[byte_offset + 1];
-        }
-        if ((cluster & 1) == 0) {
-            vfs_sector_buffer[byte_offset] = @truncate(value);
-            second = (second & 0xF0) | @as(u8, @truncate(value >> 8));
-        } else {
-            vfs_sector_buffer[byte_offset] = (vfs_sector_buffer[byte_offset] & 0x0F) | @as(u8, @truncate(value << 4));
-            second = @truncate(value >> 4);
-        }
-        if (byte_offset == 511) {
-            vfs_aux_buffer[0] = second;
-            if (!ataWriteSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer))) or
-                !ataWriteSector(lba + 1, @intCast(@intFromPtr(&vfs_aux_buffer)))) return false;
-        } else {
-            vfs_sector_buffer[byte_offset + 1] = second;
-            if (!ataWriteSector(lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return false;
+        var sector_index = first_sector;
+        while (sector_index <= last_sector) : (sector_index += 1) {
+            const lba = fat_start_lba +
+                @as(u32, @intCast(copy_index)) * fat_sectors_per_fat +
+                @as(u32, @intCast(sector_index));
+            const cache_address: u32 = @intCast(@intFromPtr(&fat_cache) + sector_index * 512);
+            if (!ataWriteSector(lba, cache_address)) return false;
         }
     }
     fat_entry_write_count +|= 1;
@@ -2978,7 +2978,7 @@ fn runShell() noreturn {
                     vfs_create_count != 1 or vfs_truncate_count != 1 or vfs_write_count != 2 or
                     vfs_seek_count != 1 or fat_allocation_count != 2 or notes_hash != expected_notes_hash or
                     !namespace_verified or vm_fault_recovery_count != 1 or vm_fault_containment_count != 4 or
-                    advanced_scheduler_exit_count != 4 or keyboard_ring_dropped != 0)
+                    advanced_scheduler_exit_count != 4 or keyboard_ring_dropped != 0 or !fat_cache_loaded)
                 {
                     shellFailure("first-session accounting");
                 }
@@ -3009,7 +3009,7 @@ fn runShell() noreturn {
                     vfs_create_count != 0 or vfs_truncate_count != 0 or vfs_write_count != 0 or
                     fat_allocation_count != 0 or notes_hash != expected_notes_hash or
                     !namespace_verified or vm_fault_recovery_count != 1 or vm_fault_containment_count != 3 or
-                    advanced_scheduler_exit_count != 4 or keyboard_ring_dropped != 0)
+                    advanced_scheduler_exit_count != 4 or keyboard_ring_dropped != 0 or !fat_cache_loaded)
                 {
                     shellFailure("persistence-session accounting");
                 }

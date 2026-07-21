@@ -57,6 +57,8 @@ The probe boundary restores the caller PID before `INIT.ELF` runs, preventing va
 
 ## FAT12 namespace contract
 
+At mount time, the kernel reads all nine sectors of the primary FAT into an aligned memory cache and compares every sector against the secondary FAT. All FAT12 entry reads then use the cache, eliminating command-boundary races from repeated metadata PIO. Entry mutations update the packed 12-bit cache first and write each affected sector to both FAT copies through the existing ATA read-after-write verification path. Both final shell sessions require the mirrored cache to remain loaded.
+
 On the first boot, the kernel performs this reversible sequence before entering the shell:
 
 ```text
@@ -89,10 +91,10 @@ The QEMU harness requires all of the following:
 - Kernel physical entry: `0x00010000`.
 - FAT12 partition start: LBA 256.
 - Protected maximum kernel area: 247 sectors.
-- Capstone 9 kernel: 50,796 bytes / 100 sectors at LBA 9-108.
-- Kernel checksum16: `0xE293`.
-- Kernel SHA-256: `2C13B7D69D567B69F138910B272BDA177546CEBA76E478AFE33297C1B7B8950C`.
-- Initial image SHA-256: `675922B4FD7AA867D8888FA7F89D1490FDDEA3657607083DFFE9C4B2A40A4878`.
-- Persisted image SHA-256: `D9CA6F828F4E7415A3E3EA6622751819974E4B71E13D1B0836342AB4EA1A11D5`.
+- Capstone 9 kernel: 50,748 bytes / 100 sectors at LBA 9-108.
+- Kernel checksum16: `0x7205`.
+- Kernel SHA-256: `7DE44A7AF0547A14F05D8B67983384887D8EC866FE33F16CDB10321F68F1DCA1`.
+- Initial image SHA-256: `28B1D02B58A1E6261ADC155F2867687ABF3A0BF9F96D8884355075208764563C`.
+- Persisted image SHA-256: `7B2C1D777F8D0A119B6B9877063EC475F65DBDAF9980DFD73BCFDD2FE38C00BF`.
 
 The independent x86-64 UEFI regression artifact must remain 888,832 bytes with SHA-256 `ABA23A4C97F504146B1633D846A3F5A46242BC6360CDE9DDA8909A98941F45C2`.
