@@ -154,6 +154,7 @@ try {
         'pwd',
         'write note.txt persistent runtime',
         'cat note.txt',
+        'wc < note.txt',
         'echo alpha beta gamma | wc',
         'echo alpha | grep alpha > match.txt',
         'cat match.txt',
@@ -173,6 +174,8 @@ try {
         'fsck',
         'sync',
         'history',
+        'fdtest',
+        'fds',
         'shutdown'
     )
     foreach ($command in $commands) {
@@ -184,7 +187,7 @@ try {
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 50
         $text = Current-SerialText
-        if ($text.Contains('ZigOs x86-64 Capstone 17 verified:')) {
+        if ($text.Contains('ZigOs x86-64 Capstone 18 verified:')) {
             $shutdownObserved = $true
             break
         }
@@ -201,6 +204,7 @@ try {
         'init PID 1; serial shell PID 2; APIC scheduling 100 Hz',
         '/home/root/demo',
         'persistent runtime',
+        '1 2 19',
         '1 3 18',
         'alpha',
         'kind file size 19',
@@ -215,10 +219,19 @@ try {
         'serial COM1 online',
         'fsck ramfs: clean',
         'sync complete:',
+        'fdtest: descriptors 3 open 3 pipes 0 shared-offset yes clone yes cloexec yes read-block yes write-block yes eof yes broken-pipe yes ring yes clean yes',
+        'fdtest counters: dup 2 inherited 7 cloexec 1 blocked 1/1 wakeups',
+        'FD KIND       MODE OFD      REFS FLAGS OFFSET/BUFFERED',
+        '0 terminal',
+        '1 terminal',
+        '2 terminal',
+        'ZigOs persistent runtime shutdown: commands 30 failed 0',
         'ZigOs persistent VFS:',
         'ZigOs persistent processes:',
-        'loop permanent shell yes navigation yes files yes processes yes network-diagnostics yes explicit-shutdown yes',
-        'ZigOs x86-64 Capstone 17 verified: goals 0x000001B1 new-goals 0x00000060 runtime yes vfs yes process-table yes shell yes portable-build yes ci-matrix yes'
+        'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/7/1 blocked 1/1 wakeups 1/1',
+        'broken 1 clean yes',
+        'loop permanent shell yes navigation yes files yes descriptors yes processes yes network-diagnostics yes explicit-shutdown yes',
+        'ZigOs x86-64 Capstone 18 verified: goals 0x000001D1 new-goals 0x00000020 fd-namespaces yes open-descriptions yes shared-offsets yes duplication yes inheritance yes cloexec yes blocking-pipes yes shell-io yes cleanup yes'
     )
     foreach ($marker in $required) {
         if (-not $serialText.Contains($marker)) { throw "Persistent runtime marker missing: $marker" }
@@ -228,7 +241,7 @@ try {
     $debugText = Get-Content $debugLog -Raw
     if (-not $debugText.Contains('ZigOs x86-64 Capstone 16 verified:')) { throw 'The inherited Capstone 16 gate did not pass before the runtime.' }
     if (-not $debugText.Contains('ZigOs x86-64 persistent runtime verified:')) { throw 'The runtime shutdown marker was not mirrored to debugcon.' }
-    if (-not $debugText.Contains('ZigOs x86-64 Capstone 17 verified:')) { throw 'The Capstone 17 release marker was not mirrored to debugcon.' }
+    if (-not $debugText.Contains('ZigOs x86-64 Capstone 18 verified:')) { throw 'The Capstone 18 release marker was not mirrored to debugcon.' }
 
     Write-Host '=== ZigOs persistent COM1 session ==='
     Write-Host $serialText

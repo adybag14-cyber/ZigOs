@@ -2123,3 +2123,24 @@ Status: released after successful portable Linux and Windows integration CI.
 - Cumulative verified accounting is 433 goals (`0x1B1`), with 96 (`0x60`) new in Capstone 17.
 - Exact release contract: [`CAPSTONE-17.0.md`](CAPSTONE-17.0.md).
 - Broader implementation queue: [`ROADMAP-500.md`](ROADMAP-500.md), with G001-G096 complete and G097-G500 open.
+
+## Capstone 18.0 - persistent file descriptors and blocking pipes
+
+Status: complete locally; release requires hosted CI success.
+
+- Added per-process numeric descriptor namespaces with thirty-two slots per process, exact generation-tagged process ownership and deterministic lowest-free allocation.
+- Added ninety-six bounded, generation-tagged, reference-counted open-file descriptions backing terminal streams, VFS handles and pipe endpoints.
+- Added shared file offsets across `dup`, `dup2` and fork-style namespace cloning, while retaining process-local close-on-exec flags.
+- Added exact close-on-exec, namespace release, stale-namespace sweep, final-reference VFS close and pipe-endpoint reclamation.
+- Added descriptor-based read, write, append, seek and truncate, including truncate-offset preservation and independent append-description tests.
+- Routed regular-file `cat`, `write`, `append`, input redirection and both output-redirection modes through transient permanent-runtime descriptors.
+- Added thirty-two bounded 1,024-byte circular pipes with empty-reader blocking, full-writer blocking, targeted scheduler wakeups, ring wrap, EOF and broken-pipe behavior.
+- Added `fds` inspection and a repeatable live `fdtest` command proving fd3/fd4/fd9 allocation, shared offsets, five inherited file/terminal descriptors, two inherited pipe descriptors, one CLOEXEC close, one reader block/wakeup, one writer block/wakeup and exact cleanup.
+- Expanded the bidirectional COM1 release session from twenty-seven to thirty commands, adding descriptor-backed input redirection, `fdtest` and final fd-table inspection; the session completes with zero failures and only fd0-fd2 remaining.
+- Expanded the canonical isolated-test graph from nineteen to twenty-nine unique declarations: ten descriptor/pipe, five VFS, eight process-table and six command/parser/editor tests.
+- The descriptor shutdown report requires one namespace, three terminal descriptors/open descriptions, zero VFS descriptions, zero pipe endpoints and complete structural validation before the release marker is emitted.
+- Cumulative historical x86-64 accounting is 465 goals (`0x1D1`), with 32 (`0x20`) new in Capstone 18.
+- The separate 500-goal general-OS roadmap now has 100 complete and 400 open; G112, G191, G192 and G194 are newly closed.
+- G175 and G193 remain open because permanent arbitrary CPL3 executable contexts and a general SMP-safe multiwriter append contract are not implemented.
+- Locally verified reference `BOOTX64.EFI`: 2,716,672 bytes, SHA-256 `4C7D5F0FC945F6F53306363C47418E3C63C60979CAA6E06C0B41C101E9382FA1`.
+- Exact release contract: [`CAPSTONE-18.0.md`](CAPSTONE-18.0.md).

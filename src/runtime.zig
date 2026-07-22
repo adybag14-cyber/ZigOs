@@ -4,6 +4,7 @@ const descriptor_tables = @import("descriptor_tables.zig");
 const elf64 = @import("elf64.zig");
 const interrupt_context = @import("interrupt_context.zig");
 const runtime_command = @import("runtime_command.zig");
+const runtime_fd = @import("runtime_fd.zig");
 const runtime_process = @import("runtime_process.zig");
 const runtime_vfs = @import("runtime_vfs.zig");
 const serial = @import("serial.zig");
@@ -134,6 +135,7 @@ const State = struct {
     config: Configuration = undefined,
     vfs: runtime_vfs.Vfs = undefined,
     processes: runtime_process.Table = undefined,
+    descriptors: runtime_fd.System = undefined,
     environment: runtime_command.Environment = undefined,
     editor: runtime_command.LineEditor = .{},
     cwd: u16 = 0,
@@ -155,6 +157,7 @@ const State = struct {
     shutdown_requested: bool = false,
     prompt_visible: bool = false,
     ignore_next_lf: bool = false,
+    fd_contract_passed: bool = false,
 };
 
 var state: State = undefined;
@@ -200,6 +203,7 @@ fn initialize(configuration: Configuration) !void {
     state.config = configuration;
     state.vfs.initialize();
     state.processes.initialize(0);
+    state.descriptors.initialize();
     state.environment = runtime_command.Environment.init();
     state.editor = .{};
     state.jobs = @splat(.{});
@@ -219,6 +223,7 @@ fn initialize(configuration: Configuration) !void {
     state.shutdown_requested = false;
     state.prompt_visible = false;
     state.ignore_next_lf = false;
+    state.fd_contract_passed = false;
     @atomicStore(u64, &runtime_interrupt_count, 0, .monotonic);
 
     try initializeFilesystem();
@@ -237,7 +242,8 @@ fn initialize(configuration: Configuration) !void {
         .{ .maximum_pages = 128, .maximum_descriptors = 32, .maximum_sockets = 16, .maximum_children = 24 },
     );
     try state.processes.setRunning(state.shell_handle);
-    try state.processes.setResourceUsage(state.shell_handle, 8, 3, 0);
+    try state.processes.setResourceUsage(state.shell_handle, 8, 0, 0);
+    try state.descriptors.bindProcess(&state.processes, state.shell_handle, true);
 }
 
 fn initializeFilesystem() !void {
@@ -249,10 +255,10 @@ fn initializeFilesystem() !void {
     for (directories) |path| _ = try state.vfs.mkdir(0, path, if (std.mem.startsWith(u8, path, "/tmp") or std.mem.startsWith(u8, path, "/var/tmp")) 0o777 else 0o755, 0);
 
     _ = try state.vfs.putFile(0, "/etc/hostname", "zigos\n", 0o644, false, 0);
-    _ = try state.vfs.putFile(0, "/etc/os-release", "NAME=ZigOs\nVERSION=17.0.0\nARCH=x86_64\n", 0o644, false, 0);
+    _ = try state.vfs.putFile(0, "/etc/os-release", "NAME=ZigOs\nVERSION=18.0.0\nARCH=x86_64\n", 0o644, false, 0);
     _ = try state.vfs.putFile(0, "/etc/motd", "ZigOs persistent x86-64 runtime\n", 0o644, false, 0);
     _ = try state.vfs.putFile(0, "/home/root/readme.txt", "This filesystem remains available after boot validation.\n", 0o644, false, 0);
-    _ = try state.vfs.putFile(0, "/var/log/boot.log", "Capstone 16 validation passed; persistent runtime entered.\n", 0o640, false, 0);
+    _ = try state.vfs.putFile(0, "/var/log/boot.log", "Capstone 16 validation passed; Capstone 18 persistent runtime entered.\n", 0o640, false, 0);
     _ = try state.vfs.putFile(0, "/boot/service-user.elf", service_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/boot/process-user.elf", process_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/boot/process-exec.elf", process_exec_elf, 0o555, false, 0);
@@ -402,23 +408,13 @@ fn executeLine(line: []const u8) void {
     }
 
     if (command_line.output_path) |path_token| {
-        if (command_line.append_output) {
-            _ = state.vfs.append(state.cwd, path_token.slice(), final_output, currentTick()) catch |err| {
-                state.failed_commands +%= 1;
-                emit("redirect: ");
-                emit(@errorName(err));
-                emit("\r\n");
-                return;
-            };
-        } else {
-            _ = state.vfs.putFile(state.cwd, path_token.slice(), final_output, 0o644, false, currentTick()) catch |err| {
-                state.failed_commands +%= 1;
-                emit("redirect: ");
-                emit(@errorName(err));
-                emit("\r\n");
-                return;
-            };
-        }
+        writeDescriptorPath(path_token.slice(), final_output, command_line.append_output) catch |err| {
+            state.failed_commands +%= 1;
+            emit("redirect: ");
+            emit(@errorName(err));
+            emit("\r\n");
+            return;
+        };
     } else {
         emit(final_output);
     }
@@ -450,6 +446,8 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
     if (equal(name, "chmod")) return commandChmod(stage, output);
     if (equal(name, "mount")) return commandMount(output);
     if (equal(name, "df")) return commandDf(output);
+    if (equal(name, "fds")) return commandFds(stage, output);
+    if (equal(name, "fdtest")) return commandFdTest(stage, output);
     if (equal(name, "ps")) return commandPs(output);
     if (equal(name, "jobs")) return commandJobs(output);
     if (equal(name, "spawn")) return commandSpawn(stage, output);
@@ -471,7 +469,7 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
     if (equal(name, "export")) return commandExport(stage, output);
     if (equal(name, "unset")) return commandUnset(stage, output);
     if (equal(name, "history")) return commandHistory(output);
-    if (equal(name, "uname")) return output.line("ZigOs 17.0.0 x86_64 freestanding");
+    if (equal(name, "uname")) return output.line("ZigOs 18.0.0 x86_64 freestanding");
     if (equal(name, "clear")) return output.write("\x1B[2J\x1B[H");
     if (equal(name, "sync")) return commandSync(output);
     if (equal(name, "fsck")) return commandFsck(output);
@@ -490,7 +488,7 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
 }
 
 fn commandHelp(output: *Output) void {
-    output.line("Filesystem: pwd cd ls cat echo touch mkdir rm rmdir mv write append stat chmod mount df sync fsck");
+    output.line("Filesystem: pwd cd ls cat echo touch mkdir rm rmdir mv write append stat chmod mount df fds fdtest sync fsck");
     output.line("Processes: ps jobs spawn kill wait crash sleep uptime elf exec run");
     output.line("Network: devices ifconfig netstat routes arp ping dns");
     output.line("Shell: env export unset history clear uname hash hexdump grep wc head shutdown");
@@ -592,11 +590,8 @@ fn commandWrite(stage: *const runtime_command.Stage, append: bool, output: *Outp
         temporary[length] = '\n';
         length += 1;
     }
-    if (append) {
-        _ = state.vfs.append(state.cwd, stage.arguments[1].slice(), temporary[0..length], currentTick()) catch |err| return shellError("append", err, output);
-    } else {
-        _ = state.vfs.putFile(state.cwd, stage.arguments[1].slice(), temporary[0..length], 0o644, false, currentTick()) catch |err| return shellError("write", err, output);
-    }
+    writeDescriptorPath(stage.arguments[1].slice(), temporary[0..length], append) catch |err|
+        return shellError(if (append) "append" else "write", err, output);
 }
 
 fn commandStat(stage: *const runtime_command.Stage, output: *Output) void {
@@ -655,6 +650,226 @@ fn commandDf(output: *Output) void {
     output.write(" open ");
     output.decimal(report.open_files);
     output.write("\r\n");
+}
+
+fn commandFds(stage: *const runtime_command.Stage, output: *Output) void {
+    if (stage.count != 1) return usage("fds", output);
+    const snapshot = state.descriptors.snapshot(&state.vfs, &state.processes, state.shell_handle) catch |err| return shellError("fds", err, output);
+    output.line("FD KIND       MODE OFD      REFS FLAGS OFFSET/BUFFERED");
+    for (snapshot.entries[0..snapshot.count]) |entry| {
+        output.decimal(entry.fd);
+        output.byte(' ');
+        output.write(@tagName(entry.kind));
+        var padding = @tagName(entry.kind).len;
+        while (padding < 10) : (padding += 1) output.byte(' ');
+        output.write(if (entry.readable and entry.writable) "rw   " else if (entry.readable) "r-   " else "-w   ");
+        output.write("0x");
+        output.hexFixed(entry.open_id, 8);
+        output.byte(' ');
+        output.decimal(entry.references);
+        output.write(if (entry.close_on_exec) "    CLOEXEC " else "    -       ");
+        output.decimal(entry.offset_or_buffered);
+        output.write("\r\n");
+    }
+}
+
+fn commandFdTest(stage: *const runtime_command.Stage, output: *Output) void {
+    if (stage.count != 1) return usage("fdtest", output);
+    runFdContract() catch |err| {
+        output.write("fdtest: ");
+        output.line(@errorName(err));
+        state.failed_commands +%= 1;
+        return;
+    };
+    const report = state.descriptors.report();
+    output.write("fdtest: descriptors ");
+    output.decimal(report.descriptors);
+    output.write(" open ");
+    output.decimal(report.open_descriptions);
+    output.write(" pipes ");
+    output.decimal(report.pipes);
+    output.line(" shared-offset yes clone yes cloexec yes read-block yes write-block yes eof yes broken-pipe yes ring yes clean yes");
+    output.write("fdtest counters: dup ");
+    output.decimal(report.duplicated_descriptors);
+    output.write(" inherited ");
+    output.decimal(report.inherited_descriptors);
+    output.write(" cloexec ");
+    output.decimal(report.close_on_exec_closes);
+    output.write(" blocked ");
+    output.decimal(report.blocked_reads);
+    output.byte('/');
+    output.decimal(report.blocked_writes);
+    output.write(" wakeups ");
+    output.decimal(report.reader_wakeups);
+    output.byte('/');
+    output.decimal(report.writer_wakeups);
+    output.write(" eof ");
+    output.decimal(report.eof_reads);
+    output.write(" broken ");
+    output.decimal(report.broken_pipe_writes);
+    output.write("\r\n");
+}
+
+fn runFdContract() !void {
+    const initial = state.descriptors.report();
+    if (initial.namespaces != 1 or initial.descriptors != 3 or initial.open_descriptions != 3 or initial.pipes != 0)
+        return error.FdContractInitialState;
+
+    const file_fd = try state.descriptors.openFile(
+        &state.vfs,
+        &state.processes,
+        state.shell_handle,
+        "/tmp/capstone18-fd.txt",
+        .{ .read = true, .write = true, .create = true, .truncate = true },
+        0o644,
+        currentTick(),
+    );
+    if (file_fd != 3) return error.FdContractLowestDescriptor;
+    if ((try state.descriptors.write(&state.vfs, &state.processes, state.shell_handle, file_fd, "alpha", currentTick())).count != 5)
+        return error.FdContractFileWrite;
+    const duplicate_fd = try state.descriptors.duplicate(&state.processes, state.shell_handle, file_fd);
+    if (duplicate_fd != 4) return error.FdContractDuplicate;
+    if ((try state.descriptors.write(&state.vfs, &state.processes, state.shell_handle, duplicate_fd, "-beta", currentTick())).count != 5)
+        return error.FdContractSharedWrite;
+    if ((try state.descriptors.duplicateTo(&state.vfs, &state.processes, state.shell_handle, file_fd, 9)) != 9)
+        return error.FdContractDuplicateTo;
+    if ((try state.descriptors.seek(&state.vfs, &state.processes, state.shell_handle, 9, 0, .start)) != 0)
+        return error.FdContractSeek;
+    var file_bytes: [64]u8 = undefined;
+    const shared_read = try state.descriptors.read(&state.vfs, &state.processes, state.shell_handle, duplicate_fd, &file_bytes);
+    if (shared_read.status != .complete or !std.mem.eql(u8, file_bytes[0..shared_read.count], "alpha-beta"))
+        return error.FdContractSharedOffset;
+    try state.descriptors.setCloseOnExec(&state.processes, state.shell_handle, duplicate_fd, true);
+    if ((try state.descriptors.closeOnExec(&state.vfs, &state.processes, state.shell_handle)) != 1)
+        return error.FdContractCloseOnExec;
+
+    const child = try state.processes.spawn(
+        state.shell_handle,
+        .userspace,
+        "fd-child",
+        &.{"fd-child"},
+        state.cwd,
+        0,
+        0,
+        currentTick(),
+        .{ .maximum_pages = 16, .maximum_descriptors = 16, .maximum_sockets = 0, .maximum_children = 0 },
+    );
+    if ((try state.descriptors.cloneProcess(&state.processes, state.shell_handle, child)) != 5)
+        return error.FdContractCloneCount;
+    if ((try state.descriptors.write(&state.vfs, &state.processes, child, file_fd, "-child", currentTick())).count != 6)
+        return error.FdContractCloneWrite;
+    _ = try state.descriptors.releaseProcess(&state.vfs, &state.processes, child);
+    try state.processes.exit(child, 0);
+    const child_status = (try state.processes.wait(state.shell_handle, child, false)) orelse return error.FdContractChildWait;
+    if (child_status.exit_status != 0) return error.FdContractChildStatus;
+
+    if ((try state.descriptors.seek(&state.vfs, &state.processes, state.shell_handle, file_fd, 0, .start)) != 0)
+        return error.FdContractParentSeek;
+    const inherited_read = try state.descriptors.read(&state.vfs, &state.processes, state.shell_handle, 9, &file_bytes);
+    if (inherited_read.status != .complete or !std.mem.eql(u8, file_bytes[0..inherited_read.count], "alpha-beta-child"))
+        return error.FdContractInheritedOffset;
+    try state.descriptors.truncate(&state.vfs, &state.processes, state.shell_handle, file_fd, 10, currentTick());
+    const file_snapshot = try state.descriptors.snapshot(&state.vfs, &state.processes, state.shell_handle);
+    var preserved_offset = false;
+    for (file_snapshot.entries[0..file_snapshot.count]) |entry| {
+        if (entry.fd == file_fd and entry.offset_or_buffered == 16) preserved_offset = true;
+    }
+    if (!preserved_offset) return error.FdContractTruncateOffset;
+    _ = try state.descriptors.seek(&state.vfs, &state.processes, state.shell_handle, 9, 0, .start);
+    const truncated_read = try state.descriptors.read(&state.vfs, &state.processes, state.shell_handle, file_fd, &file_bytes);
+    if (!std.mem.eql(u8, file_bytes[0..truncated_read.count], "alpha-beta")) return error.FdContractTruncateData;
+    try state.descriptors.close(&state.vfs, &state.processes, state.shell_handle, file_fd);
+    try state.descriptors.close(&state.vfs, &state.processes, state.shell_handle, 9);
+    try state.vfs.unlink(0, "/tmp/capstone18-fd.txt");
+
+    const reader = try state.processes.spawn(
+        state.shell_handle,
+        .userspace,
+        "pipe-reader",
+        &.{"pipe-reader"},
+        state.cwd,
+        0,
+        0,
+        currentTick(),
+        .{ .maximum_pages = 8, .maximum_descriptors = 8, .maximum_sockets = 0, .maximum_children = 0 },
+    );
+    const writer = try state.processes.spawn(
+        state.shell_handle,
+        .userspace,
+        "pipe-writer",
+        &.{"pipe-writer"},
+        state.cwd,
+        0,
+        0,
+        currentTick(),
+        .{ .maximum_pages = 8, .maximum_descriptors = 8, .maximum_sockets = 0, .maximum_children = 0 },
+    );
+    try state.descriptors.bindProcess(&state.processes, reader, false);
+    const pipe_fds = try state.descriptors.createPipe(&state.processes, reader);
+    if ((try state.descriptors.cloneProcess(&state.processes, reader, writer)) != 2)
+        return error.FdContractPipeClone;
+    try state.descriptors.close(&state.vfs, &state.processes, reader, pipe_fds[1]);
+    try state.descriptors.close(&state.vfs, &state.processes, writer, pipe_fds[0]);
+
+    var pipe_bytes: [runtime_fd.pipe_capacity]u8 = undefined;
+    if ((try state.descriptors.read(&state.vfs, &state.processes, reader, pipe_fds[0], &pipe_bytes)).status != .blocked)
+        return error.FdContractReaderDidNotBlock;
+    const wake_write = try state.descriptors.write(&state.vfs, &state.processes, writer, pipe_fds[1], "pipe-wakeup", currentTick());
+    if (wake_write.count != 11 or wake_write.wakeups != 1) return error.FdContractReaderWake;
+    const wake_read = try state.descriptors.read(&state.vfs, &state.processes, reader, pipe_fds[0], &pipe_bytes);
+    if (!std.mem.eql(u8, pipe_bytes[0..wake_read.count], "pipe-wakeup")) return error.FdContractPipePayload;
+
+    var fill: [runtime_fd.pipe_capacity]u8 = undefined;
+    for (&fill, 0..) |*byte, index| byte.* = @intCast(index & 0xFF);
+    if ((try state.descriptors.write(&state.vfs, &state.processes, writer, pipe_fds[1], &fill, currentTick())).count != runtime_fd.pipe_capacity)
+        return error.FdContractPipeFill;
+    if ((try state.descriptors.write(&state.vfs, &state.processes, writer, pipe_fds[1], "!", currentTick())).status != .blocked)
+        return error.FdContractWriterDidNotBlock;
+    const drain = try state.descriptors.read(&state.vfs, &state.processes, reader, pipe_fds[0], pipe_bytes[0..512]);
+    if (drain.count != 512 or drain.wakeups != 1) return error.FdContractWriterWake;
+    if ((try state.descriptors.write(&state.vfs, &state.processes, writer, pipe_fds[1], "tail", currentTick())).count != 4)
+        return error.FdContractRingWrite;
+    const remainder = try state.descriptors.read(&state.vfs, &state.processes, reader, pipe_fds[0], pipe_bytes[0..600]);
+    if (remainder.count != 516) return error.FdContractRingRead;
+    try state.descriptors.close(&state.vfs, &state.processes, writer, pipe_fds[1]);
+    if ((try state.descriptors.read(&state.vfs, &state.processes, reader, pipe_fds[0], &pipe_bytes)).status != .eof)
+        return error.FdContractPipeEof;
+    try state.descriptors.close(&state.vfs, &state.processes, reader, pipe_fds[0]);
+    _ = try state.descriptors.releaseProcess(&state.vfs, &state.processes, reader);
+    _ = try state.descriptors.releaseProcess(&state.vfs, &state.processes, writer);
+    try state.processes.exit(reader, 0);
+    try state.processes.exit(writer, 0);
+    _ = (try state.processes.wait(state.shell_handle, reader, false)) orelse return error.FdContractReaderWait;
+    _ = (try state.processes.wait(state.shell_handle, writer, false)) orelse return error.FdContractWriterWait;
+
+    const broken_fds = try state.descriptors.createPipe(&state.processes, state.shell_handle);
+    try state.descriptors.close(&state.vfs, &state.processes, state.shell_handle, broken_fds[0]);
+    _ = state.descriptors.write(&state.vfs, &state.processes, state.shell_handle, broken_fds[1], "broken", currentTick()) catch |err| switch (err) {
+        runtime_fd.Error.BrokenPipe => {},
+        else => return err,
+    };
+    try state.descriptors.close(&state.vfs, &state.processes, state.shell_handle, broken_fds[1]);
+
+    const final = state.descriptors.report();
+    if (final.namespaces != 1 or final.descriptors != 3 or final.open_descriptions != 3 or final.terminal_descriptions != 3 or
+        final.vfs_descriptions != 0 or final.pipe_read_descriptions != 0 or final.pipe_write_descriptions != 0 or final.pipes != 0)
+        return error.FdContractLeak;
+    if (final.duplicated_descriptors - initial.duplicated_descriptors != 2 or
+        final.inherited_descriptors - initial.inherited_descriptors != 7 or
+        final.close_on_exec_closes - initial.close_on_exec_closes != 1 or
+        final.descriptor_closes - initial.descriptor_closes != 14 or
+        final.blocked_reads - initial.blocked_reads != 1 or
+        final.blocked_writes - initial.blocked_writes != 1 or
+        final.reader_wakeups - initial.reader_wakeups != 1 or
+        final.writer_wakeups - initial.writer_wakeups != 1 or
+        final.bytes_read - initial.bytes_read != 1075 or
+        final.bytes_written - initial.bytes_written != 1055 or
+        final.eof_reads - initial.eof_reads != 1 or
+        final.broken_pipe_writes - initial.broken_pipe_writes != 1 or
+        final.stale_namespace_sweeps - initial.stale_namespace_sweeps != 0)
+        return error.FdContractCounters;
+    if (!state.descriptors.validate(&state.vfs, &state.processes)) return error.FdContractValidation;
+    state.fd_contract_passed = true;
 }
 
 fn commandPs(output: *Output) void {
@@ -1023,20 +1238,68 @@ fn readPath(path: []const u8, output: *Output) bool {
         return false;
     };
     if (info.kind == .pseudo) return readPseudo(info.node, output);
-    var storage: [runtime_vfs.maximum_file_size]u8 = undefined;
-    const count = state.vfs.read(state.cwd, path, 0, &storage) catch |err| {
+    const fd = state.descriptors.openFile(
+        &state.vfs,
+        &state.processes,
+        state.shell_handle,
+        path,
+        .{ .read = true },
+        0,
+        currentTick(),
+    ) catch |err| {
         shellError("cat", err, output);
         return false;
     };
-    output.write(storage[0..count]);
-    return true;
+    defer state.descriptors.close(&state.vfs, &state.processes, state.shell_handle, fd) catch {};
+    var storage: [1024]u8 = undefined;
+    while (true) {
+        const result = state.descriptors.read(&state.vfs, &state.processes, state.shell_handle, fd, &storage) catch |err| {
+            shellError("cat", err, output);
+            return false;
+        };
+        switch (result.status) {
+            .complete => output.write(storage[0..result.count]),
+            .eof => return true,
+            .blocked => {
+                shellError("cat", runtime_fd.Error.InvalidOperation, output);
+                return false;
+            },
+        }
+    }
+}
+
+fn writeDescriptorPath(path: []const u8, bytes: []const u8, append: bool) !void {
+    const fd = try state.descriptors.openFile(
+        &state.vfs,
+        &state.processes,
+        state.shell_handle,
+        path,
+        .{ .write = true, .create = true, .truncate = !append, .append = append },
+        0o644,
+        currentTick(),
+    );
+    errdefer state.descriptors.close(&state.vfs, &state.processes, state.shell_handle, fd) catch {};
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const result = try state.descriptors.write(
+            &state.vfs,
+            &state.processes,
+            state.shell_handle,
+            fd,
+            bytes[written..],
+            currentTick(),
+        );
+        if (result.status != .complete or result.count == 0) return runtime_fd.Error.InvalidOperation;
+        written += result.count;
+    }
+    try state.descriptors.close(&state.vfs, &state.processes, state.shell_handle, fd);
 }
 
 fn readPseudo(node: u16, output: *Output) bool {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
     const path = state.vfs.canonicalPath(node, &path_buffer) catch return false;
     if (equal(path, "/proc/version")) {
-        output.line("ZigOs 17.0.0 x86_64 persistent runtime");
+        output.line("ZigOs 18.0.0 x86_64 persistent runtime");
     } else if (equal(path, "/proc/uptime")) {
         output.decimal(currentTick() / 100);
         output.byte('.');
@@ -1103,6 +1366,12 @@ fn finishRuntime() noreturn {
     apic.stopCurrentProcessorTimer(descriptor_tables.persistent_runtime_timer_vector);
     const fs_report = state.vfs.report();
     const process_report = state.processes.report();
+    const descriptor_report = state.descriptors.report();
+    const descriptor_clean = state.descriptors.validate(&state.vfs, &state.processes) and
+        descriptor_report.namespaces == 1 and descriptor_report.descriptors == 3 and
+        descriptor_report.open_descriptions == 3 and descriptor_report.terminal_descriptions == 3 and
+        descriptor_report.vfs_descriptions == 0 and descriptor_report.pipe_read_descriptions == 0 and
+        descriptor_report.pipe_write_descriptions == 0 and descriptor_report.pipes == 0;
     emit("\r\nZigOs persistent runtime shutdown: commands ");
     emitDecimal(state.command_count);
     emit(" failed ");
@@ -1142,8 +1411,49 @@ fn finishRuntime() noreturn {
     emit(" faults ");
     emitDecimal(process_report.total_faults);
     emit("\r\n");
-    emit("ZigOs x86-64 persistent runtime verified: loop permanent shell yes navigation yes files yes processes yes network-diagnostics yes explicit-shutdown yes\r\n");
-    emit("ZigOs x86-64 Capstone 17 verified: goals 0x000001B1 new-goals 0x00000060 runtime yes vfs yes process-table yes shell yes portable-build yes ci-matrix yes\r\n");
+    emit("ZigOs persistent descriptors: namespaces ");
+    emitDecimal(descriptor_report.namespaces);
+    emit(" fds ");
+    emitDecimal(descriptor_report.descriptors);
+    emit(" open ");
+    emitDecimal(descriptor_report.open_descriptions);
+    emit(" terminals ");
+    emitDecimal(descriptor_report.terminal_descriptions);
+    emit(" vfs ");
+    emitDecimal(descriptor_report.vfs_descriptions);
+    emit(" pipes ");
+    emitDecimal(descriptor_report.pipes);
+    emit(" dup/inherited/cloexec ");
+    emitDecimal(descriptor_report.duplicated_descriptors);
+    emit("/");
+    emitDecimal(descriptor_report.inherited_descriptors);
+    emit("/");
+    emitDecimal(descriptor_report.close_on_exec_closes);
+    emit(" blocked ");
+    emitDecimal(descriptor_report.blocked_reads);
+    emit("/");
+    emitDecimal(descriptor_report.blocked_writes);
+    emit(" wakeups ");
+    emitDecimal(descriptor_report.reader_wakeups);
+    emit("/");
+    emitDecimal(descriptor_report.writer_wakeups);
+    emit(" eof ");
+    emitDecimal(descriptor_report.eof_reads);
+    emit(" broken ");
+    emitDecimal(descriptor_report.broken_pipe_writes);
+    emit(" clean ");
+    emit(if (descriptor_clean) "yes" else "no");
+    emit("\r\n");
+    emit("ZigOs x86-64 persistent runtime verified: loop permanent shell yes navigation yes files yes descriptors yes processes yes network-diagnostics yes explicit-shutdown yes\r\n");
+    if (state.fd_contract_passed and descriptor_clean) {
+        emit("ZigOs x86-64 Capstone 18 verified: goals 0x000001D1 new-goals 0x00000020 fd-namespaces yes open-descriptions yes shared-offsets yes duplication yes inheritance yes cloexec yes blocking-pipes yes shell-io yes cleanup yes\r\n");
+    } else {
+        emit("ZigOs x86-64 Capstone 18 incomplete: fd-contract ");
+        emit(if (state.fd_contract_passed) "yes" else "no");
+        emit(" descriptor-clean ");
+        emit(if (descriptor_clean) "yes" else "no");
+        emit("\r\n");
+    }
     while (true) zigos_wait_for_interrupt();
 }
 

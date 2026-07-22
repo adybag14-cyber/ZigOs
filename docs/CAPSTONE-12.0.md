@@ -78,11 +78,11 @@ The initial volume contains twelve regular files. The persistent first boot leav
 
 ```text
 /
-????????? HOME/                       cluster 31
-???   ????????? DOCS/                   cluster 32, empty
-???   ????????? ARCHIVE/                cluster 35
-???       ????????? LOG.TXT             600 bytes, clusters 33 -> 34
-????????? NOTES.TXT                   720 bytes, clusters 36 -> 37
+HOME/                                 cluster 31
+├── DOCS/                             cluster 32, empty
+├── ARCHIVE/                          cluster 35
+│   └── LOG.TXT                       600 bytes, clusters 33 -> 34
+└── NOTES.TXT                         720 bytes, clusters 36 -> 37
 ```
 
 - `LOG.TXT` FNV-1a32: `36F73195`.

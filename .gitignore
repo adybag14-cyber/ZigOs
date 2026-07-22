@@ -21,9 +21,14 @@ qemu-stderr.log
 qemu-test-output.log
 qemu-test-error.log
 qemu-test-exit.txt
+runtime-*.log
 m*-output.log
 m*-error.log
 m*-pid.txt
+
+# Python caches
+__pycache__/
+*.pyc
 
 # Editors / OS
 .vscode/

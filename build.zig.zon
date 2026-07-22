@@ -1,6 +1,6 @@
 .{
     .name = .zigos,
-    .version = "17.0.0",
+    .version = "18.0.0",
     .fingerprint = 0x559f3db1e595885d,
     .minimum_zig_version = "0.17.0-dev.1420+5d08e4716",
     .dependencies = .{},

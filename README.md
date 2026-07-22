@@ -6,17 +6,17 @@ ZigOs is an experimental x86 operating system written in freestanding Zig and ha
 
 ZigOs is a research and learning system. It is not production-ready, POSIX-compatible, secure against hostile workloads, or broadly validated on physical hardware.
 
-## Current release: Capstone 17.0
+## Current release: Capstone 18.0
 
-Capstone 17 replaces the x86-64 kernel's terminal post-validation halt with a permanent, interrupt-driven serial runtime. After the inherited hardware, network and CPL3 validation suites pass, the kernel starts PID 1 as init, PID 2 as a persistent serial command environment, a dedicated 100 Hz LAPIC runtime clock, a bounded process table and a writable RAM-backed VFS.
+Capstone 18 promotes process-local numeric file descriptors, shared open-file descriptions and scheduler-aware bounded pipes into the permanent x86-64 runtime. The serial shell now performs ordinary regular-file reads, writes, appends and redirection through the same descriptor core exercised by the live process/pipe contract.
 
-The release adds 96 verified goals to the inherited 337 x86-64 goals, reaching **433 cumulative goals (`0x1B1`)**:
+The release adds 32 verified goals to the inherited 433 x86-64 goals, reaching **465 cumulative goals (`0x1D1`)**:
 
 ```text
-ZigOs x86-64 Capstone 17 verified: goals 0x000001B1 new-goals 0x00000060 runtime yes vfs yes process-table yes shell yes portable-build yes ci-matrix yes
+ZigOs x86-64 Capstone 18 verified: goals 0x000001D1 new-goals 0x00000020 fd-namespaces yes open-descriptions yes shared-offsets yes duplication yes inheritance yes cloexec yes blocking-pipes yes shell-io yes cleanup yes
 ```
 
-The exact contract is documented in [`docs/CAPSTONE-17.0.md`](docs/CAPSTONE-17.0.md). The broader program is tracked as 500 separate goals in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md): 96 complete and 404 open at this release.
+The exact contract is documented in [`docs/CAPSTONE-18.0.md`](docs/CAPSTONE-18.0.md). The broader program remains 500 separately tracked goals in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md): 100 complete and 400 open at this release. Capstone's granular historical proof count and the broader roadmap count are deliberately not conflated.
 
 ## What runs after boot
 
@@ -31,7 +31,9 @@ The x86-64 kernel now remains alive after validation unless an explicit `shutdow
 - a bounded writable VFS and mount table;
 - process, device and network pseudo namespaces;
 - a generation-safe 64-slot process table;
-- command parsing, pipelines, redirection, background syntax and history.
+- process-local numeric descriptor namespaces and shared open-file descriptions;
+- bounded blocking pipes with reader/writer scheduler wakeups;
+- command parsing, pipelines, descriptor-backed file redirection, background syntax and history.
 
 The default serial prompt is:
 
@@ -42,9 +44,9 @@ root@zigos:/home/root#
 ### Runtime commands
 
 ```text
-Filesystem:
+Filesystem and descriptors:
   pwd cd ls cat echo touch mkdir rm rmdir mv
-  write append stat chmod mount df sync fsck
+  write append stat chmod mount df fds fdtest sync fsck
 
 Processes:
   ps jobs spawn kill wait crash sleep uptime elf exec run
@@ -57,7 +59,7 @@ Shell and utilities:
   hash hexdump grep wc head shutdown
 ```
 
-`spawn`, `exec` and `run` currently operate on the bounded runtime process model. `elf` performs real ELF64 header and `PT_LOAD` inspection, but the permanent shell does **not yet execute arbitrary storage-loaded ELF64 code at CPL3**.
+`spawn`, `exec` and `run` currently operate on the bounded runtime process model. `elf` performs real ELF64 header and `PT_LOAD` inspection, but the permanent shell does **not yet execute arbitrary storage-loaded ELF64 code at CPL3**. The fd core is kernel-resident; it is not yet exposed as a general permanent CPL3 file syscall ABI.
 
 ## Persistent-runtime validation
 
@@ -67,14 +69,15 @@ Run the bidirectional COM1 session:
 .\scripts\test-runtime.ps1 -TimeoutSeconds 150
 ```
 
-The harness boots the finished EFI image, waits for the permanent prompt and drives 27 commands covering navigation, mutation, pipelines, redirection, ELF inspection, task creation, hardware-tick sleep/wake, wait/reap, contained fault reporting, device/network diagnostics, fsck, sync, history and explicit shutdown.
+The harness boots the finished EFI image, waits for the permanent prompt and drives 30 commands covering navigation, descriptor-backed mutation and redirection, pipelines, ELF inspection, task creation, hardware-tick sleep/wake, wait/reap, contained fault reporting, live fd inheritance/duplication/close-on-exec, blocking pipe wakeups, EOF, broken-pipe handling, device/network diagnostics, fsck, sync, history and explicit shutdown.
 
 A representative run reports:
 
 ```text
-ZigOs persistent runtime shutdown: commands 27 failed 0 ticks 424 idle-halts 424 service-passes 424
-ZigOs persistent VFS: nodes 40 files 10 directories 18 pseudo 12 mounts 5 bytes 30938 clean yes
-ZigOs persistent processes: live 2 created 4 reaped 2 switches 41 signals 0 faults 1
+ZigOs persistent runtime shutdown: commands 30 failed 0 ticks 459 idle-halts 458 service-passes 459
+ZigOs persistent VFS: nodes 40 files 10 directories 18 pseudo 12 mounts 5 bytes 30950 clean yes
+ZigOs persistent processes: live 2 created 7 reaped 5 switches 41 signals 0 faults 1
+ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/7/1 blocked 1/1 wakeups 1/1 eof 4 broken 1 clean yes
 ```
 
 Tick totals vary slightly with host scheduling. The harness verifies the semantic results and continued servicing rather than one exact tick value.
@@ -92,7 +95,8 @@ The x86-64 runtime VFS currently provides:
 - directory creation and empty-directory removal;
 - unlink and rename with cycle and cross-mount rejection;
 - stat and chmod metadata;
-- generation-safe, process-owned open handles;
+- generation-safe VFS open handles used behind shared open-file descriptions;
+- descriptor-backed read, write, append, seek and truncate operations;
 - descriptor quotas and structural integrity validation.
 
 Mounted namespaces:
@@ -106,6 +110,24 @@ Mounted namespaces:
 ```
 
 The root filesystem is currently RAM-backed. `sync` therefore reports zero persistent block flushes, and `/boot` remains read-only.
+
+## Runtime file descriptors and pipes
+
+The permanent descriptor layer provides:
+
+- 32 numeric descriptor slots per process and a global 96-entry open-description pool;
+- readable fd 0 and writable fd 1/fd 2 terminal descriptions for the shell;
+- deterministic lowest-free allocation;
+- shared offsets and reference counts across `dup`, `dup2` and cloned namespaces;
+- process-local close-on-exec flags and exact close-on-exec cleanup;
+- regular-file read, write, append, seek and truncate operations;
+- 32 bounded 1,024-byte circular pipes;
+- reader blocking on empty pipes and writer blocking on full pipes;
+- targeted scheduler wakeups, final-writer EOF and final-reader broken-pipe behavior;
+- complete namespace, open-description, VFS-handle and endpoint reclamation;
+- `fds` inspection and a repeatable live `fdtest` contract.
+
+Ordinary `cat`, `write`, `append`, `<`, `>` and `>>` file paths use this layer. Shell pipeline stages still exchange bounded intermediate buffers rather than live descriptor-connected processes, and general permanent CPL3 file syscalls remain future work.
 
 ## Runtime process table
 
@@ -156,7 +178,7 @@ The legacy path boots through a native 512-byte BIOS stage 0, an eight-sector st
 - process scheduling, fork/exec, waits, signals and fault containment;
 - persistent file creation and a two-boot filesystem verification sequence.
 
-Capstone 17 does not change the legacy functional contract. The complete i686 build and two-boot persistence regression remain required release gates.
+Capstone 18 does not change the legacy functional contract. The complete i686 build and two-boot persistence regression remain required release gates.
 
 ## Requirements
 
@@ -212,7 +234,7 @@ zig-out/
     `-- process-exec.elf
 ```
 
-`zig build test` runs 19 isolated `std.testing` declarations: five VFS tests, eight process-table tests and six shell/parser/editor tests.
+`zig build test` runs 29 unique `std.testing` declarations: ten descriptor/open-description/pipe tests, five VFS tests, eight process-table tests and six shell/parser/editor tests.
 
 `zig build check` runs formatting, all isolated tests, the UEFI build and portable PE/COFF verification.
 
@@ -256,11 +278,11 @@ make clean
 
 ## Artifact identity
 
-Capstone 17 reference UEFI image:
+Capstone 18 reference UEFI image:
 
 ```text
-Size:    2,649,088 bytes
-SHA-256: 17CFB13A943D42877BEDF2265E547CD635BAC6A8D5FCC51195487FF775C3EFDC
+Size:    2,716,672 bytes
+SHA-256: 4C7D5F0FC945F6F53306363C47418E3C63C60979CAA6E06C0B41C101E9382FA1
 ```
 
 A clean Windows build and a clean Ubuntu/WSL build produced byte-identical EFI images with this identity.
@@ -291,7 +313,7 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 19 isolated tests, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 29 isolated tests, x86-64 UEFI build, portable PE verification and artifact upload.
 - **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, persistent COM1 runtime, legacy i686 build and two-boot persistence regression. Broader SMP, graphics and USB combinations remain extended local gates rather than being conflated with the hosted network proof.
 
 A green badge therefore represents substantially more than the former reduced single-boot profile.
@@ -306,7 +328,8 @@ Makefile                          conventional POSIX targets
 .toolchain-version                exact canonical Zig revision
 VERSION                           release version
 
-docs/CAPSTONE-17.0.md            exact 96-goal release contract
+docs/CAPSTONE-18.0.md            exact 32-goal release contract
+docs/CAPSTONE-17.0.md            inherited permanent-runtime contract
 docs/ROADMAP-500.md              500-goal general-OS program
 docs/ROADMAP.md                  historical milestone record
 
@@ -324,6 +347,7 @@ src/main.zig                      UEFI entry and firmware handoff
 src/kernel.zig                    post-UEFI integration and inherited gates
 src/runtime.zig                   permanent x86-64 runtime and command dispatch
 src/runtime_vfs.zig               bounded VFS and mount model
+src/runtime_fd.zig                numeric descriptors, shared descriptions and pipes
 src/runtime_process.zig           generation-safe process table
 src/runtime_command.zig           parser, environment and line editor
 src/arch/x86_64/cpu.asm           instruction, interrupt and context entries

@@ -82,8 +82,7 @@ pub fn build(b: *std.Build) void {
 
     const unit_step = b.step("test", "Run isolated runtime unit tests");
     inline for (.{
-        "src/runtime_vfs.zig",
-        "src/runtime_process.zig",
+        "src/runtime_fd.zig",
         "src/runtime_command.zig",
     }) |source_path| {
         const tests = b.addTest(.{

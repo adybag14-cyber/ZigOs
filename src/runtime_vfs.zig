@@ -126,6 +126,15 @@ const OpenFile = struct {
     append: bool = false,
 };
 
+pub const OpenInfo = struct {
+    node: u16,
+    node_generation: u16,
+    offset: usize,
+    readable: bool,
+    writable: bool,
+    append: bool,
+};
+
 pub const Report = struct {
     nodes_used: usize,
     files: usize,
@@ -507,6 +516,33 @@ pub const Vfs = struct {
         if (target < 0 or target > maximum_file_size) return Error.InvalidOffset;
         open_file.offset = @intCast(target);
         return open_file.offset;
+    }
+
+    pub fn openInfo(self: *const Vfs, owner_pid: u32, handle: u32) Error!OpenInfo {
+        const index = try self.resolveOpen(owner_pid, handle);
+        const open_file = self.open_files[index];
+        return .{
+            .node = open_file.node,
+            .node_generation = open_file.node_generation,
+            .offset = open_file.offset,
+            .readable = open_file.readable,
+            .writable = open_file.writable,
+            .append = open_file.append,
+        };
+    }
+
+    pub fn truncateOpen(self: *Vfs, owner_pid: u32, handle: u32, size: usize, tick: u64) Error!void {
+        if (size > maximum_file_size) return Error.FileTooLarge;
+        const index = try self.resolveOpen(owner_pid, handle);
+        const node_index = self.open_files[index].node;
+        if (!self.open_files[index].writable) return Error.PermissionDenied;
+        try self.requireWritableFile(node_index);
+        var node = &self.nodes[node_index];
+        if (size < node.size) @memset(node.data[size..node.size], 0);
+        if (size > node.size) @memset(node.data[node.size..size], 0);
+        node.size = size;
+        node.modified_tick = tick;
+        self.mutations +%= 1;
     }
 
     pub fn validate(self: *const Vfs) bool {
