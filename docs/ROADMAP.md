@@ -2126,7 +2126,7 @@ Status: released after successful portable Linux and Windows integration CI.
 
 ## Capstone 18.0 - persistent file descriptors and blocking pipes
 
-Status: complete locally; release requires hosted CI success.
+Status: released after successful portable Linux and Windows integration CI.
 
 - Added per-process numeric descriptor namespaces with thirty-two slots per process, exact generation-tagged process ownership and deterministic lowest-free allocation.
 - Added ninety-six bounded, generation-tagged, reference-counted open-file descriptions backing terminal streams, VFS handles and pipe endpoints.

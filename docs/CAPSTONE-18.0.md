@@ -163,7 +163,7 @@ Capstone 18 does **not** claim:
 
 ## Reference artifact
 
-The locally verified x86-64 UEFI image before the final hosted release gate is:
+The released x86-64 UEFI image is:
 
 ```text
 BOOTX64.EFI
@@ -171,4 +171,4 @@ Size:    2,716,672 bytes
 SHA-256: 4C7D5F0FC945F6F53306363C47418E3C63C60979CAA6E06C0B41C101E9382FA1
 ```
 
-The release tag is created only after clean Windows and Linux builds, byte-identity comparison, both x86-64 QEMU profiles, the thirty-command runtime, the legacy i686 two-boot persistence regression and the hosted CI matrix all pass on the exact release commit.
+Clean Windows and Linux builds are byte-identical. The release requires both x86-64 QEMU profiles, the thirty-command runtime, the legacy i686 two-boot persistence regression and the complete hosted Linux/Windows CI matrix to pass on the release sources before the annotated tag is published.
