@@ -2106,3 +2106,20 @@ Status: complete.
 - `process-exec.elf`: 10,240 bytes, SHA-256 `41D3ED292B1BE84EF3A30969B9CF22D650A22FB8BA92E831C40838B771B97B65`.
 - Reference `BOOTX64.EFI`: 961,536 bytes, SHA-256 `4A5A3CDA43F1D29B0CD30184487ABC1912542343A65C523CDE6399CC849A4166`.
 - The inherited `ZIGOS386.BIN` and persisted `ZIGOS386.IMG` remain byte-identical to Capstone 14.
+
+
+## Capstone 17.0 - persistent x86-64 runtime and portable build
+
+Status: complete locally; release requires hosted CI success.
+
+- Added a permanent post-validation x86-64 runtime with PID 1 init, PID 2 serial shell, a dedicated vector `0x4A` 100 Hz LAPIC clock, interrupt-enabled idle and continued device/network service passes.
+- Added a 64-slot generation-safe runtime process table with lifecycle states, scheduling, sleep/wake, waits, reaping, adoption, signals, quotas and fault records.
+- Added a 96-node RAM-backed VFS with five mounts, path normalization, files/directories/pseudo-files, process-owned handles, mutation, metadata and integrity validation.
+- Added a persistent COM1 command environment with editing, history, environment expansion, four-stage pipelines, redirection, background syntax and filesystem/process/device/network commands.
+- Added a 27-command bidirectional QEMU session that proves zero-failure navigation, mutation, pipelines, ELF inspection, sleep/wake, jobs, wait/reap, contained fault handling, diagnostics and explicit shutdown.
+- Added `build.zig`, `build.zig.zon`, portable generated-asset and PE verification scripts, checksum-pinned Linux bootstrap, shell/Make targets and a thin PowerShell wrapper.
+- Added 19 isolated `std.testing` declarations and expanded CI to clean Linux build/test plus Windows fallback, network, persistent-runtime and i686 persistence profiles.
+- Windows and Linux produce the same 2,649,088-byte EFI image, SHA-256 `17CFB13A943D42877BEDF2265E547CD635BAC6A8D5FCC51195487FF775C3EFDC`.
+- Cumulative verified accounting is 433 goals (`0x1B1`), with 96 (`0x60`) new in Capstone 17.
+- Exact release contract: [`CAPSTONE-17.0.md`](CAPSTONE-17.0.md).
+- Broader implementation queue: [`ROADMAP-500.md`](ROADMAP-500.md), with G001-G096 complete and G097-G500 open.

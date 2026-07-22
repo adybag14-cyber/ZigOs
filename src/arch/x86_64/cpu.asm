@@ -276,6 +276,7 @@ zigos_in32:
     ret
 
 global zigos_isr_apic_timer
+global zigos_isr_runtime_timer
 global zigos_isr_ap_work
 global zigos_isr_ap_timer
 global zigos_isr_external_irq0
@@ -288,6 +289,7 @@ global zigos_wait_for_interrupt
 global zigos_enable_interrupts
 global zigos_disable_interrupts
 extern zigos_apic_timer_handler
+extern zigos_runtime_timer_interrupt_handler
 extern zigos_ap_work_interrupt_handler
 extern zigos_ap_timer_interrupt_handler
 extern zigos_pit_irq_handler
@@ -327,6 +329,55 @@ zigos_isr_apic_timer:
     call zigos_apic_timer_handler
     add rsp, 32
     fxrstor64 [rsp]
+    mov rsp, r12
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
+; Persistent runtime timer vector 0x4A, delivered on the interrupted kernel
+; stack (IST0). Unlike the context-switch timer, this entry makes no assumption
+; about the hardware frame length or incoming stack alignment.
+zigos_isr_runtime_timer:
+    cld
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rsp
+    sub rsp, 527
+    and rsp, -16
+    mov r13, rsp
+    fxsave64 [r13]
+    sub rsp, 32
+    call zigos_runtime_timer_interrupt_handler
+    add rsp, 32
+    fxrstor64 [r13]
     mov rsp, r12
 
     pop r15

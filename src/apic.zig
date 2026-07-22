@@ -78,7 +78,7 @@ pub const TimerResult = struct {
 
 var active_x2apic: bool = false;
 var active_base: usize = 0;
-var timer_interrupt_count: u64 = 0;
+var timer_interrupt_count: u64 align(8) = 0;
 var timer_hook: ?TimerHook = null;
 
 pub fn initialize(madt: acpi.MadtInfo) ?Information {
@@ -226,24 +226,24 @@ pub fn calibrateAndTestTimer(reference: time_reference.Reference) ?TimerResult {
     if (desired_count_u64 > std.math.maxInt(u32)) return null;
     const desired_count: u32 = @intCast(desired_count_u64);
 
-    timer_interrupt_count = 0;
+    @atomicStore(u64, &timer_interrupt_count, 0, .monotonic);
     writeTimerDivide(divide_by_16_encoding);
     writeTimerLvt(timer_vector);
     writeTimerInitial(desired_count);
 
     var wake_attempts: u8 = 0;
-    while (timer_interrupt_count == 0 and wake_attempts < 8) : (wake_attempts += 1) {
+    while (timerInterruptCount() == 0 and wake_attempts < 8) : (wake_attempts += 1) {
         zigos_wait_for_interrupt();
     }
 
     writeTimerInitial(0);
     writeTimerLvt(timer_vector | timer_masked);
-    if (timer_interrupt_count == 0) return null;
+    if (timerInterruptCount() == 0) return null;
 
     return .{
         .ticks_per_second = ticks_per_second,
         .initial_count = desired_count,
-        .interrupt_count = timer_interrupt_count,
+        .interrupt_count = timerInterruptCount(),
         .reference_kind = reference.kind,
         .reference_period_femtoseconds = reference.periodFemtoseconds(),
         .reference_counter_64_bit = reference.counter64Bit(),
@@ -254,13 +254,17 @@ export fn zigos_apic_timer_handler(
     frame: *interrupt_context.Frame,
     fx_state: *align(16) interrupt_context.FxState,
 ) callconv(cc) void {
-    timer_interrupt_count +%= 1;
+    _ = @atomicRmw(u64, &timer_interrupt_count, .Add, 1, .monotonic);
     if (timer_hook) |hook| hook(frame, fx_state);
     sendEoi();
 }
 
 pub fn setTimerHook(hook: ?TimerHook) void {
     timer_hook = hook;
+}
+
+pub fn timerInterruptCount() u64 {
+    return @atomicLoad(u64, &timer_interrupt_count, .monotonic);
 }
 
 pub fn startCurrentProcessorPeriodicTimer(vector: u8, initial_count: u32) bool {

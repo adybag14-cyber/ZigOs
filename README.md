@@ -2,351 +2,358 @@
 
 [![Build ZigOs](https://github.com/adybag14-cyber/ZigOs/actions/workflows/build.yml/badge.svg)](https://github.com/adybag14-cyber/ZigOs/actions/workflows/build.yml)
 
-ZigOs is an experimental x86 operating system built from **freestanding Zig and hand-written assembly**, with an x86-64 UEFI kernel and a developing legacy BIOS/i686 path. It boots as a UEFI application, exits firmware boot services, installs its own low-level execution environment, starts additional processors, drives emulated hardware directly, enters CPL3 userspace, and validates its subsystems in deterministic QEMU boot tests.
+ZigOs is an experimental x86 operating system written in freestanding Zig and hand-written assembly. The primary target is an x86-64 UEFI kernel; a separate legacy BIOS/i686 kernel provides a smaller persistent FAT12 userspace environment.
 
-The project deliberately uses the canonical Zig builds published by [`adybag14-cyber/zig`](https://github.com/adybag14-cyber/zig/releases). Build scripts do not silently fall back to a system or stock Zig installation.
+ZigOs is a research and learning system. It is not production-ready, POSIX-compatible, secure against hostile workloads, or broadly validated on physical hardware.
 
-> ZigOs is a research and learning operating system. It is not ready for production use or general physical-hardware support.
+## Current release: Capstone 17.0
 
-## Current release: Capstone 16.0
+Capstone 17 replaces the x86-64 kernel's terminal post-validation halt with a permanent, interrupt-driven serial runtime. After the inherited hardware, network and CPL3 validation suites pass, the kernel starts PID 1 as init, PID 2 as a persistent serial command environment, a dedicated 100 Hz LAPIC runtime clock, a bounded process table and a writable RAM-backed VFS.
 
-ZigOs Capstone 16.0 adds 128 verified goals to the main x86-64 UEFI path, reaching 337 cumulative goals (`0x151`). A second ELF64 integration suite now runs after the inherited Capstone 15 service and creates six process generations across four recyclable slots with private CR3 roots, generation-tagged handles, real APIC timer preemption, GPR/FX-state switching, descriptor inheritance, shared open-file descriptions, pipes, signals, directed waits, a copy-on-write fork, atomic static-image exec, one-page heap and anonymous mappings, demand-zero recovery, guard-fault containment, and exact descriptor, pipe, PTE, CR3, and 52-frame allocator restoration. The canonical nine-stage build independently generates and verifies `service-user.elf`, `process-user.elf`, and `process-exec.elf`; the legacy i686 kernel and persistent disk remain byte-identical to Capstone 14. The scope remains deliberately bounded rather than POSIX-compatible: four simultaneous slots, static embedded images, one fixed user page table per process, BSP-local scheduling, and checkpoint reclamation at suite completion. See [`docs/CAPSTONE-16.0.md`](docs/CAPSTONE-16.0.md) for the exact 128-goal contract and [`docs/CAPSTONE-15.0.md`](docs/CAPSTONE-15.0.md) for the inherited single-process service.
-
-
-The current checkpoint includes a native Intel 82574L/e1000e path with DMA descriptor recycling, transmit/receive ring wrap, interrupt-to-kernel completion queues, a persistent queue owner, a bounded software RX packet queue, protocol-specific packet dispatch, retained UDP/TFTP transfers, destination-port UDP endpoint demultiplexing, bounded endpoint lifecycle management, generation-tagged UDP socket handles, checksum-validating UDP dispatch, peer-connected socket filtering, structured datagram receive metadata, connected UDP transmission, deterministic ephemeral-port allocation, nonblocking socket readiness/queue control, bounded multi-packet dispatch, endpoint-wide readiness polling, generation-safe UDP service cycles, round-robin readable-socket fairness, transactional automatic IPv4 identification, exact UDP payload-boundary enforcement, application-level TX ring wrap, bounded-copy UDP receive semantics, non-consuming preview/exact receive, explicit discard-on-close semantics, transactional unconnected send-to/reply APIs, a bounded DNS A-record wire codec, a connected UDP DNS client transaction, resumable bounded DNS polling, loop-safe CNAME-to-A resolution, CNAME resolution through the resumable UDP client, transactional DNS retransmission, a fixed-capacity TTL-aware DNS cache, cache-aware resolver starts/completions, transactional automatic DNS transaction IDs, a fully automatic cache-aware resolver start path, terminal NXDOMAIN outcomes, TTL-bounded negative DNS caching, explicit DNS request cancellation, a stateful DNS resolver context, a bounded NTPv4 wire codec, a connected NTP client transaction, resumable bounded NTP polling/cancellation, transactional NTP retransmission, a stateful NTP client context, monotonic synchronized network-clock state, clock-aware bounded NTP polling, monotonic-tick wall-clock projection, an ACPI PM timer continuous-reference fallback, live reference-backed NTP wall-clock polling, a fail-fast resource-safe QEMU harness, a deadline-driven owned NTP synchronization service, exact projected-time NTP timestamp generation, automatic timestamp selection for the NTP service, live automatic bootstrap/retry/refresh timestamp integration, deterministic NTP sample-quality evaluation, quality-gated live NTP synchronization, non-mutating synchronization-health/holdover snapshots, validated capped-exponential retry policy calculations, live retry exhaustion with latched timeout/restart control, bounded timeout-recovery cooldown decisions, live bounded automatic outage recovery, synchronized holdover recovery with success-budget reset, exact bounded forward clock-step evaluation, quality-plus-step-gated live clock discipline, stale-sample retention with deadline retry, a bounded per-request discipline-rejection budget, immediate live retry at the rejection boundary, safe timeout when discipline-forced retry allowance is exhausted, synchronized automatic recovery from discipline-triggered timeout, a bounded quality-rejection retry policy, live pre-sample retry at the exact quality-rejection boundary, safe timeout when quality-forced retry allowance is exhausted, synchronized automatic recovery from quality-triggered timeout, deterministic bounded NTP source rotation, transactional same-socket NTP server switching, a validated bounded 2-4 server source pool, source-pool ownership in the NTP service and health snapshot, automatic same-socket source failover during recovery, exact consecutive-failure thresholds before rotation, live three-source wraparound on one socket, success-reset consecutive source-failure chains, bounded terminal exhaustion after all configured source recoveries, explicit current-source reset from terminal exhaustion, transactional operator-selected source reset, live projected refresh on the selected source, automatic fallback after operator-selected recovery, pre-sample rejection of delayed replies from the previous source, transaction-layer rejection of wrong-originate replies from the active source, bounded mixed-response batch resolution, deadline-preserving retry after rejected traffic, queued-valid-response preservation across a retry, zero-budget deadline independence, accepted-response residual queue purging, quality-rejection queue preservation, clock-step-rejection queue preservation, and transaction-rejection queue preservation under accepted-response purge semantics, and pre-request purging of stale idle NTP datagrams before new initial, refresh, or recovery transmissions, and recovery pre-switch purging so queued old-source replies cannot block same-socket failover, and operator-reset pre-switch purging with invalid-command queue preservation and additive health diagnostics, and below-threshold same-source recovery purging without peer or rotation changes, and stale-queue purging before the first bootstrap NTP request, and same-source operator reset purging with unchanged peer, socket, rotations, and cumulative state, plus independent cumulative pre-request and post-response discard diagnostics across initial and refresh cycles, and structured active-service close results with request cancellation and exact queued-datagram disposal accounting, plus independent cumulative close-time discard diagnostics retained in inactive health, with one shared saturating accumulator preventing any discard total from wrapping, plus live production-path saturation across pre-request, post-response, and close-time disposal, with atomic close preflight under externally invalidated transport and explicit structured abandonment after irrecoverable transport loss, and transactional transport reopen after abandonment with preserved clock/source/cumulative state and immediate projected refresh, including active-refresh cancellation, a strictly newer replacement originate timestamp, rejection of delayed old-transaction replies on the new socket, and allocation-failure atomicity under a saturated UDP endpoint table with cursor-preserving retry, plus a pure reopen inspection API that exposes the validated prior socket, target server, source index, clock state, and refresh tick without allocation or mutation, with the detailed reopen result required to match that preflight record, and single-use reopen-plan execution that rejects stale service or endpoint-allocation state before opening replacement transport, with a canonical FNV-1a64 integrity tag covering every service field, allocation snapshot, and executable plan field before stale-state classification, plus a pure actual-versus-expected integrity inspection that remains independent from runtime freshness, and a pure ordered freshness inspection that exposes integrity, service, transport, and canonical-plan readiness before allocation, plus a non-mutating execution preview that reports transport availability and the exact replacement socket before applying the shared ephemeral allocation plan, with a tagged consumable preview plan that distinguishes altered plan bytes from runtime-stale service or allocation state before mutation, and a pure execution-plan inspection that reports integrity, freshness, current allocation agreement, consumability, public rejection, and exact stale cause, plus a pure refresh API that reuses current plans or reissues integrity-valid stale plans from current abandoned service and transport state, with an explicit-deadline variant that rejects backward synchronized ticks and retags validated forward deadlines, plus a transactional refresh-and-execute API that mutates only after refresh produces a consumable exact-allocation plan, with gateway/server peer validation split at preflight inspection so an unusable gateway is rejected distinctly before any preflight record, plan, or allocation can exist, plus protected execution plans that embed the exact gateway MAC, server IPv4, and NTP port, canonically compare that peer with the preflight snapshot, and reject correctly re-tagged peer forgeries before allocation, plus a native TCP wire foundation with Ethernet/IPv4/TCP construction, pseudo-header checksums, variable options, strict malformed-segment rejection, dedicated TCP dispatch, transactional identification, real e1000e transmission, and a live SYN-to-RST/ACK hardware round trip, plus a native active-open TCP control block with wrap-safe sequence arithmetic, immutable invalid-transition rejection, SYN-SENT establishment, exact ACK generation, established reset validation, and direct consumption of the live hardware RST-ACK, plus a validated monotonic TCP SYN retransmission engine with capped exponential backoff, exact replay, terminal timeout, completion cancellation, and saturating deadline arithmetic, plus in-order receive accounting, duplicate and out-of-order ACK generation, receive-window enforcement, passive and active FIN closure, simultaneous close, TIME-WAIT expiry, and synchronized reset handling. The build matrix now also emits a verified little-endian ELF32 Intel 80386 executable and raw i686 payload at the fixed physical entry address `0x00010000`, alongside the evolving AMD64 UEFI image. A native 512-byte BIOS stage-0 now boots from a raw hard-disk image, captures drive `0x80`, verifies INT 13h Extensions, carries the mandatory `0x55AA` signature, and is exercised by `qemu-system-i386`. The disk now contains an eight-sector stage-1 at LBA 1 and the generated i686 kernel at LBA 9; stage-1 enables A20, installs a flat GDT, enters 32-bit protected mode, and transfers control to Zig at `0x00010000`. The i686 entry now clears BSS explicitly and the Zig kernel verifies CPUID, CR0.PE, stack alignment, VGA text memory, COM1, and mirrored debug output. Stage-1 now supplies a version-2 32-byte boot-info block and bounded 24-byte E820 map, which Zig validates and summarizes before using firmware memory information. The i686 kernel now installs a 256-entry IDT, remaps and masks the dual 8259 PIC, programs PIT channel 0 for 100 Hz, and proves five IRQ0 deliveries before reporting boot success. The same IDT now exposes all 32 architectural exception vectors through normalized assembly trap frames; two recoverable breakpoint exceptions verify register preservation, vector/error normalization, and safe IRETD return. The legacy interrupt path now also installs IRQ1, drives the emulated 8042 output buffer with controller command `0xD2`, captures scan code `0x1E` through the real PS/2 interrupt line, and verifies the result on debugcon and COM1. The E820 map now feeds a bounded 4 KiB physical-frame allocator managing the first 64 MiB, reserving all sub-1 MiB state and proving deterministic allocation, free, reuse, and exact free-frame accounting. Allocator-backed i686 paging now identity-maps 16 MiB, loads CR3, enables CR0.PG, and proves coherent access through a separate `0xC0000000` virtual alias. A bounded 32 KiB first-fit heap now splits 16-byte-aligned blocks, validates exact frees, reuses released space, preserves neighboring sentinels, and coalesces back to one full block. Native primary-master ATA PIO now performs IDENTIFY, parses the QEMU disk model and LBA28 capacity, reads the MBR signature, and proves LBA9 matches the executing kernel sector exactly. The build now creates a partitioned 2 MiB disk with a deterministic FAT12 volume at LBA256, and the kernel mounts it through ATA, finds `HELLO.TXT`, follows its FAT12 chain, and verifies exact content and hash. A bounded interactive COM1 shell now accepts paced commands for help, memory, timer, disk, and FAT12 file inspection; the QEMU harness drives a complete live session and requires an orderly zero-error exit report on both COM1 and debugcon. A PIT-driven preemptive round-robin scheduler now switches complete interrupt contexts between two independent ring-0 tasks and the bootstrap task, proves three quanta per worker, and restores the bootstrap stack after seven hardware-timer switches. A kernel-owned six-entry GDT and 32-bit TSS now provide a real CPL3 boundary: dedicated user code and stack pages carry U/S permissions, the executing kernel remains supervisor-only, and a DPL-3 interrupt gate proves a complete ring-3-to-ring-0 round trip. A DPL-3 `int 0x80` ABI now returns results through the saved register frame and implements bounded `write`, `getpid`, and `exit`; user pointer ranges are validated before access and a supervisor-page write request is rejected with `-EFAULT`. The build now emits a real ELF32 Intel 80386 executable as `INIT.ELF`, places it in FAT12, validates its headers and PT_LOAD segment on the host, and the kernel independently locates, maps, zero-fills, and executes it at CPL3 through the syscall ABI. A bounded FAT12 VFS now caches root nodes and exposes process-owned descriptor semantics with persistent offsets; the `int 0x80` ABI exports bounded `open`, `read`, and `close` calls to CPL3. The deterministic disk includes `CAT.ELF`, which reads and prints `HELLO.TXT` entirely from userspace. Capstone 8 extends that environment with verified ATA PIO sector writes and readback, arbitrary bounded FAT12 chains, mirrored allocation/free updates, writable root metadata, create/truncate/append/seek descriptor semantics, and eight CPL3 syscalls. Disk-loaded `SPINA.ELF` and `SPINB.ELF` are preempted in independent CR3 spaces; generic `run FILE.ELF` launches bounded i386 ELF files; `wait PID` records one-time completion; `FAULT.ELF` is terminated on page fault without halting the kernel; and `WRITER.ELF` creates the persistent two-cluster `NOTES.TXT`. The harness drives a first mutation session, validates the raw disk offline, and then boots the identical image again to prove the persisted file is readable while the disk SHA-256 remains unchanged. Capstone 9 adds reusable i686 page operations, demand-zero recovery, protection-fault containment, a four-thread sleep/block/wakeup scheduler, a bounded IRQ1 scan-code ring, and reversible FAT12 rename/unlink/reuse validation before that persistence sequence.
-
-The deterministic networking sequence is:
+The release adds 96 verified goals to the inherited 337 x86-64 goals, reaching **433 cumulative goals (`0x1B1`)**:
 
 ```text
-DHCP Discover -> Offer -> Request -> ACK
-        |
-        v
-ARP gateway resolution
-        |
-        v
-IPv4 / ICMP Echo Request and Reply
-        |
-        v
-UDP / TFTP read of zigos.bin
-        |
-        +--> 5 DATA blocks: 512 / 512 / 512 / 512 / 256 bytes
-        +--> 2,304 bytes validated byte-for-byte
-        +--> cumulative FNV-1a64: 6175986CBBAB5125
-        +--> TX descriptors: 5, 6, 7, 0, 1
-        +--> RX packets:      0, 1, 2, 3, 4, 5, 6, 7, 0
-        +--> final TDT: 2
-        +--> final RDH/RDT: 1 / 0
+ZigOs x86-64 Capstone 17 verified: goals 0x000001B1 new-goals 0x00000060 runtime yes vfs yes process-table yes shell yes portable-build yes ci-matrix yes
 ```
 
-Every DHCP, ARP, ICMP, TFTP DATA, and TFTP ACK stage requires a fresh queue-specific MSI-X interrupt and the expected descriptor writeback. The ISR scans completed descriptors and publishes their indices through bounded TX/RX completion queues; kernel code consumes those records before recycling or reusing entries. Receive descriptors are returned to hardware only after their packet has been parsed and its required state preserved.
+The exact contract is documented in [`docs/CAPSTONE-17.0.md`](docs/CAPSTONE-17.0.md). The broader program is tracked as 500 separate goals in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md): 96 complete and 404 open at this release.
 
-## Architecture
+## What runs after boot
+
+The x86-64 kernel now remains alive after validation unless an explicit `shutdown` command is entered. Its permanent runtime provides:
+
+- a dedicated LAPIC timer vector and ISR that are independent of the temporary Capstone 16 scheduler;
+- an interrupt-enabled HLT idle loop;
+- continued device and retained network service passes;
+- sleeping, blocked, runnable, stopped, zombie and faulted task states;
+- PID 1 orphan adoption and terminal-child reaping;
+- a persistent COM1 prompt;
+- a bounded writable VFS and mount table;
+- process, device and network pseudo namespaces;
+- a generation-safe 64-slot process table;
+- command parsing, pipelines, redirection, background syntax and history.
+
+The default serial prompt is:
 
 ```text
-UEFI / OVMF
-    |
-    v
-EFI/BOOT/BOOTX64.EFI
-    |
-    +-- firmware memory-map, ACPI RSDP and GOP discovery
-    +-- final ExitBootServices transition
-    +-- NASM stack switch into kernel ownership
-    |
-    v
-Freestanding Zig kernel
-    |
-    +-- normalized physical-memory map and frame allocator
-    +-- kernel-owned page tables and higher-half aliases
-    +-- GDT, TSS, IDT, IST exception stacks and stack traces
-    +-- Local APIC, IOAPIC, HPET/PIT and interrupt routing
-    +-- x86-64 SMP startup through a 16-to-64-bit AP trampoline
-    +-- per-CPU state, local timers, IPIs and work stealing
-    +-- PCIe ECAM or legacy PCI configuration mechanism #1
-    +-- xHCI, NVMe, AHCI and Intel 82574L/e1000e drivers
-    +-- framebuffer terminal, PS/2 and USB HID input
-    +-- heap, cooperative and preemptive scheduling
-    +-- isolated CPL3 payload and int 0x80 syscall round trip
-    +-- DHCP, ARP, IPv4, ICMP, UDP and TFTP validation
+root@zigos:/home/root#
 ```
 
-Assembly is used where exact instruction, register, descriptor, interrupt-entry, context-switch, or startup control matters. The maintainable kernel and protocol logic remain in Zig.
+### Runtime commands
 
-## Implemented subsystems
+```text
+Filesystem:
+  pwd cd ls cat echo touch mkdir rm rmdir mv
+  write append stat chmod mount df sync fsck
 
-### Boot and memory
+Processes:
+  ps jobs spawn kill wait crash sleep uptime elf exec run
 
-- Native `x86_64-uefi-msvc` EFI application at `EFI/BOOT/BOOTX64.EFI`.
-- ACPI RSDP, GOP framebuffer, final UEFI memory-map, and kernel-stack discovery.
-- Clean `ExitBootServices` transition with no later dependency on UEFI boot services.
-- Normalized physical-memory layout with protected firmware/kernel regions.
-- Physical frame allocator and kernel heap allocator.
-- Kernel-owned page tables, identity mappings, and higher-half data/code aliases.
-- Deterministic checks that protected ranges cannot be returned by the allocator.
+Devices and networking:
+  devices ifconfig netstat sockets routes arp ping dns
 
-### CPU, exceptions, interrupts, and SMP
+Shell and utilities:
+  env export unset history clear uname
+  hash hexdump grep wc head shutdown
+```
 
-- NASM CPUID, control-register, port-I/O, interrupt, context, and memory-order primitives.
-- GDT, TSS, IDT, IST1 exception stack, vectors 0-31, and recoverable invalid-opcode probe.
-- Frame-pointer stack tracing with kernel symbol lookup.
-- Local APIC/x2APIC, IOAPIC, legacy PIC masking, EOI handling, and routed ISA interrupts.
-- HPET timing with PIT channel 2 fallback when HPET is absent.
-- SMP startup through a one-page real-mode AP trampoline.
-- Per-CPU descriptors, stacks, local timers, targeted IPIs, queues, synchronization, and work stealing.
-- Sparse and high APIC-ID topology validation, including APIC ID 256.
+`spawn`, `exec` and `run` currently operate on the bounded runtime process model. `elf` performs real ELF64 header and `PT_LOAD` inspection, but the permanent shell does **not yet execute arbitrary storage-loaded ELF64 code at CPL3**.
 
-### Runtime and userspace
+## Persistent-runtime validation
 
-- Kernel heap allocation, alignment, splitting, freeing, and coalescing checks.
-- Cooperative task switching with dedicated stacks and canaries.
-- Timer-driven preemptive scheduling with GPR and FX-state preservation.
-- CPL3 code and stack mappings isolated through dedicated user page tables.
-- `int 0x80` syscall frame validation and userspace-to-kernel round trip.
+Run the bidirectional COM1 session:
 
-### Display and input
+```powershell
+.\scripts\test-runtime.ps1 -TimeoutSeconds 150
+```
 
-- Direct GOP framebuffer terminal with cursor rendering, scrolling, clearing, and checksums.
-- COM1 diagnostics at 115200 8N1.
-- PS/2 keyboard initialization and IOAPIC-routed interrupt delivery.
-- Native xHCI ownership, command/event rings, MSI-X, device enumeration, and boot-keyboard input.
-- Shared keyboard event queue and interactive ZigOs shell with editing and history.
+The harness boots the finished EFI image, waits for the permanent prompt and drives 27 commands covering navigation, mutation, pipelines, redirection, ELF inspection, task creation, hardware-tick sleep/wake, wait/reap, contained fault reporting, device/network diagnostics, fsck, sync, history and explicit shutdown.
 
-### Storage
+A representative run reports:
 
-- Native NVMe controller ownership, admin/I/O queues, MSI-X completions, and namespace reads.
-- NVMe namespaces with 512-byte and 4 KiB logical blocks.
-- GPT primary/backup headers, partition-array CRCs, and EFI System Partition discovery.
-- Native AHCI ownership, ATA IDENTIFY, READ DMA EXT, and MSI completion.
-- MBR partition parsing and FAT16 volume discovery.
-- FAT directory traversal and streaming verification of `EFI/BOOT/BOOTX64.EFI` from NVMe and AHCI-backed media.
-- Optional NVMe-only and storage-backend fallback test configurations.
+```text
+ZigOs persistent runtime shutdown: commands 27 failed 0 ticks 424 idle-halts 424 service-passes 424
+ZigOs persistent VFS: nodes 40 files 10 directories 18 pseudo 12 mounts 5 bytes 30938 clean yes
+ZigOs persistent processes: live 2 created 4 reaped 2 switches 41 signals 0 faults 1
+```
 
-### Networking
+Tick totals vary slightly with host scheduling. The harness verifies the semantic results and continued servicing rather than one exact tick value.
 
-- Intel 82574L/e1000e discovery and ownership.
-- DMA RX/TX rings with eight descriptors, writeback checks, recycling, and wrap.
-- Independent 32-entry ISR-to-kernel TX/RX completion queues with atomic pending masks, coalesced-completion ready masks, high-water tracking, and overflow detection.
-- A retained `Device` owner exposes reusable frame submission, receive, and release operations with persistent TX/RX cursors and DMA addresses.
-- A bounded eight-entry software RX queue copies frames out of DMA before immediately recycling their hardware descriptors; later protocol code dequeues stable packet copies.
-- After DHCP/ARP/ICMP/TFTP bootstrap, a second ICMP exchange exercises the generic owner APIs and a third ICMP exchange exercises DMA-to-software queuing.
-- The complete flow produces twenty-five TX and twenty-two RX completion records, each dequeued once with zero overflow; two UDP endpoints remain isolated and unmatched traffic is accounted for.
-- MSI-X vector `0x49` routed to a valid BSP or application-processor destination.
-- DHCP Discover/Offer/Request/ACK with BOOTP identity and option validation.
-- Runtime lease fields for local address, subnet mask, server, lease duration, and optional router/DNS data.
-- ARP request/reply validation against the leased address and effective gateway.
-- IPv4 and ICMP Echo construction, checksum generation, and reply verification.
-- Reusable Ethernet II, IPv4, and UDP builder/parser with pseudoheader checksum validation.
-- Multi-block TFTP RRQ/DATA/ACK transfer against QEMU's restricted built-in TFTP service.
-- Bounded software ingress queue with ARP/ICMP/UDP classification and independent protocol queues.
-- Retained five-block TFTP transfer routed through the UDP packet queue with TX/RX wrap.
-- Four-slot UDP endpoint table with destination-port routing and unmatched-port accounting.
-- Duplicate-safe endpoint registration, bounded FIFO saturation, guarded removal, and slot reuse.
-- Deterministic 2,304-byte fixture validation, cumulative hash, TX descriptor reuse, and RX descriptor recycling.
+## Runtime VFS
+
+The x86-64 runtime VFS currently provides:
+
+- 96 bounded nodes;
+- ordinary files up to 16 KiB;
+- absolute and relative path resolution;
+- repeated-separator, `.` and `..` normalization;
+- files, directories and pseudo-files;
+- create, replace, truncate, read, write, append and seek;
+- directory creation and empty-directory removal;
+- unlink and rename with cycle and cross-mount rejection;
+- stat and chmod metadata;
+- generation-safe, process-owned open handles;
+- descriptor quotas and structural integrity validation.
+
+Mounted namespaces:
+
+```text
+/       ramfs       writable, lost at reboot
+/boot   boot_fat    read-only verified boot namespace
+/proc   procfs      runtime process information
+/dev    devfs       retained device information
+/net    netfs       retained network information
+```
+
+The root filesystem is currently RAM-backed. `sync` therefore reports zero persistent block flushes, and `/boot` remains read-only.
+
+## Runtime process table
+
+The permanent process table is distinct from the bounded executable CPL3 suite inherited from Capstone 16. It currently provides:
+
+- 64 recyclable slots and monotonic PIDs;
+- generation-tagged handles;
+- PPID, process group, session, current directory, UID and GID fields;
+- runnable, running, sleeping, blocked, stopped, zombie and faulted states;
+- bounded round-robin scheduling and tick accounting;
+- wait, terminal status and one-time reaping;
+- orphan adoption by PID 1;
+- directed and process-group signals;
+- pending masks and basic UID permission checks;
+- page, descriptor, socket, child and CPU quotas;
+- fault vector, address and terminal-status records.
+
+It does not yet own persistent private CR3 contexts for arbitrary executable processes. Unifying this table with the Capstone 16 CPL3 engine is one of the next major milestones.
+
+## Existing bounded x86-64 capabilities
+
+Before entering the permanent runtime, the x86-64 kernel still runs its inherited assertion-heavy integration suites. These include:
+
+- UEFI handoff, memory-map normalization, frame allocation and kernel-owned paging;
+- higher-half aliases, GDT, TSS, IDT, IST stacks and exception recovery;
+- local APIC, I/O APIC, HPET/ACPI PM/PIT timing and SMP startup;
+- PCIe/legacy PCI discovery;
+- NVMe, AHCI, xHCI, PS/2, framebuffer and COM1 paths;
+- Intel 82574L/e1000e DMA and MSI-X operation;
+- bounded DHCP, ARP, IPv4, ICMP, UDP, TFTP, DNS, NTP and TCP components;
+- CPL3 transitions and an `int 0x80` service ABI;
+- ELF64 parsing, private address spaces, copy-on-write fork, static-image exec, demand mapping, signals, pipes, waits and contained faults.
+
+These components are validated against deterministic QEMU scenarios. They are not a production network stack or a general POSIX process environment.
+
+A precise networking description is:
+
+> ZigOs contains bounded in-kernel UDP, DNS, NTP and TCP components validated against deterministic QEMU scenarios, but does not yet expose a general userspace socket API or production network stack.
+
+## Legacy BIOS/i686 path
+
+The legacy path boots through a native 512-byte BIOS stage 0, an eight-sector stage 1 and an ELF32/freestanding Zig kernel. Its bounded environment includes:
+
+- protected mode, E820 memory information, paging and heap allocation;
+- PIC, PIT, PS/2 and COM1 interrupt handling;
+- ATA PIO and writable FAT12;
+- disk-loaded ELF32 CPL3 programs;
+- process scheduling, fork/exec, waits, signals and fault containment;
+- persistent file creation and a two-boot filesystem verification sequence.
+
+Capstone 17 does not change the legacy functional contract. The complete i686 build and two-boot persistence regression remain required release gates.
 
 ## Requirements
 
-- Windows PowerShell 5.1 or PowerShell 7.
-- NASM 2.16 or newer in `PATH`.
-- Python 3 for deterministic NVMe test-image generation.
-- Internet access for the first canonical Zig bootstrap.
-- QEMU x86-64 with split EDK2/OVMF code and variable-store images for emulation.
-- Git only for repository operations; it is not required by the build itself.
+### Build only
 
-The pinned compiler version is stored in `.toolchain-version` and is currently:
+- Python 3
+- NASM 2.16 or newer
+- Internet access for the first checksum-pinned canonical Zig download
+
+Supported build hosts:
+
+- Windows x86-64 through PowerShell
+- Linux x86-64 through POSIX shell
+- Linux AArch64 through POSIX shell
+
+The exact compiler revision is stored in `.toolchain-version`:
 
 ```text
 0.17.0-dev.1420+5d08e4716
 ```
 
+The scripts refuse to use a different Zig version silently.
+
+### Integration tests
+
+- QEMU x86-64/i386
+- split OVMF/EDK2 code and variable-store images for UEFI tests
+- PowerShell for the current hardware integration harnesses
+
 ## Build
+
+### Standard Zig build graph
+
+With the exact pinned Zig already available as `zig`:
+
+```text
+zig build
+zig build test
+zig build check
+zig build assets
+```
+
+`zig build` generates all assembly/ELF assets, builds the UEFI application and installs:
+
+```text
+zig-out/
+|-- EFI/
+|   `-- BOOT/
+|       `-- BOOTX64.EFI
+`-- artifacts/
+    |-- service-user.elf
+    |-- process-user.elf
+    `-- process-exec.elf
+```
+
+`zig build test` runs 19 isolated `std.testing` declarations: five VFS tests, eight process-table tests and six shell/parser/editor tests.
+
+`zig build check` runs formatting, all isolated tests, the UEFI build and portable PE/COFF verification.
+
+### Windows wrapper
 
 ```powershell
 .\scripts\build.ps1
-```
-
-Clean build:
-
-```powershell
 .\scripts\build.ps1 -Clean
-```
-
-Select an optimization mode:
-
-```powershell
 .\scripts\build.ps1 -Optimize Debug
 .\scripts\build.ps1 -Optimize ReleaseSafe
 .\scripts\build.ps1 -Optimize ReleaseFast
 .\scripts\build.ps1 -Optimize ReleaseSmall
 ```
 
-`ReleaseSmall` is the default.
+### Linux wrapper
 
-Build the legacy i686 kernel image:
+```sh
+./scripts/build.sh
+./scripts/build.sh test
+./scripts/build.sh check
+```
+
+The Linux bootstrap supports x86-64 and AArch64 and verifies the downloaded archive SHA-256 before extraction.
+
+### Make targets
+
+```sh
+make build
+make assets
+make test
+make check
+make clean
+```
+
+### Legacy i686
 
 ```powershell
 .\scripts\build-legacy-i686.ps1
+.\scripts\test-legacy-i686.ps1 -TimeoutSeconds 120
 ```
 
-Boot-test the legacy image under PC BIOS firmware:
+## Artifact identity
 
-```powershell
-.\scripts\test-legacy-i686.ps1
-```
-
-
-This target uses canonical Zig's `x86-freestanding-none` backend with `-mcpu i686`, links an ELF32 executable at physical address `0x00010000`, extracts a flat payload with `zig objcopy`, and verifies the ELF class, endianness, machine, entry point, size ceiling, and SHA-256.
-
-
-The build script:
-
-1. Bootstraps the pinned canonical Zig release when it is missing.
-2. Refuses to continue when the compiler version differs from `.toolchain-version`.
-3. Runs canonical `zig fmt --check` across the entire `src` tree.
-4. Assembles the x86-64 hardware layer as Win64 COFF.
-5. Assembles the one-page AP startup trampoline as a flat binary.
-6. Compiles and links the UEFI image.
-7. Verifies AMD64 PE32+, EFI application subsystem 10, and output structure.
-
-Output:
+Capstone 17 reference UEFI image:
 
 ```text
-zig-out/
-ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ EFI/
-    ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ BOOT/
-        ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ BOOTX64.EFI
+Size:    2,649,088 bytes
+SHA-256: 17CFB13A943D42877BEDF2265E547CD635BAC6A8D5FCC51195487FF775C3EFDC
 ```
 
-Latest verified kernel image before this README-only update:
-
-```text
-Size:    229,888 bytes
-SHA-256: 5378CF27F1F8FEECCF9822C23E7C9856EE9560395DB56B56D1D65574A6838F9D
-```
+A clean Windows build and a clean Ubuntu/WSL build produced byte-identical EFI images with this identity.
 
 ## QEMU validation
 
-Run the default full-system test without a network controller:
+Reduced fallback profile:
 
 ```powershell
-.\scripts\test-qemu.ps1
+.\scripts\test-qemu.ps1 -NoHpet -NoPs2 -CpuCount 1 -NoUsbKeyboard -NoGraphics -TimeoutSeconds 120
 ```
 
-Run the complete networking path:
+Network-enabled profile:
 
 ```powershell
-.\scripts\test-qemu.ps1 -Network -TimeoutSeconds 75
+.\scripts\test-qemu.ps1 -Network -NoHpet -NoPs2 -TimeoutSeconds 150
 ```
 
-Useful compatibility matrices:
+Persistent post-boot runtime:
 
 ```powershell
-# BSP-only interrupt destination
-.\scripts\test-qemu.ps1 -Network -CpuCount 1 -TimeoutSeconds 75
-
-# i440FX and legacy PCI configuration mechanism #1
-.\scripts\test-qemu.ps1 -Network -LegacyPci -NvmeOnly -TimeoutSeconds 75
-
-# Topology containing x2APIC ID 256
-.\scripts\test-qemu.ps1 -Network -HighApicId -TimeoutSeconds 75
-
-# HPET and PS/2 absent; PIT timing fallback
-.\scripts\test-qemu.ps1 -Network -NoHpet -NoPs2 -TimeoutSeconds 75
-
-# 4 KiB NVMe logical blocks
-.\scripts\test-qemu.ps1 -Nvme4k
-
-# Serial-only / no graphical adapter
-.\scripts\test-qemu.ps1 -NoGraphics
-
-# No USB keyboard attached
-.\scripts\test-qemu.ps1 -NoUsbKeyboard
+.\scripts\test-runtime.ps1 -TimeoutSeconds 150
 ```
 
-Other supported switches include `-NvmeOnly`, `-UsbMouseOnly`, `-LegacyAhci`, `-SparseApicIds`, and `-NoX2Apic`. Some combinations are intentionally rejected when they describe an unsupported QEMU topology.
+Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `-LegacyAhci`, `-HighApicId`, `-SparseApicIds`, `-NoX2Apic`, `-NoGraphics`, `-NoUsbKeyboard` and `-UsbMouseOnly`.
 
-The harness builds deterministic NVMe and TFTP fixtures, starts QEMU, injects keyboard input through the QEMU monitor, captures port `0xE9` and COM1 output, and rejects the run when expected hardware, interrupt, scheduler, userspace, storage, or network invariants are absent.
+## Continuous integration
 
-The GitHub Actions workflow currently performs the canonical Windows build, Zig formatting check, and EFI artifact upload. The full QEMU hardware matrix is run locally.
+The workflow contains two required implementation paths:
 
-## Run interactively
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 19 isolated tests, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Windows integration:** clean build, isolated checks, reduced fallback boot, network-enabled boot, persistent COM1 runtime, legacy i686 build and two-boot persistence regression.
 
-```powershell
-.\scripts\run-qemu.ps1
-```
-
-This launches a simpler interactive q35/OVMF session using the FAT-backed `zig-out` directory. The automated test harness exercises the broader device and topology matrix.
-
-## Boot on a physical machine
-
-Copy the contents of `zig-out` to an empty FAT32 EFI System Partition so this path exists:
-
-```text
-EFI\BOOT\BOOTX64.EFI
-```
-
-Secure Boot must be disabled unless the image has been signed with a key trusted by the firmware.
-
-Physical-machine execution is experimental. Most current device validation targets QEMU's emulated hardware, particularly q35, e1000e, QEMU xHCI, QEMU NVMe, and AHCI. Use disposable hardware or a virtual machine and preserve important data elsewhere.
+A green badge therefore represents substantially more than the former reduced single-boot profile.
 
 ## Repository layout
 
 ```text
-.github/workflows/build.yml       canonical Windows CI build
-.toolchain-version                pinned canonical Zig version
-docs/ROADMAP.md                   completed and planned milestones
-scripts/bootstrap-toolchain.ps1   canonical Zig downloader/verifier
-scripts/build.ps1                 reproducible UEFI build
-scripts/create-nvme-test-image.py deterministic GPT/FAT NVMe image builder
-scripts/run-qemu.ps1              interactive QEMU launcher
-scripts/test-qemu.ps1             headless hardware/system validation matrix
-scripts/verify-efi.ps1            PE/COFF UEFI image verifier
-src/main.zig                      UEFI entry and firmware handoff
-src/kernel.zig                    post-UEFI kernel integration and validation
-src/arch/x86_64/cpu.asm           x86-64 primitives and interrupt/context stubs
-src/arch/x86_64/ap_trampoline.asm 16-to-64-bit AP startup trampoline
-src/memory.zig                    physical frame allocation
-src/paging.zig                    kernel and user page tables
-src/descriptor_tables.zig         GDT, TSS, IDT, and IST setup
-src/exceptions.zig                exception handling and recovery probes
-src/apic.zig / ioapic.zig         local and I/O APIC control
-src/smp.zig / percpu.zig          AP startup and per-CPU execution
-src/scheduler.zig                 cooperative scheduling
-src/preemptive.zig                timer-driven preemptive scheduling
-src/user_mode.zig                 CPL3 and syscall validation
-src/framebuffer_console.zig       graphical terminal
-src/input.zig / ps2.zig           input queue and PS/2 keyboard
-src/xhci.zig                      USB xHCI and HID boot keyboard
-src/pci.zig                       ECAM and legacy PCI enumeration
-src/nvme.zig / ahci.zig           storage-controller drivers
-src/gpt.zig / partition.zig       disk partition parsing
-src/fat.zig / pe.zig              FAT traversal and PE verification
-src/e1000e.zig                    Intel 82574L DMA/MSI-X driver
-src/dhcp.zig                      DHCP client framing and validation
-src/udp.zig                       reusable Ethernet/IPv4/UDP framing
-src/tftp.zig                      deterministic multi-block TFTP client
-```
+build.zig                         canonical x86-64 build graph
+build.zig.zon                     package identity and minimum Zig revision
+Makefile                          conventional POSIX targets
+.github/workflows/build.yml       Linux and Windows CI matrix
+.toolchain-version                exact canonical Zig revision
+VERSION                           release version
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the milestone-by-milestone implementation record.
+docs/CAPSTONE-17.0.md            exact 96-goal release contract
+docs/ROADMAP-500.md              500-goal general-OS program
+docs/ROADMAP.md                  historical milestone record
+
+scripts/build-assets.py           portable generated-asset pipeline
+scripts/verify-efi.py             portable PE/COFF verifier
+scripts/bootstrap-toolchain.sh    checksum-pinned Linux bootstrap
+scripts/build.sh                  Linux zig-build wrapper
+scripts/build.ps1                 Windows zig-build wrapper
+scripts/test-runtime.ps1          bidirectional persistent COM1 test
+scripts/test-qemu.ps1             x86-64 hardware/network test matrix
+scripts/build-legacy-i686.ps1     legacy BIOS/i686 build
+scripts/test-legacy-i686.ps1      legacy two-boot persistence test
+
+src/main.zig                      UEFI entry and firmware handoff
+src/kernel.zig                    post-UEFI integration and inherited gates
+src/runtime.zig                   permanent x86-64 runtime and command dispatch
+src/runtime_vfs.zig               bounded VFS and mount model
+src/runtime_process.zig           generation-safe process table
+src/runtime_command.zig           parser, environment and line editor
+src/arch/x86_64/cpu.asm           instruction, interrupt and context entries
+src/descriptor_tables.zig         GDT, TSS, IDT and permanent runtime gate setup
+src/apic.zig                      LAPIC control and runtime clock
+src/serial.zig                    COM1 transmit and receive
+```
 
 ## Current limitations
 
-- x86-64 UEFI only; there is no legacy BIOS boot path.
-- Hardware support is deliberately narrow and primarily validated in QEMU.
-- Networking is currently a deterministic boot-time validation flow, not an asynchronous socket API.
-- There is no TCP, DNS resolver, IPv6, firewall, or general network service framework.
-- The CPL3 component is a controlled validation payload, not a complete process/ELF runtime.
-- FAT support is read-oriented; there is no general writable filesystem layer.
-- There is no package manager, graphical desktop, security hardening, or stable userspace ABI.
-- The kernel remains experimental and may halt deliberately when an invariant fails.
+- The permanent shell and its pseudo jobs still run as kernel-owned runtime services, not as arbitrary CPL3 programs.
+- Storage-loaded ELF64 execution is not yet connected to the permanent process table.
+- The writable x86-64 root filesystem is RAM-backed and does not survive reboot.
+- The x86-64 boot FAT mount is read-only.
+- The VFS is bounded and is not yet exposed through a complete userspace file syscall ABI.
+- There is no general userspace socket API, long-lived production TCP service, IPv6 stack or firewall.
+- Routing, ARP expiry and DHCP renewal are not yet general long-lived services.
+- Hardware support remains strongly aligned with QEMU q35, QEMU NVMe/xHCI and Intel 82574L emulation.
+- There is no complete user/group permission model, ASLR, IOMMU DMA isolation, executable-signing policy or stable ABI.
+- Kernel and driver recovery behavior remains experimental; invariant failures may still halt the machine deliberately.
 
 ## Design principles
 
 - Use assembly only where exact machine control is required.
-- Keep the kernel and protocol majority in readable Zig.
-- Never depend silently on hosted operating-system services after firmware handoff.
-- Pin and verify the canonical Zig compiler.
-- Prefer deterministic, assertion-heavy integration tests over optimistic boot messages.
-- Test in QEMU before attempting physical hardware.
-- Treat every interrupt, DMA completion, descriptor transition, and checksum as something to verify.
+- Keep policy, parsing and subsystem logic in readable Zig.
+- Never depend silently on UEFI services after firmware handoff.
+- Pin and verify the compiler and generated assets.
+- Distinguish bounded validation components from general production interfaces.
+- Prefer isolated unit tests plus end-to-end QEMU proofs.
+- Treat every interrupt, DMA completion, page transition and on-disk mutation as something to verify.
 
 ## License
 

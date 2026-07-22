@@ -1,0 +1,532 @@
+# ZigOs 500-goal operating-system roadmap
+
+This roadmap converts the broad runtime, process, filesystem, userland, networking, build, testing, hardware and security gaps into 500 individually trackable engineering goals. A checked item means the repository contains an implementation and a corresponding release or test contract; it does not imply production readiness.
+
+**Status at Capstone 17.0:** 96 complete, 404 open.
+
+## Completed in Capstone 17
+
+- [x] **G001** ??? Transfer control from the completed boot-validation sequence into a non-returning x86-64 runtime.
+- [x] **G002** ??? Retain PID 1 as a permanent init process after boot validation.
+- [x] **G003** ??? Retain PID 2 as a permanent serial-shell process after boot validation.
+- [x] **G004** ??? Install a dedicated LAPIC vector for the permanent runtime clock.
+- [x] **G005** ??? Use a dedicated runtime timer ISR that cannot select a Capstone 16 process context.
+- [x] **G006** ??? Restore the canonical kernel GDT before permanent runtime ownership.
+- [x] **G007** ??? Restore a valid TSS and task register before permanent interrupt delivery.
+- [x] **G008** ??? Install and verify permanent runtime IDT entries independently of temporary test gates.
+- [x] **G009** ??? Preserve all general-purpose and FX state in the dedicated runtime timer entry.
+- [x] **G010** ??? Expose the runtime interrupt count through atomic operations.
+- [x] **G011** ??? Drive the permanent service clock at 100 Hz.
+- [x] **G012** ??? Use an interrupt-enabled HLT idle path instead of a terminal halt.
+- [x] **G013** ??? Run device service work after each observed runtime tick.
+- [x] **G014** ??? Run retained network service work after each observed runtime tick.
+- [x] **G015** ??? Wake sleeping runtime tasks when their tick deadlines expire.
+- [x] **G016** ??? Stop the permanent loop only through an explicit testable shutdown command.
+- [x] **G017** ??? Provide a bounded 64-slot x86-64 runtime process table.
+- [x] **G018** ??? Use generation-tagged process handles to reject stale references.
+- [x] **G019** ??? Allocate monotonic process identifiers independently of recyclable slots.
+- [x] **G020** ??? Track PID, PPID, process group, session, current directory, UID and GID fields.
+- [x] **G021** ??? Represent runnable, running, sleeping, blocked, stopped, zombie and faulted states.
+- [x] **G022** ??? Select runnable tasks with bounded round-robin scheduling.
+- [x] **G023** ??? Track sleeping deadlines and wakeups in the process table.
+- [x] **G024** ??? Support explicit blocking and targeted wakeup.
+- [x] **G025** ??? Support parent wait, terminal status collection and one-time reaping.
+- [x] **G026** ??? Adopt orphaned children into PID 1 and support init auto-reaping.
+- [x] **G027** ??? Support directed signal delivery and pending-signal masks.
+- [x] **G028** ??? Support process-group signal delivery.
+- [x] **G029** ??? Enforce bounded UID-based signal permission checks.
+- [x] **G030** ??? Apply transactional page, descriptor, socket, child and CPU quotas.
+- [x] **G031** ??? Preserve crash vector, fault address and terminal status metadata.
+- [x] **G032** ??? Reject operations through reaped or otherwise stale process handles.
+- [x] **G033** ??? Provide a bounded 96-node x86-64 virtual filesystem.
+- [x] **G034** ??? Provide bounded ordinary files of up to 16 KiB each.
+- [x] **G035** ??? Resolve both absolute and current-directory-relative paths.
+- [x] **G036** ??? Normalize repeated separators, dot and parent path components.
+- [x] **G037** ??? Maintain a five-entry mount table.
+- [x] **G038** ??? Mount a writable RAM-backed root filesystem at slash.
+- [x] **G039** ??? Mount the verified boot namespace read-only at /boot.
+- [x] **G040** ??? Mount process, device and network pseudo namespaces at /proc, /dev and /net.
+- [x] **G041** ??? Support file creation, replacement, truncation, writing and append.
+- [x] **G042** ??? Support process-owned open, read, seek and close handles.
+- [x] **G043** ??? Support directory creation and empty-directory removal.
+- [x] **G044** ??? Support unlink and rename with bounded namespace updates.
+- [x] **G045** ??? Expose stat metadata and chmod mutation.
+- [x] **G046** ??? Use generation-safe VFS handles with ownership and descriptor quotas.
+- [x] **G047** ??? Reject cross-mount rename and directory-cycle creation.
+- [x] **G048** ??? Validate complete VFS structure through an fsck-style integrity pass.
+- [x] **G049** ??? Expose a persistent root@zigos serial prompt.
+- [x] **G050** ??? Receive COM1 bytes after boot validation through a nonblocking UART path.
+- [x] **G051** ??? Support insertion into an editable command line.
+- [x] **G052** ??? Support left/right movement, backspace, delete, home and end editing.
+- [x] **G053** ??? Retain a deduplicated sixteen-entry ANSI command history.
+- [x] **G054** ??? Parse quoted and escaped command arguments.
+- [x] **G055** ??? Expand bounded shell environment variables.
+- [x] **G056** ??? Ignore shell comments outside quoted text.
+- [x] **G057** ??? Parse and execute pipelines of up to four stages.
+- [x] **G058** ??? Support input, replacement-output and append-output redirection.
+- [x] **G059** ??? Recognize background-job syntax.
+- [x] **G060** ??? Expose navigation, inspection and mutation filesystem commands.
+- [x] **G061** ??? Expose process listing, spawn, signal, wait, sleep and fault-containment commands.
+- [x] **G062** ??? Expose device and bounded network-diagnostic commands.
+- [x] **G063** ??? Inspect arbitrary VFS-resident ELF64 headers and PT_LOAD segments.
+- [x] **G064** ??? Expose an explicit shutdown command used only by the integration harness.
+- [x] **G065** ??? Drive a 27-command post-boot session through bidirectional COM1.
+- [x] **G066** ??? Complete the scripted persistent session with zero failed commands.
+- [x] **G067** ??? Prove directory creation, navigation, file replacement and file viewing live.
+- [x] **G068** ??? Prove pipelines and output redirection preserve expected command data.
+- [x] **G069** ??? Prove a sleeping shell wakes from hardware runtime ticks.
+- [x] **G070** ??? Prove a background job reaches terminal state and is reaped once.
+- [x] **G071** ??? Prove a simulated child fault is contained and reported without halting the kernel.
+- [x] **G072** ??? Prove device and network service passes continue while the shell remains online.
+- [x] **G073** ??? Add a conventional build.zig graph for the x86-64 UEFI image.
+- [x] **G074** ??? Add build.zig.zon package identity and exact minimum Zig revision.
+- [x] **G075** ??? Make NASM payloads, generated ELF files and the AP trampoline explicit build dependencies.
+- [x] **G076** ??? Add a portable Python PE32+ EFI verifier.
+- [x] **G077** ??? Add checksum-pinned Linux Zig bootstrap support for x86-64 and AArch64 hosts.
+- [x] **G078** ??? Reduce the Windows PowerShell build script to a wrapper over zig build.
+- [x] **G079** ??? Add a POSIX shell wrapper and conventional Makefile targets.
+- [x] **G080** ??? Produce byte-identical Windows and Linux UEFI images from the pinned toolchain.
+- [x] **G081** ??? Expose zig build test as a conventional isolated-test target.
+- [x] **G082** ??? Pass five independent VFS std.testing declarations.
+- [x] **G083** ??? Pass eight independent process-table std.testing declarations.
+- [x] **G084** ??? Pass six independent shell-parser and line-editor std.testing declarations.
+- [x] **G085** ??? Add a clean Ubuntu hosted build, test and PE-verification job.
+- [x] **G086** ??? Retain the reduced Windows x86-64 fallback boot profile in hosted CI.
+- [x] **G087** ??? Add a network-enabled x86-64 QEMU boot profile to hosted CI.
+- [x] **G088** ??? Add the persistent COM1 runtime and legacy i686 two-boot regressions to hosted CI.
+- [x] **G089** ??? Generate an asset manifest containing output sizes and SHA-256 identities.
+- [x] **G090** ??? Treat NASM warnings as errors for generated x86-64 payloads and the hardware object.
+- [x] **G091** ??? Run Zig formatting, Python compilation, PowerShell parsing and workflow-YAML validation.
+- [x] **G092** ??? Require inherited Capstone 15 and Capstone 16 markers before the persistent runtime marker.
+- [x] **G093** ??? Keep the legacy i686 Capstone 14 build and persistence contract passing unchanged.
+- [x] **G094** ??? Document the RAM-backed, bounded and diagnostic-only limits without production claims.
+- [x] **G095** ??? Track the broader operating-system work as a separate 500-goal roadmap.
+- [x] **G096** ??? Emit the Capstone 17 release marker with 433 cumulative and 96 new verified goals.
+
+## General x86-64 processes and virtual memory
+
+- [ ] **G097** ??? Unify the runtime process table with executable CPL3 context records.
+- [ ] **G098** ??? Retain executable process contexts after the validation suites finish.
+- [ ] **G099** ??? Allocate reusable private CR3 roots for long-lived processes.
+- [ ] **G100** ??? Allocate and reclaim a private privilege stack for every executable process.
+- [ ] **G101** ??? Allocate flexible multi-page user stacks rather than one fixed stack page.
+- [ ] **G102** ??? Load ELF64 executables directly from a mounted storage backend.
+- [ ] **G103** ??? Support arbitrary valid ELF64 program-header counts within a documented bound.
+- [ ] **G104** ??? Map multiple non-overlapping PT_LOAD segments per executable.
+- [ ] **G105** ??? Reject overlapping or aliasing ELF64 load segments transactionally.
+- [ ] **G106** ??? Validate ELF64 file, virtual-address and alignment constraints completely.
+- [ ] **G107** ??? Support ET_DYN position-independent executables with a selected load base.
+- [ ] **G108** ??? Construct a System V-compatible initial argv stack.
+- [ ] **G109** ??? Construct a bounded envp vector in new process address spaces.
+- [ ] **G110** ??? Provide a minimal auxiliary-vector contract to userspace.
+- [ ] **G111** ??? Inherit and validate current working directories on spawn and fork.
+- [ ] **G112** ??? Provide per-process numeric file-descriptor namespaces.
+- [ ] **G113** ??? Replace the calling process image during exec instead of creating a pseudo job.
+- [ ] **G114** ??? Implement a real spawn syscall that enters storage-loaded CPL3 code.
+- [ ] **G115** ??? Implement fork for persistent runtime processes.
+- [ ] **G116** ??? Retain copy-on-write mappings after fork beyond a bounded proof suite.
+- [ ] **G117** ??? Resolve copy-on-write write faults in the general page-fault path.
+- [ ] **G118** ??? Implement anonymous mmap with page-aligned flexible regions.
+- [ ] **G119** ??? Implement file-backed mmap through VFS objects.
+- [ ] **G120** ??? Implement munmap with partial-region splitting.
+- [ ] **G121** ??? Implement mprotect with W^X and user-range enforcement.
+- [ ] **G122** ??? Implement brk/sbrk-compatible heap-region growth.
+- [ ] **G123** ??? Install unmapped guard pages around every user stack.
+- [ ] **G124** ??? Grow user stacks on eligible guard faults within a resource limit.
+- [ ] **G125** ??? Generalize demand-zero mapping to arbitrary anonymous regions.
+- [ ] **G126** ??? Classify not-present, protection, execute, reserved-bit and user page faults.
+- [ ] **G127** ??? Terminate only the offending userspace task on unrecoverable faults.
+- [ ] **G128** ??? Release every user mapping and page-table page on process exit.
+- [ ] **G129** ??? Release every per-process privilege stack on process exit.
+- [ ] **G130** ??? Save and restore FPU state for every scheduled executable process.
+- [ ] **G131** ??? Save and restore extended SIMD state with XSAVE when supported.
+- [ ] **G132** ??? Construct userspace signal-delivery frames.
+- [ ] **G133** ??? Support installable userspace signal handlers.
+- [ ] **G134** ??? Implement default, ignore and terminate signal dispositions.
+- [ ] **G135** ??? Apply blocked signal masks during delivery.
+- [ ] **G136** ??? Queue more than one distinct pending signal per process.
+- [ ] **G137** ??? Implement a validated sigreturn path.
+- [ ] **G138** ??? Implement waitpid for a specific child.
+- [ ] **G139** ??? Implement wait-any across direct children.
+- [ ] **G140** ??? Implement WNOHANG-style nonblocking wait behavior.
+- [ ] **G141** ??? Implement stable process-group membership operations.
+- [ ] **G142** ??? Implement session creation and leadership rules.
+- [ ] **G143** ??? Associate sessions with controlling terminal objects.
+- [ ] **G144** ??? Stop foreground and background jobs through terminal job control.
+- [ ] **G145** ??? Resume stopped jobs through SIGCONT semantics.
+- [ ] **G146** ??? Notify parents of stop, continue and terminal state changes.
+- [ ] **G147** ??? Retain zombie status until a legitimate parent or init reaps it.
+- [ ] **G148** ??? Reparent complete descendant trees safely when a parent exits.
+- [ ] **G149** ??? Run a permanent init reaper over all adopted terminal children.
+- [ ] **G150** ??? Handle PID counter wrap without colliding with live processes.
+- [ ] **G151** ??? Expose configurable per-process priorities.
+- [ ] **G152** ??? Implement nice-value adjustment with permission checks.
+- [ ] **G153** ??? Add at least round-robin and normal time-sharing scheduler policies.
+- [ ] **G154** ??? Account user, kernel and blocked time separately.
+- [ ] **G155** ??? Maintain one runnable queue per online CPU.
+- [ ] **G156** ??? Migrate eligible processes between CPUs.
+- [ ] **G157** ??? Expose and enforce CPU affinity masks.
+- [ ] **G158** ??? Balance runnable load across online CPUs.
+- [ ] **G159** ??? Protect the process table with SMP-safe locking.
+- [ ] **G160** ??? Make process state transitions safe under interrupt preemption.
+- [ ] **G161** ??? Route all userspace entries through one audited syscall frame format.
+- [ ] **G162** ??? Assign stable documented syscall numbers for the general runtime ABI.
+- [ ] **G163** ??? Provide centralized copy_from_user validation and fault handling.
+- [ ] **G164** ??? Provide centralized copy_to_user validation and fault handling.
+- [ ] **G165** ??? Support bounded iovec copy operations for scatter/gather syscalls.
+- [ ] **G166** ??? Expose per-process resource-limit get/set syscalls.
+- [ ] **G167** ??? Choose and terminate a process predictably under true memory exhaustion.
+- [ ] **G168** ??? Enforce per-process CPU-time limits.
+- [ ] **G169** ??? Enforce per-process output-file-size limits.
+- [ ] **G170** ??? Record bounded core-dump metadata for faulted processes.
+- [ ] **G171** ??? Back /proc process entries from the live executable process table.
+- [ ] **G172** ??? Record executable paths and argv for live processes.
+- [ ] **G173** ??? Support a parent-death notification signal.
+- [ ] **G174** ??? Apply effective credentials to every process permission decision.
+- [ ] **G175** ??? Make pipes block and wake persistent executable processes through the scheduler.
+- [ ] **G176** ??? Stress persistent process create/exec/exit/reap cycles for thousands of iterations.
+
+## Persistent filesystem and storage
+
+- [ ] **G177** ??? Define a filesystem-driver interface below the VFS namespace layer.
+- [ ] **G178** ??? Separate inode identity from directory-entry names.
+- [ ] **G179** ??? Add reference-counted dentry cache entries.
+- [ ] **G180** ??? Represent nested mount trees instead of a flat mount array.
+- [ ] **G181** ??? Resolve paths across mount boundaries and mounted roots.
+- [ ] **G182** ??? Implement openat relative to directory descriptors.
+- [ ] **G183** ??? Implement fstat and stat through one metadata path.
+- [ ] **G184** ??? Implement directory iteration through stable directory descriptors.
+- [ ] **G185** ??? Implement readlink and symbolic-link traversal limits.
+- [ ] **G186** ??? Implement hard-link creation and link counts.
+- [ ] **G187** ??? Implement atomic rename within one filesystem.
+- [ ] **G188** ??? Implement replacement rename over an existing file.
+- [ ] **G189** ??? Reject directory rename cycles across complete ancestry.
+- [ ] **G190** ??? Implement unlink of open files with deferred inode reclamation.
+- [ ] **G191** ??? Implement file-descriptor duplication.
+- [ ] **G192** ??? Implement shared open-file descriptions and shared offsets.
+- [ ] **G193** ??? Implement append mode atomically across writers.
+- [ ] **G194** ??? Implement truncate through descriptors and paths.
+- [ ] **G195** ??? Implement sparse-file holes.
+- [ ] **G196** ??? Implement vectored read and write operations.
+- [ ] **G197** ??? Implement fsync for one file.
+- [ ] **G198** ??? Implement fdatasync for file data without unrelated metadata.
+- [ ] **G199** ??? Implement sync for all writable mounts.
+- [ ] **G200** ??? Add a bounded page cache for file data.
+- [ ] **G201** ??? Track dirty cache pages.
+- [ ] **G202** ??? Write back dirty pages asynchronously.
+- [ ] **G203** ??? Evict clean cache pages under memory pressure.
+- [ ] **G204** ??? Serialize concurrent writes to the same cached page.
+- [ ] **G205** ??? Maintain coherent reads across file and mmap access.
+- [ ] **G206** ??? Retain the boot FAT filesystem as a real block-backed mount.
+- [ ] **G207** ??? Read arbitrary files and directories from the boot FAT volume.
+- [ ] **G208** ??? Implement writable FAT cluster allocation on x86-64.
+- [ ] **G209** ??? Implement writable FAT cluster release on x86-64.
+- [ ] **G210** ??? Mirror all FAT updates to every FAT copy.
+- [ ] **G211** ??? Grow FAT directories across multiple clusters.
+- [ ] **G212** ??? Create FAT short-name directory entries.
+- [ ] **G213** ??? Read and write FAT long-file-name entries safely.
+- [ ] **G214** ??? Update FAT file size and first-cluster metadata atomically.
+- [ ] **G215** ??? Create files on the persistent FAT mount.
+- [ ] **G216** ??? Delete files from the persistent FAT mount.
+- [ ] **G217** ??? Rename files on the persistent FAT mount.
+- [ ] **G218** ??? Create and remove directories on the persistent FAT mount.
+- [ ] **G219** ??? Persist shell-created data across a real reboot.
+- [ ] **G220** ??? Verify reboot persistence against an unchanged expected filesystem state.
+- [ ] **G221** ??? Detect FAT chain loops and cross-links.
+- [ ] **G222** ??? Detect out-of-range FAT cluster references.
+- [ ] **G223** ??? Repair or quarantine recoverable FAT inconsistencies.
+- [ ] **G224** ??? Add a write-ahead intent log for multi-sector metadata updates.
+- [ ] **G225** ??? Replay incomplete filesystem intents after simulated power loss.
+- [ ] **G226** ??? Order data and metadata writes to avoid exposing uninitialized data.
+- [ ] **G227** ??? Flush controller caches when storage reports volatile writeback.
+- [ ] **G228** ??? Propagate block-device I/O errors to filesystem callers.
+- [ ] **G229** ??? Remount a damaged writable filesystem read-only.
+- [ ] **G230** ??? Expose mount and unmount syscalls.
+- [ ] **G231** ??? Reject unmount while paths or descriptors remain busy.
+- [ ] **G232** ??? Support a tmpfs mount distinct from the root mount.
+- [ ] **G233** ??? Support a devfs backed by live device registrations.
+- [ ] **G234** ??? Support a procfs backed by live kernel objects.
+- [ ] **G235** ??? Support a netfs backed by live network objects.
+- [ ] **G236** ??? Expose filesystem capacity and free-space statistics.
+- [ ] **G237** ??? Store creation, modification, change and access timestamps.
+- [ ] **G238** ??? Update timestamps with documented precision and ordering.
+- [ ] **G239** ??? Store owner UID and GID on persistent inodes.
+- [ ] **G240** ??? Enforce owner/group/other read, write and execute permissions.
+- [ ] **G241** ??? Apply process umask during object creation.
+- [ ] **G242** ??? Support setuid and setgid metadata without enabling unsafe execution by default.
+- [ ] **G243** ??? Implement sticky-directory deletion rules.
+- [ ] **G244** ??? Add advisory whole-file locking.
+- [ ] **G245** ??? Add advisory byte-range locking.
+- [ ] **G246** ??? Provide filesystem notifications for directory changes.
+- [ ] **G247** ??? Validate all user pathname lengths and component lengths.
+- [ ] **G248** ??? Fuzz path resolution, rename and unlink state machines.
+- [ ] **G249** ??? Stress concurrent create/write/rename/unlink workloads.
+- [ ] **G250** ??? Run block-level corruption injection against recovery paths.
+- [ ] **G251** ??? Document on-disk compatibility and recovery guarantees.
+
+## Shell and standalone userland
+
+- [ ] **G252** ??? Move the persistent shell itself into a real CPL3 process.
+- [ ] **G253** ??? Connect shell stdin, stdout and stderr to a terminal descriptor.
+- [ ] **G254** ??? Execute external storage-backed programs from command names.
+- [ ] **G255** ??? Search executable paths through the PATH environment variable.
+- [ ] **G256** ??? Pass parsed argv to external programs.
+- [ ] **G257** ??? Pass the shell environment to external programs.
+- [ ] **G258** ??? Implement shell exit-status propagation.
+- [ ] **G259** ??? Implement conditional execution with && and ||.
+- [ ] **G260** ??? Implement sequential command lists with semicolons.
+- [ ] **G261** ??? Implement subshell process groups for pipelines.
+- [ ] **G262** ??? Connect pipelines with kernel pipe descriptors.
+- [ ] **G263** ??? Implement foreground process-group waiting.
+- [ ] **G264** ??? Implement background job completion notifications.
+- [ ] **G265** ??? Implement fg and bg builtins.
+- [ ] **G266** ??? Implement terminal interrupt and suspend key handling.
+- [ ] **G267** ??? Implement shell variable assignment syntax.
+- [ ] **G268** ??? Implement command substitution with a bounded output limit.
+- [ ] **G269** ??? Implement wildcard pathname expansion.
+- [ ] **G270** ??? Implement tilde expansion.
+- [ ] **G271** ??? Implement shell startup files.
+- [ ] **G272** ??? Persist shell history to a writable filesystem.
+- [ ] **G273** ??? Provide a standalone ls userspace program.
+- [ ] **G274** ??? Provide a standalone cat userspace program.
+- [ ] **G275** ??? Provide a standalone echo userspace program.
+- [ ] **G276** ??? Provide a standalone pwd userspace program.
+- [ ] **G277** ??? Provide a standalone mkdir userspace program.
+- [ ] **G278** ??? Provide standalone rm and rmdir userspace programs.
+- [ ] **G279** ??? Provide standalone mv and cp userspace programs.
+- [ ] **G280** ??? Provide a standalone stat userspace program.
+- [ ] **G281** ??? Provide standalone head, tail, wc and grep programs.
+- [ ] **G282** ??? Provide a standalone hexdump program.
+- [ ] **G283** ??? Provide a standalone ps program backed by procfs.
+- [ ] **G284** ??? Provide standalone kill and sleep programs.
+- [ ] **G285** ??? Provide a standalone mount inspection program.
+- [ ] **G286** ??? Provide a standalone df program.
+- [ ] **G287** ??? Provide a standalone fsck launcher.
+- [ ] **G288** ??? Provide a standalone uname program.
+- [ ] **G289** ??? Provide a standalone env program.
+- [ ] **G290** ??? Provide a basic text editor suitable for serial consoles.
+- [ ] **G291** ??? Provide a file-copy utility with partial-I/O handling.
+- [ ] **G292** ??? Provide a minimal dynamic-free C-compatible userspace ABI description.
+- [ ] **G293** ??? Provide a Zig userspace support library wrapping syscalls.
+- [ ] **G294** ??? Build every userspace program as a separate ELF64 artifact.
+- [ ] **G295** ??? Install userspace programs into the persistent filesystem image.
+- [ ] **G296** ??? Run a multi-program boot smoke test entirely through the shell.
+
+## General userspace networking
+
+- [ ] **G297** ??? Expose socket creation to userspace.
+- [ ] **G298** ??? Expose socket close through normal descriptor semantics.
+- [ ] **G299** ??? Expose bind for local addresses and ports.
+- [ ] **G300** ??? Expose connect for UDP and TCP sockets.
+- [ ] **G301** ??? Expose listen for passive TCP sockets.
+- [ ] **G302** ??? Expose accept for incoming TCP connections.
+- [ ] **G303** ??? Expose send and sendto with partial-send semantics.
+- [ ] **G304** ??? Expose recv and recvfrom with blocking and nonblocking modes.
+- [ ] **G305** ??? Expose shutdown for half-closing TCP connections.
+- [ ] **G306** ??? Expose getsockname and getpeername.
+- [ ] **G307** ??? Expose socket option get/set operations.
+- [ ] **G308** ??? Integrate sockets into poll/select-style readiness.
+- [ ] **G309** ??? Wake blocked readers when packet data arrives.
+- [ ] **G310** ??? Wake blocked writers when transmit capacity becomes available.
+- [ ] **G311** ??? Maintain long-lived UDP endpoints after boot validation.
+- [ ] **G312** ??? Maintain long-lived TCP control blocks after boot validation.
+- [ ] **G313** ??? Support arbitrary TCP application-data transmission.
+- [ ] **G314** ??? Support arbitrary TCP application-data receive and reassembly.
+- [ ] **G315** ??? Queue out-of-order TCP segments within a bounded receive window.
+- [ ] **G316** ??? Retransmit unacknowledged TCP data.
+- [ ] **G317** ??? Estimate TCP round-trip time and retransmission timeout.
+- [ ] **G318** ??? Implement TCP delayed acknowledgements.
+- [ ] **G319** ??? Implement TCP persist behavior for zero windows.
+- [ ] **G320** ??? Implement TCP keepalive as an optional socket policy.
+- [ ] **G321** ??? Implement graceful active close.
+- [ ] **G322** ??? Implement graceful passive close.
+- [ ] **G323** ??? Handle simultaneous TCP open and close cases.
+- [ ] **G324** ??? Expire TIME-WAIT entries safely.
+- [ ] **G325** ??? Recycle connection-table slots with generation safety.
+- [ ] **G326** ??? Support multiple concurrent TCP connections.
+- [ ] **G327** ??? Support multiple concurrent UDP applications.
+- [ ] **G328** ??? Implement bounded per-socket receive buffers.
+- [ ] **G329** ??? Implement bounded per-socket transmit buffers.
+- [ ] **G330** ??? Apply socket buffer quotas per process.
+- [ ] **G331** ??? Maintain an ARP cache keyed by interface and IPv4 address.
+- [ ] **G332** ??? Age ARP entries with reachable, stale and expired states.
+- [ ] **G333** ??? Coalesce concurrent ARP resolution requests.
+- [ ] **G334** ??? Queue bounded packets while ARP resolution is pending.
+- [ ] **G335** ??? Handle ARP resolution timeout and negative completion.
+- [ ] **G336** ??? Renew DHCP leases before T1.
+- [ ] **G337** ??? Rebind DHCP leases after T2.
+- [ ] **G338** ??? Expire addresses when lease renewal fails.
+- [ ] **G339** ??? Handle DHCP NAK and server changes.
+- [ ] **G340** ??? Persist interface configuration state outside one test sequence.
+- [ ] **G341** ??? Maintain an IPv4 route table.
+- [ ] **G342** ??? Select the longest-prefix matching route.
+- [ ] **G343** ??? Support multiple interfaces and per-route gateways.
+- [ ] **G344** ??? Reject routes with unusable next hops.
+- [ ] **G345** ??? Process ICMP destination-unreachable errors.
+- [ ] **G346** ??? Process ICMP time-exceeded errors.
+- [ ] **G347** ??? Process ICMP fragmentation-needed errors.
+- [ ] **G348** ??? Associate ICMP errors with affected sockets.
+- [ ] **G349** ??? Implement Path MTU discovery for IPv4.
+- [ ] **G350** ??? Fragment outgoing IPv4 datagrams only under explicit policy.
+- [ ] **G351** ??? Reassemble bounded incoming IPv4 fragments.
+- [ ] **G352** ??? Make DNS resolution callable by arbitrary userspace processes.
+- [ ] **G353** ??? Support concurrent DNS resolver transactions.
+- [ ] **G354** ??? Support DNS search domains and resolver configuration.
+- [ ] **G355** ??? Support AAAA record parsing.
+- [ ] **G356** ??? Implement IPv6 interface addressing.
+- [ ] **G357** ??? Implement IPv6 neighbor discovery.
+- [ ] **G358** ??? Implement IPv6 router advertisements.
+- [ ] **G359** ??? Implement IPv6 route selection.
+- [ ] **G360** ??? Implement ICMPv6 error handling.
+- [ ] **G361** ??? Implement UDP over IPv6.
+- [ ] **G362** ??? Implement TCP over IPv6.
+- [ ] **G363** ??? Support IPv4/IPv6 dual-stack socket policy.
+- [ ] **G364** ??? Add a stateful packet-filter rule table.
+- [ ] **G365** ??? Apply ingress filtering before socket demultiplexing.
+- [ ] **G366** ??? Apply egress filtering before device submission.
+- [ ] **G367** ??? Expose packet-filter counters and rule inspection.
+- [ ] **G368** ??? Rate-limit malformed and abusive traffic.
+- [ ] **G369** ??? Randomize ephemeral ports from a per-boot secret.
+- [ ] **G370** ??? Randomize initial TCP sequence numbers.
+- [ ] **G371** ??? Stress loss, duplication, reordering and delayed-packet scenarios.
+
+## Portable build and developer tooling
+
+- [ ] **G372** ??? Publish checksums for every supported canonical toolchain archive.
+- [ ] **G373** ??? Support a checksum-pinned macOS host bootstrap.
+- [ ] **G374** ??? Allow an explicitly supplied matching Zig executable without downloading.
+- [ ] **G375** ??? Detect and reject mismatched NASM versions when reproducibility requires it.
+- [ ] **G376** ??? Record Python and NASM versions in release metadata.
+- [ ] **G377** ??? Make every generated source dependency visible to IDE tooling.
+- [ ] **G378** ??? Generate compile_commands.json or an equivalent Zig tooling description.
+- [ ] **G379** ??? Provide editor configuration for the project build graph.
+- [ ] **G380** ??? Add a conventional clean target that preserves downloaded toolchains.
+- [ ] **G381** ??? Add a distclean target that removes downloaded toolchains.
+- [ ] **G382** ??? Build x86-64 and i686 targets from one top-level build graph.
+- [ ] **G383** ??? Expose QEMU boot targets through zig build run steps.
+- [ ] **G384** ??? Expose the persistent runtime test through zig build.
+- [ ] **G385** ??? Expose the network integration matrix through zig build.
+- [ ] **G386** ??? Expose disk-image generation through explicit build steps.
+- [ ] **G387** ??? Cache deterministic generated assets by content identity.
+- [ ] **G388** ??? Verify generated files are reproducible across two consecutive builds.
+- [ ] **G389** ??? Create a source archive without ignored local artifacts.
+- [ ] **G390** ??? Create a signed checksum manifest for release artifacts.
+- [ ] **G391** ??? Generate SBOM-style source and toolchain metadata.
+- [ ] **G392** ??? Document supported host-platform dependency installation.
+- [ ] **G393** ??? Validate the build from a path containing spaces.
+- [ ] **G394** ??? Validate the build from a read-only source checkout with separate outputs.
+- [ ] **G395** ??? Validate offline rebuilds after the toolchain is cached.
+- [ ] **G396** ??? Keep the build graph compatible with the pinned Zig revision through automated checks.
+
+## Automated testing and CI
+
+- [ ] **G397** ??? Add isolated tests for the ELF64 parser.
+- [ ] **G398** ??? Add isolated tests for virtual-memory region splitting and merging.
+- [ ] **G399** ??? Add isolated tests for syscall argument validation.
+- [ ] **G400** ??? Add isolated tests for signal state transitions.
+- [ ] **G401** ??? Add isolated tests for pipe blocking and wakeup.
+- [ ] **G402** ??? Add isolated tests for socket state transitions.
+- [ ] **G403** ??? Add isolated tests for TCP sequence arithmetic.
+- [ ] **G404** ??? Add isolated tests for TCP retransmission timers.
+- [ ] **G405** ??? Add isolated tests for ARP cache expiry.
+- [ ] **G406** ??? Add isolated tests for DHCP renewal state.
+- [ ] **G407** ??? Add isolated tests for route lookup.
+- [ ] **G408** ??? Add isolated tests for writable FAT allocation and release.
+- [ ] **G409** ??? Add isolated tests for directory rename invariants.
+- [ ] **G410** ??? Add isolated tests for permission checks.
+- [ ] **G411** ??? Fuzz the shell parser with malformed byte streams.
+- [ ] **G412** ??? Fuzz the ELF parser with malformed binaries.
+- [ ] **G413** ??? Fuzz network packet parsers with malformed frames.
+- [ ] **G414** ??? Fuzz filesystem path and directory operations.
+- [ ] **G415** ??? Run persistent-runtime sessions repeatedly to detect state leakage.
+- [ ] **G416** ??? Run process create/exit/reap stress under timer preemption.
+- [ ] **G417** ??? Run filesystem mutation stress across simulated power failures.
+- [ ] **G418** ??? Run concurrent network connections with injected packet loss.
+- [ ] **G419** ??? Publish the full network-enabled QEMU profile as a required CI gate.
+- [ ] **G420** ??? Publish an SMP-enabled QEMU profile as a required CI gate.
+- [ ] **G421** ??? Publish a framebuffer and USB-keyboard profile as a required CI gate.
+- [ ] **G422** ??? Publish NVMe and AHCI fallback profiles as required CI gates.
+- [ ] **G423** ??? Compare Windows and Linux artifact hashes in one hosted workflow.
+- [ ] **G424** ??? Archive serial, debugcon and QEMU traces on integration failure.
+- [ ] **G425** ??? Measure and fail on unexpected boot-time or runtime regressions.
+- [ ] **G426** ??? Run a scheduled extended matrix in addition to pull-request gates.
+
+## Physical hardware robustness
+
+- [ ] **G427** ??? Enumerate multiple NVMe controllers safely.
+- [ ] **G428** ??? Support multiple NVMe namespaces as block devices.
+- [ ] **G429** ??? Handle NVMe controller reset and queue recreation.
+- [ ] **G430** ??? Handle NVMe asynchronous error status without halting the kernel.
+- [ ] **G431** ??? Support common NVMe namespace formats beyond the deterministic QEMU setup.
+- [ ] **G432** ??? Handle NVMe controllers with nondefault doorbell stride and queue limits.
+- [ ] **G433** ??? Support AHCI SATA disks as writable block devices.
+- [ ] **G434** ??? Support AHCI controller reset and port recovery.
+- [ ] **G435** ??? Support USB hubs in the xHCI topology.
+- [ ] **G436** ??? Support multiple USB HID keyboards.
+- [ ] **G437** ??? Support USB mice as general input devices.
+- [ ] **G438** ??? Handle xHCI port connect and disconnect events after boot.
+- [ ] **G439** ??? Handle xHCI BIOS/OS ownership handoff quirks.
+- [ ] **G440** ??? Support common non-QEMU xHCI capability variations.
+- [ ] **G441** ??? Add at least one additional PCI Ethernet driver.
+- [ ] **G442** ??? Support virtio-net as an alternative virtual NIC.
+- [ ] **G443** ??? Support virtio-blk as an alternative virtual disk.
+- [ ] **G444** ??? Handle MSI and MSI-X allocation across multiple devices.
+- [ ] **G445** ??? Fall back to line-based interrupts when MSI is unavailable.
+- [ ] **G446** ??? Parse broader ACPI MADT topology variations.
+- [ ] **G447** ??? Parse ACPI _PRT routing where required.
+- [ ] **G448** ??? Handle firmware-provided memory maps with unusual fragmentation.
+- [ ] **G449** ??? Handle systems without usable x2APIC.
+- [ ] **G450** ??? Stress multicore scheduling on all discovered CPUs.
+- [ ] **G451** ??? Support CPU hotplug state transitions where firmware exposes them.
+- [ ] **G452** ??? Initialize and use an IOMMU when available.
+- [ ] **G453** ??? Support framebuffer modes with nonstandard pixel masks.
+- [ ] **G454** ??? Provide a fallback text console when GOP is unavailable after boot.
+- [ ] **G455** ??? Handle firmware that exposes only BLT-mode graphics.
+- [ ] **G456** ??? Implement ACPI power-off.
+- [ ] **G457** ??? Implement ACPI reboot.
+- [ ] **G458** ??? Implement orderly device quiescence before shutdown.
+- [ ] **G459** ??? Implement idle-state selection beyond raw HLT.
+- [ ] **G460** ??? Implement monotonic clock support across HPET, PM timer and invariant TSC.
+- [ ] **G461** ??? Calibrate and use invariant TSC deadlines when supported.
+- [ ] **G462** ??? Test on at least one Intel physical machine.
+- [ ] **G463** ??? Test on at least one AMD physical machine.
+- [ ] **G464** ??? Test on laptop-class firmware and USB topology.
+- [ ] **G465** ??? Maintain a documented hardware compatibility database.
+
+## Security and fault tolerance
+
+- [ ] **G466** ??? Define a concrete kernel threat model.
+- [ ] **G467** ??? Define a stable privilege boundary between kernel and userspace.
+- [ ] **G468** ??? Audit every syscall for integer overflow and pointer-range errors.
+- [ ] **G469** ??? Enforce W^X on all userspace mappings.
+- [ ] **G470** ??? Enforce supervisor-only kernel mappings in every process address space.
+- [ ] **G471** ??? Enable SMEP when available.
+- [ ] **G472** ??? Enable SMAP when available and wrap user copies correctly.
+- [ ] **G473** ??? Enable NX consistently on nonexecutable kernel data.
+- [ ] **G474** ??? Randomize userspace executable load addresses.
+- [ ] **G475** ??? Randomize userspace stack and mmap bases.
+- [ ] **G476** ??? Randomize selected kernel object addresses where the boot model permits.
+- [ ] **G477** ??? Use stack canaries in kernel code.
+- [ ] **G478** ??? Add allocator poisoning and double-free detection.
+- [ ] **G479** ??? Add guard pages around kernel stacks.
+- [ ] **G480** ??? Enforce per-user process and memory quotas.
+- [ ] **G481** ??? Implement users and groups backed by persistent configuration.
+- [ ] **G482** ??? Enforce filesystem permission checks through process credentials.
+- [ ] **G483** ??? Drop privileges across exec where policy requires it.
+- [ ] **G484** ??? Define executable trust and signing policy.
+- [ ] **G485** ??? Verify optional signed executables before loading.
+- [ ] **G486** ??? Integrate a documented Secure Boot signing path.
+- [ ] **G487** ??? Use IOMMU domains to constrain device DMA.
+- [ ] **G488** ??? Quarantine a driver after unrecoverable repeated faults.
+- [ ] **G489** ??? Recover or isolate failed device service tasks without stopping unrelated processes.
+- [ ] **G490** ??? Bound kernel queues against resource-exhaustion attacks.
+- [ ] **G491** ??? Apply network packet-filter defaults before exposing user sockets.
+- [ ] **G492** ??? Rate-limit network control-plane traffic.
+- [ ] **G493** ??? Protect process and filesystem identifiers against stale-handle reuse.
+- [ ] **G494** ??? Version the userspace ABI and reject incompatible binaries clearly.
+- [ ] **G495** ??? Maintain backward-compatible syscall behavior within an ABI version.
+- [ ] **G496** ??? Record security-relevant process, filesystem and network events.
+- [ ] **G497** ??? Provide a bounded kernel log readable only under policy.
+- [ ] **G498** ??? Add deterministic fault-injection tests for security cleanup paths.
+- [ ] **G499** ??? Run static analysis over assembly/Zig ABI boundaries.
+- [ ] **G500** ??? Document unresolved security limitations in every release.

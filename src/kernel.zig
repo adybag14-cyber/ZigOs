@@ -21,6 +21,7 @@ const pe = @import("pe.zig");
 const heap = @import("heap.zig");
 const scheduler = @import("scheduler.zig");
 const preemptive = @import("preemptive.zig");
+const runtime = @import("runtime.zig");
 const user_mode = @import("user_mode.zig");
 const user_service = @import("user_service.zig");
 const user_process = @import("user_process.zig");
@@ -248,7 +249,14 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     }
 
     debugWrite("ZigOs boot sequence complete: kernel foundations and hardware probes passed.\r\n");
-    zigos_halt_forever();
+    runtime.run(.{
+        .ticks_per_second = timer_setup.result.ticks_per_second,
+        .network_ready = network_ready,
+        .usb_keyboard_ready = usb_keyboard_ready,
+        .nvme_ready = nvme_storage_ready,
+        .ahci_ready = ahci_storage_ready,
+        .framebuffer_ready = graphical_console != null,
+    });
 }
 
 fn verifyMemoryLayout(info: *const boot.BootInfo, layout: *const memory.Layout) void {

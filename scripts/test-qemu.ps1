@@ -278,7 +278,7 @@ try {
     Write-Warning "Could not lower QEMU process priority: $($_.Exception.Message)"
 }
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-$marker = 'ZigOs boot sequence complete'
+$marker = 'ZigOs persistent runtime online'
 $captured = $false
 $qemuExitCode = $null
 $keyInjected = $false
@@ -335,9 +335,9 @@ Write-Host $output
 if (-not $captured) {
     $errorText = if (Test-Path $qemuStderr) { Get-Content $qemuStderr -Raw } else { '' }
     if ($null -ne $qemuExitCode) {
-        throw "QEMU exited before the ZigOs boot marker with exit code $qemuExitCode. $errorText"
+        throw "QEMU exited before the ZigOs persistent-runtime marker with exit code $qemuExitCode. $errorText"
     }
-    throw "ZigOs boot marker was not captured within $TimeoutSeconds seconds. $errorText"
+    throw "ZigOs persistent-runtime marker was not captured within $TimeoutSeconds seconds. $errorText"
 }
 if (-not $output.Contains('CPU vendor:')) {
     throw 'The assembly CPUID result was not observed.'
@@ -350,6 +350,15 @@ if (-not $output.Contains('ExitBootServices succeeded.')) {
 }
 if (-not $output.Contains('ZigOs now owns execution without UEFI boot services.')) {
     throw 'No post-UEFI kernel execution marker was observed.'
+}
+if (-not $output.Contains('ZigOs boot sequence complete: kernel foundations and hardware probes passed.')) {
+    throw 'The inherited boot-validation completion marker was not observed before runtime takeover.'
+}
+if (-not $output.Contains('ZigOs persistent runtime online')) {
+    throw 'The permanent x86-64 runtime did not take ownership after boot validation.'
+}
+if (-not $output.Contains('init PID 1; serial shell PID 2; APIC scheduling 100 Hz; writable ramfs mounted at /')) {
+    throw 'The permanent init, serial shell, runtime clock, and root VFS ownership marker was not observed.'
 }
 if (([regex]::Matches($output, 'Kernel stack: 0x')).Count -lt 2) {
     throw 'The ZigOs-owned stack was not observed on both sides of the handoff.'
@@ -1511,6 +1520,12 @@ if (-not $serialOutput.Contains('ZigOs COM1 serial diagnostics online')) {
 if (-not $serialOutput.Contains('ZigOs boot sequence complete')) {
     throw 'The final boot marker was not mirrored to COM1.'
 }
+if (-not $serialOutput.Contains('ZigOs persistent runtime online')) {
+    throw 'The permanent runtime takeover marker was not mirrored to COM1.'
+}
+if (-not $serialOutput.Contains('root@zigos:/home/root# ')) {
+    throw 'The persistent serial prompt was not observed by the hardware harness.'
+}
 if (-not $output.Contains('Cooperative scheduler active: 2 tasks, 13 context switches, trace ABABABABABBB')) {
     throw 'The deterministic cooperative scheduler marker was not observed.'
 }
@@ -1611,7 +1626,7 @@ if ($NoGraphics) {
     }
 }
 
-Write-Host 'QEMU boot test passed.'
+Write-Host 'QEMU hardware boot and persistent-runtime handoff test passed.'
 } finally {
     if ($testMutexAcquired) {
         $testMutex.ReleaseMutex()

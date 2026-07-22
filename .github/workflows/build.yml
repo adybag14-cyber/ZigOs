@@ -7,7 +7,38 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  portable-linux:
+    name: Portable Zig build (Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install portable build dependencies
+        run: sudo apt-get update && sudo apt-get install -y nasm xz-utils
+
+      - name: Run formatting, isolated tests, build, and PE verification
+        run: bash ./scripts/build.sh check --summary all
+
+      - name: Install UEFI and userspace artifacts
+        run: bash ./scripts/build.sh --summary all
+
+      - name: Record Linux artifact identities
+        run: sha256sum zig-out/EFI/BOOT/BOOTX64.EFI zig-out/artifacts/*.elf
+
+      - name: Upload Linux-built UEFI image
+        uses: actions/upload-artifact@v7
+        with:
+          name: ZigOs-BOOTX64-linux-build
+          path: |
+            zig-out/EFI/BOOT/BOOTX64.EFI
+            zig-out/artifacts/*.elf
+            build/assets-manifest.json
+          if-no-files-found: error
+
+  integration-windows:
+    name: Hardware, network, runtime, and i686 integration
     runs-on: windows-latest
 
     steps:
@@ -18,41 +49,47 @@ jobs:
         shell: pwsh
         run: choco install nasm qemu -y --no-progress
 
-      - name: Build x86-64 UEFI with canonical Zig
+      - name: Build x86-64 UEFI through zig build
         shell: pwsh
         run: .\scripts\build.ps1 -Clean
 
-      - name: Boot-test x86-64 UEFI services
-        shell: pwsh
-        run: .\scripts\test-qemu.ps1 -NoHpet -NoPs2 -CpuCount 1 -NoUsbKeyboard -NoGraphics -TimeoutSeconds 120
-
-      - name: Build legacy i686 kernel with canonical Zig
-        shell: pwsh
-        run: .\scripts\build-legacy-i686.ps1
-
-      - name: Check canonical Zig formatting
+      - name: Run isolated runtime tests and portable verification
         shell: pwsh
         run: |
           $version = (Get-Content .toolchain-version -Raw).Trim()
           $zig = ".toolchains\zig-canonical\zig-x86_64-windows-$version\zig.exe"
-          & $zig fmt --check src
+          & $zig build check --summary all
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Boot reduced x86-64 fallback profile
+        shell: pwsh
+        run: .\scripts\test-qemu.ps1 -NoHpet -NoPs2 -CpuCount 1 -NoUsbKeyboard -NoGraphics -TimeoutSeconds 120
+
+      - name: Boot network-enabled x86-64 profile
+        shell: pwsh
+        run: .\scripts\test-qemu.ps1 -Network -NoHpet -NoPs2 -TimeoutSeconds 150
+
+      - name: Drive persistent post-boot COM1 runtime
+        shell: pwsh
+        run: .\scripts\test-runtime.ps1 -TimeoutSeconds 150
+
+      - name: Build legacy i686 kernel
+        shell: pwsh
+        run: .\scripts\build-legacy-i686.ps1
 
       - name: Boot-test legacy BIOS i686 image
         shell: pwsh
         run: .\scripts\test-legacy-i686.ps1 -TimeoutSeconds 90
 
-      - name: Upload UEFI image
+      - name: Upload Windows-built UEFI image
         uses: actions/upload-artifact@v7
         with:
-          name: ZigOs-BOOTX64
+          name: ZigOs-BOOTX64-windows-build
           path: |
             zig-out/EFI/BOOT/BOOTX64.EFI
-            build/service-user.elf
-            build/process-user.elf
-            build/process-exec.elf
+            zig-out/artifacts/*.elf
+            build/assets-manifest.json
           if-no-files-found: error
-
 
       - name: Upload legacy i686 kernel
         uses: actions/upload-artifact@v7

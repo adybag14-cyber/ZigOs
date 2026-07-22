@@ -9,6 +9,7 @@ pub const user_data_selector: u16 = 0x2B;
 pub const user_code_selector: u16 = 0x33;
 const breakpoint_vector: usize = 3;
 const timer_vector: usize = 0x40;
+pub const persistent_runtime_timer_vector: u8 = 0x4A;
 const scheduler_vector: usize = 0x41;
 const ap_work_vector: usize = 0x42;
 const ap_timer_vector: usize = 0x43;
@@ -79,6 +80,7 @@ extern fn zigos_read_cs() callconv(cc) u64;
 extern fn zigos_read_tr() callconv(cc) u64;
 extern fn zigos_isr_breakpoint() callconv(cc) void;
 extern fn zigos_isr_apic_timer() callconv(cc) void;
+extern fn zigos_isr_runtime_timer() callconv(cc) void;
 extern fn zigos_isr_scheduler() callconv(cc) void;
 extern fn zigos_isr_ap_work() callconv(cc) void;
 extern fn zigos_isr_ap_timer() callconv(cc) void;
@@ -95,6 +97,8 @@ extern fn zigos_trigger_breakpoint() callconv(cc) void;
 var gdt: [7]u64 align(16) = .{ 0, 0, 0, 0, 0, 0, 0 };
 var tss: TaskStateSegment align(16) = undefined;
 var idt: [256]IdtEntry align(16) = undefined;
+var persistent_interrupt_stack: [64 * 1024]u8 align(16) = undefined;
+const persistent_stack_canary: u64 = 0x5045_5253_4953_5431;
 
 var interrupt_stack_base: usize = 0;
 var interrupt_stack_size: usize = 0;
@@ -188,6 +192,50 @@ export fn zigos_breakpoint_handler(vector: u64, interrupt_rsp: usize) callconv(c
     breakpoint_stack_pointer = interrupt_rsp;
     breakpoint_used_ist = interrupt_rsp >= interrupt_stack_base and
         interrupt_rsp < interrupt_stack_base + interrupt_stack_size;
+}
+
+pub fn installPersistentRuntimeDescriptors() bool {
+    const persistent_stack_base = @intFromPtr(&persistent_interrupt_stack);
+    const persistent_stack_top = persistent_stack_base + persistent_interrupt_stack.len;
+    if (persistent_stack_top <= persistent_stack_base) return false;
+    @as(*align(8) u64, @ptrCast(&persistent_interrupt_stack[0])).* = persistent_stack_canary;
+    @as(*align(8) u64, @ptrCast(&persistent_interrupt_stack[persistent_interrupt_stack.len - 8])).* = persistent_stack_canary;
+    tss.ist1 = @intCast(persistent_stack_top - 16);
+    tss.io_map_base = @intCast(@sizeOf(TaskStateSegment));
+
+    gdt[0] = 0;
+    gdt[1] = 0x00AF_9A00_0000_FFFF;
+    gdt[2] = 0x00CF_9200_0000_FFFF;
+    installTssDescriptor();
+    gdt[5] = 0x00CF_F200_0000_FFFF;
+    gdt[6] = 0x00AF_FA00_0000_FFFF;
+
+    const gdt_pointer = DescriptorTablePointer{
+        .limit = @intCast(@sizeOf(@TypeOf(gdt)) - 1),
+        .base = @intCast(@intFromPtr(&gdt)),
+    };
+    zigos_load_gdt(&gdt_pointer, code_selector, data_selector, tss_selector);
+
+    setInterruptGate(&idt[persistent_runtime_timer_vector], @intFromPtr(&zigos_isr_runtime_timer), code_selector, 0);
+    const idt_pointer = DescriptorTablePointer{
+        .limit = @intCast(@sizeOf(@TypeOf(idt)) - 1),
+        .base = @intCast(@intFromPtr(&idt)),
+    };
+    zigos_load_idt(&idt_pointer);
+
+    const gate = idt[persistent_runtime_timer_vector];
+    return @as(u16, @truncate(zigos_read_cs())) == code_selector and
+        @as(u16, @truncate(zigos_read_tr())) == tss_selector and
+        gdt[1] == 0x00AF_9A00_0000_FFFF and
+        tss.ist1 == persistent_stack_top - 16 and tss.io_map_base == @sizeOf(TaskStateSegment) and
+        persistentRuntimeStackIntact() and
+        gate.selector == code_selector and gate.ist == 0 and gate.type_attributes == 0x8E and
+        gate.offset_low != 0 and (gate.offset_middle != 0 or gate.offset_high != 0);
+}
+
+pub fn persistentRuntimeStackIntact() bool {
+    return @as(*align(8) const u64, @ptrCast(&persistent_interrupt_stack[0])).* == persistent_stack_canary and
+        @as(*align(8) const u64, @ptrCast(&persistent_interrupt_stack[persistent_interrupt_stack.len - 8])).* == persistent_stack_canary;
 }
 
 fn installTssDescriptor() void {
