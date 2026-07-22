@@ -2110,7 +2110,7 @@ Status: complete.
 
 ## Capstone 17.0 - persistent x86-64 runtime and portable build
 
-Status: complete locally; release requires hosted CI success.
+Status: released after successful portable Linux and Windows integration CI.
 
 - Added a permanent post-validation x86-64 runtime with PID 1 init, PID 2 serial shell, a dedicated vector `0x4A` 100 Hz LAPIC clock, interrupt-enabled idle and continued device/network service passes.
 - Added a 64-slot generation-safe runtime process table with lifecycle states, scheduling, sleep/wake, waits, reaping, adoption, signals, quotas and fault records.
