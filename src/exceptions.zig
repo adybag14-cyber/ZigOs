@@ -1,6 +1,8 @@
 const std = @import("std");
 const serial = @import("serial.zig");
+const interrupt_context = @import("interrupt_context.zig");
 const stack_trace = @import("stack_trace.zig");
+const user_process = @import("user_process.zig");
 const user_service = @import("user_service.zig");
 
 const cc = std.os.uefi.cc;
@@ -10,30 +12,7 @@ extern fn zigos_halt_forever() callconv(cc) noreturn;
 extern fn zigos_read_cr2() callconv(cc) u64;
 extern fn zigos_trigger_ud2() callconv(cc) void;
 
-pub const ExceptionFrame = extern struct {
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-    r11: u64,
-    r10: u64,
-    r9: u64,
-    r8: u64,
-    rdi: u64,
-    rsi: u64,
-    rbp: u64,
-    rdx: u64,
-    rcx: u64,
-    rbx: u64,
-    rax: u64,
-    vector: u64,
-    error_code: u64,
-    rip: u64,
-    cs: u64,
-    rflags: u64,
-    interrupted_rsp: u64,
-    interrupted_ss: u64,
-};
+pub const ExceptionFrame = interrupt_context.ExceptionFrame;
 
 pub const RecoveryResult = struct {
     vector: u64,
@@ -75,7 +54,10 @@ pub fn testInvalidOpcodeRecovery() ?RecoveryResult {
     };
 }
 
-export fn zigos_exception_handler(frame: *ExceptionFrame) callconv(cc) void {
+export fn zigos_exception_handler(
+    frame: *ExceptionFrame,
+    fx_state: *align(16) interrupt_context.FxState,
+) callconv(cc) void {
     last_vector = frame.vector;
     last_error_code = frame.error_code;
     last_fault_rip = frame.rip;
@@ -89,6 +71,7 @@ export fn zigos_exception_handler(frame: *ExceptionFrame) callconv(cc) void {
     }
 
     const fault_address = if (frame.vector == 14) zigos_read_cr2() else frame.rip;
+    if ((frame.cs & 3) == 3 and user_process.handleException(frame, fx_state, fault_address)) return;
     if ((frame.cs & 3) == 3 and user_service.handleException(
         frame.vector,
         frame.error_code,

@@ -14,6 +14,7 @@ extern fn zigos_cpu_has_nx() callconv(cc) u8;
 extern fn zigos_read_msr(index: u32) callconv(cc) u64;
 extern fn zigos_write_msr(index: u32, value: u64) callconv(cc) void;
 
+var kernel_pml4_address: usize = 0;
 var active_pml4_address: usize = 0;
 var no_execute_enabled = false;
 
@@ -70,6 +71,7 @@ pub fn installFourGiBIdentityMap(allocator: *memory.FrameAllocator) ?Installatio
         }
     }
 
+    kernel_pml4_address = pml4_address;
     active_pml4_address = pml4_address;
     zigos_load_cr3(pml4_address);
 
@@ -342,6 +344,175 @@ fn userPageEntry(virtual_address: usize) ?*volatile u64 {
 
 fn pageIndex(address: usize, shift: u6) usize {
     return (address >> shift) & 0x1FF;
+}
+
+pub const UserAddressSpace = struct {
+    pml4_address: usize,
+    pdpt_address: usize,
+    directory_address: usize,
+    table_address: usize,
+    table_pages: u64,
+};
+
+pub fn createUserAddressSpace(allocator: *memory.FrameAllocator) ?UserAddressSpace {
+    if (kernel_pml4_address == 0 or !no_execute_enabled) return null;
+    const pml4_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    const pdpt_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    const directory_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    const table_address = allocator.allocateBelow(memory.four_gib) orelse return null;
+    clearTable(pml4_address);
+    clearTable(pdpt_address);
+    clearTable(directory_address);
+    clearTable(table_address);
+
+    const kernel_root = tableAt(kernel_pml4_address);
+    const root = tableAt(pml4_address);
+    for (0..entries_per_table) |index| root[index] = kernel_root[index];
+    root[user_pml4_index] = @as(u64, @intCast(pdpt_address)) | present_writable_user;
+    const pdpt = tableAt(pdpt_address);
+    pdpt[0] = @as(u64, @intCast(directory_address)) | present_writable_user;
+    const directory = tableAt(directory_address);
+    directory[0] = @as(u64, @intCast(table_address)) | present_writable_user;
+
+    return .{
+        .pml4_address = pml4_address,
+        .pdpt_address = pdpt_address,
+        .directory_address = directory_address,
+        .table_address = table_address,
+        .table_pages = 4,
+    };
+}
+
+pub fn activateAddressSpace(pml4_address: usize) bool {
+    if (pml4_address == 0 or (pml4_address & 0xFFF) != 0 or pml4_address >= memory.four_gib) return false;
+    active_pml4_address = pml4_address;
+    zigos_load_cr3(pml4_address);
+    return zigos_read_cr3() == pml4_address;
+}
+
+pub fn activateKernelAddressSpace() bool {
+    if (kernel_pml4_address == 0) return false;
+    return activateAddressSpace(kernel_pml4_address);
+}
+
+pub fn kernelPml4Address() ?usize {
+    return if (kernel_pml4_address == 0) null else kernel_pml4_address;
+}
+
+pub fn mapUserPageInSpace(
+    space: UserAddressSpace,
+    virtual_address: usize,
+    physical_address: usize,
+    writable: bool,
+    executable: bool,
+) bool {
+    const entry = userPageEntryInSpace(space, virtual_address) orelse return false;
+    if (entry.* != 0 or (physical_address & 0xFFF) != 0 or physical_address == 0 or physical_address >= memory.four_gib) return false;
+    if (!executable and !no_execute_enabled) return false;
+    var flags = present_user;
+    if (writable) flags |= writable_flag;
+    if (!executable) flags |= no_execute_flag;
+    entry.* = @as(u64, @intCast(physical_address)) | flags;
+    flushIfActive(space.pml4_address);
+    const info = inspectUserPageInSpace(space, virtual_address) orelse return false;
+    return info.physical_address == physical_address and info.writable == writable and info.executable == executable;
+}
+
+pub fn replaceUserPageInSpace(
+    space: UserAddressSpace,
+    virtual_address: usize,
+    expected_physical: usize,
+    new_physical: usize,
+    writable: bool,
+    executable: bool,
+) bool {
+    const entry = userPageEntryInSpace(space, virtual_address) orelse return false;
+    const old = entry.*;
+    if ((old & present_flag) == 0 or @as(usize, @intCast(old & page_table_address_mask)) != expected_physical) return false;
+    if ((new_physical & 0xFFF) != 0 or new_physical == 0 or new_physical >= memory.four_gib) return false;
+    var flags = present_user;
+    if (writable) flags |= writable_flag;
+    if (!executable) {
+        if (!no_execute_enabled) return false;
+        flags |= no_execute_flag;
+    }
+    entry.* = @as(u64, @intCast(new_physical)) | flags;
+    flushIfActive(space.pml4_address);
+    const info = inspectUserPageInSpace(space, virtual_address) orelse return false;
+    return info.physical_address == new_physical and info.writable == writable and info.executable == executable;
+}
+
+pub fn protectUserPageInSpace(
+    space: UserAddressSpace,
+    virtual_address: usize,
+    expected_physical: usize,
+    writable: bool,
+    executable: bool,
+) bool {
+    return replaceUserPageInSpace(space, virtual_address, expected_physical, expected_physical, writable, executable);
+}
+
+pub fn unmapUserPageInSpace(space: UserAddressSpace, virtual_address: usize, expected_physical: usize) bool {
+    const entry = userPageEntryInSpace(space, virtual_address) orelse return false;
+    const current = entry.*;
+    if ((current & present_flag) == 0 or @as(usize, @intCast(current & page_table_address_mask)) != expected_physical) return false;
+    entry.* = 0;
+    flushIfActive(space.pml4_address);
+    return inspectUserPageInSpace(space, virtual_address) == null;
+}
+
+pub fn inspectUserPageInSpace(space: UserAddressSpace, virtual_address: usize) ?UserPageInfo {
+    const entry = userPageEntryInSpace(space, virtual_address) orelse return null;
+    const value = entry.*;
+    if ((value & present_flag) == 0 or (value & user_flag) == 0) return null;
+    const physical: usize = @intCast(value & page_table_address_mask);
+    if (physical == 0 or physical >= memory.four_gib) return null;
+    return .{
+        .virtual_address = virtual_address,
+        .physical_address = physical,
+        .writable = (value & writable_flag) != 0,
+        .executable = !no_execute_enabled or (value & no_execute_flag) == 0,
+        .accessed = (value & (1 << 5)) != 0,
+        .dirty = (value & (1 << 6)) != 0,
+    };
+}
+
+pub fn translateUserAddressInSpace(
+    space: UserAddressSpace,
+    address: usize,
+    require_write: bool,
+    require_execute: bool,
+) ?usize {
+    const page_base = address & ~@as(usize, 0xFFF);
+    const info = inspectUserPageInSpace(space, page_base) orelse return null;
+    if (require_write and !info.writable) return null;
+    if (require_execute and !info.executable) return null;
+    return info.physical_address + (address & 0xFFF);
+}
+
+pub fn userAddressSpaceEmpty(space: UserAddressSpace) bool {
+    const table = tableAt(space.table_address);
+    for (0..entries_per_table) |index| {
+        if (table[index] != 0) return false;
+    }
+    return true;
+}
+
+fn userPageEntryInSpace(space: UserAddressSpace, virtual_address: usize) ?*volatile u64 {
+    if ((virtual_address & 0xFFF) != 0 or @as(u64, @intCast(virtual_address)) > 0x0000_7FFF_FFFF_F000) return null;
+    if (pageIndex(virtual_address, 39) != user_pml4_index or pageIndex(virtual_address, 30) != 0 or pageIndex(virtual_address, 21) != 0) return null;
+    const root = tableAt(space.pml4_address);
+    const root_entry = root[user_pml4_index];
+    if ((root_entry & page_table_address_mask) != space.pdpt_address or (root_entry & present_writable_user) != present_writable_user) return null;
+    const pdpt = tableAt(space.pdpt_address);
+    if ((pdpt[0] & page_table_address_mask) != space.directory_address or (pdpt[0] & present_writable_user) != present_writable_user) return null;
+    const directory = tableAt(space.directory_address);
+    if ((directory[0] & page_table_address_mask) != space.table_address or (directory[0] & present_writable_user) != present_writable_user) return null;
+    return &tableAt(space.table_address)[pageIndex(virtual_address, 12)];
+}
+
+fn flushIfActive(pml4_address: usize) void {
+    if (active_pml4_address == pml4_address) zigos_load_cr3(active_pml4_address);
 }
 
 pub fn higherHalfAlias(physical_address: usize) ?usize {

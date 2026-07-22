@@ -1556,6 +1556,30 @@ if (-not $output.Contains('ELF64 user faults recovered: NX CR2 0x000000800010200
 if (-not $output.Contains('ZigOs x86-64 Capstone 15 verified: goals 0x000000D1 new-goals 0x00000040 syscalls 0x00000032 faults 0x00000002 parser-rejections 0x00000008 frames 0x00000007 page-tables 0x00000000 cleanup yes')) {
     throw 'The complete x86-64 Capstone 15 64-goal release marker was not observed.'
 }
+if (-not $output.Contains('ELF64 process images: main/exec bytes 10240/10240, FNV-1a64 0xF4E0D9F25BF74D76/0x13F8A5B090C2F18A')) {
+    throw 'The deterministic Capstone 16 main/exec ELF64 identity marker was not observed.'
+}
+if (-not $output.Contains('ELF64 process lifecycle: creates/syscalls 6/24, spawns/fork/exec/failed 4/1/1/2, waits/reuses/stale/tombstones 5/2/2/6')) {
+    throw 'The Capstone 16 bounded process lifecycle marker was not observed.'
+}
+if (-not [regex]::IsMatch($output, 'ELF64 process scheduling: ticks/preemptions/switches [1-9][0-9]*/[1-9][0-9]*/[1-9][0-9]*, yields/sleeps/wakeups/idle 2/1/[1-9][0-9]*/[0-2]')) {
+    throw 'The Capstone 16 timer preemption, switching, sleep, wake, and bounded idle marker was not observed.'
+}
+if (-not $output.Contains('ELF64 process memory: spaces/tables/frames 6/24/52, COW/demand/terminal 3/2/1, shared/COW/exec yes/yes/yes')) {
+    throw 'The Capstone 16 private-address-space, COW, demand, terminal-fault, and exec proof marker was not observed.'
+}
+if (-not $output.Contains('ELF64 process IPC: signals sent/taken 2/2, pipe bytes 32, descriptors peak/closed 8/13, open files peak 2, records yes')) {
+    throw 'The Capstone 16 signal, pipe, descriptor, and open-file-description marker was not observed.'
+}
+if (-not $output.Contains('ELF64 process exits: main/worker1/worker2/exec/fault/reuse 0x0000000000000080/0x0000000000000081/0x0000000000000082/0x0000000000000083/0x000000000000E00E/0x0000000000000095')) {
+    throw 'The Capstone 16 six-process terminal-status marker was not observed.'
+}
+if (-not $output.Contains('ELF64 process cleanup: descriptors/pipes/spaces/allocator/CR3/kernel yes/yes/yes/yes/yes/yes')) {
+    throw 'The Capstone 16 exact resource restoration marker was not observed.'
+}
+if (-not $output.Contains('ZigOs x86-64 Capstone 16 verified: goals 0x00000151 new-goals 0x00000080 processes 0x00000006 syscalls 0x00000018 spawns 0x00000004 fork 0x00000001 exec 0x00000001 COW 0x00000003 demand 0x00000002 terminal 0x00000001 frames 0x00000034 page-tables 0x00000018 cleanup yes')) {
+    throw 'The complete x86-64 Capstone 16 128-goal release marker was not observed.'
+}
 if ($NoGraphics) {
     if (-not $output.Contains('Framebuffer console unavailable; serial-only diagnostics active')) {
         throw 'The final serial-only framebuffer marker was not observed.'

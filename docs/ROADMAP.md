@@ -2085,3 +2085,24 @@ Status: complete.
 - `BOOTX64.EFI`: 913,920 bytes, SHA-256 `0BED23A310182BCEF969F01BA925D9537A84D7055DB06611139AB951FC81EE42`.
 - `service-user.elf`: 10,240 bytes, SHA-256 `A166FAE8BCFD94663CA1CE0904AE2BF5D2044E831179910C173F9E4BCA1A8E28`.
 - The inherited i686 kernel and persisted disk remain byte-identical to Capstone 14.
+
+## Capstone 16.0 - bounded preemptive ELF64 process runtime
+
+Status: complete.
+
+- Added deterministic 1,657-byte main and 175-byte exec NASM workloads, each wrapped as a verified 10,240-byte two-segment ELF64 executable.
+- Added explicit private x86-64 address-space objects with one PML4, PDPT, directory, and user page table per process, plus root-specific map, protect, replace, inspect, translate, activate, and unmap operations.
+- Added four recyclable process slots with generation-tagged handles, PIDs 80-83, complete saved CPL3 register frames, aligned FXSAVE state, private CR3 roots, descriptor tables, parent state, sleep/wait state, and terminal tombstones.
+- Added syscalls 32-55 for identity, role/tick, spawn, COW fork, static-image exec, exit, yield, sleep, directed wait, pipe I/O, close, dup, signal send/take, process/VM information, anonymous map/unmap, bounded `brk`, and current handle.
+- Added real APIC-timer CPL3 preemption with GPR and FX-state preservation, round-robin switching, bounded sleep/wake, and zero-to-two deterministic idle ticks only when no user process is runnable.
+- Added one fork with shared RX text, read-only shared data/BSS, eager stack copying, parent/child COW resolution, fork return-value split, inherited descriptors, and independent parent/child sentinel verification.
+- Added one atomic successful exec plus two failed execs, replacing text, initialized data, BSS, stack, RIP, RSP, GPRs, and FX state while preserving PID, PPID, generation handle, and shared pipe descriptors.
+- Added zero-filled heap, anonymous, and demand mappings; two demand faults resume userspace, while one guard read terminates only the faulting generation with status `0xE00E` and resumes another process from the exception frame.
+- Added shared open-file descriptions, a bounded pipe, descriptor inheritance, `dup`, 32 exact record bytes, two directed signals, thirteen descriptor closes, and complete endpoint/reference reclamation.
+- The live tree creates six generations, executes 24 syscalls, performs four spawns, one fork, one exec, five waits, two slot reuses, two stale-handle rejections, three COW faults, two demand faults, and one contained terminal fault.
+- Exact terminal statuses are `0x80`, `0x81`, `0x82`, `0x83`, `0xE00E`, and `0x95`; all six private page tables are empty before the allocator checkpoint rewinds all 52 temporary frames.
+- The hosted and local QEMU harness requires the cumulative 337-goal (`0x151`) and new 128-goal (`0x80`) marker while preserving every Capstone 15 marker.
+- `process-user.elf`: 10,240 bytes, SHA-256 `A04BEBD46E4C95A9A34A5BD84B2B3A43A2C555FB1601F2A94EBDBA82D3DDDD40`.
+- `process-exec.elf`: 10,240 bytes, SHA-256 `41D3ED292B1BE84EF3A30969B9CF22D650A22FB8BA92E831C40838B771B97B65`.
+- Reference `BOOTX64.EFI`: 961,536 bytes, SHA-256 `4A5A3CDA43F1D29B0CD30184487ABC1912542343A65C523CDE6399CC849A4166`.
+- The inherited `ZIGOS386.BIN` and persisted `ZIGOS386.IMG` remain byte-identical to Capstone 14.

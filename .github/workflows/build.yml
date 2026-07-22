@@ -49,6 +49,8 @@ jobs:
           path: |
             zig-out/EFI/BOOT/BOOTX64.EFI
             build/service-user.elf
+            build/process-user.elf
+            build/process-exec.elf
           if-no-files-found: error
 
 

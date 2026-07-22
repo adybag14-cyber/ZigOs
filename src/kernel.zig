@@ -23,6 +23,7 @@ const scheduler = @import("scheduler.zig");
 const preemptive = @import("preemptive.zig");
 const user_mode = @import("user_mode.zig");
 const user_service = @import("user_service.zig");
+const user_process = @import("user_process.zig");
 const xhci = @import("xhci.zig");
 const e1000e = @import("e1000e.zig");
 const ntp = @import("ntp.zig");
@@ -203,6 +204,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     testPreemptiveScheduler(&frame_allocator, timer_setup.result.ticks_per_second);
     testUserMode(&frame_allocator);
     testElf64UserService(&frame_allocator);
+    testElf64ProcessRuntime(&frame_allocator, timer_setup.result.ticks_per_second);
 
     if (graphical_console) |console| {
         const report = console.report();
@@ -14714,6 +14716,174 @@ fn testElf64UserService(allocator: *memory.FrameAllocator) void {
     debugWrite("\r\n");
 
     debugWrite("ZigOs x86-64 Capstone 15 verified: goals 0x000000D1 new-goals 0x00000040 syscalls 0x00000032 faults 0x00000002 parser-rejections 0x00000008 frames 0x00000007 page-tables 0x00000000 cleanup yes\r\n");
+}
+
+fn testElf64ProcessRuntime(allocator: *memory.FrameAllocator, ticks_per_second: u64) void {
+    const maybe_report = user_process.run(allocator, ticks_per_second);
+    if (maybe_report == null) {
+        debugWrite("ELF64 process runtime diagnostic: stage ");
+        debugWriteU64Decimal(user_process.lastFailureStage());
+        debugWrite(", syscalls ");
+        debugWriteU64Decimal(user_process.lastFailureSyscalls());
+        debugWrite(", ticks ");
+        debugWriteU64Decimal(user_process.lastFailureTicks());
+        debugWrite(", reason/slot/states ");
+        debugWriteU64Decimal(user_process.lastFailureReason());
+        debugWrite("/");
+        debugWriteU64Decimal(user_process.lastFailureSlot());
+        debugWrite("/0x");
+        debugWriteHex64(user_process.lastFailureStates());
+        debugWrite(", final/accounting/proofs ");
+        debugWriteU64Decimal(user_process.lastFinalVerifyReason());
+        debugWrite("/0x");
+        debugWriteHex64(user_process.lastFailureAccounting());
+        debugWrite("/0x");
+        debugWriteHex64(user_process.lastFailureProofs());
+        debugWrite("\r\n");
+        userModeFailure("ELF64 multiprocess runtime or cleanup failed");
+    }
+    const report = maybe_report.?;
+    if (report.main_elf_bytes != 10240 or report.exec_elf_bytes != 10240 or
+        report.main_hash != 0xF4E0_D9F2_5BF7_4D76 or report.exec_hash != 0x13F8_A5B0_90C2_F18A or
+        report.process_creations != 6 or report.syscall_count != 24 or report.spawns != 4 or
+        report.forks != 1 or report.execs != 1 or report.failed_execs != 2 or report.waits != 5 or
+        report.slot_reuses != 2 or report.stale_rejections != 2 or report.tombstones != 6 or
+        report.cow_faults != 3 or report.demand_faults != 2 or report.terminal_faults != 1 or
+        report.signals_sent != 2 or report.signals_taken != 2 or report.pipe_bytes != 32 or
+        report.descriptor_peak != 8 or report.descriptor_closes != 13 or report.open_file_peak != 2 or
+        report.allocated_frames != 52 or report.page_table_frames != 24 or report.spaces_created != 6 or
+        report.main_exit != 0x80 or report.worker_one_exit != 0x81 or report.worker_two_exit != 0x82 or
+        report.exec_exit != 0x83 or report.fault_exit != 0xE00E or report.reuse_exit != 0x95)
+    {
+        userModeFailure("ELF64 multiprocess exact accounting drifted");
+    }
+    if (report.timer_ticks == 0 or report.timer_preemptions < 2 or report.context_switches < 6 or
+        report.yields != 2 or report.sleeps != 1 or report.idle_ticks > 2)
+    {
+        userModeFailure("ELF64 multiprocess scheduling bounds drifted");
+    }
+    if (!report.shared_text_verified or !report.cow_isolation_verified or
+        !report.exec_replacement_verified or !report.pipe_records_verified or
+        !report.generations_verified or !report.returned_to_kernel or !report.allocator_restored or
+        !report.cr3_restored or !report.all_spaces_empty or !report.all_descriptors_closed or
+        !report.all_pipes_released)
+    {
+        userModeFailure("ELF64 multiprocess independent proof or cleanup failed");
+    }
+
+    debugWrite("ELF64 process images: main/exec bytes ");
+    debugWriteUsizeDecimal(report.main_elf_bytes);
+    debugWrite("/");
+    debugWriteUsizeDecimal(report.exec_elf_bytes);
+    debugWrite(", FNV-1a64 0x");
+    debugWriteHex64(report.main_hash);
+    debugWrite("/0x");
+    debugWriteHex64(report.exec_hash);
+    debugWrite("\r\n");
+
+    debugWrite("ELF64 process lifecycle: creates/syscalls ");
+    debugWriteU64Decimal(report.process_creations);
+    debugWrite("/");
+    debugWriteU64Decimal(report.syscall_count);
+    debugWrite(", spawns/fork/exec/failed ");
+    debugWriteU64Decimal(report.spawns);
+    debugWrite("/");
+    debugWriteU64Decimal(report.forks);
+    debugWrite("/");
+    debugWriteU64Decimal(report.execs);
+    debugWrite("/");
+    debugWriteU64Decimal(report.failed_execs);
+    debugWrite(", waits/reuses/stale/tombstones ");
+    debugWriteU64Decimal(report.waits);
+    debugWrite("/");
+    debugWriteU64Decimal(report.slot_reuses);
+    debugWrite("/");
+    debugWriteU64Decimal(report.stale_rejections);
+    debugWrite("/");
+    debugWriteU64Decimal(report.tombstones);
+    debugWrite("\r\n");
+
+    debugWrite("ELF64 process scheduling: ticks/preemptions/switches ");
+    debugWriteU64Decimal(report.timer_ticks);
+    debugWrite("/");
+    debugWriteU64Decimal(report.timer_preemptions);
+    debugWrite("/");
+    debugWriteU64Decimal(report.context_switches);
+    debugWrite(", yields/sleeps/wakeups/idle ");
+    debugWriteU64Decimal(report.yields);
+    debugWrite("/");
+    debugWriteU64Decimal(report.sleeps);
+    debugWrite("/");
+    debugWriteU64Decimal(report.wakeups);
+    debugWrite("/");
+    debugWriteU64Decimal(report.idle_ticks);
+    debugWrite("\r\n");
+
+    debugWrite("ELF64 process memory: spaces/tables/frames ");
+    debugWriteU64Decimal(report.spaces_created);
+    debugWrite("/");
+    debugWriteU64Decimal(report.page_table_frames);
+    debugWrite("/");
+    debugWriteU64Decimal(report.allocated_frames);
+    debugWrite(", COW/demand/terminal ");
+    debugWriteU64Decimal(report.cow_faults);
+    debugWrite("/");
+    debugWriteU64Decimal(report.demand_faults);
+    debugWrite("/");
+    debugWriteU64Decimal(report.terminal_faults);
+    debugWrite(", shared/COW/exec ");
+    debugWrite(if (report.shared_text_verified) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (report.cow_isolation_verified) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (report.exec_replacement_verified) "yes" else "no");
+    debugWrite("\r\n");
+
+    debugWrite("ELF64 process IPC: signals sent/taken ");
+    debugWriteU64Decimal(report.signals_sent);
+    debugWrite("/");
+    debugWriteU64Decimal(report.signals_taken);
+    debugWrite(", pipe bytes ");
+    debugWriteU64Decimal(report.pipe_bytes);
+    debugWrite(", descriptors peak/closed ");
+    debugWriteU64Decimal(report.descriptor_peak);
+    debugWrite("/");
+    debugWriteU64Decimal(report.descriptor_closes);
+    debugWrite(", open files peak ");
+    debugWriteU64Decimal(report.open_file_peak);
+    debugWrite(", records ");
+    debugWrite(if (report.pipe_records_verified) "yes" else "no");
+    debugWrite("\r\n");
+
+    debugWrite("ELF64 process exits: main/worker1/worker2/exec/fault/reuse 0x");
+    debugWriteHex64(report.main_exit);
+    debugWrite("/0x");
+    debugWriteHex64(report.worker_one_exit);
+    debugWrite("/0x");
+    debugWriteHex64(report.worker_two_exit);
+    debugWrite("/0x");
+    debugWriteHex64(report.exec_exit);
+    debugWrite("/0x");
+    debugWriteHex64(report.fault_exit);
+    debugWrite("/0x");
+    debugWriteHex64(report.reuse_exit);
+    debugWrite("\r\n");
+
+    debugWrite("ELF64 process cleanup: descriptors/pipes/spaces/allocator/CR3/kernel ");
+    debugWrite(if (report.all_descriptors_closed) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (report.all_pipes_released) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (report.all_spaces_empty) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (report.allocator_restored) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (report.cr3_restored) "yes" else "no");
+    debugWrite("/");
+    debugWrite(if (report.returned_to_kernel) "yes" else "no");
+    debugWrite("\r\n");
+
+    debugWrite("ZigOs x86-64 Capstone 16 verified: goals 0x00000151 new-goals 0x00000080 processes 0x00000006 syscalls 0x00000018 spawns 0x00000004 fork 0x00000001 exec 0x00000001 COW 0x00000003 demand 0x00000002 terminal 0x00000001 frames 0x00000034 page-tables 0x00000018 cleanup yes\r\n");
 }
 
 fn userModeFailure(reason: []const u8) noreturn {

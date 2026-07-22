@@ -804,9 +804,15 @@ zigos_exception_common:
 
     mov r12, rsp
     and rsp, -16
+    sub rsp, 512
+    mov r13, rsp
+    fxsave64 [r13]
     sub rsp, 32
     mov rcx, r12
+    mov rdx, r13
     call zigos_exception_handler
+    add rsp, 32
+    fxrstor64 [r13]
     mov rsp, r12
 
     pop r15

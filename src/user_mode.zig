@@ -3,6 +3,7 @@ const descriptor_tables = @import("descriptor_tables.zig");
 const interrupt_context = @import("interrupt_context.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
+const user_process = @import("user_process.zig");
 const user_service = @import("user_service.zig");
 
 const cc = std.os.uefi.cc;
@@ -112,6 +113,7 @@ export fn zigos_user_syscall_handler(
     frame: *interrupt_context.Frame,
     fx_state: *align(16) interrupt_context.FxState,
 ) callconv(cc) u64 {
+    if (user_process.isActive()) return user_process.handleSyscall(frame, fx_state);
     if (user_service.isActive()) return user_service.handleSyscall(frame, fx_state);
     syscall_count +%= 1;
 
