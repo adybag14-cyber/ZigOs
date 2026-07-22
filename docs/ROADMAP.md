@@ -2118,7 +2118,7 @@ Status: complete locally; release requires hosted CI success.
 - Added a persistent COM1 command environment with editing, history, environment expansion, four-stage pipelines, redirection, background syntax and filesystem/process/device/network commands.
 - Added a 27-command bidirectional QEMU session that proves zero-failure navigation, mutation, pipelines, ELF inspection, sleep/wake, jobs, wait/reap, contained fault handling, diagnostics and explicit shutdown.
 - Added `build.zig`, `build.zig.zon`, portable generated-asset and PE verification scripts, checksum-pinned Linux bootstrap, shell/Make targets and a thin PowerShell wrapper.
-- Added 19 isolated `std.testing` declarations and expanded CI to clean Linux build/test plus Windows fallback, network, persistent-runtime and i686 persistence profiles.
+- Added 19 isolated `std.testing` declarations and expanded CI to clean Linux build/test plus Windows fallback, a hosted-stable uniprocessor serial network profile, persistent-runtime and i686 persistence profiles. Broader SMP, framebuffer and USB combinations remain extended local gates.
 - Windows and Linux produce the same 2,649,088-byte EFI image, SHA-256 `17CFB13A943D42877BEDF2265E547CD635BAC6A8D5FCC51195487FF775C3EFDC`.
 - Cumulative verified accounting is 433 goals (`0x1B1`), with 96 (`0x60`) new in Capstone 17.
 - Exact release contract: [`CAPSTONE-17.0.md`](CAPSTONE-17.0.md).

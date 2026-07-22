@@ -273,10 +273,10 @@ Reduced fallback profile:
 .\scripts\test-qemu.ps1 -NoHpet -NoPs2 -CpuCount 1 -NoUsbKeyboard -NoGraphics -TimeoutSeconds 120
 ```
 
-Network-enabled profile:
+Network-enabled hosted-stable profile:
 
 ```powershell
-.\scripts\test-qemu.ps1 -Network -NoHpet -NoPs2 -TimeoutSeconds 150
+.\scripts\test-qemu.ps1 -Network -NoHpet -NoPs2 -CpuCount 1 -NoUsbKeyboard -NoGraphics -TimeoutSeconds 180
 ```
 
 Persistent post-boot runtime:
@@ -292,7 +292,7 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 The workflow contains two required implementation paths:
 
 - **Portable Linux:** clean bootstrap, asset generation, formatting, 19 isolated tests, x86-64 UEFI build, portable PE verification and artifact upload.
-- **Windows integration:** clean build, isolated checks, reduced fallback boot, network-enabled boot, persistent COM1 runtime, legacy i686 build and two-boot persistence regression.
+- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, persistent COM1 runtime, legacy i686 build and two-boot persistence regression. Broader SMP, graphics and USB combinations remain extended local gates rather than being conflated with the hosted network proof.
 
 A green badge therefore represents substantially more than the former reduced single-boot profile.
 

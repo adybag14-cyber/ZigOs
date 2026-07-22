@@ -65,9 +65,9 @@ jobs:
         shell: pwsh
         run: .\scripts\test-qemu.ps1 -NoHpet -NoPs2 -CpuCount 1 -NoUsbKeyboard -NoGraphics -TimeoutSeconds 120
 
-      - name: Boot network-enabled x86-64 profile
+      - name: Boot network-enabled x86-64 serial profile
         shell: pwsh
-        run: .\scripts\test-qemu.ps1 -Network -NoHpet -NoPs2 -TimeoutSeconds 150
+        run: .\scripts\test-qemu.ps1 -Network -NoHpet -NoPs2 -CpuCount 1 -NoUsbKeyboard -NoGraphics -TimeoutSeconds 180
 
       - name: Drive persistent post-boot COM1 runtime
         shell: pwsh

@@ -179,9 +179,10 @@ A clean Windows build and a clean WSL Ubuntu build produced byte-identical UEFI 
 - clean Linux `zig build check` and installed artifact build;
 - Windows/Linux byte-identity comparison;
 - reduced x86-64 fallback QEMU profile;
-- network-enabled x86-64 QEMU profile;
+- network-enabled uniprocessor, serial-only x86-64 QEMU profile in hosted CI;
 - 27-command persistent COM1 runtime profile;
 - full legacy i686 build and two-boot FAT12 persistence regression;
+- broader SMP, framebuffer and USB combinations retained as extended local release gates;
 - Zig formatting, Python compilation, PowerShell parser, YAML parser and `git diff --check`.
 
 ## Deliberate limitations
