@@ -7,6 +7,25 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+$root = Split-Path -Parent $PSScriptRoot
+$kernelSourcePath = Join-Path $root 'src\legacy\i686\kernel.zig'
+$kernelSource = [IO.File]::ReadAllText((Resolve-Path $kernelSourcePath))
+if (-not $kernelSource.Contains('const ata_poll_limit: u32 = 1 << 20;')) {
+    throw 'Legacy ATA PIO wait budget is below the hosted-runner hardening contract.'
+}
+$allocateStart = $kernelSource.IndexOf('fn fatAllocateCluster() ?u16 {', [StringComparison]::Ordinal)
+$allocateEnd = $kernelSource.IndexOf("`nfn ", $allocateStart + 1, [StringComparison]::Ordinal)
+if ($allocateStart -lt 0 -or $allocateEnd -lt 0) {
+    throw 'Legacy FAT allocation function could not be isolated for ordering verification.'
+}
+$allocateBody = $kernelSource.Substring($allocateStart, $allocateEnd - $allocateStart)
+$dataWrite = $allocateBody.IndexOf('ataWriteSector(cluster_lba', [StringComparison]::Ordinal)
+$fatPublish = $allocateBody.IndexOf('fatWriteEntry(cluster, 0x0FFF)', [StringComparison]::Ordinal)
+if ($dataWrite -lt 0 -or $fatPublish -lt 0 -or $dataWrite -gt $fatPublish) {
+    throw 'Legacy FAT allocation must zero data before publishing the FAT reservation.'
+}
+
 $elf = [IO.File]::ReadAllBytes((Resolve-Path $ElfPath))
 if ($elf.Length -lt 52) { throw "ELF32 image is truncated: $($elf.Length) bytes." }
 if ($elf[0] -ne 0x7F -or $elf[1] -ne 0x45 -or $elf[2] -ne 0x4C -or $elf[3] -ne 0x46) {

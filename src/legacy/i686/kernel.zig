@@ -4618,10 +4618,15 @@ fn fatAllocateCluster() ?u16 {
     while (cluster <= fat_cluster_count + 1) : (cluster += 1) {
         const value = fatReadEntry(cluster) orelse return null;
         if (value != 0) continue;
-        if (!fatWriteEntry(cluster, 0x0FFF)) return null;
+
+        // Zero the data sector before publishing the FAT reservation. The VFS
+        // mutator is single-threaded, so no competing allocator can claim the
+        // cluster between these operations. If PIO completion fails, the FAT
+        // remains unchanged and the first-fit cluster is immediately reusable.
         @memset(vfs_sector_buffer[0..], 0);
         const cluster_lba = fat_data_lba + (@as(u32, cluster) - 2) * fat_sectors_per_cluster;
         if (!ataWriteSector(cluster_lba, @intCast(@intFromPtr(&vfs_sector_buffer)))) return null;
+        if (!fatWriteEntry(cluster, 0x0FFF)) return null;
         fat_allocation_count +|= 1;
         return cluster;
     }
@@ -7039,7 +7044,10 @@ fn ataTryWriteSector(lba: u32, source_address: u32) bool {
     return true;
 }
 
-const ata_poll_limit: u32 = 1024;
+// A raw port-read count is not an elapsed-time guarantee under a preempted
+// hosted runner. Keep the wait finite, but allow enough PIO status samples for
+// command completion and SRST recovery even when the VM is heavily descheduled.
+const ata_poll_limit: u32 = 1 << 20;
 
 fn ataRecover() bool {
     // SRST aborts any incomplete PIO phase and returns the selected device to
