@@ -4,6 +4,7 @@ const elf64 = @import("elf64.zig");
 const interrupt_context = @import("interrupt_context.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
+const runtime_abi = @import("runtime_abi.zig");
 const runtime_fd = @import("runtime_fd.zig");
 const runtime_process = @import("runtime_process.zig");
 const runtime_vfs = @import("runtime_vfs.zig");
@@ -35,11 +36,11 @@ const syscall_open: u64 = 74;
 const syscall_ticks: u64 = 75;
 const syscall_fault_return: u64 = 78;
 
-const errno_bad_fd: i64 = -9;
-const errno_would_block: i64 = -11;
-const errno_fault: i64 = -14;
-const errno_invalid: i64 = -22;
-const errno_no_syscall: i64 = -38;
+const errno_bad_fd = runtime_abi.errno_bad_fd;
+const errno_would_block = runtime_abi.errno_would_block;
+const errno_fault = runtime_abi.errno_fault;
+const errno_invalid = runtime_abi.errno_invalid;
+const errno_no_syscall = runtime_abi.errno_no_syscall;
 
 const fault_trampoline = [_]u8{
     0xB8, @truncate(syscall_fault_return), 0x00, 0x00, 0x00, // mov eax, SYS_FAULT_RETURN
@@ -312,8 +313,8 @@ pub fn handleSyscall(
                 frame.rax = reject(errno_fault);
                 return 0;
             }
-            const fds = activeDescriptors().createPipe(activeProcesses(), context.handle) catch {
-                frame.rax = reject(errno_bad_fd);
+            const fds = activeDescriptors().createPipe(activeProcesses(), context.handle) catch |err| {
+                frame.rax = reject(runtime_abi.fromError(err));
                 return 0;
             };
             const values = [2]u32{ fds[0], fds[1] };
@@ -327,30 +328,46 @@ pub fn handleSyscall(
             return 0;
         },
         syscall_close => {
-            activeDescriptors().close(activeVfs(), activeProcesses(), context.handle, @truncate(frame.rdi)) catch {
+            const fd = runtime_abi.descriptor(frame.rdi) orelse {
                 frame.rax = reject(errno_bad_fd);
+                return 0;
+            };
+            activeDescriptors().close(activeVfs(), activeProcesses(), context.handle, fd) catch |err| {
+                frame.rax = reject(runtime_abi.fromError(err));
                 return 0;
             };
             frame.rax = 0;
             return 0;
         },
         syscall_dup => {
-            const fd = activeDescriptors().duplicate(activeProcesses(), context.handle, @truncate(frame.rdi)) catch {
+            const source_fd = runtime_abi.descriptor(frame.rdi) orelse {
                 frame.rax = reject(errno_bad_fd);
+                return 0;
+            };
+            const fd = activeDescriptors().duplicate(activeProcesses(), context.handle, source_fd) catch |err| {
+                frame.rax = reject(runtime_abi.fromError(err));
                 return 0;
             };
             frame.rax = fd;
             return 0;
         },
         syscall_dup2 => {
+            const source_fd = runtime_abi.descriptor(frame.rdi) orelse {
+                frame.rax = reject(errno_bad_fd);
+                return 0;
+            };
+            const target_fd = runtime_abi.descriptor(frame.rsi) orelse {
+                frame.rax = reject(errno_bad_fd);
+                return 0;
+            };
             const fd = activeDescriptors().duplicateTo(
                 activeVfs(),
                 activeProcesses(),
                 context.handle,
-                @truncate(frame.rdi),
-                @truncate(frame.rsi),
-            ) catch {
-                frame.rax = reject(errno_bad_fd);
+                source_fd,
+                target_fd,
+            ) catch |err| {
+                frame.rax = reject(runtime_abi.fromError(err));
                 return 0;
             };
             frame.rax = fd;
@@ -500,7 +517,10 @@ fn syscallWrite(
         frame.rax = reject(errno_fault);
         return 0;
     }
-    const fd: u16 = @truncate(frame.rdi);
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
     const kind = descriptorKind(context.handle, fd) orelse {
         frame.rax = reject(errno_bad_fd);
         return 0;
@@ -517,8 +537,8 @@ fn syscallWrite(
         fd,
         bytes[0..length],
         current_tick,
-    ) catch {
-        frame.rax = reject(errno_bad_fd);
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
     if (result.status == .blocked) return blockAndRetry(context, frame, fx_state);
@@ -539,7 +559,10 @@ fn syscallRead(
         frame.rax = reject(errno_fault);
         return 0;
     }
-    const fd: u16 = @truncate(frame.rdi);
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
     const kind = descriptorKind(context.handle, fd) orelse {
         frame.rax = reject(errno_bad_fd);
         return 0;
@@ -555,8 +578,8 @@ fn syscallRead(
         context.handle,
         fd,
         bytes[0..length],
-    ) catch {
-        frame.rax = reject(errno_bad_fd);
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
     if (result.status == .blocked) return blockAndRetry(context, frame, fx_state);
@@ -574,11 +597,14 @@ fn syscallOpen(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_fault);
         return 0;
     };
-    const bits: u8 = @truncate(frame.rsi);
-    if ((bits & 0xE0) != 0) {
+    const bits = runtime_abi.openFlagBits(frame.rsi) orelse {
         frame.rax = reject(errno_invalid);
         return 0;
-    }
+    };
+    const mode = runtime_abi.mode(frame.rdx) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
     const flags = runtime_vfs.OpenFlags{
         .read = (bits & 1) != 0,
         .write = (bits & 2) != 0,
@@ -592,10 +618,10 @@ fn syscallOpen(context: *Context, frame: *interrupt_context.Frame) u64 {
         context.handle,
         path_buffer[0..path_length],
         flags,
-        @truncate(frame.rdx),
+        mode,
         current_tick,
-    ) catch {
-        frame.rax = reject(errno_bad_fd);
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
     frame.rax = fd;

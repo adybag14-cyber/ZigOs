@@ -2,6 +2,7 @@
 """Enforce the permanent-userspace source and release contract."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -31,6 +32,11 @@ def main() -> int:
     syscalls = text("src/user_mode.zig")
     assets = text("scripts/build-assets.py")
     runtime_test = text("scripts/test-runtime.ps1")
+    runtime_abi = text("src/runtime_abi.zig")
+    build_graph = text("build.zig")
+    workflow = text(".github/workflows/build.yml")
+    asset_builder = text("scripts/build-assets.py")
+    asset_manifest = json.loads(text("build/assets-manifest.json"))
 
     for forbidden, description in (
         ("launchPseudoJob", "timed pseudo-job launcher returned"),
@@ -56,6 +62,11 @@ def main() -> int:
     require(runtime, "state.live_ping_passes", "release gate counts validated ping replies")
     require(runtime, "state.live_dns_passes", "release gate counts completed DNS results")
     require(runtime, "e1000e was not initialized for this boot", "offline commands report device absence explicitly")
+    require(runtime, "kill defaults to forced signal 9", "help documents forced default termination")
+    require(runtime, "else 9;", "kill defaults to a signal with implemented terminal semantics")
+    require(runtime, "state.shell_waiting = true", "shell wait enters a real blocking state")
+    require(runtime, "state.processes.wait(state.shell_handle, handle, false)", "shell wait uses process-table blocking wait")
+    forbid(runtime, "wait: process is still running", "wait remained a status query")
 
     require(executor, "paging.activateAddressSpace", "private CR3 activation")
     require(executor, "zigos_enter_user_context", "complete context entry")
@@ -67,6 +78,37 @@ def main() -> int:
     require(executor, "releasePage(physical);", "failed owned mappings release their arena page")
     require(executor, "paging.userAddressSpaceEmpty", "teardown requires an empty private page table")
     require(executor, "std.math.add(u64, current_tick, frame.rdi)", "overflow-safe sleep deadlines")
+    require(executor, "runtime_abi.descriptor(frame.rdi)", "descriptor registers are range-checked before narrowing")
+    require(executor, "runtime_abi.openFlagBits(frame.rsi)", "open flags are validated before narrowing")
+    forbid(executor, "const fd: u16 = @truncate(frame.rdi)", "descriptor arguments truncate before validation")
+    forbid(executor, "const bits: u8 = @truncate(frame.rsi)", "open flags truncate before validation")
+
+    require(runtime_abi, "pub fn fromError", "stable kernel-error to userspace-errno mapping")
+    require(runtime_abi, "descriptor arguments reject narrowing aliases", "hostile descriptor-width tests")
+    require(runtime_abi, "open flags reject every high bit before narrowing", "hostile open-flag tests")
+
+    for source_path in (
+        '"src/runtime_fd.zig"',
+        '"src/runtime_command.zig"',
+        '"src/runtime_process.zig"',
+        '"src/runtime_vfs.zig"',
+        '"src/runtime_abi.zig"',
+    ):
+        require(build_graph, source_path, f"isolated test graph includes {source_path}")
+
+    require(workflow, ".\\scripts\\test-runtime.ps1 -TimeoutSeconds 180 -Network", "hosted live permanent-shell network test")
+    require(workflow, "Cross-platform artifact identity gate", "hosted cross-platform reproducibility gate")
+    require(workflow, "cmp --", "artifact bytes are compared instead of only printed")
+    require(asset_builder, '"schema": 2', "host-independent generated-asset manifest schema")
+    forbid(asset_builder, '"python": sys.version', "host Python version leaked into compared manifest")
+    forbid(asset_builder, '"nasm": nasm', "host NASM path leaked into compared manifest")
+    if asset_manifest.get("schema") != 2:
+        raise SystemExit("generated-asset manifest does not use deterministic schema 2")
+    manifest_outputs = asset_manifest.get("outputs", {})
+    if "build/cpu.obj" in manifest_outputs:
+        raise SystemExit("non-deterministic intermediate COFF object leaked into release manifest")
+    if not manifest_outputs:
+        raise SystemExit("generated-asset release manifest is empty")
 
     require(cpu, "zigos_enter_user_context:", "assembly retained-context entry")
     require(cpu, ".runtime_return_to_kernel:", "timer return to scheduler")
@@ -83,6 +125,8 @@ def main() -> int:
         "hello from VFS-loaded CPL3 ELF64",
         "contained genuine CPL3 exception",
         "real CPL3 reader blocked; real CPL3 writer woke it",
+        "PID 8 status 0x7 state zombie",
+        "forced termination signal 9 sent to real PID 9 state zombie",
         "reply from 10.0.2.2:",
         "localhost A 127.0.0.1",
         "ping: unavailable: e1000e was not initialized for this boot",

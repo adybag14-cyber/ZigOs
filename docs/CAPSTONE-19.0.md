@@ -22,7 +22,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 10. **C19-10** — Leave an unmapped guard page above every permanent userspace stack.
 11. **C19-11** — Install a read-only executable userspace fault trampoline in every permanent address space.
 12. **C19-12** — Add an assembly entry that restores a complete saved GPR, RIP/RSP/RFLAGS and FXSAVE context before `iretq` to CPL3.
-13. **C19-13** ? Deliver timer-driven CPL3 validation on a 64 KiB bootstrap IST1 with a bottom canary, then install a separate canary-protected 64 KiB permanent-runtime IST1.
+13. **C19-13** — Deliver timer-driven CPL3 validation on a 64 KiB bootstrap IST1 with a bottom canary, then install a separate canary-protected 64 KiB permanent-runtime IST1.
 14. **C19-14** — Preempt non-cooperative permanent CPL3 code and return safely to the kernel scheduler without a userspace yield.
 15. **C19-15** — Bind every executable context to an exact generation-tagged permanent process-table handle and PID.
 16. **C19-16** — Clone the parent descriptor namespace into each real executable process and release it exactly once at termination.
@@ -39,8 +39,8 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 27. **C19-27** — Launch a non-terminating CPL3 spin executable in the background, preempt it repeatedly, signal it, wait for it and reap it.
 28. **C19-28** — Make `spawn PATH [ARGS...]` and executable-only trailing `&` create real retained userspace contexts rather than diagnostic records.
 29. **C19-29** — Unmap every user page, release every page-table frame, restore the kernel CR3 and report zero live executable contexts at shutdown.
-30. **C19-30** — Expand the canonical bidirectional COM1 session to 37 commands covering real `run`, `exec`, sleep, fault, pipe, preemption, kill, wait and cleanup.
-31. **C19-31** ? Remove canned network answers, retain the initialized e1000e owner for real bounded ICMP echo and DNS A queries when present, and report explicit unavailability when booted without the NIC.
+30. **C19-30** — Expand the canonical bidirectional COM1 session to 39 commands covering real `run`, `exec`, sleep, fault, pipe, preemption, default forced kill, blocking wait and cleanup.
+31. **C19-31** — Remove canned network answers, retain the initialized e1000e owner for real bounded ICMP echo and DNS A queries when present, and report explicit unavailability when booted without the NIC.
 32. **C19-32** — Add a portable source-contract verifier that rejects pseudo-job launchers, fabricated crash paths, canned network results and missing cleanup gates.
 
 ## Permanent executable model
@@ -146,17 +146,19 @@ dns: unavailable: e1000e was not initialized for this boot
 ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes
 ```
 
+The canonical harness also proves a sleeping spawned child completes under a genuinely blocking shell `wait`, then proves default `kill PID` performs an explicit forced signal-9 termination before one-time reap.
+
 The canonical harness scopes its forbidden-fixture scan to output after `ZigOs persistent runtime online`, so deterministic boot codec tests may still use documentation addresses while the permanent shell is forbidden from leaking `192.0.2.42`, `deterministic-QEMU-path` or a fabricated reply.
 
 ## Complete runtime result
 
-The canonical COM1 harness sends 37 commands and requires zero failures. One representative run reported:
+The canonical COM1 harness sends 39 commands and requires zero failures. One representative run reported:
 
 ```text
-ZigOs persistent runtime shutdown: commands 37 failed 0 ticks 607 idle-halts 561 service-passes 607
-ZigOs persistent processes: live 2 created 11 reaped 9 switches 110 signals 1 faults 1
-ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/29/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
-ZigOs permanent userspace: arena 256 used 0 peak 16 contexts 0 launches/exits/faults 6/4/1 preemptions/blocking/syscalls 43/2/15 reclaimed 48 clean yes
+ZigOs persistent runtime shutdown: commands 39 failed 0 ticks 878 idle-halts 830 service-passes 878
+ZigOs persistent processes: live 2 created 12 reaped 10 switches 112 signals 1 faults 1
+ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/32/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
+ZigOs permanent userspace: arena 256 used 0 peak 16 contexts 0 launches/exits/faults 7/5/1 preemptions/blocking/syscalls 42/3/19 reclaimed 56 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 ```
 

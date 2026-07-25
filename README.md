@@ -16,9 +16,9 @@ The release adds 32 verified goals to the inherited 465 x86-64 goals, reaching *
 ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes
 ```
 
-The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap.
+The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, pinned Zig tests, source contract, live-network runtime and offline runtime. Hosted CI has not been run in this working session.
+Local Windows validation is complete for the canonical build, all 33 isolated tests, source contract, live-network runtime and offline runtime. The required hosted workflow includes those gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -77,14 +77,14 @@ Run the bidirectional COM1 session:
 .\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 ```
 
-Each harness run boots the finished EFI image, waits for the permanent prompt and drives 37 commands. It preserves the previous navigation, mutation, redirection, parser, descriptor, device, fsck, sync and history coverage, then additionally requires:
+Each harness run boots the finished EFI image, waits for the permanent prompt and drives 39 commands. It preserves the previous navigation, mutation, redirection, parser, descriptor, device, fsck, sync and history coverage, then additionally requires:
 
 - `run` and `exec` to enter VFS-loaded CPL3 code;
 - a real hardware-tick sleep and saved-context resume;
 - a genuine vector-14 page fault with CR2 `0x8000180000`;
 - a real CPL3 reader block and separate CPL3 writer wakeup;
 - non-cooperative timer preemption of a background spin process;
-- signal, wait, reap, descriptor and frame cleanup;
+- a genuinely blocking shell `wait` over a sleeping CPL3 child, default forced `kill` through signal 9, one-time reap, descriptor cleanup and frame cleanup;
 - real `10.0.2.2` ICMP and `localhost` DNS results in the network profile;
 - explicit unavailable responses in the offline profile;
 - absence of the former canned DNS and ping strings in permanent-runtime output.
@@ -92,10 +92,10 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 A representative run reports:
 
 ```text
-ZigOs persistent runtime shutdown: commands 37 failed 0 ticks 607 idle-halts 561 service-passes 607
-ZigOs persistent processes: live 2 created 11 reaped 9 switches 110 signals 1 faults 1
-ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/29/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
-ZigOs permanent userspace: arena 256 used 0 peak 16 contexts 0 launches/exits/faults 6/4/1 preemptions/blocking/syscalls 43/2/15 reclaimed 48 clean yes
+ZigOs persistent runtime shutdown: commands 39 failed 0 ticks 878 idle-halts 830 service-passes 878
+ZigOs persistent processes: live 2 created 12 reaped 10 switches 112 signals 1 faults 1
+ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/32/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
+ZigOs permanent userspace: arena 256 used 0 peak 16 contexts 0 launches/exits/faults 7/5/1 preemptions/blocking/syscalls 42/3/19 reclaimed 56 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 ```
 
@@ -299,11 +299,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    2,819,584 bytes
-SHA-256: E4736349B960AD665C44878CD7F27D246E719AE0AE7E8B42A55F4BD1332F0953
+Size:    2,820,608 bytes
+SHA-256: 24C450E9F1BA1ED2D008982B59D2AF155B27DA043AE13A05E330F22ACCE976C6
 ```
 
-This identity is from the locally validated Windows build after the IST1 and retained-network fixes. Cross-platform byte-identity remains for hosted CI to confirm.
+This identity is from the locally validated Windows build after the runtime correctness remediation. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
@@ -322,7 +322,10 @@ Network-enabled hosted-stable profile:
 Persistent post-boot runtime:
 
 ```powershell
-.\scripts\test-runtime.ps1 -TimeoutSeconds 150
+.\scripts\test-runtime.ps1 -TimeoutSeconds 180
+
+# Required live-network permanent-shell profile
+.\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 ```
 
 Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `-LegacyAhci`, `-HighApicId`, `-SparseApicIds`, `-NoX2Apic`, `-NoGraphics`, `-NoUsbKeyboard` and `-UsbMouseOnly`.
@@ -331,8 +334,9 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 29 isolated tests, x86-64 UEFI build, portable PE verification and artifact upload.
-- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, persistent COM1 runtime, legacy i686 build and two-boot persistence regression. Broader SMP, graphics and USB combinations remain extended local gates rather than being conflated with the hosted network proof.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 33 isolated tests, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, both offline and live-network 39-command permanent COM1 sessions, legacy i686 build and two-boot persistence regression.
+- **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 
 A green badge therefore represents substantially more than the former reduced single-boot profile.
 
@@ -350,6 +354,7 @@ docs/CAPSTONE-19.0.md            exact permanent-userspace release contract
 docs/CAPSTONE-18.0.md            inherited descriptor release contract
 docs/CAPSTONE-17.0.md            inherited permanent-runtime contract
 docs/ROADMAP-500.md              500-goal general-OS program
+docs/PRIORITY-REMEDIATION.md     audit disposition and tier plan
 docs/ROADMAP.md                  historical milestone record
 
 scripts/build-assets.py           portable generated-asset pipeline

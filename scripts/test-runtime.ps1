@@ -182,11 +182,13 @@ try {
         'exec /bin/sleep.elf',
         'crash',
         'pipex',
+        'spawn /bin/sleep.elf',
+        'wait 8',
         'spawn /bin/spin.elf',
         'ps',
         'jobs',
-        'kill 8 9',
-        'wait 8',
+        'kill 9',
+        'wait 9',
         'devices',
         'ifconfig',
         $pingCommand,
@@ -203,7 +205,7 @@ try {
     )
     foreach ($command in $commands) {
         Send-SerialLine $command
-        if ($command -like 'sleep *' -or $command -like 'exec *' -or $command -eq 'pipex' -or ($Network -and ($command -like 'ping *' -or $command -like 'dns *'))) { Start-Sleep -Milliseconds 600; Read-SerialAvailable }
+        if ($command -like 'sleep *' -or $command -like 'exec *' -or $command -eq 'pipex' -or $command -like 'wait *' -or ($Network -and ($command -like 'ping *' -or $command -like 'dns *'))) { Start-Sleep -Milliseconds 600; Read-SerialAvailable }
     }
 
     $shutdownObserved = $false
@@ -243,28 +245,30 @@ try {
         'crash: contained genuine CPL3 exception in PID 5 vector 14 CR2 0x8000180000',
         'PIPE-CPL',
         'pipex: real CPL3 reader blocked; real CPL3 writer woke it; payload PIPE-CPL; pipe reclaimed',
-        '[8] CPL3 started /bin/spin.elf',
+        '[8] CPL3 started /bin/sleep.elf',
+        '[9] CPL3 started /bin/spin.elf',
         'PID PPID STATE',
-        '[8] runnable /bin/spin.elf',
-        'signal 9 sent to real PID 8 state zombie',
-        'PID 8 status 0x89 state zombie',
+        'PID 8 status 0x7 state zombie',
+        '[9] runnable /bin/spin.elf',
+        'forced termination signal 9 sent to real PID 9 state zombie',
+        'PID 9 status 0x89 state zombie',
         'serial COM1 online',
         'fsck ramfs: clean',
         'sync complete:',
         'fdtest: descriptors 3 open 3 pipes 0 shared-offset yes clone yes cloexec yes read-block yes write-block yes eof yes broken-pipe yes ring yes clean yes',
-        'fdtest counters: dup 2 inherited 29 cloexec 1 blocked 2/1 wakeups 2/1',
+        'fdtest counters: dup 2 inherited 32 cloexec 1 blocked 2/1 wakeups 2/1',
         'FD KIND       MODE OFD      REFS FLAGS OFFSET/BUFFERED',
         '0 terminal',
         '1 terminal',
         '2 terminal',
-        'ZigOs persistent runtime shutdown: commands 37 failed 0',
+        'ZigOs persistent runtime shutdown: commands 39 failed 0',
         'ZigOs persistent VFS:',
         'ZigOs persistent processes:',
         'faults 1',
-        'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/29/1 blocked 2/1 wakeups 2/1',
+        'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/32/1 blocked 2/1 wakeups 2/1',
         'broken 1 clean yes',
         'ZigOs permanent userspace: arena 256 used 0',
-        'contexts 0 launches/exits/faults 6/4/1',
+        'contexts 0 launches/exits/faults 7/5/1',
         'clean yes',
         'ZigOs x86-64 Capstone 18 verified: goals 0x000001D1',
         'ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes'

@@ -159,14 +159,11 @@ def main() -> int:
         process_elf,
         process_exec_elf,
         *runtime_outputs,
-        cpu_object,
         trampoline,
         *embedded.keys(),
     ]
     manifest = {
-        "schema": 1,
-        "python": sys.version.split()[0],
-        "nasm": nasm,
+        "schema": 2,
         "outputs": {
             str(path.relative_to(root)).replace("\\", "/"): {
                 "bytes": path.stat().st_size,

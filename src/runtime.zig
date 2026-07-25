@@ -166,6 +166,7 @@ const State = struct {
     filesystem_checks: u64 = 0,
     last_serviced_tick: u64 = 0,
     shell_sleeping: bool = false,
+    shell_waiting: bool = false,
     shutdown_requested: bool = false,
     prompt_visible: bool = false,
     ignore_next_lf: bool = false,
@@ -235,6 +236,7 @@ fn initialize(configuration: Configuration) !void {
     state.filesystem_checks = 0;
     state.last_serviced_tick = 0;
     state.shell_sleeping = false;
+    state.shell_waiting = false;
     state.shutdown_requested = false;
     state.prompt_visible = false;
     state.ignore_next_lf = false;
@@ -356,7 +358,7 @@ fn serviceJobs(tick: u64) void {
             emit(@errorName(err));
             emit("\r\n");
         };
-        if (!state.shell_sleeping) state.processes.setRunning(state.shell_handle) catch {};
+        if (!state.shell_sleeping and !state.shell_waiting) state.processes.setRunning(state.shell_handle) catch {};
     }
 }
 
@@ -529,8 +531,8 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
 
 fn commandHelp(output: *Output) void {
     output.line("Filesystem: pwd cd ls cat echo touch mkdir rm rmdir mv write append stat chmod mount df fds fdtest pipex sync fsck");
-    output.line("Processes: ps jobs spawn kill wait crash sleep uptime elf exec run (real VFS-loaded CPL3)");
-    output.line("Network status: devices ifconfig netstat routes arp; ping/dns explicitly report unavailable until packet I/O is retained");
+    output.line("Processes: ps jobs spawn kill wait crash sleep uptime elf exec run (real VFS-loaded CPL3; kill defaults to forced signal 9)");
+    output.line("Network: ping and dns use retained e1000e packet I/O when available; offline boots report explicit unavailability");
     output.line("Shell: env export unset history clear uname hash hexdump grep wc head shutdown");
     output.line("Grammar: quotes, escapes, $VARS, comments, bounded shell pipelines, <, >, >>; trailing & is executable-only.");
 }
@@ -1245,11 +1247,12 @@ fn commandKill(stage: *const runtime_command.Stage, output: *Output) void {
     if (stage.count < 2 or stage.count > 3) return usage("kill PID [SIGNAL]", output);
     const pid = parseU32(stage.arguments[1].slice()) orelse return usage("kill PID [SIGNAL]", output);
     if (pid == 1 or pid == 2) return output.line("kill: refusing to terminate init or the active shell");
-    const signal: u8 = if (stage.count == 3) std.fmt.parseInt(u8, stage.arguments[2].slice(), 10) catch return usage("kill PID [SIGNAL]", output) else 15;
+    const signal: u8 = if (stage.count == 3) std.fmt.parseInt(u8, stage.arguments[2].slice(), 10) catch return usage("kill PID [SIGNAL]", output) else 9;
     const handle = state.processes.handleForPid(pid) catch |err| return shellError("kill", err, output);
     state.processes.sendSignal(state.shell_handle, handle, signal) catch |err| return shellError("kill", err, output);
     const process = state.processes.get(handle) catch return;
     if (process.terminal()) runtime_user.finalize(handle) catch |err| return shellError("kill cleanup", err, output);
+    if (stage.count == 2) output.write("forced termination ");
     output.write("signal ");
     output.decimal(signal);
     output.write(" sent to real PID ");
@@ -1262,14 +1265,31 @@ fn commandWait(stage: *const runtime_command.Stage, output: *Output) void {
     if (stage.count != 2) return usage("wait PID", output);
     const pid = parseU32(stage.arguments[1].slice()) orelse return usage("wait PID", output);
     const handle = state.processes.handleForPid(pid) catch |err| return shellError("wait", err, output);
-    const process = state.processes.get(handle) catch |err| return shellError("wait", err, output);
-    if (!process.terminal()) return output.line("wait: process is still running");
+    var process = state.processes.get(handle) catch |err| return shellError("wait", err, output);
+    const shell = state.processes.get(state.shell_handle) catch |err| return shellError("wait", err, output);
+    if (process.ppid != shell.pid) return shellError("wait", runtime_process.Error.NotChild, output);
+
+    if (!process.terminal()) {
+        state.shell_waiting = true;
+        defer {
+            state.shell_waiting = false;
+            state.processes.setRunning(state.shell_handle) catch {};
+        }
+        _ = state.processes.wait(state.shell_handle, handle, false) catch |err| return shellError("wait", err, output);
+        while (true) {
+            process = state.processes.get(handle) catch |err| return shellError("wait", err, output);
+            if (process.terminal()) break;
+            serviceRuntime();
+            zigos_wait_for_interrupt();
+        }
+    }
+
     runtime_user.finalize(handle) catch |err| return shellError("wait cleanup", err, output);
     var program_output: [4096]u8 = undefined;
     const output_count = runtime_user.takeOutput(handle, &program_output);
     if (output_count != 0) output.write(program_output[0..output_count]);
     const status = state.processes.wait(state.shell_handle, handle, true) catch |err| return shellError("wait", err, output);
-    if (status == null) return output.line("wait: process is still running");
+    if (status == null) return shellError("wait", runtime_process.Error.StillRunning, output);
     output.write("PID ");
     output.decimal(status.?.pid);
     output.write(" status 0x");

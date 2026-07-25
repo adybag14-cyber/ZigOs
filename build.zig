@@ -93,6 +93,9 @@ pub fn build(b: *std.Build) void {
     inline for (.{
         "src/runtime_fd.zig",
         "src/runtime_command.zig",
+        "src/runtime_process.zig",
+        "src/runtime_vfs.zig",
+        "src/runtime_abi.zig",
     }) |source_path| {
         const tests = b.addTest(.{
             .root_module = b.createModule(.{

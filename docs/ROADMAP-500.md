@@ -1,10 +1,10 @@
 # ZigOs 500-goal operating-system roadmap
 
-This roadmap converts the broad runtime, process, filesystem, userland, networking, build, testing, hardware and security gaps into 500 individually trackable engineering goals. A checked item means the repository contains an implementation and a corresponding release or test contract; it does not imply production readiness.
+This roadmap converts the broad runtime, process, filesystem, userland, networking, build, testing, hardware and security gaps into 500 individually trackable engineering goals. A checked item means the repository contains the claimed implementation and at least one executable test or release contract; it does not imply production readiness. Each completed goal should also state whether its evidence is source-only, isolated-unit, QEMU integration or required hosted CI. Bounded Capstone fixtures do not automatically satisfy a general-runtime goal.
 
-**Status at Capstone 19.0:** 113 complete, 387 open.
+**Status after the Capstone 19 correctness/CI remediation:** 119 complete, 381 open.
 
-Capstone 19 additionally completes **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. Its 32-entry release contract is more granular than this roadmap, so the two accounting systems are intentionally separate.
+Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. Its release contract is more granular than this roadmap, so the two accounting systems remain separate.
 
 ## Completed in Capstone 17
 
@@ -87,7 +87,7 @@ Capstone 19 additionally completes **G097, G098, G099, G105, G106, G111, G123, G
 - [x] **G077** — Add checksum-pinned Linux Zig bootstrap support for x86-64 and AArch64 hosts.
 - [x] **G078** — Reduce the Windows PowerShell build script to a wrapper over zig build.
 - [x] **G079** — Add a POSIX shell wrapper and conventional Makefile targets.
-- [x] **G080** — Produce byte-identical Windows and Linux UEFI images from the pinned toolchain.
+- [x] **G080** — Produce byte-identical Windows and Linux UEFI images from the pinned toolchain; G423 enforces the identity in hosted CI.
 - [x] **G081** — Expose zig build test as a conventional isolated-test target.
 - [x] **G082** — Pass five independent VFS std.testing declarations.
 - [x] **G083** — Pass eight independent process-table std.testing declarations.
@@ -114,14 +114,14 @@ Capstone 19 additionally completes **G097, G098, G099, G105, G106, G111, G123, G
 - [ ] **G101** — Allocate flexible multi-page user stacks rather than one fixed stack page.
 - [ ] **G102** — Load ELF64 executables directly from a mounted storage backend.
 - [ ] **G103** — Support arbitrary valid ELF64 program-header counts within a documented bound.
-- [ ] **G104** — Map multiple non-overlapping PT_LOAD segments per executable.
+- [x] **G104** — Map up to four validated non-overlapping PT_LOAD segments per executable, with transactional rejection of overlap and aliasing.
 - [x] **G105** — Reject overlapping or aliasing ELF64 load segments transactionally.
 - [x] **G106** — Validate ELF64 file, virtual-address and alignment constraints completely.
 - [ ] **G107** — Support ET_DYN position-independent executables with a selected load base.
 - [ ] **G108** — Construct a System V-compatible initial argv stack.
 - [ ] **G109** — Construct a bounded envp vector in new process address spaces.
 - [ ] **G110** — Provide a minimal auxiliary-vector contract to userspace.
-- [x] **G111** — Inherit and validate current working directories on spawn and fork.
+- [x] **G111** — Inherit and validate current working directories for permanent-runtime spawn; the bounded Capstone fork fixture separately preserves its working directory, while general persistent fork remains G115.
 - [x] **G112** — Provide per-process numeric file-descriptor namespaces.
 - [ ] **G113** — Replace the calling process image during exec instead of creating a pseudo job.
 - [ ] **G114** — Implement a real spawn syscall that enters storage-loaded CPL3 code.
@@ -359,7 +359,7 @@ Capstone 19 additionally completes **G097, G098, G099, G105, G106, G111, G123, G
 - [ ] **G337** — Rebind DHCP leases after T2.
 - [ ] **G338** — Expire addresses when lease renewal fails.
 - [ ] **G339** — Handle DHCP NAK and server changes.
-- [x] **G340** ? Persist interface configuration state outside one test sequence.
+- [x] **G340** — Persist interface configuration state outside one test sequence.
 - [ ] **G341** — Maintain an IPv4 route table.
 - [ ] **G342** — Select the longest-prefix matching route.
 - [ ] **G343** — Support multiple interfaces and per-route gateways.
@@ -424,9 +424,9 @@ Capstone 19 additionally completes **G097, G098, G099, G105, G106, G111, G123, G
 
 - [ ] **G397** — Add isolated tests for the ELF64 parser.
 - [ ] **G398** — Add isolated tests for virtual-memory region splitting and merging.
-- [ ] **G399** — Add isolated tests for syscall argument validation.
-- [ ] **G400** — Add isolated tests for signal state transitions.
-- [ ] **G401** — Add isolated tests for pipe blocking and wakeup.
+- [x] **G399** — Add isolated hostile tests for descriptor, open-flag and mode argument validation before ABI narrowing.
+- [x] **G400** — Run the existing isolated signal permission and state-transition tests through the canonical build graph.
+- [x] **G401** — Run the existing isolated pipe blocking, wakeup, EOF and broken-pipe tests through the canonical build graph.
 - [ ] **G402** — Add isolated tests for socket state transitions.
 - [ ] **G403** — Add isolated tests for TCP sequence arithmetic.
 - [ ] **G404** — Add isolated tests for TCP retransmission timers.
@@ -444,11 +444,11 @@ Capstone 19 additionally completes **G097, G098, G099, G105, G106, G111, G123, G
 - [ ] **G416** — Run process create/exit/reap stress under timer preemption.
 - [ ] **G417** — Run filesystem mutation stress across simulated power failures.
 - [ ] **G418** — Run concurrent network connections with injected packet loss.
-- [ ] **G419** — Publish the full network-enabled QEMU profile as a required CI gate.
+- [x] **G419** — Require both the network-enabled boot profile and the 39-command live-network permanent-shell profile in hosted CI.
 - [ ] **G420** — Publish an SMP-enabled QEMU profile as a required CI gate.
 - [ ] **G421** — Publish a framebuffer and USB-keyboard profile as a required CI gate.
 - [ ] **G422** — Publish NVMe and AHCI fallback profiles as required CI gates.
-- [ ] **G423** — Compare Windows and Linux artifact hashes in one hosted workflow.
+- [x] **G423** — Download the Windows and Linux artifact sets into one required hosted job and compare every path byte-for-byte.
 - [ ] **G424** — Archive serial, debugcon and QEMU traces on integration failure.
 - [ ] **G425** — Measure and fail on unexpected boot-time or runtime regressions.
 - [ ] **G426** — Run a scheduled extended matrix in addition to pull-request gates.

@@ -69,9 +69,13 @@ jobs:
         shell: pwsh
         run: .\scripts\test-qemu.ps1 -Network -NoHpet -NoPs2 -CpuCount 1 -NoUsbKeyboard -NoGraphics -TimeoutSeconds 180
 
-      - name: Drive 37-command permanent-userspace COM1 runtime
+      - name: Drive 39-command permanent-userspace COM1 runtime (offline)
         shell: pwsh
         run: .\scripts\test-runtime.ps1 -TimeoutSeconds 180
+
+      - name: Drive 39-command permanent-userspace COM1 runtime (live network)
+        shell: pwsh
+        run: .\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 
       - name: Build legacy i686 kernel
         shell: pwsh
@@ -103,3 +107,33 @@ jobs:
             zig-out/legacy/i686/FAT12VOL.BIN
             zig-out/legacy/i686/ZIGOS386.IMG
           if-no-files-found: error
+
+  reproducibility:
+    name: Cross-platform artifact identity gate
+    runs-on: ubuntu-latest
+    needs: [portable-linux, integration-windows]
+
+    steps:
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: ZigOs-BOOTX64-linux-build
+          path: compare/linux
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: ZigOs-BOOTX64-windows-build
+          path: compare/windows
+
+      - name: Require byte-identical output sets
+        shell: bash
+        run: |
+          set -euo pipefail
+          find compare/linux -type f -printf '%P\n' | LC_ALL=C sort > linux-files.txt
+          find compare/windows -type f -printf '%P\n' | LC_ALL=C sort > windows-files.txt
+          diff -u linux-files.txt windows-files.txt
+          while IFS= read -r relative; do
+            cmp -- "compare/linux/$relative" "compare/windows/$relative"
+            sha256sum "compare/linux/$relative"
+          done < linux-files.txt
