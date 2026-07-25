@@ -4,6 +4,7 @@ const interrupt_context = @import("interrupt_context.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
 const user_process = @import("user_process.zig");
+const runtime_user = @import("runtime_user.zig");
 const user_service = @import("user_service.zig");
 
 const cc = std.os.uefi.cc;
@@ -115,6 +116,7 @@ export fn zigos_user_syscall_handler(
 ) callconv(cc) u64 {
     if (user_process.isActive()) return user_process.handleSyscall(frame, fx_state);
     if (user_service.isActive()) return user_service.handleSyscall(frame, fx_state);
+    if (runtime_user.isActive()) return runtime_user.handleSyscall(frame, fx_state);
     syscall_count +%= 1;
 
     if ((frame.cs & 3) != 3 or frame.cs != descriptor_tables.user_code_selector) {

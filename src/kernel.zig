@@ -206,6 +206,9 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     testUserMode(&frame_allocator);
     testElf64UserService(&frame_allocator);
     testElf64ProcessRuntime(&frame_allocator, timer_setup.result.ticks_per_second);
+    if (!descriptor_tables.bootstrapInterruptStackIntact()) {
+        descriptorTableFailure("bootstrap IST1 stack canary was overwritten during CPL3 validation");
+    }
 
     if (graphical_console) |console| {
         const report = console.report();
@@ -250,6 +253,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
 
     debugWrite("ZigOs boot sequence complete: kernel foundations and hardware probes passed.\r\n");
     runtime.run(.{
+        .allocator = &frame_allocator,
         .ticks_per_second = timer_setup.result.ticks_per_second,
         .network_ready = network_ready,
         .usb_keyboard_ready = usb_keyboard_ready,
@@ -1506,7 +1510,22 @@ fn inspectE1000e(
         allocator,
         target_apic_id,
         continuous_counter,
-    ) orelse networkFailure("reset, DMA rings, MSI-X, DHCP, ARP, ICMP, UDP, TCP, or TFTP validation failed");
+    ) orelse {
+        debugWrite("e1000e initialization stopped at stage ");
+        debugWrite(@tagName(e1000e.initializationStage()));
+        debugWrite(" verifier ");
+        debugWriteU64Decimal(e1000e.initializationVerifier());
+        debugWrite(" substage ");
+        debugWriteU64Decimal(e1000e.initializationSubstage());
+        const details = e1000e.initializationDetails();
+        debugWrite(" details ");
+        for (details, 0..) |detail, index| {
+            if (index != 0) debugWrite("/");
+            debugWriteU64Decimal(detail);
+        }
+        debugWrite("\r\n");
+        networkFailure("reset, DMA rings, MSI-X, DHCP, ARP, ICMP, UDP, TCP, or TFTP validation failed");
+    };
 
     debugWrite("e1000e rings active: RX 0x");
     debugWriteHex64(network.rx_ring_address);
@@ -11490,7 +11509,7 @@ fn inspectE1000e(
     debugWriteU64Decimal(network.tcp_foundation.transmit_frame_length);
     debugWrite(" advanced ");
     debugWrite(if (network.tcp_foundation.identification_advanced) "yes" else "no");
-    debugWrite(" live RST-ACK frame/descriptor/cursor ");
+    debugWrite(" fixture RST-ACK frame/descriptor/cursor ");
     debugWriteU64Decimal(network.tcp_foundation.hardware_reply_frame_length);
     debugWrite("/");
     debugWriteU64Decimal(network.tcp_foundation.hardware_reply_descriptor);

@@ -148,14 +148,56 @@ pub fn mapIdentityMmio(
 }
 
 pub fn isIdentityRangeMapped(requested_base: u64, requested_size: u64) bool {
-    if (active_pml4_address == 0 or requested_size == 0) return false;
+    if (active_pml4_address == 0) return false;
+    return isIdentityRangeMappedInRoot(active_pml4_address, requested_base, requested_size);
+}
+
+pub const KernelIdentityPreparation = struct {
+    current_before: usize,
+    current_after: usize,
+    tracked_before: usize,
+    kernel_root: usize,
+    switched: bool,
+    kernel_mapped: bool,
+    ready: bool,
+};
+
+pub fn prepareKernelIdentityRange(requested_base: u64, requested_size: u64) KernelIdentityPreparation {
+    var result = KernelIdentityPreparation{
+        .current_before = currentCr3Address(),
+        .current_after = 0,
+        .tracked_before = active_pml4_address,
+        .kernel_root = kernel_pml4_address,
+        .switched = false,
+        .kernel_mapped = false,
+        .ready = false,
+    };
+    if (kernel_pml4_address == 0 or requested_size == 0) return result;
+
+    if (result.current_before != kernel_pml4_address or active_pml4_address != kernel_pml4_address) {
+        result.switched = true;
+        if (!activateKernelAddressSpace()) {
+            result.current_after = currentCr3Address();
+            return result;
+        }
+    }
+
+    result.current_after = currentCr3Address();
+    if (result.current_after != kernel_pml4_address or active_pml4_address != kernel_pml4_address) return result;
+    result.kernel_mapped = isIdentityRangeMappedInRoot(kernel_pml4_address, requested_base, requested_size);
+    result.ready = result.kernel_mapped;
+    return result;
+}
+
+fn isIdentityRangeMappedInRoot(pml4_address: usize, requested_base: u64, requested_size: u64) bool {
+    if (pml4_address == 0 or requested_size == 0) return false;
     if (requested_base > std.math.maxInt(u64) - requested_size) return false;
     const requested_end = requested_base + requested_size;
     const mapped_base = alignBackward(requested_base, large_page_size);
     const mapped_end = alignForward(requested_end, large_page_size) orelse return false;
     if (mapped_end <= mapped_base) return false;
 
-    const pml4 = tableAt(active_pml4_address);
+    const pml4 = tableAt(pml4_address);
     var physical = mapped_base;
     while (physical < mapped_end) : (physical += large_page_size) {
         const pml4_index: usize = @intCast((physical >> 39) & 0x1FF);
@@ -163,10 +205,10 @@ pub fn isIdentityRangeMapped(requested_base: u64, requested_size: u64) bool {
         const directory_index: usize = @intCast((physical >> 21) & 0x1FF);
 
         const pml4_entry = pml4[pml4_index];
-        if ((pml4_entry & 1) == 0 or (pml4_entry & large_page_flag) != 0) return false;
+        if ((pml4_entry & present_flag) == 0 or (pml4_entry & large_page_flag) != 0) return false;
         const pdpt = tableAt(@intCast(pml4_entry & page_table_address_mask));
         const pdpt_entry = pdpt[pdpt_index];
-        if ((pdpt_entry & 1) == 0 or (pdpt_entry & large_page_flag) != 0) return false;
+        if ((pdpt_entry & present_flag) == 0 or (pdpt_entry & large_page_flag) != 0) return false;
         const directory = tableAt(@intCast(pdpt_entry & page_table_address_mask));
         const expected = physical | present_writable_large;
         if ((directory[directory_index] & ~hardware_accessed_dirty_flags) != expected) return false;
@@ -355,16 +397,31 @@ pub const UserAddressSpace = struct {
 };
 
 pub fn createUserAddressSpace(allocator: *memory.FrameAllocator) ?UserAddressSpace {
-    if (kernel_pml4_address == 0 or !no_execute_enabled) return null;
-    const pml4_address = allocator.allocateBelow(memory.four_gib) orelse return null;
-    const pdpt_address = allocator.allocateBelow(memory.four_gib) orelse return null;
-    const directory_address = allocator.allocateBelow(memory.four_gib) orelse return null;
-    const table_address = allocator.allocateBelow(memory.four_gib) orelse return null;
-    clearTable(pml4_address);
-    clearTable(pdpt_address);
-    clearTable(directory_address);
-    clearTable(table_address);
+    const frames = [4]usize{
+        allocator.allocateBelow(memory.four_gib) orelse return null,
+        allocator.allocateBelow(memory.four_gib) orelse return null,
+        allocator.allocateBelow(memory.four_gib) orelse return null,
+        allocator.allocateBelow(memory.four_gib) orelse return null,
+    };
+    return createUserAddressSpaceFromFrames(frames);
+}
 
+/// Construct a private userspace hierarchy from caller-owned frames. This is
+/// used by the permanent runtime's bounded recyclable frame arena; ownership of
+/// all four frames remains with the caller and they may be recycled only after
+/// every user mapping has been removed and the kernel CR3 is active.
+pub fn createUserAddressSpaceFromFrames(frames: [4]usize) ?UserAddressSpace {
+    if (kernel_pml4_address == 0 or !no_execute_enabled) return null;
+    for (frames, 0..) |frame, index| {
+        if (frame == 0 or frame >= memory.four_gib or (frame & 0xFFF) != 0) return null;
+        for (frames[0..index]) |previous| if (previous == frame) return null;
+        clearTable(frame);
+    }
+
+    const pml4_address = frames[0];
+    const pdpt_address = frames[1];
+    const directory_address = frames[2];
+    const table_address = frames[3];
     const kernel_root = tableAt(kernel_pml4_address);
     const root = tableAt(pml4_address);
     for (0..entries_per_table) |index| root[index] = kernel_root[index];
@@ -530,6 +587,10 @@ pub fn activePml4Address() ?usize {
 
 pub fn currentCr3() u64 {
     return zigos_read_cr3();
+}
+
+pub fn currentCr3Address() usize {
+    return @intCast(zigos_read_cr3() & page_table_address_mask);
 }
 
 const EnsuredTable = struct {

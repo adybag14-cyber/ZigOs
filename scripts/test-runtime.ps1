@@ -15,6 +15,8 @@ $qemuStdout = Join-Path $repoRoot 'runtime-qemu-stdout.log'
 $qemuStderr = Join-Path $repoRoot 'runtime-qemu-stderr.log'
 $nvmeImage = Join-Path $buildDir 'runtime-nvme.img'
 $nvmeMetadata = Join-Path $buildDir 'runtime-nvme.json'
+$tftpRoot = Join-Path $buildDir 'runtime-tftp-root'
+$tftpFile = Join-Path $tftpRoot 'zigos.bin'
 $mutex = [System.Threading.Mutex]::new($false, 'Local\ZigOsQemuTestHarness')
 $acquired = $false
 $process = $null
@@ -23,10 +25,9 @@ try {
     try { $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(30)) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
     if (-not $acquired) { throw 'The shared ZigOs QEMU harness remained busy for 30 seconds.' }
 
-    if (-not (Test-Path $efiImage)) {
-        & (Join-Path $PSScriptRoot 'build.ps1') -Clean
-        if ($LASTEXITCODE -ne 0) { throw 'The x86-64 build failed.' }
-    }
+    & (Join-Path $PSScriptRoot 'build.ps1')
+    if ($LASTEXITCODE -ne 0) { throw 'The x86-64 build failed.' }
+    if (-not (Test-Path $efiImage)) { throw 'The current x86-64 build produced no installed EFI image.' }
 
     $qemuCandidates = @(
         (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
@@ -48,6 +49,18 @@ try {
     if (-not $codeSource -or -not $varsSource) { throw 'Compatible split OVMF images were not found.' }
 
     New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+    if ($Network) {
+        New-Item -ItemType Directory -Force -Path $tftpRoot | Out-Null
+        $tftpBytes = [byte[]]::new(2304)
+        for ($index = 0; $index -lt $tftpBytes.Length; $index++) {
+            $tftpBytes[$index] = [byte](($index * 37 + 11) -band 0xFF)
+        }
+        [System.IO.File]::WriteAllBytes($tftpFile, $tftpBytes)
+        $tftpHash = (Get-FileHash -Path $tftpFile -Algorithm SHA256).Hash
+        if ($tftpHash -ne '03652909284ACDFA888C1815EFC062536C671574EB7761413F6E2F2385F5F822') {
+            throw "The runtime TFTP fixture hash was invalid: $tftpHash"
+        }
+    }
     $codeImage = Join-Path $buildDir 'runtime-ovmf-code.fd'
     $varsImage = Join-Path $buildDir 'runtime-ovmf-vars.fd'
     Copy-Item $codeSource $codeImage -Force
@@ -66,6 +79,7 @@ try {
     $nvmePath = $nvmeImage.Replace('\', '/')
     $codePath = $codeImage.Replace('\', '/')
     $varsPath = $varsImage.Replace('\', '/')
+    $tftpPath = $tftpRoot.Replace('\', '/')
     $arguments = @(
         '-machine', 'q35,i8042=off,hpet=off',
         '-m', '256M',
@@ -85,7 +99,7 @@ try {
         '-no-reboot'
     )
     if ($Network) {
-        $arguments += @('-netdev', 'user,id=net0,restrict=on', '-device', 'e1000e,netdev=net0,mac=52:54:00:12:34:56')
+        $arguments += @('-netdev', "user,id=net0,tftp=$tftpPath", '-device', 'e1000e,netdev=net0,mac=52:54:00:12:34:56')
     } else {
         $arguments += @('-net', 'none')
     }
@@ -146,6 +160,8 @@ try {
     }
     if (-not $promptObserved) { throw 'The persistent serial prompt was not observed.' }
 
+    $pingCommand = if ($Network) { 'ping 10.0.2.2' } else { 'ping 192.0.2.1' }
+    $dnsCommand = if ($Network) { 'dns localhost' } else { 'dns example.test' }
     $commands = @(
         'pwd',
         'ls /',
@@ -161,16 +177,23 @@ try {
         'stat note.txt',
         'mount',
         'df',
-        'elf /boot/service-user.elf',
-        'spawn worker 20',
+        'elf /bin/hello.elf',
+        'run /bin/hello.elf one two',
+        'exec /bin/sleep.elf',
+        'crash',
+        'pipex',
+        'spawn /bin/spin.elf',
         'ps',
-        'sleep 25',
         'jobs',
-        'wait 3',
-        'crash bad 14',
-        'wait 4',
+        'kill 8 9',
+        'wait 8',
         'devices',
         'ifconfig',
+        $pingCommand,
+        $dnsCommand,
+        'netstat',
+        'routes',
+        'arp',
         'fsck',
         'sync',
         'history',
@@ -180,14 +203,14 @@ try {
     )
     foreach ($command in $commands) {
         Send-SerialLine $command
-        if ($command -like 'sleep *') { Start-Sleep -Milliseconds 600; Read-SerialAvailable }
+        if ($command -like 'sleep *' -or $command -like 'exec *' -or $command -eq 'pipex' -or ($Network -and ($command -like 'ping *' -or $command -like 'dns *'))) { Start-Sleep -Milliseconds 600; Read-SerialAvailable }
     }
 
     $shutdownObserved = $false
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 50
         $text = Current-SerialText
-        if ($text.Contains('ZigOs x86-64 Capstone 18 verified:')) {
+        if ($text.Contains('ZigOs x86-64 Capstone 19 verified:') -and $text.Contains('network-facades-removed yes cleanup yes')) {
             $shutdownObserved = $true
             break
         }
@@ -209,39 +232,87 @@ try {
         'alpha',
         'kind file size 19',
         'ramfs on / type ramfs (rw)',
-        'ELF64 entry 0x8000100000 segments 2 bytes 10240',
-        '[3] started worker',
+        'ELF64 entry 0x8000000000 segments 2 bytes 12288',
+        'exec: mapped VFS ELF bytes 12288',
+        'hello from VFS-loaded CPL3 ELF64',
+        'exec: PID 3 state zombie status 0x2A',
+        'sleep: before',
+        'sleep: after',
+        'exec: PID 4 state zombie status 0x7',
+        'crash: real page fault follows',
+        'crash: contained genuine CPL3 exception in PID 5 vector 14 CR2 0x8000180000',
+        'PIPE-CPL',
+        'pipex: real CPL3 reader blocked; real CPL3 writer woke it; payload PIPE-CPL; pipe reclaimed',
+        '[8] CPL3 started /bin/spin.elf',
         'PID PPID STATE',
-        'sleep complete',
-        'PID 3 status 0x0 state zombie',
-        'contained fault in PID 4 vector 14',
-        'PID 4 status 0x8000000E state faulted',
+        '[8] runnable /bin/spin.elf',
+        'signal 9 sent to real PID 8 state zombie',
+        'PID 8 status 0x89 state zombie',
         'serial COM1 online',
         'fsck ramfs: clean',
         'sync complete:',
         'fdtest: descriptors 3 open 3 pipes 0 shared-offset yes clone yes cloexec yes read-block yes write-block yes eof yes broken-pipe yes ring yes clean yes',
-        'fdtest counters: dup 2 inherited 7 cloexec 1 blocked 1/1 wakeups',
+        'fdtest counters: dup 2 inherited 29 cloexec 1 blocked 2/1 wakeups 2/1',
         'FD KIND       MODE OFD      REFS FLAGS OFFSET/BUFFERED',
         '0 terminal',
         '1 terminal',
         '2 terminal',
-        'ZigOs persistent runtime shutdown: commands 30 failed 0',
+        'ZigOs persistent runtime shutdown: commands 37 failed 0',
         'ZigOs persistent VFS:',
         'ZigOs persistent processes:',
-        'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/7/1 blocked 1/1 wakeups 1/1',
+        'faults 1',
+        'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/29/1 blocked 2/1 wakeups 2/1',
         'broken 1 clean yes',
-        'loop permanent shell yes navigation yes files yes descriptors yes processes yes network-diagnostics yes explicit-shutdown yes',
-        'ZigOs x86-64 Capstone 18 verified: goals 0x000001D1 new-goals 0x00000020 fd-namespaces yes open-descriptions yes shared-offsets yes duplication yes inheritance yes cloexec yes blocking-pipes yes shell-io yes cleanup yes'
+        'ZigOs permanent userspace: arena 256 used 0',
+        'contexts 0 launches/exits/faults 6/4/1',
+        'clean yes',
+        'ZigOs x86-64 Capstone 18 verified: goals 0x000001D1',
+        'ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes'
     )
+    if ($Network) {
+        $required += @(
+            'serial COM1 online; framebuffer no; USB keyboard no; NVMe yes; AHCI no; e1000e yes',
+            'e1000e0: up mac 52:54:00:12:34:56 ipv4 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 dns 10.0.2.3',
+            'reply from 10.0.2.2: bytes=16',
+            'localhost A 127.0.0.1',
+            'UDP endpoints active/readable/connected',
+            'default via 10.0.2.2 dev e1000e0',
+            '10.0.2.2 at ',
+            'dev e1000e0 retained-from-live-ARP',
+            'ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes',
+            'network-state yes live-network yes canned-results no explicit-shutdown yes'
+        )
+    } else {
+        $required += @(
+            'serial COM1 online; framebuffer no; USB keyboard no; NVMe yes; AHCI no; e1000e no',
+            'ifconfig: unavailable: e1000e was not initialized for this boot',
+            'ping: unavailable: e1000e was not initialized for this boot',
+            'dns: unavailable: e1000e was not initialized for this boot',
+            'netstat: unavailable: e1000e was not initialized for this boot',
+            'routes: unavailable: e1000e was not initialized for this boot',
+            'arp: unavailable: e1000e was not initialized for this boot',
+            'ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes',
+            'network-state yes live-network no canned-results no explicit-shutdown yes'
+        )
+    }
     foreach ($marker in $required) {
         if (-not $serialText.Contains($marker)) { throw "Persistent runtime marker missing: $marker" }
     }
     if ($serialText.Contains('Persistent runtime failure:')) { throw 'The kernel reported a persistent runtime failure.' }
+    if ($serialText.Contains([char]0)) { throw 'The permanent runtime emitted an unexpected NUL byte.' }
+    $runtimeMarker = 'ZigOs persistent runtime online'
+    $runtimeOffset = $serialText.IndexOf($runtimeMarker, [System.StringComparison]::Ordinal)
+    if ($runtimeOffset -lt 0) { throw 'The permanent-runtime output boundary was not observed.' }
+    $runtimeText = $serialText.Substring($runtimeOffset)
+    foreach ($forbidden in @('192.0.2.42', 'deterministic-QEMU-path', 'reply from 192.0.2.1')) {
+        if ($runtimeText.Contains($forbidden)) { throw "Canned network facade leaked into permanent runtime output: $forbidden" }
+    }
     if (-not (Test-Path $debugLog)) { throw 'The persistent runtime produced no debugcon log.' }
     $debugText = Get-Content $debugLog -Raw
     if (-not $debugText.Contains('ZigOs x86-64 Capstone 16 verified:')) { throw 'The inherited Capstone 16 gate did not pass before the runtime.' }
     if (-not $debugText.Contains('ZigOs x86-64 persistent runtime verified:')) { throw 'The runtime shutdown marker was not mirrored to debugcon.' }
-    if (-not $debugText.Contains('ZigOs x86-64 Capstone 18 verified:')) { throw 'The Capstone 18 release marker was not mirrored to debugcon.' }
+    if (-not $debugText.Contains('ZigOs x86-64 Capstone 18 verified:')) { throw 'The inherited Capstone 18 marker was not mirrored to debugcon.' }
+    if (-not $debugText.Contains('ZigOs x86-64 Capstone 19 verified:')) { throw 'The Capstone 19 release marker was not mirrored to debugcon.' }
 
     Write-Host '=== ZigOs persistent COM1 session ==='
     Write-Host $serialText

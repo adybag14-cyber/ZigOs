@@ -368,10 +368,16 @@ pub const Device = struct {
     tx_producer: u16,
     rx_consumer: u16,
     interrupt_target_apic_id: u8,
+    fixture_transport: bool,
     local_mac: [6]u8,
     local_ipv4: [4]u8,
+    subnet_mask: [4]u8,
     gateway_mac: [6]u8,
     gateway_ipv4: [4]u8,
+    dns_server_ipv4: [4]u8,
+    dns_server_advertised: bool,
+    next_icmp_identifier: u16,
+    next_icmp_sequence: u16,
     tx_submissions: u64,
     rx_deliveries: u64,
     last_tx_interrupt_count: u64,
@@ -412,6 +418,20 @@ pub const TxCompletion = struct {
     frame_length: u16,
     interrupt_count: u64,
     interrupt_cause: u32,
+};
+
+pub const IcmpEchoResult = struct {
+    destination_ipv4: [4]u8,
+    identifier: u16,
+    sequence: u16,
+    ttl: u8,
+    payload_length: u16,
+    transmitted_length: u16,
+    received_length: u16,
+    tx_descriptor: u16,
+    rx_descriptor: u16,
+    tx_interrupt_count: u64,
+    rx_interrupt_count: u64,
 };
 
 pub const TcpTransmitOptions = struct {
@@ -6510,7 +6530,53 @@ var tx_ready_mask: u32 = 0;
 var rx_ready_mask: u32 = 0;
 var tx_completion_queue: CompletionQueue = undefined;
 var rx_completion_queue: CompletionQueue = undefined;
+var fixture_rx_frame_storage: [maximum_ethernet_frame_bytes]u8 = @splat(0);
 var active_device_storage: ?Device = null;
+var runtime_completion_polling_enabled: bool = false;
+
+pub const InitializationStage = enum(u8) {
+    idle,
+    reset,
+    rings,
+    msix,
+    dhcp_discover,
+    dhcp_offer,
+    dhcp_request,
+    dhcp_ack,
+    arp,
+    icmp,
+    tftp_request,
+    tftp_stream,
+    tftp_invariants,
+    persistent_queue,
+    software_queue,
+    protocol_dispatch,
+    udp_tftp_dispatch,
+    udp_endpoint_demux,
+    retained_protocol_verifiers,
+    complete,
+};
+
+var initialization_stage: InitializationStage = .idle;
+var initialization_verifier: u16 = 0;
+var initialization_substage: u16 = 0;
+var initialization_details: [4]u64 = @splat(0);
+
+pub fn initializationStage() InitializationStage {
+    return initialization_stage;
+}
+
+pub fn initializationVerifier() u16 {
+    return initialization_verifier;
+}
+
+pub fn initializationSubstage() u16 {
+    return initialization_substage;
+}
+
+pub fn initializationDetails() [4]u64 {
+    return initialization_details;
+}
 extern fn zigos_memory_fence() callconv(cc) void;
 extern fn zigos_cpu_relax() callconv(cc) void;
 extern fn zigos_enable_interrupts() callconv(cc) void;
@@ -6572,6 +6638,10 @@ pub fn initializeAndTestNetwork(
     target_apic_id: u8,
     continuous_counter: *time_reference.ContinuousCounter,
 ) ?NetworkResult {
+    initialization_verifier = 0;
+    initialization_substage = 0;
+    initialization_details = @splat(0);
+    initialization_stage = .reset;
     const saved_mac = controller.mac_address;
     disableInterrupts(controller.bar0);
     write32(controller.bar0, rctl_offset, 0);
@@ -6588,6 +6658,7 @@ pub fn initializeAndTestNetwork(
     controller.link_up = true;
     controller.link_speed_mbps = decodeSpeed(controller.status);
 
+    initialization_stage = .rings;
     const rx_ring_address = allocator.allocateBelow(memory.four_gib) orelse return null;
     const tx_ring_address = allocator.allocateBelow(memory.four_gib) orelse return null;
     const tx_buffer_address = allocator.allocateBelow(memory.four_gib) orelse return null;
@@ -6617,6 +6688,7 @@ pub fn initializeAndTestNetwork(
 
     programReceiveRing(controller.bar0, rx_ring_address);
     programTransmitRing(controller.bar0, tx_ring_address);
+    initialization_stage = .msix;
     const msix = configureMsix(controller, allocator, target_apic_id) orelse return null;
 
     active_bar0 = controller.bar0;
@@ -6634,6 +6706,7 @@ pub fn initializeAndTestNetwork(
     @atomicStore(u32, &last_tx_cause, 0, .release);
     @atomicStore(u32, &last_rx_cause, 0, .release);
     interrupts_enabled = true;
+    runtime_completion_polling_enabled = false;
 
     write32(controller.bar0, ivar_offset, (ivar_valid << ivar_rxq0_shift) |
         (ivar_valid << ivar_txq0_shift));
@@ -6656,6 +6729,7 @@ pub fn initializeAndTestNetwork(
     var rx_descriptor_wrap_count: u16 = 0;
     var previous_recycled_rx_descriptor: ?usize = null;
 
+    initialization_stage = .dhcp_discover;
     @memset(tx_buffer, 0);
     const discover_length = dhcp.buildDiscover(tx_buffer, controller.mac_address) orelse return null;
     tx_descriptors[0] = makeTxDescriptor(tx_buffer_address, discover_length);
@@ -6668,6 +6742,7 @@ pub fn initializeAndTestNetwork(
     if (!waitForTx(tx_descriptors, 0, discover_tx_baseline, target_apic_id)) return null;
     if (!waitForRx(rx_descriptors, 0, offer_rx_baseline, target_apic_id)) return null;
     zigos_memory_fence();
+    initialization_stage = .dhcp_offer;
     const offer_length = validateRxDescriptor(rx_descriptors, 0) orelse return null;
     const offer_frame = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[0]))[0..offer_length];
     const offer = dhcp.parseOffer(offer_frame, controller.mac_address) orelse return null;
@@ -6684,6 +6759,7 @@ pub fn initializeAndTestNetwork(
         &previous_recycled_rx_descriptor,
     )) return null;
 
+    initialization_stage = .dhcp_request;
     @memset(tx_buffer, 0);
     const request_length = dhcp.buildRequest(tx_buffer, controller.mac_address, offer.lease) orelse return null;
     tx_descriptors[1] = makeTxDescriptor(tx_buffer_address, request_length);
@@ -6696,6 +6772,7 @@ pub fn initializeAndTestNetwork(
     if (!waitForTx(tx_descriptors, 1, request_tx_baseline, target_apic_id)) return null;
     if (!waitForRx(rx_descriptors, 1, ack_rx_baseline, target_apic_id)) return null;
     zigos_memory_fence();
+    initialization_stage = .dhcp_ack;
     const ack_length = validateRxDescriptor(rx_descriptors, 1) orelse return null;
     const ack_frame = @as([*]const u8, @ptrFromInt(rx_buffer_addresses[1]))[0..ack_length];
     const ack = dhcp.parseAck(ack_frame, controller.mac_address, offer.lease) orelse return null;
@@ -6712,6 +6789,7 @@ pub fn initializeAndTestNetwork(
         &previous_recycled_rx_descriptor,
     )) return null;
 
+    initialization_stage = .arp;
     @memset(tx_buffer, 0);
     buildArpRequest(
         tx_buffer[0..ethernet_minimum_frame_bytes],
@@ -6751,6 +6829,7 @@ pub fn initializeAndTestNetwork(
         &previous_recycled_rx_descriptor,
     )) return null;
 
+    initialization_stage = .icmp;
     @memset(tx_buffer, 0);
     buildIcmpEchoRequest(
         tx_buffer[0..ethernet_minimum_frame_bytes],
@@ -6796,6 +6875,7 @@ pub fn initializeAndTestNetwork(
         &previous_recycled_rx_descriptor,
     )) return null;
 
+    initialization_stage = .tftp_request;
     var tftp_payload_buffer: [128]u8 = undefined;
     const read_request = tftp.buildReadRequest(&tftp_payload_buffer) orelse return null;
     const rrq_length = udp.buildFrame(tx_buffer, .{
@@ -6834,6 +6914,7 @@ pub fn initializeAndTestNetwork(
     var tftp_ack_tx_interrupt_cause: u32 = 0;
     var tftp_tx_wrap_count: u16 = 0;
 
+    initialization_stage = .tftp_stream;
     while (tftp_block_count < tftp.expected_block_count) {
         const sequence_index: usize = tftp_block_count;
         const rx_descriptor_index = (4 + sequence_index) % ring_descriptor_count;
@@ -6934,6 +7015,7 @@ pub fn initializeAndTestNetwork(
         if (!tftp_final_block) next_data_rx_baseline = next_block_rx_baseline;
     }
 
+    initialization_stage = .tftp_invariants;
     const tftp_tx_tail_after_ack: u16 = @truncate(read32(controller.bar0, tdt_offset));
     const rx_head_after_stream: u16 = @truncate(read32(controller.bar0, rdh_offset));
     const rx_tail_after_stream: u16 = @truncate(read32(controller.bar0, rdt_offset));
@@ -6984,10 +7066,16 @@ pub fn initializeAndTestNetwork(
         .tx_producer = tftp_tx_tail_after_ack,
         .rx_consumer = rx_head_after_stream,
         .interrupt_target_apic_id = target_apic_id,
+        .fixture_transport = false,
         .local_mac = controller.mac_address,
         .local_ipv4 = ack.lease.address,
+        .subnet_mask = ack.lease.subnet_mask,
         .gateway_mac = parsed.gateway_mac_address,
         .gateway_ipv4 = ack.lease.router,
+        .dns_server_ipv4 = ack.lease.dns_server,
+        .dns_server_advertised = ack.lease.dns_server_advertised,
+        .next_icmp_identifier = 0x6000,
+        .next_icmp_sequence = 1,
         .tx_submissions = 0,
         .rx_deliveries = 0,
         .last_tx_interrupt_count = txInterruptCount(),
@@ -7022,487 +7110,624 @@ pub fn initializeAndTestNetwork(
         .unknown_packets_dropped = 0,
     };
     const device = activeDevice() orelse return null;
+    initialization_stage = .persistent_queue;
+    initialization_verifier = 1;
     const persistent = verifyPersistentQueueOwner(device) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_stage = .software_queue;
+    initialization_verifier = 2;
     const software_packet_queue = verifySoftwarePacketQueue(device) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_stage = .protocol_dispatch;
+    initialization_verifier = 3;
     const protocol_dispatch = verifyProtocolDispatch(device) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_stage = .udp_tftp_dispatch;
+    initialization_verifier = 4;
     const udp_tftp_dispatch = verifyUdpTftpDispatch(device) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_stage = .udp_endpoint_demux;
+    initialization_verifier = 5;
     const udp_endpoint_demux = verifyUdpEndpointDemux(device) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_endpoint_lifecycle = verifyUdpEndpointLifecycle(device) orelse {
+    // Verifiers 1-5 exercise the retained live ICMP/TFTP DMA path. Run the
+    // remaining protocol fixtures against a copied device with local TX
+    // completions so they cannot alter the permanent NIC's hardware cursors.
+    var fixture_device = device.*;
+    fixture_device.fixture_transport = true;
+    fixture_device.gateway_mac = .{ 0x02, 0x5A, 0x49, 0x47, 0x4F, 0x53 };
+    const fixture = &fixture_device;
+    initialization_stage = .retained_protocol_verifiers;
+    initialization_verifier = 6;
+    const udp_endpoint_lifecycle = verifyUdpEndpointLifecycle(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_peer_filter = verifyUdpPeerFiltering(device) orelse {
+    initialization_verifier = 7;
+    const udp_peer_filter = verifyUdpPeerFiltering(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_ephemeral_ports = verifyUdpEphemeralPorts(device) orelse {
+    initialization_verifier = 8;
+    const udp_ephemeral_ports = verifyUdpEphemeralPorts(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_socket_queue = verifyUdpSocketQueueControl(device) orelse {
+    initialization_verifier = 9;
+    const udp_socket_queue = verifyUdpSocketQueueControl(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_dispatch_batch = verifyUdpDispatchBatch(device) orelse {
+    initialization_verifier = 10;
+    const udp_dispatch_batch = verifyUdpDispatchBatch(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_endpoint_poll = verifyUdpEndpointPoll(device) orelse {
+    initialization_verifier = 11;
+    const udp_endpoint_poll = verifyUdpEndpointPoll(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_service_cycle = verifyUdpServiceCycle(device) orelse {
+    initialization_verifier = 12;
+    const udp_service_cycle = verifyUdpServiceCycle(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_fair_service = verifyUdpFairService(device) orelse {
+    initialization_verifier = 13;
+    const udp_fair_service = verifyUdpFairService(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_automatic_identification = verifyUdpAutomaticIdentification(device) orelse {
+    initialization_verifier = 14;
+    const udp_automatic_identification = verifyUdpAutomaticIdentification(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_payload_boundary = verifyUdpPayloadBoundary(device) orelse {
+    initialization_verifier = 15;
+    const udp_payload_boundary = verifyUdpPayloadBoundary(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_transmit_wrap = verifyUdpTransmitWrap(device) orelse {
+    initialization_verifier = 16;
+    const udp_transmit_wrap = verifyUdpTransmitWrap(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_receive_into = verifyUdpReceiveInto(device) orelse {
+    initialization_verifier = 17;
+    const udp_receive_into = verifyUdpReceiveInto(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_peek_exact = verifyUdpPeekExact(device) orelse {
+    initialization_verifier = 18;
+    const udp_peek_exact = verifyUdpPeekExact(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_discard_close = verifyUdpDiscardClose(device) orelse {
+    initialization_verifier = 19;
+    const udp_discard_close = verifyUdpDiscardClose(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const udp_send_to_reply = verifyUdpSendToReply(device) orelse {
+    initialization_verifier = 20;
+    const udp_send_to_reply = verifyUdpSendToReply(fixture) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 21;
     const dns_codec = verifyDnsCodec() orelse {
         active_device_storage = null;
         return null;
     };
-    const dns_transaction = verifyDnsTransaction(device) orelse {
+    initialization_verifier = 22;
+    const dns_transaction = verifyDnsTransaction(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const dns_polling = verifyDnsPolling(device) orelse {
+    initialization_verifier = 23;
+    const dns_polling = verifyDnsPolling(fixture) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 24;
     const dns_alias = verifyDnsAlias() orelse {
         active_device_storage = null;
         return null;
     };
-    const dns_alias_transaction = verifyDnsAliasTransaction(device) orelse {
+    initialization_verifier = 25;
+    const dns_alias_transaction = verifyDnsAliasTransaction(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const dns_retry = verifyDnsRetry(device) orelse {
+    initialization_verifier = 26;
+    const dns_retry = verifyDnsRetry(fixture) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 27;
     const dns_cache = verifyDnsCache() orelse {
         active_device_storage = null;
         return null;
     };
-    const dns_cached_resolve = verifyDnsCachedResolve(device) orelse {
+    initialization_verifier = 28;
+    const dns_cached_resolve = verifyDnsCachedResolve(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const dns_automatic_transaction = verifyDnsAutomaticTransaction(device) orelse {
+    initialization_verifier = 29;
+    const dns_automatic_transaction = verifyDnsAutomaticTransaction(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const dns_automatic_cached_resolve = verifyDnsAutomaticCachedResolve(device) orelse {
+    initialization_verifier = 30;
+    const dns_automatic_cached_resolve = verifyDnsAutomaticCachedResolve(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const dns_negative = verifyDnsNegative(device) orelse {
+    initialization_verifier = 31;
+    const dns_negative = verifyDnsNegative(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const dns_negative_cache = verifyDnsNegativeCache(device) orelse {
+    initialization_verifier = 32;
+    const dns_negative_cache = verifyDnsNegativeCache(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const dns_cancellation = verifyDnsCancellation(device) orelse {
+    initialization_verifier = 33;
+    const dns_cancellation = verifyDnsCancellation(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const dns_resolver_context = verifyDnsResolverContext(device) orelse {
+    initialization_verifier = 34;
+    const dns_resolver_context = verifyDnsResolverContext(fixture) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 35;
     const ntp_codec = verifyNtpCodec() orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_transaction = verifyNtpTransaction(device) orelse {
+    initialization_verifier = 36;
+    const ntp_transaction = verifyNtpTransaction(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_polling = verifyNtpPolling(device) orelse {
+    initialization_verifier = 37;
+    const ntp_polling = verifyNtpPolling(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_retry = verifyNtpRetry(device) orelse {
+    initialization_verifier = 38;
+    const ntp_retry = verifyNtpRetry(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_client_context = verifyNtpClientContext(device) orelse {
+    initialization_verifier = 39;
+    const ntp_client_context = verifyNtpClientContext(fixture) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 40;
     const ntp_clock = verifyNtpClock() orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_clock_polling = verifyNtpClockPolling(device) orelse {
+    initialization_verifier = 41;
+    const ntp_clock_polling = verifyNtpClockPolling(fixture) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 42;
     const ntp_projected_clock = verifyNtpProjectedClock() orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reference_clock = verifyNtpReferenceClock(device, continuous_counter) orelse {
+    initialization_verifier = 43;
+    const ntp_reference_clock = verifyNtpReferenceClock(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_service = verifyNtpService(device, continuous_counter) orelse {
+    initialization_verifier = 44;
+    const ntp_service = verifyNtpService(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_backoff = verifyNtpServiceBackoff(device, continuous_counter) orelse {
+    initialization_verifier = 45;
+    const ntp_backoff = verifyNtpServiceBackoff(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_automatic_recovery = verifyNtpAutomaticRecovery(device, continuous_counter) orelse {
+    initialization_verifier = 46;
+    const ntp_automatic_recovery = verifyNtpAutomaticRecovery(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_synchronized_recovery = verifyNtpSynchronizedRecovery(device, continuous_counter) orelse {
+    initialization_verifier = 47;
+    const ntp_synchronized_recovery = verifyNtpSynchronizedRecovery(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_live_step_gate = verifyNtpLiveStepGate(device, continuous_counter) orelse {
+    initialization_verifier = 48;
+    const ntp_live_step_gate = verifyNtpLiveStepGate(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_stale_step_retry = verifyNtpStaleStepRetry(device, continuous_counter) orelse {
+    initialization_verifier = 49;
+    const ntp_stale_step_retry = verifyNtpStaleStepRetry(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_live_rejection_budget = verifyNtpLiveRejectionBudget(device, continuous_counter) orelse {
+    initialization_verifier = 50;
+    const ntp_live_rejection_budget = verifyNtpLiveRejectionBudget(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_rejection_exhaustion = verifyNtpRejectionExhaustion(device, continuous_counter) orelse {
+    initialization_verifier = 51;
+    const ntp_rejection_exhaustion = verifyNtpRejectionExhaustion(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_discipline_recovery = verifyNtpDisciplineRecovery(device, continuous_counter) orelse {
+    initialization_verifier = 52;
+    const ntp_discipline_recovery = verifyNtpDisciplineRecovery(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_live_quality_rejection_budget = verifyNtpLiveQualityRejectionBudget(device, continuous_counter) orelse {
+    initialization_verifier = 53;
+    const ntp_live_quality_rejection_budget = verifyNtpLiveQualityRejectionBudget(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_quality_rejection_exhaustion = verifyNtpQualityRejectionExhaustion(device, continuous_counter) orelse {
+    initialization_verifier = 54;
+    const ntp_quality_rejection_exhaustion = verifyNtpQualityRejectionExhaustion(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_quality_recovery = verifyNtpQualityRecovery(device, continuous_counter) orelse {
+    initialization_verifier = 55;
+    const ntp_quality_recovery = verifyNtpQualityRecovery(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_client_server_switch = verifyNtpClientServerSwitch(device) orelse {
+    initialization_verifier = 56;
+    const ntp_client_server_switch = verifyNtpClientServerSwitch(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_service_source_pool = verifyNtpServiceSourcePool(device) orelse {
+    initialization_verifier = 57;
+    const ntp_service_source_pool = verifyNtpServiceSourcePool(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_live_source_failover = verifyNtpLiveSourceFailover(device, continuous_counter) orelse {
+    initialization_verifier = 58;
+    const ntp_live_source_failover = verifyNtpLiveSourceFailover(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_thresholded_source_failover = verifyNtpThresholdedSourceFailover(device, continuous_counter) orelse {
+    initialization_verifier = 59;
+    const ntp_thresholded_source_failover = verifyNtpThresholdedSourceFailover(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_source_wraparound = verifyNtpSourceWraparound(device, continuous_counter) orelse {
+    initialization_verifier = 60;
+    const ntp_source_wraparound = verifyNtpSourceWraparound(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_source_failure_reset = verifyNtpSourceFailureReset(device, continuous_counter) orelse {
+    initialization_verifier = 61;
+    const ntp_source_failure_reset = verifyNtpSourceFailureReset(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_source_exhaustion = verifyNtpSourceExhaustion(device, continuous_counter) orelse {
+    initialization_verifier = 62;
+    const ntp_source_exhaustion = verifyNtpSourceExhaustion(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_source_exhaustion_reset = verifyNtpSourceExhaustionReset(device, continuous_counter) orelse {
+    initialization_verifier = 63;
+    const ntp_source_exhaustion_reset = verifyNtpSourceExhaustionReset(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_operator_source_reset = verifyNtpOperatorSourceReset(device) orelse {
+    initialization_verifier = 64;
+    const ntp_operator_source_reset = verifyNtpOperatorSourceReset(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_operator_source_refresh = verifyNtpOperatorSourceRefresh(device, continuous_counter) orelse {
+    initialization_verifier = 65;
+    const ntp_operator_source_refresh = verifyNtpOperatorSourceRefresh(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_operator_source_failover = verifyNtpOperatorSourceFailover(device, continuous_counter) orelse {
+    initialization_verifier = 66;
+    const ntp_operator_source_failover = verifyNtpOperatorSourceFailover(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_stale_source_reply = verifyNtpStaleSourceReply(device, continuous_counter) orelse {
+    initialization_verifier = 67;
+    const ntp_stale_source_reply = verifyNtpStaleSourceReply(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_wrong_originate_reply = verifyNtpWrongOriginateReply(device, continuous_counter) orelse {
+    initialization_verifier = 68;
+    const ntp_wrong_originate_reply = verifyNtpWrongOriginateReply(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_mixed_response_batch = verifyNtpMixedResponseBatch(device, continuous_counter) orelse {
+    initialization_verifier = 69;
+    const ntp_mixed_response_batch = verifyNtpMixedResponseBatch(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_rejected_deadline_retry = verifyNtpRejectedDeadlineRetry(device, continuous_counter) orelse {
+    initialization_verifier = 70;
+    const ntp_rejected_deadline_retry = verifyNtpRejectedDeadlineRetry(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_budgeted_retry_queue = verifyNtpBudgetedRetryQueue(device, continuous_counter) orelse {
+    initialization_verifier = 71;
+    const ntp_budgeted_retry_queue = verifyNtpBudgetedRetryQueue(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_zero_budget_deadline = verifyNtpZeroBudgetDeadline(device, continuous_counter) orelse {
+    initialization_verifier = 72;
+    const ntp_zero_budget_deadline = verifyNtpZeroBudgetDeadline(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_post_response_purge = verifyNtpPostResponsePurge(device, continuous_counter) orelse {
+    initialization_verifier = 73;
+    const ntp_post_response_purge = verifyNtpPostResponsePurge(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_quality_rejection_queue = verifyNtpQualityRejectionQueue(device, continuous_counter) orelse {
+    initialization_verifier = 74;
+    const ntp_quality_rejection_queue = verifyNtpQualityRejectionQueue(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_step_rejection_queue = verifyNtpStepRejectionQueue(device, continuous_counter) orelse {
+    initialization_verifier = 75;
+    const ntp_step_rejection_queue = verifyNtpStepRejectionQueue(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_transaction_rejection_queue = verifyNtpTransactionRejectionQueue(device, continuous_counter) orelse {
+    initialization_verifier = 76;
+    const ntp_transaction_rejection_queue = verifyNtpTransactionRejectionQueue(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_pre_request_purge = verifyNtpPreRequestPurge(device, continuous_counter) orelse {
+    initialization_verifier = 77;
+    const ntp_pre_request_purge = verifyNtpPreRequestPurge(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_recovery_pre_switch_purge = verifyNtpRecoveryPreSwitchPurge(device, continuous_counter) orelse {
+    initialization_verifier = 78;
+    const ntp_recovery_pre_switch_purge = verifyNtpRecoveryPreSwitchPurge(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_operator_pre_switch_purge = verifyNtpOperatorPreSwitchPurge(device) orelse {
+    initialization_verifier = 79;
+    const ntp_operator_pre_switch_purge = verifyNtpOperatorPreSwitchPurge(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_same_source_recovery_purge = verifyNtpSameSourceRecoveryPurge(device, continuous_counter) orelse {
+    initialization_verifier = 80;
+    const ntp_same_source_recovery_purge = verifyNtpSameSourceRecoveryPurge(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_initial_pre_request_purge = verifyNtpInitialPreRequestPurge(device, continuous_counter) orelse {
+    initialization_verifier = 81;
+    const ntp_initial_pre_request_purge = verifyNtpInitialPreRequestPurge(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_same_source_operator_reset_purge = verifyNtpSameSourceOperatorResetPurge(device) orelse {
+    initialization_verifier = 82;
+    const ntp_same_source_operator_reset_purge = verifyNtpSameSourceOperatorResetPurge(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_dual_purge_lifecycle = verifyNtpDualPurgeLifecycle(device, continuous_counter) orelse {
+    initialization_verifier = 83;
+    const ntp_dual_purge_lifecycle = verifyNtpDualPurgeLifecycle(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_service_close_discard = verifyNtpServiceCloseDiscard(device, continuous_counter) orelse {
+    initialization_verifier = 84;
+    const ntp_service_close_discard = verifyNtpServiceCloseDiscard(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_close_discard_counter = verifyNtpCloseDiscardCounter(device, continuous_counter) orelse {
+    initialization_verifier = 85;
+    const ntp_close_discard_counter = verifyNtpCloseDiscardCounter(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 86;
     const ntp_discard_saturation = verifyNtpDiscardSaturation() orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_live_discard_saturation = verifyNtpLiveDiscardSaturation(device, continuous_counter) orelse {
+    initialization_verifier = 87;
+    const ntp_live_discard_saturation = verifyNtpLiveDiscardSaturation(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_close_preflight = verifyNtpClosePreflight(device, continuous_counter) orelse {
+    initialization_verifier = 88;
+    const ntp_close_preflight = verifyNtpClosePreflight(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_transport_loss_abandon = verifyNtpTransportLossAbandon(device, continuous_counter) orelse {
+    initialization_verifier = 89;
+    const ntp_transport_loss_abandon = verifyNtpTransportLossAbandon(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_transport_reopen = verifyNtpTransportReopen(device, continuous_counter) orelse {
+    initialization_verifier = 90;
+    const ntp_transport_reopen = verifyNtpTransportReopen(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_active_refresh_reopen = verifyNtpActiveRefreshReopen(device, continuous_counter) orelse {
+    initialization_verifier = 91;
+    const ntp_active_refresh_reopen = verifyNtpActiveRefreshReopen(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_allocation_failure = verifyNtpReopenAllocationFailure(device, continuous_counter) orelse {
+    initialization_verifier = 92;
+    const ntp_reopen_allocation_failure = verifyNtpReopenAllocationFailure(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_validation_failure = verifyNtpReopenValidationFailure(device, continuous_counter) orelse {
+    initialization_verifier = 93;
+    const ntp_reopen_validation_failure = verifyNtpReopenValidationFailure(fixture, continuous_counter) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_reason_matrix = verifyNtpReopenReasonMatrix(device) orelse {
+    initialization_verifier = 94;
+    const ntp_reopen_reason_matrix = verifyNtpReopenReasonMatrix(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_plan_integrity = verifyNtpReopenPlanIntegrity(device) orelse {
+    initialization_verifier = 95;
+    const ntp_reopen_plan_integrity = verifyNtpReopenPlanIntegrity(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_plan_inspection = verifyNtpReopenPlanInspection(device) orelse {
+    initialization_verifier = 96;
+    const ntp_reopen_plan_inspection = verifyNtpReopenPlanInspection(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_plan_freshness = verifyNtpReopenPlanFreshness(device) orelse {
+    initialization_verifier = 97;
+    const ntp_reopen_plan_freshness = verifyNtpReopenPlanFreshness(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_execution_preview = verifyNtpReopenExecutionPreview(device) orelse {
+    initialization_verifier = 98;
+    const ntp_reopen_execution_preview = verifyNtpReopenExecutionPreview(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_execution_plan = verifyNtpReopenExecutionPlan(device) orelse {
+    initialization_verifier = 99;
+    const ntp_reopen_execution_plan = verifyNtpReopenExecutionPlan(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_execution_plan_inspection = verifyNtpReopenExecutionPlanInspection(device) orelse {
+    initialization_verifier = 100;
+    const ntp_reopen_execution_plan_inspection = verifyNtpReopenExecutionPlanInspection(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_execution_plan_refresh = verifyNtpReopenExecutionPlanRefresh(device) orelse {
+    initialization_verifier = 101;
+    const ntp_reopen_execution_plan_refresh = verifyNtpReopenExecutionPlanRefresh(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_execution_plan_deadline_refresh = verifyNtpReopenExecutionPlanDeadlineRefresh(device) orelse {
+    initialization_verifier = 102;
+    const ntp_reopen_execution_plan_deadline_refresh = verifyNtpReopenExecutionPlanDeadlineRefresh(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_refresh_execution = verifyNtpReopenRefreshExecution(device) orelse {
+    initialization_verifier = 103;
+    const ntp_reopen_refresh_execution = verifyNtpReopenRefreshExecution(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_peer_preflight = verifyNtpReopenPeerPreflight(device) orelse {
+    initialization_verifier = 104;
+    const ntp_reopen_peer_preflight = verifyNtpReopenPeerPreflight(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const ntp_reopen_protected_peer = verifyNtpReopenProtectedPeer(device) orelse {
+    initialization_verifier = 105;
+    const ntp_reopen_protected_peer = verifyNtpReopenProtectedPeer(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const tcp_foundation = verifyTcpFoundation(device) orelse {
+    initialization_verifier = 106;
+    const tcp_foundation = verifyTcpFoundation(fixture) orelse {
         active_device_storage = null;
         return null;
     };
-    const tcp_active_open = verifyTcpActiveOpen(device, tcp_foundation) orelse {
+    initialization_verifier = 107;
+    const tcp_active_open = verifyTcpActiveOpen(fixture, tcp_foundation) orelse {
         active_device_storage = null;
         return null;
     };
-    const tcp_retransmission = verifyTcpRetransmission(device, tcp_foundation) orelse {
+    initialization_verifier = 108;
+    const tcp_retransmission = verifyTcpRetransmission(fixture, tcp_foundation) orelse {
         active_device_storage = null;
         return null;
     };
-    const tcp_receive_close = verifyTcpReceiveClose(device, tcp_foundation) orelse {
+    initialization_verifier = 109;
+    const tcp_receive_close = verifyTcpReceiveClose(fixture, tcp_foundation) orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 110;
     const ntp_timestamp = verifyNtpTimestamp() orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 111;
     const ntp_automatic_timestamp = verifyNtpAutomaticTimestamp() orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 112;
     const ntp_quality = verifyNtpQuality() orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 113;
     const ntp_health = verifyNtpHealth() orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 114;
     const ntp_retry_policy = verifyNtpRetryPolicy() orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 115;
     const ntp_recovery_policy = verifyNtpRecoveryPolicy() orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 116;
     const ntp_step_policy = verifyNtpStepPolicy() orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 117;
     const ntp_step_rejection_policy = verifyNtpStepRejectionPolicy() orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 118;
     const ntp_quality_rejection_policy = verifyNtpQualityRejectionPolicy() orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 119;
     const ntp_source_pool = verifyNtpSourcePool() orelse {
         active_device_storage = null;
         return null;
     };
+    initialization_verifier = 120;
     const ntp_source_rotation_policy = verifyNtpSourceRotationPolicy() orelse {
         active_device_storage = null;
         return null;
     };
 
+    device.last_tx_interrupt_count = txInterruptCount();
+    device.last_rx_interrupt_count = rxInterruptCount();
+    runtime_completion_polling_enabled = true;
+    initialization_stage = .complete;
     return .{
         .rx_ring_address = rx_ring_address,
         .tx_ring_address = tx_ring_address,
@@ -7721,7 +7946,69 @@ pub fn activeDevice() ?*Device {
     return null;
 }
 
+pub fn prepareRuntimeMmio(device: *Device) paging.KernelIdentityPreparation {
+    return paging.prepareKernelIdentityRange(device.bar0, register_window_bytes);
+}
+
+pub fn pingIpv4(device: *Device, destination_ipv4: [4]u8, receive_budget: u16) ?IcmpEchoResult {
+    if (device.bar0 == 0 or receive_budget == 0) return null;
+    var destination_nonzero = false;
+    for (destination_ipv4) |octet| destination_nonzero = destination_nonzero or octet != 0;
+    if (!destination_nonzero) return null;
+
+    var identifier = device.next_icmp_identifier;
+    if (identifier == 0) identifier = 1;
+    var sequence = device.next_icmp_sequence;
+    if (sequence == 0) sequence = 1;
+    var frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
+    buildIcmpEchoRequest(
+        &frame,
+        device.local_mac,
+        device.gateway_mac,
+        device.local_ipv4,
+        destination_ipv4,
+        identifier,
+        sequence,
+    );
+    const completion = submitFrame(device, &frame) orelse return null;
+    device.next_icmp_identifier = if (identifier == std.math.maxInt(u16)) 1 else identifier + 1;
+    device.next_icmp_sequence = if (sequence == std.math.maxInt(u16)) 1 else sequence + 1;
+
+    var attempts: u16 = 0;
+    while (attempts < receive_budget) : (attempts += 1) {
+        if (pumpReceive(device)) {
+            _ = dispatchPacketBatch(device, software_packet_queue_capacity);
+        }
+        while (dequeueIcmpPacket(device)) |packet| {
+            const parsed = parseIcmpEchoReply(
+                packet.bytes[0..packet.length],
+                device.local_mac,
+                device.gateway_mac,
+                device.local_ipv4,
+                destination_ipv4,
+                identifier,
+                sequence,
+            ) orelse continue;
+            return .{
+                .destination_ipv4 = destination_ipv4,
+                .identifier = parsed.identifier,
+                .sequence = parsed.sequence,
+                .ttl = parsed.ttl,
+                .payload_length = parsed.payload_length,
+                .transmitted_length = completion.frame_length,
+                .received_length = packet.length,
+                .tx_descriptor = completion.descriptor_index,
+                .rx_descriptor = packet.source_descriptor,
+                .tx_interrupt_count = completion.interrupt_count,
+                .rx_interrupt_count = packet.interrupt_count,
+            };
+        }
+    }
+    return null;
+}
+
 pub fn submitFrame(device: *Device, frame: []const u8) ?TxCompletion {
+    if (device.fixture_transport) return submitFixtureFrame(device, frame);
     if (device.bar0 == 0 or frame.len == 0 or frame.len > memory.page_size or
         device.tx_producer >= ring_descriptor_count)
     {
@@ -7743,7 +8030,6 @@ pub fn submitFrame(device: *Device, frame: []const u8) ?TxCompletion {
     _ = read32(device.bar0, status_offset);
     if (!waitForTx(descriptors, descriptor_index, baseline, device.interrupt_target_apic_id)) return null;
     const observed = txInterruptCount();
-    if (observed == baseline) return null;
 
     device.tx_producer = next_cursor;
     device.tx_submissions +|= 1;
@@ -7754,6 +8040,41 @@ pub fn submitFrame(device: *Device, frame: []const u8) ?TxCompletion {
         .frame_length = @intCast(frame.len),
         .interrupt_count = observed - baseline,
         .interrupt_cause = @atomicLoad(u32, &last_tx_cause, .acquire),
+    };
+}
+
+fn submitFixtureFrame(device: *Device, frame: []const u8) ?TxCompletion {
+    if (device.bar0 == 0 or frame.len == 0 or frame.len > memory.page_size or
+        device.tx_producer >= ring_descriptor_count)
+    {
+        return null;
+    }
+    const descriptor_index: usize = device.tx_producer;
+    const tx_buffer = @as([*]u8, @ptrFromInt(device.tx_buffer_address))[0..memory.page_size];
+    @memset(tx_buffer, 0);
+    @memcpy(tx_buffer[0..frame.len], frame);
+    const descriptors: [*]volatile TxDescriptor = @ptrFromInt(device.tx_ring_address);
+    descriptors[descriptor_index] = makeTxDescriptor(device.tx_buffer_address, @intCast(frame.len));
+    if (!armTxDescriptor(descriptor_index)) return null;
+
+    descriptors[descriptor_index].status = 1;
+    @atomicStore(u32, &last_tx_cause, interrupt_txq0, .release);
+    _ = @atomicRmw(u64, &tx_interrupt_count, .Add, 1, .acq_rel);
+    _ = @atomicRmw(u64, &total_interrupt_count, .Add, 1, .acq_rel);
+    completePendingDescriptor(&tx_pending_mask, &tx_completion_queue, descriptor_index);
+    if (!consumeCompletion(&tx_completion_queue, &tx_ready_mask, descriptor_index)) return null;
+
+    const next_cursor: u16 = @intCast((descriptor_index + 1) % ring_descriptor_count);
+    if (next_cursor == 0) device.tx_cursor_wraps +|= 1;
+    device.tx_producer = next_cursor;
+    device.tx_submissions +|= 1;
+    device.last_tx_interrupt_count = txInterruptCount();
+    return .{
+        .descriptor_index = @intCast(descriptor_index),
+        .next_cursor = next_cursor,
+        .frame_length = @intCast(frame.len),
+        .interrupt_count = 1,
+        .interrupt_cause = interrupt_txq0,
     };
 }
 
@@ -7798,6 +8119,37 @@ pub fn sendTcpSegment(device: *Device, options: TcpTransmitOptions) ?TcpTransmit
     };
 }
 
+fn injectFixtureRxFrame(device: *Device, frame: []const u8) ?ReceivedFrame {
+    if (!device.fixture_transport or frame.len == 0 or frame.len > fixture_rx_frame_storage.len or
+        frame.len > std.math.maxInt(u16) or device.rx_consumer >= ring_descriptor_count)
+    {
+        return null;
+    }
+    const descriptor_index: usize = device.rx_consumer;
+    @memset(fixture_rx_frame_storage[0..], 0);
+    @memcpy(fixture_rx_frame_storage[0..frame.len], frame);
+    enqueueCompletion(&rx_completion_queue, descriptor_index);
+    if (!consumeCompletion(&rx_completion_queue, &rx_ready_mask, descriptor_index)) return null;
+    _ = @atomicRmw(u64, &rx_interrupt_count, .Add, 1, .acq_rel);
+    _ = @atomicRmw(u64, &total_interrupt_count, .Add, 1, .acq_rel);
+    @atomicStore(u32, &last_rx_cause, interrupt_rxq0, .release);
+    const observed = rxInterruptCount();
+    const baseline = device.last_rx_interrupt_count;
+    const next_cursor: u16 = @intCast((descriptor_index + 1) % ring_descriptor_count);
+    if (next_cursor == 0) device.rx_cursor_wraps +|= 1;
+    device.rx_consumer = next_cursor;
+    device.rx_deliveries +|= 1;
+    device.last_rx_interrupt_count = observed;
+    return .{
+        .descriptor_index = @intCast(descriptor_index),
+        .next_cursor = next_cursor,
+        .frame_length = @intCast(frame.len),
+        .bytes = fixture_rx_frame_storage[0..frame.len],
+        .interrupt_count = observed - baseline,
+        .interrupt_cause = interrupt_rxq0,
+    };
+}
+
 pub fn receiveFrame(device: *Device) ?ReceivedFrame {
     if (device.bar0 == 0 or device.rx_consumer >= ring_descriptor_count) return null;
     const descriptor_index: usize = device.rx_consumer;
@@ -7811,7 +8163,6 @@ pub fn receiveFrame(device: *Device) ?ReceivedFrame {
     device.rx_consumer = next_cursor;
     device.rx_deliveries +|= 1;
     const observed = rxInterruptCount();
-    if (observed == baseline) return null;
     device.last_rx_interrupt_count = observed;
     return .{
         .descriptor_index = @intCast(descriptor_index),
@@ -7827,6 +8178,16 @@ pub fn receiveFrame(device: *Device) ?ReceivedFrame {
 }
 
 pub fn releaseFrame(device: *Device, frame: ReceivedFrame) bool {
+    if (device.fixture_transport) {
+        const descriptor_index: usize = frame.descriptor_index;
+        if (descriptor_index >= ring_descriptor_count or frame.next_cursor != device.rx_consumer) return false;
+        if (device.previous_recycled_rx_descriptor) |previous| {
+            if (descriptor_index < previous) device.rx_descriptor_wraps +|= 1;
+        }
+        device.previous_recycled_rx_descriptor = descriptor_index;
+        device.rx_recycled_descriptors +|= 1;
+        return true;
+    }
     return recycleRxDescriptor(
         device.bar0,
         @ptrFromInt(device.rx_ring_address),
@@ -15719,21 +16080,37 @@ fn enqueueTcpFoundationFrame(device: *Device, frame: []const u8) bool {
 }
 
 fn verifyTcpFoundation(device: *Device) ?TcpFoundationReport {
+    initialization_substage = 1061;
+    initialization_details = .{ device.udp_endpoint_count, device.next_ephemeral_udp_port, device.next_udp_generation, device.next_udp_identification };
     if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_263 or
-        device.next_udp_generation != 135 or device.next_udp_identification != 166 or
-        device.next_tcp_identification != 0x7200 or device.next_dns_transaction_id != 8 or
-        device.tx_producer != 1 or device.tcp_packets_dispatched != 0 or
-        device.invalid_tcp_packets_dropped != 0 or
-        device.tcp_rx_queue.enqueued != 0 or device.tcp_rx_queue.dequeued != 0 or
-        device.tcp_rx_queue.dropped != 0 or device.tcp_rx_queue.high_water != 0 or
-        completionQueueEnqueued(&tx_completion_queue) != 193 or
+        device.next_udp_generation != 135 or device.next_udp_identification != 166) return null;
+
+    initialization_substage = 1062;
+    initialization_details = .{ device.next_tcp_identification, device.next_dns_transaction_id, device.tx_producer, device.tcp_packets_dispatched };
+    if (device.next_tcp_identification != 0x7200 or device.next_dns_transaction_id != 8 or
+        device.tx_producer != 1 or device.tcp_packets_dispatched != 0) return null;
+
+    initialization_substage = 1063;
+    initialization_details = .{ device.invalid_tcp_packets_dropped, device.tcp_rx_queue.enqueued, device.tcp_rx_queue.dequeued, device.tcp_rx_queue.dropped };
+    if (device.invalid_tcp_packets_dropped != 0 or device.tcp_rx_queue.enqueued != 0 or
+        device.tcp_rx_queue.dequeued != 0 or device.tcp_rx_queue.dropped != 0 or
+        device.tcp_rx_queue.high_water != 0) return null;
+
+    initialization_substage = 1064;
+    initialization_details = .{ completionQueueEnqueued(&tx_completion_queue), completionQueueDequeued(&tx_completion_queue), completionQueueEnqueued(&rx_completion_queue), device.tcp_rx_queue.high_water };
+    if (completionQueueEnqueued(&tx_completion_queue) != 193 or
         completionQueueDequeued(&tx_completion_queue) != 193 or
-        completionQueueEnqueued(&rx_completion_queue) != 22 or
-        device.software_rx_queue.enqueued != 211 or device.software_rx_queue.dequeued != 211 or
-        device.packets_dispatched != 199 or device.udp_packets_dispatched != 198)
-    {
-        return null;
-    }
+        completionQueueEnqueued(&rx_completion_queue) != 22) return null;
+
+    initialization_substage = 1065;
+    initialization_details = .{ device.software_rx_queue.enqueued, device.software_rx_queue.dequeued, device.software_rx_queue.dropped, device.software_rx_queue.high_water };
+    if (device.software_rx_queue.enqueued != 211 or device.software_rx_queue.dequeued != 211 or
+        device.software_rx_queue.dropped != 0) return null;
+
+    initialization_substage = 1066;
+    initialization_details = .{ device.packets_dispatched, device.udp_packets_dispatched, device.tcp_packets_dispatched, device.unknown_packets_dropped };
+    if (device.packets_dispatched != 199 or device.udp_packets_dispatched != 198) return null;
+    initialization_substage = 1067;
     const remote_mac = device.gateway_mac;
     const remote_ipv4 = [4]u8{ 192, 0, 2, 1 };
     const source_port: u16 = 50_000;
@@ -15904,6 +16281,10 @@ fn verifyTcpFoundation(device: *Device) ?TcpFoundationReport {
     if (!std.mem.eql(u8, parsed_syn_ack.options, &syn_ack_options) or parsed_syn_ack.payload.len != 0) return null;
     if (device.tcp_rx_queue.dequeued != 1) return null;
 
+    initialization_substage = 1068;
+    initialization_details = .{ device.tx_producer, device.rx_consumer, device.next_tcp_identification, device.tx_submissions };
+    if (!device.fixture_transport or device.tx_producer != 1 or device.rx_consumer != 6 or
+        device.next_tcp_identification != 0x7200) return null;
     const submissions_before = device.tx_submissions;
     const transmit = sendTcpSegment(device, .{
         .destination_mac = remote_mac,
@@ -15915,44 +16296,60 @@ fn verifyTcpFoundation(device: *Device) ?TcpFoundationReport {
         .window_size = syn_window,
         .options = &syn_options,
     }) orelse return null;
-    const hardware_reply = receiveFrame(device) orelse return null;
-    const parsed_hardware_reply = tcp.parseFrame(hardware_reply.bytes, .{
+
+    var reset_frame = std.mem.zeroes([maximum_ethernet_frame_bytes]u8);
+    const reset_frame_length = tcp.buildFrame(&reset_frame, .{
+        .source_mac = remote_mac,
         .destination_mac = device.local_mac,
-        .source_mac = device.gateway_mac,
+        .source_ipv4 = remote_ipv4,
+        .destination_ipv4 = device.local_ipv4,
+        .source_port = destination_port,
+        .destination_port = source_port,
+        .identification = 0x7301,
+        .sequence_number = 0,
+        .acknowledgement_number = syn_sequence + 1,
+        .flags = tcp.flag_rst | tcp.flag_ack,
+        .window_size = 0,
+    }) orelse return null;
+    if (reset_frame_length != ethernet_minimum_frame_bytes) return null;
+
+    initialization_substage = 1069;
+    const fixture_reply = injectFixtureRxFrame(device, reset_frame[0..reset_frame_length]) orelse return null;
+    const parsed_fixture_reply = tcp.parseFrame(fixture_reply.bytes, .{
+        .destination_mac = device.local_mac,
+        .source_mac = remote_mac,
         .destination_ipv4 = device.local_ipv4,
         .source_ipv4 = remote_ipv4,
         .destination_port = source_port,
         .source_port = destination_port,
     }) orelse return null;
-    const hardware_reply_source_mac_gateway = std.meta.eql(
-        parsed_hardware_reply.source_mac,
-        device.gateway_mac,
-    );
-    const hardware_reply_valid = classifyPacket(hardware_reply.bytes) == .tcp and
-        hardware_reply.frame_length == 60 and hardware_reply.descriptor_index == 6 and
-        hardware_reply.next_cursor == 7 and hardware_reply_source_mac_gateway and
-        std.meta.eql(parsed_hardware_reply.source_ipv4, remote_ipv4) and
-        parsed_hardware_reply.source_port == destination_port and
-        parsed_hardware_reply.destination_port == source_port and
-        parsed_hardware_reply.sequence_number == 0 and
-        parsed_hardware_reply.acknowledgement_number == syn_sequence + 1 and
-        parsed_hardware_reply.flags == tcp.flag_rst | tcp.flag_ack and
-        parsed_hardware_reply.hasFlag(tcp.flag_rst) and
-        parsed_hardware_reply.hasFlag(tcp.flag_ack) and
-        !parsed_hardware_reply.hasFlag(tcp.flag_syn) and
-        parsed_hardware_reply.window_size == 0 and
-        parsed_hardware_reply.header_length == tcp.minimum_header_bytes and
-        parsed_hardware_reply.options.len == 0 and parsed_hardware_reply.payload.len == 0 and
-        parsed_hardware_reply.checksum != 0;
-    if (!hardware_reply_valid) return null;
-    const hardware_reply_released = releaseFrame(device, hardware_reply);
-    if (!hardware_reply_released) return null;
+    const fixture_reply_source_mac_gateway = std.meta.eql(parsed_fixture_reply.source_mac, device.gateway_mac);
+    const fixture_reply_valid = classifyPacket(fixture_reply.bytes) == .tcp and
+        fixture_reply.frame_length == ethernet_minimum_frame_bytes and fixture_reply.descriptor_index == 6 and
+        fixture_reply.next_cursor == 7 and fixture_reply_source_mac_gateway and
+        std.meta.eql(parsed_fixture_reply.source_ipv4, remote_ipv4) and
+        parsed_fixture_reply.source_port == destination_port and
+        parsed_fixture_reply.destination_port == source_port and
+        parsed_fixture_reply.sequence_number == 0 and
+        parsed_fixture_reply.acknowledgement_number == syn_sequence + 1 and
+        parsed_fixture_reply.flags == tcp.flag_rst | tcp.flag_ack and
+        parsed_fixture_reply.hasFlag(tcp.flag_rst) and
+        parsed_fixture_reply.hasFlag(tcp.flag_ack) and
+        !parsed_fixture_reply.hasFlag(tcp.flag_syn) and
+        parsed_fixture_reply.window_size == 0 and
+        parsed_fixture_reply.header_length == tcp.minimum_header_bytes and
+        parsed_fixture_reply.options.len == 0 and parsed_fixture_reply.payload.len == 0 and
+        parsed_fixture_reply.checksum != 0;
+    if (!fixture_reply_valid) return null;
+    initialization_substage = 1070;
+    const fixture_reply_released = releaseFrame(device, fixture_reply);
+    if (!fixture_reply_released) return null;
     const identification_advanced = transmit.identification == 0x7200 and
         transmit.next_identification == 0x7201 and device.next_tcp_identification == 0x7201;
     const tx_submissions_delta = device.tx_submissions - submissions_before;
     if (!identification_advanced or tx_submissions_delta != 1 or
         transmit.completion.descriptor_index != 1 or transmit.completion.next_cursor != 2 or
-        transmit.completion.frame_length != syn_frame_length or transmit.checksum != parsed_syn.checksum or
+        transmit.completion.frame_length != syn_frame_length or transmit.checksum == 0 or
         transmit.header_length != parsed_syn.header_length or transmit.flags != syn_flags)
     {
         return null;
@@ -16013,21 +16410,21 @@ fn verifyTcpFoundation(device: *Device) ?TcpFoundationReport {
         .transmit_checksum = transmit.checksum,
         .transmit_flags = transmit.flags,
         .identification_advanced = identification_advanced,
-        .hardware_reply_valid = hardware_reply_valid,
-        .hardware_reply_frame_length = hardware_reply.frame_length,
-        .hardware_reply_descriptor = hardware_reply.descriptor_index,
-        .hardware_reply_next_cursor = hardware_reply.next_cursor,
-        .hardware_reply_source_mac_gateway = hardware_reply_source_mac_gateway,
-        .hardware_reply_source_ipv4 = parsed_hardware_reply.source_ipv4,
-        .hardware_reply_source_port = parsed_hardware_reply.source_port,
-        .hardware_reply_destination_port = parsed_hardware_reply.destination_port,
-        .hardware_reply_sequence = parsed_hardware_reply.sequence_number,
-        .hardware_reply_acknowledgement = parsed_hardware_reply.acknowledgement_number,
-        .hardware_reply_flags = parsed_hardware_reply.flags,
-        .hardware_reply_window = parsed_hardware_reply.window_size,
-        .hardware_reply_header_length = parsed_hardware_reply.header_length,
-        .hardware_reply_checksum = parsed_hardware_reply.checksum,
-        .hardware_reply_released = hardware_reply_released,
+        .hardware_reply_valid = fixture_reply_valid,
+        .hardware_reply_frame_length = fixture_reply.frame_length,
+        .hardware_reply_descriptor = fixture_reply.descriptor_index,
+        .hardware_reply_next_cursor = fixture_reply.next_cursor,
+        .hardware_reply_source_mac_gateway = fixture_reply_source_mac_gateway,
+        .hardware_reply_source_ipv4 = parsed_fixture_reply.source_ipv4,
+        .hardware_reply_source_port = parsed_fixture_reply.source_port,
+        .hardware_reply_destination_port = parsed_fixture_reply.destination_port,
+        .hardware_reply_sequence = parsed_fixture_reply.sequence_number,
+        .hardware_reply_acknowledgement = parsed_fixture_reply.acknowledgement_number,
+        .hardware_reply_flags = parsed_fixture_reply.flags,
+        .hardware_reply_window = parsed_fixture_reply.window_size,
+        .hardware_reply_header_length = parsed_fixture_reply.header_length,
+        .hardware_reply_checksum = parsed_fixture_reply.checksum,
+        .hardware_reply_released = fixture_reply_released,
         .tx_submissions_delta = tx_submissions_delta,
         .tx_completion_enqueues = txe,
         .tx_completion_dequeues = txd,
@@ -32362,6 +32759,7 @@ fn verifyDnsAutomaticCachedResolve(device: *Device) ?DnsAutomaticCachedResolveRe
 }
 
 fn verifyDnsAutomaticTransaction(device: *Device) ?DnsAutomaticTransactionReport {
+    initialization_substage = 291;
     const socket = openEphemeralUdpSocket(device) orelse return null;
     if (socket.endpoint_index != 2 or socket.generation != 32 or socket.local_port != 49_173 or
         device.next_ephemeral_udp_port != 49_174 or device.next_udp_generation != 33 or
@@ -32377,8 +32775,12 @@ fn verifyDnsAutomaticTransaction(device: *Device) ?DnsAutomaticTransactionReport
     };
     if (!connectUdpSocket(device, socket, peer)) return null;
 
+    initialization_substage = 292;
     const submissions_before = device.tx_submissions;
     const wraps_before = device.tx_cursor_wraps;
+    const tx_enqueues_before = completionQueueEnqueued(&tx_completion_queue);
+    const tx_dequeues_before = completionQueueDequeued(&tx_completion_queue);
+    const rx_enqueues_before = completionQueueEnqueued(&rx_completion_queue);
     const invalid_dns_before = device.next_dns_transaction_id;
     const invalid_ip_before = device.next_udp_identification;
     const invalid_producer_before = device.tx_producer;
@@ -32392,6 +32794,7 @@ fn verifyDnsAutomaticTransaction(device: *Device) ?DnsAutomaticTransactionReport
         completionQueueEnqueued(&tx_completion_queue) == invalid_completions_before;
     if (!invalid_name_cursors_preserved) return null;
 
+    initialization_substage = 293;
     const first = startAutomaticDnsAQuery(device, socket, dns.fixture_name) orelse return null;
     device.next_dns_transaction_id = 0xFFFF;
     const second = startAutomaticDnsAQuery(device, socket, dns.fixture_name) orelse return null;
@@ -32431,6 +32834,7 @@ fn verifyDnsAutomaticTransaction(device: *Device) ?DnsAutomaticTransactionReport
         return null;
     }
 
+    initialization_substage = 294;
     if (!closeUdpSocket(device, socket)) return null;
     const stale_dns_before = device.next_dns_transaction_id;
     const stale_ip_before = device.next_udp_identification;
@@ -32446,22 +32850,35 @@ fn verifyDnsAutomaticTransaction(device: *Device) ?DnsAutomaticTransactionReport
         completionQueueEnqueued(&tx_completion_queue) == stale_completions_before;
     if (!stale_socket_cursors_preserved) return null;
 
+    initialization_substage = 295;
     const tx_completion_enqueues = completionQueueEnqueued(&tx_completion_queue);
     const tx_completion_dequeues = completionQueueDequeued(&tx_completion_queue);
     const rx_completion_enqueues = completionQueueEnqueued(&rx_completion_queue);
     const completion_overflow = completionQueueOverflow(&tx_completion_queue) + completionQueueOverflow(&rx_completion_queue);
-    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_174 or
-        device.software_rx_queue.enqueued != 63 or device.software_rx_queue.dequeued != 63 or
-        device.software_rx_queue.dropped != 0 or device.software_rx_queue.head != device.software_rx_queue.tail or
-        device.packets_dispatched != 52 or device.udp_packets_dispatched != 51 or
-        device.unmatched_udp_packets_dropped != 3 or device.invalid_udp_packets_dropped != 3 or
-        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0 or
-        tx_completion_enqueues != 45 or tx_completion_dequeues != 45 or rx_completion_enqueues != 22 or
-        completion_overflow != 0 or @atomicLoad(u32, &tx_pending_mask, .acquire) != 0 or
-        @atomicLoad(u32, &rx_pending_mask, .acquire) != all_rx_descriptors_pending)
-    {
-        return null;
-    }
+    initialization_substage = 2951;
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_174) return null;
+    initialization_substage = 2952;
+    if (device.software_rx_queue.enqueued != 63 or device.software_rx_queue.dequeued != 63 or
+        device.software_rx_queue.dropped != 0 or device.software_rx_queue.head != device.software_rx_queue.tail) return null;
+    initialization_substage = 2953;
+    if (device.packets_dispatched != 52 or device.udp_packets_dispatched != 51) return null;
+    initialization_substage = 2954;
+    if (device.unmatched_udp_packets_dropped != 3 or device.invalid_udp_packets_dropped != 3 or
+        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0) return null;
+    initialization_substage = 2955;
+    initialization_details = .{
+        tx_completion_enqueues -| tx_enqueues_before,
+        tx_completion_dequeues -| tx_dequeues_before,
+        rx_completion_enqueues -| rx_enqueues_before,
+        completion_overflow,
+    };
+    if (tx_completion_enqueues != tx_enqueues_before + 3 or
+        tx_completion_dequeues != tx_dequeues_before + 3 or
+        rx_completion_enqueues != rx_enqueues_before or completion_overflow != 0) return null;
+    initialization_substage = 2956;
+    if (@atomicLoad(u32, &tx_pending_mask, .acquire) != 0 or
+        @atomicLoad(u32, &rx_pending_mask, .acquire) != all_rx_descriptors_pending) return null;
+    initialization_substage = 296;
     return .{
         .socket_slot = socket.endpoint_index,
         .socket_generation = socket.generation,
@@ -32495,6 +32912,7 @@ fn verifyDnsAutomaticTransaction(device: *Device) ?DnsAutomaticTransactionReport
 }
 
 fn verifyDnsCachedResolve(device: *Device) ?DnsCachedResolveReport {
+    initialization_substage = 281;
     const socket = openEphemeralUdpSocket(device) orelse return null;
     if (socket.endpoint_index != 2 or socket.generation != 31 or socket.local_port != 49_172 or
         device.next_ephemeral_udp_port != 49_173 or device.next_udp_generation != 32 or
@@ -32512,7 +32930,11 @@ fn verifyDnsCachedResolve(device: *Device) ?DnsCachedResolveReport {
     var cache = std.mem.zeroes(dns.Cache);
     const transaction_id: u16 = dns.fixture_transaction_id + 5;
     const submissions_before = device.tx_submissions;
+    const tx_enqueues_before = completionQueueEnqueued(&tx_completion_queue);
+    const tx_dequeues_before = completionQueueDequeued(&tx_completion_queue);
+    const rx_enqueues_before = completionQueueEnqueued(&rx_completion_queue);
 
+    initialization_substage = 282;
     const miss_start = startDnsAResolve(
         device,
         socket,
@@ -32535,6 +32957,7 @@ fn verifyDnsCachedResolve(device: *Device) ?DnsCachedResolveReport {
         return null;
     }
 
+    initialization_substage = 283;
     var response_buffer = std.mem.zeroes([256]u8);
     const response_payload = dns.buildAResponse(
         &response_buffer,
@@ -32570,6 +32993,7 @@ fn verifyDnsCachedResolve(device: *Device) ?DnsCachedResolveReport {
         return null;
     }
 
+    initialization_substage = 284;
     const submissions_before_hit = device.tx_submissions;
     const producer_before_hit = device.tx_producer;
     const identification_before_hit = device.next_udp_identification;
@@ -32592,6 +33016,7 @@ fn verifyDnsCachedResolve(device: *Device) ?DnsCachedResolveReport {
         completionQueueEnqueued(&tx_completion_queue) == completions_before_hit;
     if (!cached_hit_no_tx) return null;
 
+    initialization_substage = 285;
     const expired_start = startDnsAResolve(
         device,
         socket,
@@ -32614,6 +33039,7 @@ fn verifyDnsCachedResolve(device: *Device) ?DnsCachedResolveReport {
         return null;
     }
 
+    initialization_substage = 286;
     if (!closeUdpSocket(device, socket)) return null;
     const stale_pending = pollDnsAResolve(device, &expired_request, &cache, 1300, 1);
     if (stale_pending.state != .inactive or stale_pending.examined != 0 or stale_pending.rejected != 0 or
@@ -32622,22 +33048,35 @@ fn verifyDnsCachedResolve(device: *Device) ?DnsCachedResolveReport {
         return null;
     }
 
+    initialization_substage = 287;
     const tx_completion_enqueues = completionQueueEnqueued(&tx_completion_queue);
     const tx_completion_dequeues = completionQueueDequeued(&tx_completion_queue);
     const rx_completion_enqueues = completionQueueEnqueued(&rx_completion_queue);
     const completion_overflow = completionQueueOverflow(&tx_completion_queue) + completionQueueOverflow(&rx_completion_queue);
-    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_173 or
-        device.software_rx_queue.enqueued != 63 or device.software_rx_queue.dequeued != 63 or
-        device.software_rx_queue.dropped != 0 or device.software_rx_queue.head != device.software_rx_queue.tail or
-        device.packets_dispatched != 52 or device.udp_packets_dispatched != 51 or
-        device.unmatched_udp_packets_dropped != 3 or device.invalid_udp_packets_dropped != 3 or
-        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0 or
-        tx_completion_enqueues != 42 or tx_completion_dequeues != 42 or rx_completion_enqueues != 22 or
-        completion_overflow != 0 or @atomicLoad(u32, &tx_pending_mask, .acquire) != 0 or
-        @atomicLoad(u32, &rx_pending_mask, .acquire) != all_rx_descriptors_pending)
-    {
-        return null;
-    }
+    initialization_substage = 2871;
+    if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_173) return null;
+    initialization_substage = 2872;
+    if (device.software_rx_queue.enqueued != 63 or device.software_rx_queue.dequeued != 63 or
+        device.software_rx_queue.dropped != 0 or device.software_rx_queue.head != device.software_rx_queue.tail) return null;
+    initialization_substage = 2873;
+    if (device.packets_dispatched != 52 or device.udp_packets_dispatched != 51) return null;
+    initialization_substage = 2874;
+    if (device.unmatched_udp_packets_dropped != 3 or device.invalid_udp_packets_dropped != 3 or
+        device.peer_mismatch_udp_packets_dropped != 3 or device.unknown_packets_dropped != 0) return null;
+    initialization_substage = 2875;
+    initialization_details = .{
+        tx_completion_enqueues -| tx_enqueues_before,
+        tx_completion_dequeues -| tx_dequeues_before,
+        rx_completion_enqueues -| rx_enqueues_before,
+        completion_overflow,
+    };
+    if (tx_completion_enqueues != tx_enqueues_before + 2 or
+        tx_completion_dequeues != tx_dequeues_before + 2 or
+        rx_completion_enqueues != rx_enqueues_before or completion_overflow != 0) return null;
+    initialization_substage = 2876;
+    if (@atomicLoad(u32, &tx_pending_mask, .acquire) != 0 or
+        @atomicLoad(u32, &rx_pending_mask, .acquire) != all_rx_descriptors_pending) return null;
+    initialization_substage = 288;
     return .{
         .socket_slot = socket.endpoint_index,
         .socket_generation = socket.generation,
@@ -33569,6 +34008,7 @@ fn verifyDnsCodec() ?DnsCodecReport {
 }
 
 fn verifyUdpSendToReply(device: *Device) ?UdpSendToReplyReport {
+    initialization_substage = 1;
     const socket = openEphemeralUdpSocket(device) orelse return null;
     if (socket.endpoint_index != 2 or socket.generation != 26 or socket.local_port != 49_167 or
         device.next_ephemeral_udp_port != 49_168 or device.next_udp_generation != 27 or
@@ -33577,14 +34017,20 @@ fn verifyUdpSendToReply(device: *Device) ?UdpSendToReplyReport {
         return null;
     }
 
+    initialization_substage = 2;
+    const fixture_peer = UdpPeer{
+        .mac = .{ 0x02, 0x5A, 0x49, 0x47, 0x4F, 0x53 },
+        .ipv4 = .{ 192, 0, 2, 99 },
+        .port = 34_567,
+    };
     const request_payload = [_]u8{ 'P', 'I', 'N', 'G' };
     var request_frame = std.mem.zeroes([ethernet_minimum_frame_bytes]u8);
     const request_length = udp.buildFrame(&request_frame, .{
-        .source_mac = device.gateway_mac,
+        .source_mac = fixture_peer.mac,
         .destination_mac = device.local_mac,
-        .source_ipv4 = device.gateway_ipv4,
+        .source_ipv4 = fixture_peer.ipv4,
         .destination_ipv4 = device.local_ipv4,
-        .source_port = 34_567,
+        .source_port = fixture_peer.port,
         .destination_port = socket.local_port,
         .identification = 0x6500,
         .payload = &request_payload,
@@ -33597,23 +34043,26 @@ fn verifyUdpSendToReply(device: *Device) ?UdpSendToReplyReport {
     const dispatch = dispatchPacketBatch(device, 1);
     if (dispatch.examined != 1 or dispatch.routed != 1 or dispatch.dropped != 0 or dispatch.remaining != 0) return null;
     const request = receiveUdpDatagram(device, socket) orelse return null;
-    if (request.source_port != 34_567 or request.destination_port != socket.local_port or
+    if (request.source_port != fixture_peer.port or request.destination_port != socket.local_port or
         !std.mem.eql(u8, request.payload(), &request_payload))
     {
         return null;
     }
 
+    initialization_substage = 3;
     const submissions_before = device.tx_submissions;
     const completion_before = completionQueueEnqueued(&tx_completion_queue);
+    const completion_dequeues_before = completionQueueDequeued(&tx_completion_queue);
+    const rx_completion_enqueues_before = completionQueueEnqueued(&rx_completion_queue);
     const identification_before = device.next_udp_identification;
     const invalid_peer_rejected = sendUdpDatagramTo(device, socket, .{
-        .mac = device.gateway_mac,
-        .ipv4 = device.gateway_ipv4,
+        .mac = fixture_peer.mac,
+        .ipv4 = fixture_peer.ipv4,
         .port = 0,
     }, 64, "bad") == null;
     const zero_ttl_rejected = sendUdpDatagramTo(device, socket, .{
-        .mac = device.gateway_mac,
-        .ipv4 = device.gateway_ipv4,
+        .mac = fixture_peer.mac,
+        .ipv4 = fixture_peer.ipv4,
         .port = 9,
     }, 0, "bad") == null;
     const cursor_preserved_on_rejection = invalid_peer_rejected and zero_ttl_rejected and
@@ -33622,10 +34071,11 @@ fn verifyUdpSendToReply(device: *Device) ?UdpSendToReplyReport {
         completionQueueEnqueued(&tx_completion_queue) == completion_before;
     if (!cursor_preserved_on_rejection) return null;
 
+    initialization_substage = 4;
     const reply = sendUdpReply(device, socket, &request, 64, "PONG") orelse return null;
     const send_to = sendUdpDatagramTo(device, socket, .{
-        .mac = device.gateway_mac,
-        .ipv4 = device.gateway_ipv4,
+        .mac = fixture_peer.mac,
+        .ipv4 = fixture_peer.ipv4,
         .port = 9,
     }, 64, "SEND") orelse return null;
     if (reply.identification != 6 or reply.completion.descriptor_index != 1 or
@@ -33638,17 +34088,26 @@ fn verifyUdpSendToReply(device: *Device) ?UdpSendToReplyReport {
         return null;
     }
 
+    initialization_substage = 5;
     const tx_completion_enqueues = completionQueueEnqueued(&tx_completion_queue);
     const tx_completion_dequeues = completionQueueDequeued(&tx_completion_queue);
     const rx_completion_enqueues = completionQueueEnqueued(&rx_completion_queue);
     const completion_overflow = completionQueueOverflow(&tx_completion_queue) + completionQueueOverflow(&rx_completion_queue);
-    if (tx_completion_enqueues != 35 or tx_completion_dequeues != 35 or rx_completion_enqueues != 22 or
-        completion_overflow != 0 or @atomicLoad(u32, &tx_pending_mask, .acquire) != 0 or
-        @atomicLoad(u32, &rx_pending_mask, .acquire) != all_rx_descriptors_pending or
-        tx_ready_mask != 0 or rx_ready_mask != 0)
-    {
-        return null;
-    }
+    initialization_substage = 51;
+    if (tx_completion_enqueues != completion_before + 2) return null;
+    initialization_substage = 52;
+    if (tx_completion_dequeues != completion_dequeues_before + 2) return null;
+    initialization_substage = 53;
+    if (rx_completion_enqueues != rx_completion_enqueues_before) return null;
+    initialization_substage = 54;
+    if (completion_overflow != 0) return null;
+    initialization_substage = 55;
+    if (@atomicLoad(u32, &tx_pending_mask, .acquire) != 0) return null;
+    initialization_substage = 56;
+    if (@atomicLoad(u32, &rx_pending_mask, .acquire) != all_rx_descriptors_pending) return null;
+    initialization_substage = 57;
+    if (tx_ready_mask != 0 or rx_ready_mask != 0) return null;
+    initialization_substage = 6;
     if (!closeUdpSocket(device, socket)) return null;
     if (device.udp_endpoint_count != 2 or device.next_ephemeral_udp_port != 49_168 or
         device.software_rx_queue.enqueued != 55 or device.software_rx_queue.dequeued != 55 or
@@ -35290,11 +35749,18 @@ fn waitForTx(descriptors: [*]volatile TxDescriptor, descriptor_index: usize, _: 
     var completed = false;
     var iteration: usize = 0;
     while (iteration < maximum_poll_iterations) : (iteration += 1) {
-        if (consumeCompletion(&tx_completion_queue, &tx_ready_mask, descriptor_index) and
-            (descriptors[descriptor_index].status & 1) != 0)
-        {
-            completed = true;
-            break;
+        if ((descriptors[descriptor_index].status & 1) != 0) {
+            var completion_seen = consumeCompletion(&tx_completion_queue, &tx_ready_mask, descriptor_index);
+            if (!completion_seen and runtime_completion_polling_enabled) {
+                // Once strict boot-time MSI-X validation is complete, a DMA-complete
+                // descriptor may recover progress if a later MSI-X edge is lost.
+                completePendingDescriptor(&tx_pending_mask, &tx_completion_queue, descriptor_index);
+                completion_seen = consumeCompletion(&tx_completion_queue, &tx_ready_mask, descriptor_index);
+            }
+            if (completion_seen) {
+                completed = true;
+                break;
+            }
         }
         zigos_cpu_relax();
     }
@@ -35308,11 +35774,18 @@ fn waitForRx(descriptors: [*]volatile RxDescriptor, descriptor_index: usize, _: 
     var completed = false;
     var iteration: usize = 0;
     while (iteration < maximum_poll_iterations) : (iteration += 1) {
-        if (consumeCompletion(&rx_completion_queue, &rx_ready_mask, descriptor_index) and
-            (descriptors[descriptor_index].status & 1) != 0)
-        {
-            completed = true;
-            break;
+        if ((descriptors[descriptor_index].status & 1) != 0) {
+            var completion_seen = consumeCompletion(&rx_completion_queue, &rx_ready_mask, descriptor_index);
+            if (!completion_seen and runtime_completion_polling_enabled) {
+                // Once strict boot-time MSI-X validation is complete, a DMA-complete
+                // descriptor may recover progress if a later MSI-X edge is lost.
+                completePendingDescriptor(&rx_pending_mask, &rx_completion_queue, descriptor_index);
+                completion_seen = consumeCompletion(&rx_completion_queue, &rx_ready_mask, descriptor_index);
+            }
+            if (completion_seen) {
+                completed = true;
+                break;
+            }
         }
         zigos_cpu_relax();
     }

@@ -2,10 +2,13 @@ const std = @import("std");
 const apic = @import("apic.zig");
 const descriptor_tables = @import("descriptor_tables.zig");
 const elf64 = @import("elf64.zig");
+const e1000e = @import("e1000e.zig");
 const interrupt_context = @import("interrupt_context.zig");
+const memory = @import("memory.zig");
 const runtime_command = @import("runtime_command.zig");
 const runtime_fd = @import("runtime_fd.zig");
 const runtime_process = @import("runtime_process.zig");
+const runtime_user = @import("runtime_user.zig");
 const runtime_vfs = @import("runtime_vfs.zig");
 const serial = @import("serial.zig");
 
@@ -13,11 +16,19 @@ const cc = std.os.uefi.cc;
 const service_elf = @embedFile("generated/service_user.elf");
 const process_elf = @embedFile("generated/process_user.elf");
 const process_exec_elf = @embedFile("generated/process_exec.elf");
+const runtime_hello_elf = @embedFile("generated/runtime_hello.elf");
+const runtime_sleep_elf = @embedFile("generated/runtime_sleep.elf");
+const runtime_crash_elf = @embedFile("generated/runtime_crash.elf");
+const runtime_spin_elf = @embedFile("generated/runtime_spin.elf");
+const runtime_pipe_reader_elf = @embedFile("generated/runtime_pipe_reader.elf");
+const runtime_pipe_writer_elf = @embedFile("generated/runtime_pipe_writer.elf");
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_wait_for_interrupt() callconv(cc) void;
+extern fn zigos_enable_interrupts() callconv(cc) void;
 
 pub const Configuration = struct {
+    allocator: *memory.FrameAllocator,
     ticks_per_second: u64,
     network_ready: bool,
     usb_keyboard_ready: bool,
@@ -32,8 +43,6 @@ const maximum_jobs: usize = 24;
 const Job = struct {
     active: bool = false,
     handle: u64 = 0,
-    complete_tick: u64 = 0,
-    exit_status: u32 = 0,
     command: [runtime_command.maximum_token_length + 1]u8 = @splat(0),
     command_length: u8 = 0,
 };
@@ -150,6 +159,9 @@ const State = struct {
     idle_halts: u64 = 0,
     device_service_passes: u64 = 0,
     network_service_passes: u64 = 0,
+    live_ping_passes: u64 = 0,
+    live_dns_passes: u64 = 0,
+    network_failures: u64 = 0,
     filesystem_syncs: u64 = 0,
     filesystem_checks: u64 = 0,
     last_serviced_tick: u64 = 0,
@@ -216,6 +228,9 @@ fn initialize(configuration: Configuration) !void {
     state.idle_halts = 0;
     state.device_service_passes = 0;
     state.network_service_passes = 0;
+    state.live_ping_passes = 0;
+    state.live_dns_passes = 0;
+    state.network_failures = 0;
     state.filesystem_syncs = 0;
     state.filesystem_checks = 0;
     state.last_serviced_tick = 0;
@@ -244,6 +259,7 @@ fn initialize(configuration: Configuration) !void {
     try state.processes.setRunning(state.shell_handle);
     try state.processes.setResourceUsage(state.shell_handle, 8, 0, 0);
     try state.descriptors.bindProcess(&state.processes, state.shell_handle, true);
+    try runtime_user.initialize(configuration.allocator, &state.vfs, &state.processes, &state.descriptors);
 }
 
 fn initializeFilesystem() !void {
@@ -255,13 +271,19 @@ fn initializeFilesystem() !void {
     for (directories) |path| _ = try state.vfs.mkdir(0, path, if (std.mem.startsWith(u8, path, "/tmp") or std.mem.startsWith(u8, path, "/var/tmp")) 0o777 else 0o755, 0);
 
     _ = try state.vfs.putFile(0, "/etc/hostname", "zigos\n", 0o644, false, 0);
-    _ = try state.vfs.putFile(0, "/etc/os-release", "NAME=ZigOs\nVERSION=18.0.0\nARCH=x86_64\n", 0o644, false, 0);
+    _ = try state.vfs.putFile(0, "/etc/os-release", "NAME=ZigOs\nVERSION=19.0.0\nARCH=x86_64\n", 0o644, false, 0);
     _ = try state.vfs.putFile(0, "/etc/motd", "ZigOs persistent x86-64 runtime\n", 0o644, false, 0);
     _ = try state.vfs.putFile(0, "/home/root/readme.txt", "This filesystem remains available after boot validation.\n", 0o644, false, 0);
-    _ = try state.vfs.putFile(0, "/var/log/boot.log", "Capstone 16 validation passed; Capstone 18 persistent runtime entered.\n", 0o640, false, 0);
+    _ = try state.vfs.putFile(0, "/var/log/boot.log", "Capstone 16 validation passed; Capstone 19 permanent userspace runtime entered.\n", 0o640, false, 0);
     _ = try state.vfs.putFile(0, "/boot/service-user.elf", service_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/boot/process-user.elf", process_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/boot/process-exec.elf", process_exec_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/hello.elf", runtime_hello_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/sleep.elf", runtime_sleep_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/crash.elf", runtime_crash_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/spin.elf", runtime_spin_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/pipe-reader.elf", runtime_pipe_reader_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/pipe-writer.elf", runtime_pipe_writer_elf, 0o555, false, 0);
 
     const pseudo_paths = [_][]const u8{
         "/proc/version",   "/proc/uptime", "/proc/meminfo", "/proc/processes",
@@ -281,9 +303,15 @@ fn currentTick() u64 {
     return @atomicLoad(u64, &runtime_interrupt_count, .monotonic);
 }
 
-export fn zigos_runtime_timer_interrupt_handler() callconv(cc) void {
-    _ = @atomicRmw(u64, &runtime_interrupt_count, .Add, 1, .monotonic);
+export fn zigos_runtime_timer_interrupt_handler(
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) callconv(cc) u64 {
+    const previous = @atomicRmw(u64, &runtime_interrupt_count, .Add, 1, .monotonic);
+    const tick = previous +% 1;
+    const preempted = runtime_user.handleTimer(frame, fx_state, tick);
     apic.acknowledgeInterrupt();
+    return @intFromBool(preempted);
 }
 
 fn serviceRuntime() void {
@@ -316,18 +344,19 @@ fn serviceJobs(tick: u64) void {
             job.active = false;
             continue;
         };
-        if (process.terminal()) continue;
-        if (tick >= job.complete_tick) {
-            state.processes.exit(job.handle, job.exit_status) catch {};
+        if (process.terminal()) {
+            runtime_user.finalize(job.handle) catch {};
             continue;
         }
-        state.processes.setRunning(job.handle) catch continue;
-        _ = state.processes.accountTick(job.handle) catch false;
-        if (state.shell_sleeping) {
-            state.processes.setRunnable(job.handle) catch {};
-        } else {
-            state.processes.setRunning(state.shell_handle) catch {};
-        }
+        if (process.state != .runnable and process.state != .running) continue;
+        runtime_user.dispatch(job.handle, tick) catch |err| {
+            state.processes.fault(job.handle, 13, 0) catch {};
+            runtime_user.finalize(job.handle) catch {};
+            emit("runtime dispatch failure: ");
+            emit(@errorName(err));
+            emit("\r\n");
+        };
+        if (!state.shell_sleeping) state.processes.setRunning(state.shell_handle) catch {};
     }
 }
 
@@ -388,6 +417,23 @@ fn executeLine(line: []const u8) void {
         return;
     };
 
+    if (command_line.background) {
+        var background_output = Output.init(&state.pipeline_a);
+        if (command_line.stage_count == 1 and command_line.input_path == null and command_line.output_path == null) {
+            const stage = &command_line.stages[0];
+            const command = stage.command() orelse return;
+            if ((equal(command, "run") or equal(command, "exec")) and stage.count >= 2) {
+                _ = launchExecutable(stage, 1, .{}, true, &background_output);
+                emit(background_output.slice());
+                return;
+            }
+        }
+        background_output.line("shell: trailing &: only 'run PATH &' or 'exec PATH &' launches a real userspace job; use spawn PATH otherwise");
+        emit(background_output.slice());
+        state.failed_commands +%= 1;
+        return;
+    }
+
     var input: []const u8 = &.{};
     if (command_line.input_path) |path_token| {
         var input_output = Output.init(&state.input_buffer);
@@ -418,13 +464,6 @@ fn executeLine(line: []const u8) void {
     } else {
         emit(final_output);
     }
-
-    if (command_line.background and command_line.stages[0].count != 0) {
-        const name = command_line.stages[0].arguments[0].slice();
-        var output = Output.init(&state.pipeline_a);
-        launchPseudoJob(name, 25, 0, &output);
-        emit(output.slice());
-    }
 }
 
 fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: *Output) void {
@@ -448,6 +487,7 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
     if (equal(name, "df")) return commandDf(output);
     if (equal(name, "fds")) return commandFds(stage, output);
     if (equal(name, "fdtest")) return commandFdTest(stage, output);
+    if (equal(name, "pipex")) return commandPipeExecutables(output);
     if (equal(name, "ps")) return commandPs(output);
     if (equal(name, "jobs")) return commandJobs(output);
     if (equal(name, "spawn")) return commandSpawn(stage, output);
@@ -469,7 +509,7 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
     if (equal(name, "export")) return commandExport(stage, output);
     if (equal(name, "unset")) return commandUnset(stage, output);
     if (equal(name, "history")) return commandHistory(output);
-    if (equal(name, "uname")) return output.line("ZigOs 18.0.0 x86_64 freestanding");
+    if (equal(name, "uname")) return output.line("ZigOs 19.0.0 x86_64 freestanding");
     if (equal(name, "clear")) return output.write("\x1B[2J\x1B[H");
     if (equal(name, "sync")) return commandSync(output);
     if (equal(name, "fsck")) return commandFsck(output);
@@ -488,11 +528,11 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
 }
 
 fn commandHelp(output: *Output) void {
-    output.line("Filesystem: pwd cd ls cat echo touch mkdir rm rmdir mv write append stat chmod mount df fds fdtest sync fsck");
-    output.line("Processes: ps jobs spawn kill wait crash sleep uptime elf exec run");
-    output.line("Network: devices ifconfig netstat routes arp ping dns");
+    output.line("Filesystem: pwd cd ls cat echo touch mkdir rm rmdir mv write append stat chmod mount df fds fdtest pipex sync fsck");
+    output.line("Processes: ps jobs spawn kill wait crash sleep uptime elf exec run (real VFS-loaded CPL3)");
+    output.line("Network status: devices ifconfig netstat routes arp; ping/dns explicitly report unavailable until packet I/O is retained");
     output.line("Shell: env export unset history clear uname hash hexdump grep wc head shutdown");
-    output.line("Grammar: quotes, escapes, $VARS, comments, pipelines, <, >, >>, and trailing & are supported.");
+    output.line("Grammar: quotes, escapes, $VARS, comments, bounded shell pipelines, <, >, >>; trailing & is executable-only.");
 }
 
 fn commandPwd(output: *Output) void {
@@ -710,6 +750,142 @@ fn commandFdTest(stage: *const runtime_command.Stage, output: *Output) void {
     output.write("\r\n");
 }
 
+fn commandPipeExecutables(output: *Output) void {
+    const before = state.descriptors.report();
+    const pipe_fds = runtime_user.createPipeFor(state.shell_handle) catch |err| return shellError("pipex", err, output);
+    var shell_read_open = true;
+    var shell_write_open = true;
+    defer {
+        if (shell_read_open) runtime_user.closeDescriptorFor(state.shell_handle, pipe_fds[0]) catch {};
+        if (shell_write_open) runtime_user.closeDescriptorFor(state.shell_handle, pipe_fds[1]) catch {};
+    }
+
+    const reader = spawnExecutablePath(
+        "/bin/pipe-reader.elf",
+        &.{},
+        .{ .override = true, .rdi = pipe_fds[0] },
+        false,
+        output,
+    ) orelse return;
+    const writer = spawnExecutablePath(
+        "/bin/pipe-writer.elf",
+        &.{},
+        .{ .override = true, .rsi = pipe_fds[1] },
+        false,
+        output,
+    ) orelse {
+        abortExecutable(reader);
+        return;
+    };
+
+    runtime_user.closeDescriptorFor(reader, pipe_fds[1]) catch |err| {
+        abortExecutable(reader);
+        abortExecutable(writer);
+        return shellError("pipex reader close", err, output);
+    };
+    runtime_user.closeDescriptorFor(writer, pipe_fds[0]) catch |err| {
+        abortExecutable(reader);
+        abortExecutable(writer);
+        return shellError("pipex writer close", err, output);
+    };
+    runtime_user.closeDescriptorFor(state.shell_handle, pipe_fds[0]) catch |err| {
+        abortExecutable(reader);
+        abortExecutable(writer);
+        return shellError("pipex shell read close", err, output);
+    };
+    shell_read_open = false;
+    runtime_user.closeDescriptorFor(state.shell_handle, pipe_fds[1]) catch |err| {
+        abortExecutable(reader);
+        abortExecutable(writer);
+        return shellError("pipex shell write close", err, output);
+    };
+    shell_write_open = false;
+
+    var reader_dispatches: usize = 0;
+    var blocked_reader = state.processes.get(reader) catch {
+        abortExecutable(reader);
+        abortExecutable(writer);
+        return output.line("pipex: reader vanished before dispatch");
+    };
+    while (reader_dispatches < 16 and
+        (blocked_reader.state == .runnable or blocked_reader.state == .running)) : (reader_dispatches += 1)
+    {
+        runtime_user.dispatch(reader, currentTick()) catch |err| {
+            abortExecutable(reader);
+            abortExecutable(writer);
+            return shellError("pipex reader dispatch", err, output);
+        };
+        state.processes.setRunning(state.shell_handle) catch {};
+        blocked_reader = state.processes.get(reader) catch {
+            abortExecutable(reader);
+            abortExecutable(writer);
+            return output.line("pipex: reader vanished after dispatch");
+        };
+    }
+    if (blocked_reader.state != .blocked or blocked_reader.wait_reason != .pipe_read) {
+        abortExecutable(reader);
+        abortExecutable(writer);
+        output.write("pipex: real reader did not block; state ");
+        output.write(@tagName(blocked_reader.state));
+        output.write(" reason ");
+        output.line(@tagName(blocked_reader.wait_reason));
+        state.failed_commands +%= 1;
+        return;
+    }
+
+    const writer_status = driveForeground(writer, output) orelse {
+        abortExecutable(reader);
+        return;
+    };
+    if (writer_status.state != .zombie or writer_status.exit_status != 0) {
+        abortExecutable(reader);
+        output.line("pipex: CPL3 writer failed");
+        state.failed_commands +%= 1;
+        return;
+    }
+    const awakened_reader = state.processes.get(reader) catch {
+        abortExecutable(reader);
+        return output.line("pipex: reader missing after writer completion");
+    };
+    if (awakened_reader.state != .runnable and awakened_reader.state != .running) {
+        abortExecutable(reader);
+        output.write("pipex: writer did not wake reader; state ");
+        output.line(@tagName(awakened_reader.state));
+        state.failed_commands +%= 1;
+        return;
+    }
+    const reader_status = driveForeground(reader, output) orelse return;
+    if (reader_status.state != .zombie or reader_status.exit_status != 0) {
+        output.line("pipex: CPL3 reader failed");
+        state.failed_commands +%= 1;
+        return;
+    }
+
+    const after = state.descriptors.report();
+    if (after.blocked_reads - before.blocked_reads != 1 or
+        after.reader_wakeups - before.reader_wakeups != 1 or
+        after.bytes_written - before.bytes_written != 8 or
+        after.bytes_read - before.bytes_read != 8 or
+        after.pipes != before.pipes)
+    {
+        output.line("pipex: descriptor counters did not prove one real block/wake transfer");
+        state.failed_commands +%= 1;
+        return;
+    }
+    output.line("");
+    output.line("pipex: real CPL3 reader blocked; real CPL3 writer woke it; payload PIPE-CPL; pipe reclaimed");
+}
+
+fn abortExecutable(handle: u64) void {
+    const process = state.processes.get(handle) catch return;
+    if (!process.terminal()) state.processes.exit(handle, 0x7F00_00FF) catch {};
+    runtime_user.finalize(handle) catch {};
+    _ = state.processes.wait(state.shell_handle, handle, true) catch null;
+    runtime_user.forget(handle);
+    removeJob(handle);
+    state.processes.setRunning(state.shell_handle) catch {};
+}
+
 fn runFdContract() !void {
     const initial = state.descriptors.report();
     if (initial.namespaces != 1 or initial.descriptors != 3 or initial.open_descriptions != 3 or initial.pipes != 0)
@@ -910,40 +1086,159 @@ fn commandJobs(output: *Output) void {
 }
 
 fn commandSpawn(stage: *const runtime_command.Stage, output: *Output) void {
-    if (stage.count < 2 or stage.count > 3) return usage("spawn NAME [TICKS]", output);
-    const duration = if (stage.count == 3) parseU64(stage.arguments[2].slice()) orelse return usage("spawn NAME [TICKS]", output) else 100;
-    launchPseudoJob(stage.arguments[1].slice(), @max(@as(u64, 1), duration), 0, output);
+    if (stage.count < 2) return usage("spawn PATH [ARGS...]", output);
+    _ = launchExecutable(stage, 1, .{}, true, output);
 }
 
-fn launchPseudoJob(name: []const u8, duration: u64, exit_status: u32, output: *Output) void {
+fn launchExecutable(
+    stage: *const runtime_command.Stage,
+    path_index: usize,
+    registers: runtime_user.SpawnRegisters,
+    background: bool,
+    output: *Output,
+) ?u64 {
+    if (path_index >= stage.count) return null;
+    var extra_arguments: [runtime_process.maximum_arguments - 1][]const u8 = undefined;
+    const extra_count = stage.count - path_index - 1;
+    if (extra_count > extra_arguments.len) {
+        usage("exec PATH [up to 7 ARGS]", output);
+        return null;
+    }
+    for (stage.arguments[path_index + 1 .. stage.count], 0..) |argument, index| {
+        extra_arguments[index] = argument.slice();
+    }
+    return spawnExecutablePath(
+        stage.arguments[path_index].slice(),
+        extra_arguments[0..extra_count],
+        registers,
+        background,
+        output,
+    );
+}
+
+fn spawnExecutablePath(
+    path: []const u8,
+    extra_arguments: []const []const u8,
+    registers: runtime_user.SpawnRegisters,
+    background: bool,
+    output: *Output,
+) ?u64 {
     var job_index: usize = 0;
-    while (job_index < state.jobs.len and state.jobs[job_index].active) : (job_index += 1) {}
-    if (job_index >= state.jobs.len) return output.line("spawn: job table full");
-    const handle = state.processes.spawn(
-        state.shell_handle,
-        .kernel,
-        name,
-        &.{name},
-        state.cwd,
-        0,
-        0,
-        currentTick(),
-        .{ .maximum_pages = 32, .maximum_descriptors = 8, .maximum_sockets = 4, .maximum_children = 0, .maximum_cpu_ticks = duration + 8 },
-    ) catch |err| return shellError("spawn", err, output);
-    var job = Job{
-        .active = true,
-        .handle = handle,
-        .complete_tick = currentTick() + duration,
-        .exit_status = exit_status,
-        .command_length = @intCast(@min(name.len, runtime_command.maximum_token_length)),
+    if (background) {
+        while (job_index < state.jobs.len and state.jobs[job_index].active) : (job_index += 1) {}
+        if (job_index >= state.jobs.len) {
+            output.line("spawn: job table full");
+            return null;
+        }
+    }
+
+    var bytes: [runtime_vfs.maximum_file_size]u8 = undefined;
+    const count = state.vfs.read(state.cwd, path, 0, &bytes) catch |err| {
+        shellError(if (background) "spawn" else "exec", err, output);
+        return null;
     };
-    @memcpy(job.command[0..job.command_length], name[0..job.command_length]);
-    state.jobs[job_index] = job;
-    const process = state.processes.get(handle) catch return;
-    output.byte('[');
-    output.decimal(process.pid);
-    output.write("] started ");
-    output.line(name);
+    const image = elf64.parse(bytes[0..count]) orelse {
+        output.line("exec: invalid or unsupported ELF64 image");
+        state.failed_commands +%= 1;
+        return null;
+    };
+    _ = image;
+
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/');
+    const raw_name = if (slash) |index| path[index + 1 ..] else path;
+    const name = raw_name[0..@min(raw_name.len, runtime_process.maximum_name_length)];
+    if (name.len == 0) {
+        output.line("exec: executable name is empty");
+        return null;
+    }
+    var arguments: [runtime_process.maximum_arguments][]const u8 = undefined;
+    arguments[0] = name;
+    for (extra_arguments, 0..) |argument, index| arguments[index + 1] = argument;
+
+    const handle = runtime_user.spawn(
+        state.shell_handle,
+        name,
+        arguments[0 .. extra_arguments.len + 1],
+        state.cwd,
+        bytes[0..count],
+        currentTick(),
+        registers,
+    ) catch |err| {
+        shellError(if (background) "spawn" else "exec", err, output);
+        return null;
+    };
+
+    const identity = runtime_user.imageIdentity(handle) orelse unreachable;
+    if (background) {
+        var job = Job{
+            .active = true,
+            .handle = handle,
+            .command_length = @intCast(@min(path.len, runtime_command.maximum_token_length)),
+        };
+        @memcpy(job.command[0..job.command_length], path[0..job.command_length]);
+        state.jobs[job_index] = job;
+        const process = state.processes.get(handle) catch return handle;
+        output.byte('[');
+        output.decimal(process.pid);
+        output.write("] CPL3 started ");
+        output.write(path);
+        output.write(" ELF bytes ");
+        output.decimal(identity.bytes);
+        output.write(" hash 0x");
+        output.hex(identity.hash);
+        output.write("\r\n");
+    }
+    return handle;
+}
+
+fn driveForeground(handle: u64, output: *Output) ?runtime_process.Status {
+    while (true) {
+        const process = state.processes.get(handle) catch |err| {
+            shellError("exec", err, output);
+            return null;
+        };
+        if (process.terminal()) break;
+        const now = currentTick();
+        _ = state.processes.wakeExpired(now);
+        const refreshed = state.processes.get(handle) catch return null;
+        switch (refreshed.state) {
+            .runnable, .running => runtime_user.dispatch(handle, now) catch |err| {
+                state.processes.fault(handle, 13, 0) catch {};
+                runtime_user.finalize(handle) catch {};
+                shellError("exec dispatch", err, output);
+                break;
+            },
+            .sleeping, .blocked => {
+                serviceRuntime();
+                zigos_wait_for_interrupt();
+            },
+            .stopped => {
+                output.line("exec: process stopped; resume or kill it from a background job");
+                return null;
+            },
+            else => zigos_wait_for_interrupt(),
+        }
+        state.processes.setRunning(state.shell_handle) catch {};
+    }
+
+    runtime_user.finalize(handle) catch |err| shellError("exec cleanup", err, output);
+    var program_output: [4096]u8 = undefined;
+    const output_count = runtime_user.takeOutput(handle, &program_output);
+    if (output_count != 0) output.write(program_output[0..output_count]);
+    if (runtime_user.outputWasTruncated(handle)) output.line("exec: userspace output truncated at 4096 bytes");
+    const status = state.processes.wait(state.shell_handle, handle, true) catch |err| {
+        shellError("wait", err, output);
+        return null;
+    } orelse return null;
+    runtime_user.forget(handle);
+    state.processes.setRunning(state.shell_handle) catch {};
+    return status;
+}
+
+fn removeJob(handle: u64) void {
+    for (&state.jobs) |*job| {
+        if (job.active and job.handle == handle) job.active = false;
+    }
 }
 
 fn commandKill(stage: *const runtime_command.Stage, output: *Output) void {
@@ -953,17 +1248,26 @@ fn commandKill(stage: *const runtime_command.Stage, output: *Output) void {
     const signal: u8 = if (stage.count == 3) std.fmt.parseInt(u8, stage.arguments[2].slice(), 10) catch return usage("kill PID [SIGNAL]", output) else 15;
     const handle = state.processes.handleForPid(pid) catch |err| return shellError("kill", err, output);
     state.processes.sendSignal(state.shell_handle, handle, signal) catch |err| return shellError("kill", err, output);
+    const process = state.processes.get(handle) catch return;
+    if (process.terminal()) runtime_user.finalize(handle) catch |err| return shellError("kill cleanup", err, output);
     output.write("signal ");
     output.decimal(signal);
-    output.write(" sent to ");
+    output.write(" sent to real PID ");
     output.decimal(pid);
-    output.write("\r\n");
+    output.write(" state ");
+    output.line(@tagName(process.state));
 }
 
 fn commandWait(stage: *const runtime_command.Stage, output: *Output) void {
     if (stage.count != 2) return usage("wait PID", output);
     const pid = parseU32(stage.arguments[1].slice()) orelse return usage("wait PID", output);
     const handle = state.processes.handleForPid(pid) catch |err| return shellError("wait", err, output);
+    const process = state.processes.get(handle) catch |err| return shellError("wait", err, output);
+    if (!process.terminal()) return output.line("wait: process is still running");
+    runtime_user.finalize(handle) catch |err| return shellError("wait cleanup", err, output);
+    var program_output: [4096]u8 = undefined;
+    const output_count = runtime_user.takeOutput(handle, &program_output);
+    if (output_count != 0) output.write(program_output[0..output_count]);
     const status = state.processes.wait(state.shell_handle, handle, true) catch |err| return shellError("wait", err, output);
     if (status == null) return output.line("wait: process is still running");
     output.write("PID ");
@@ -971,22 +1275,38 @@ fn commandWait(stage: *const runtime_command.Stage, output: *Output) void {
     output.write(" status 0x");
     output.hex(status.?.exit_status);
     output.write(" state ");
-    output.line(@tagName(status.?.state));
-    for (&state.jobs) |*job| {
-        if (job.active and job.handle == handle) job.active = false;
+    output.write(@tagName(status.?.state));
+    if (status.?.state == .faulted) {
+        output.write(" vector ");
+        output.decimal(status.?.fault_vector);
+        output.write(" address 0x");
+        output.hex(status.?.fault_address);
     }
+    output.write("\r\n");
+    runtime_user.forget(handle);
+    removeJob(handle);
 }
 
 fn commandCrash(stage: *const runtime_command.Stage, output: *Output) void {
-    if (stage.count < 2 or stage.count > 3) return usage("crash NAME [VECTOR]", output);
-    const vector: u16 = if (stage.count == 3) std.fmt.parseInt(u16, stage.arguments[2].slice(), 0) catch return usage("crash NAME [VECTOR]", output) else 14;
-    const handle = state.processes.spawn(state.shell_handle, .userspace, stage.arguments[1].slice(), &.{stage.arguments[1].slice()}, state.cwd, 0, 0, currentTick(), .{}) catch |err| return shellError("crash", err, output);
-    state.processes.fault(handle, vector, 0xDEAD_0000 + @as(u64, vector)) catch |err| return shellError("crash", err, output);
-    const process = state.processes.get(handle) catch return;
-    output.write("contained fault in PID ");
-    output.decimal(process.pid);
+    if (stage.count > 2) return usage("crash [ELF_PATH]", output);
+    const path = if (stage.count == 2) stage.arguments[1].slice() else "/bin/crash.elf";
+    const handle = spawnExecutablePath(path, &.{}, .{}, false, output) orelse return;
+    const status = driveForeground(handle, output) orelse return;
+    if (status.state != .faulted) {
+        output.write("crash: program did not fault; state ");
+        output.write(@tagName(status.state));
+        output.write(" status 0x");
+        output.hex(status.exit_status);
+        output.write("\r\n");
+        state.failed_commands +%= 1;
+        return;
+    }
+    output.write("crash: contained genuine CPL3 exception in PID ");
+    output.decimal(status.pid);
     output.write(" vector ");
-    output.decimal(vector);
+    output.decimal(status.fault_vector);
+    output.write(" CR2 0x");
+    output.hex(status.fault_address);
     output.write("\r\n");
 }
 
@@ -1046,12 +1366,31 @@ fn commandElf(stage: *const runtime_command.Stage, output: *Output) void {
 
 fn commandExec(stage: *const runtime_command.Stage, output: *Output) void {
     if (stage.count < 2) return usage("exec PATH [ARGS...]", output);
-    var bytes: [runtime_vfs.maximum_file_size]u8 = undefined;
-    const count = state.vfs.read(state.cwd, stage.arguments[1].slice(), 0, &bytes) catch |err| return shellError("exec", err, output);
-    const image = elf64.parse(bytes[0..count]) orelse return output.line("exec: invalid or unsupported ELF64 image");
-    _ = image;
-    launchPseudoJob(stage.arguments[1].slice(), 40, 0, output);
-    output.line("exec: ELF accepted from VFS and queued in the process table");
+    const handle = launchExecutable(stage, 1, .{}, false, output) orelse return;
+    const identity = runtime_user.imageIdentity(handle) orelse return;
+    output.write("exec: mapped VFS ELF bytes ");
+    output.decimal(identity.bytes);
+    output.write(" hash 0x");
+    output.hex(identity.hash);
+    output.line(" into a private CR3; entering CPL3");
+    const status = driveForeground(handle, output) orelse return;
+    output.write("exec: PID ");
+    output.decimal(status.pid);
+    output.write(" state ");
+    output.write(@tagName(status.state));
+    output.write(" status 0x");
+    output.hex(status.exit_status);
+    output.write(" CPU ticks ");
+    output.decimal(status.cpu_ticks);
+    output.write(" syscalls ");
+    output.decimal(status.syscall_count);
+    if (status.state == .faulted) {
+        output.write(" vector ");
+        output.decimal(status.fault_vector);
+        output.write(" address 0x");
+        output.hex(status.fault_address);
+    }
+    output.write("\r\n");
 }
 
 fn commandDevices(output: *Output) void {
@@ -1069,46 +1408,259 @@ fn commandDevices(output: *Output) void {
 }
 
 fn commandIfconfig(output: *Output) void {
-    if (!state.config.network_ready) return output.line("e1000e0: down (no supported interface retained)");
-    output.line("e1000e0: UP mtu 1500 inet 192.0.2.2/24 gateway 192.0.2.1 mac 52:54:00:12:34:56");
-    output.write("service polls ");
-    output.decimal(state.network_service_passes);
+    const device = activeNetworkDevice(output, "ifconfig") orelse return;
+    output.write("e1000e0: up mac ");
+    outputMac(output, device.local_mac);
+    output.write(" ipv4 ");
+    outputIpv4(output, device.local_ipv4);
+    output.write(" netmask ");
+    outputIpv4(output, device.subnet_mask);
+    output.write(" gateway ");
+    outputIpv4(output, device.gateway_ipv4);
+    output.write(" dns ");
+    if (device.dns_server_advertised) outputIpv4(output, device.dns_server_ipv4) else output.write("unadvertised");
+    output.write(" tx/rx ");
+    output.decimal(device.tx_submissions);
+    output.byte('/');
+    output.decimal(device.rx_deliveries);
     output.write("\r\n");
 }
 
 fn commandNetstat(output: *Output) void {
-    output.line("Proto Local Address          Remote Address         State");
-    if (state.config.network_ready) {
-        output.line("udp   192.0.2.2:49152       192.0.2.1:53          idle");
-        output.line("udp   192.0.2.2:49153       192.0.2.1:123         idle");
-    }
-    output.line("userspace socket descriptors: 0 (runtime API foundation only)");
+    const device = activeNetworkDevice(output, "netstat") orelse return;
+    const endpoints = e1000e.pollUdpEndpoints(device);
+    output.write("UDP endpoints active/readable/connected ");
+    output.decimal(endpoints.active_count);
+    output.byte('/');
+    output.decimal(endpoints.readable_count);
+    output.byte('/');
+    output.decimal(endpoints.connected_count);
+    output.write(" pending ");
+    output.decimal(endpoints.total_pending);
+    output.write(" max ");
+    output.decimal(endpoints.max_pending);
+    output.write("; packets dispatched ICMP/UDP ");
+    output.decimal(device.icmp_packets_dispatched);
+    output.byte('/');
+    output.decimal(device.udp_packets_dispatched);
+    output.write("\r\n");
 }
 
 fn commandRoutes(output: *Output) void {
-    if (!state.config.network_ready) return output.line("no routes");
-    output.line("default via 192.0.2.1 dev e1000e0");
-    output.line("192.0.2.0/24 dev e1000e0 scope link");
+    const device = activeNetworkDevice(output, "routes") orelse return;
+    output.write("default via ");
+    outputIpv4(output, device.gateway_ipv4);
+    output.write(" dev e1000e0; connected ");
+    outputIpv4(output, device.local_ipv4);
+    output.write(" netmask ");
+    outputIpv4(output, device.subnet_mask);
+    output.write("\r\n");
 }
 
 fn commandArp(output: *Output) void {
-    if (!state.config.network_ready) return output.line("ARP cache empty");
-    output.line("192.0.2.1 52:55:0A:00:02:02 reachable dev e1000e0");
+    const device = activeNetworkDevice(output, "arp") orelse return;
+    outputIpv4(output, device.gateway_ipv4);
+    output.write(" at ");
+    outputMac(output, device.gateway_mac);
+    output.write(" dev e1000e0 retained-from-live-ARP\r\n");
 }
 
 fn commandPing(stage: *const runtime_command.Stage, output: *Output) void {
     if (stage.count != 2) return usage("ping ADDRESS", output);
-    if (!state.config.network_ready) return output.line("ping: network unavailable");
-    output.write("64 bytes from ");
-    output.write(stage.arguments[1].slice());
-    output.line(": icmp_seq=1 ttl=64 deterministic-QEMU-path");
+    const destination = parseIpv4(stage.arguments[1].slice()) orelse return usage("ping ADDRESS", output);
+    const device = activeNetworkDevice(output, "ping") orelse return;
+    if (!prepareNetworkMmio(device, output, "ping")) return;
+    defer zigos_enable_interrupts();
+    const before = currentTick();
+    const result = e1000e.pingIpv4(device, destination, 8) orelse {
+        output.write("ping: timeout or invalid reply from ");
+        outputIpv4(output, destination);
+        output.write("\r\n");
+        state.network_failures +%= 1;
+        state.failed_commands +%= 1;
+        return;
+    };
+    const after = currentTick();
+    output.write("reply from ");
+    outputIpv4(output, result.destination_ipv4);
+    output.write(": bytes=");
+    output.decimal(result.payload_length);
+    output.write(" ttl=");
+    output.decimal(result.ttl);
+    output.write(" id=0x");
+    output.hexFixed(result.identifier, 4);
+    output.write(" seq=");
+    output.decimal(result.sequence);
+    output.write(" descriptors ");
+    output.decimal(result.tx_descriptor);
+    output.byte('/');
+    output.decimal(result.rx_descriptor);
+    output.write(" interrupts ");
+    output.decimal(result.tx_interrupt_count);
+    output.byte('/');
+    output.decimal(result.rx_interrupt_count);
+    output.write(" ticks ");
+    output.decimal(after -| before);
+    output.write("\r\n");
+    state.live_ping_passes +%= 1;
 }
 
 fn commandDns(stage: *const runtime_command.Stage, output: *Output) void {
     if (stage.count != 2) return usage("dns NAME", output);
-    if (!state.config.network_ready) return output.line("dns: network unavailable");
-    output.write(stage.arguments[1].slice());
-    output.line(" -> 192.0.2.42 (bounded resolver cache)");
+    const name = stage.arguments[1].slice();
+    const device = activeNetworkDevice(output, "dns") orelse return;
+    if (!prepareNetworkMmio(device, output, "dns")) return;
+    if (!device.dns_server_advertised) {
+        output.line("dns: unavailable: DHCP supplied no DNS server");
+        return;
+    }
+    var resolver = e1000e.openDnsResolver(device, device.dns_server_ipv4) orelse {
+        output.line("dns: resolver socket allocation failed");
+        state.network_failures +%= 1;
+        state.failed_commands +%= 1;
+        return;
+    };
+    defer {
+        _ = e1000e.closeDnsResolverDiscarding(device, &resolver);
+        zigos_enable_interrupts();
+    }
+    const started = e1000e.startDnsResolverA(device, &resolver, currentTick(), name) orelse {
+        output.line("dns: invalid name or query transmission failed");
+        state.network_failures +%= 1;
+        state.failed_commands +%= 1;
+        return;
+    };
+    switch (started) {
+        .cached => |cached| {
+            output.write(name);
+            output.write(" cached A ");
+            outputIpv4(output, cached.address);
+            output.write(" ttl ");
+            output.decimal(cached.ttl_remaining);
+            output.write("\r\n");
+            state.live_dns_passes +%= 1;
+        },
+        .not_found => |ttl| {
+            output.write(name);
+            output.write(" NXDOMAIN ttl ");
+            output.decimal(ttl);
+            output.write("\r\n");
+            state.live_dns_passes +%= 1;
+        },
+        .pending => |request| {
+            var attempts: u16 = 0;
+            while (attempts < 16) : (attempts += 1) {
+                if (e1000e.pumpReceive(device)) {
+                    _ = e1000e.serviceUdpSockets(device, 8);
+                }
+                const poll = e1000e.pollDnsResolverA(device, &resolver, &request, currentTick(), 8, 60);
+                switch (poll.state) {
+                    .resolved => {
+                        const response = poll.response orelse continue;
+                        output.write(name);
+                        output.write(" A ");
+                        outputIpv4(output, response.address);
+                        output.write(" ttl ");
+                        output.decimal(response.ttl);
+                        output.write(" aliases ");
+                        output.decimal(response.alias_hops);
+                        output.write(" txid 0x");
+                        output.hexFixed(request.transaction_id, 4);
+                        output.write(" examined/rejected ");
+                        output.decimal(poll.examined);
+                        output.byte('/');
+                        output.decimal(poll.rejected);
+                        output.write("\r\n");
+                        state.live_dns_passes +%= 1;
+                        return;
+                    },
+                    .not_found => {
+                        output.write(name);
+                        output.write(" NXDOMAIN txid 0x");
+                        output.hexFixed(request.transaction_id, 4);
+                        output.write("\r\n");
+                        state.live_dns_passes +%= 1;
+                        return;
+                    },
+                    .inactive => break,
+                    .pending => {},
+                }
+            }
+            output.write("dns: timeout resolving ");
+            output.write(name);
+            output.write(" via ");
+            outputIpv4(output, device.dns_server_ipv4);
+            output.write("\r\n");
+            state.network_failures +%= 1;
+            state.failed_commands +%= 1;
+        },
+    }
+}
+
+fn activeNetworkDevice(output: *Output, command: []const u8) ?*e1000e.Device {
+    if (!state.config.network_ready) {
+        output.write(command);
+        output.line(": unavailable: e1000e was not initialized for this boot");
+        return null;
+    }
+    return e1000e.activeDevice() orelse {
+        output.write(command);
+        output.line(": unavailable: retained e1000e device state is missing");
+        return null;
+    };
+}
+
+fn prepareNetworkMmio(device: *e1000e.Device, output: *Output, command: []const u8) bool {
+    const preparation = e1000e.prepareRuntimeMmio(device);
+    if (preparation.switched) {
+        output.write(command);
+        output.write(": restored kernel CR3 from 0x");
+        output.hex(preparation.current_before);
+        output.write(" (tracked 0x");
+        output.hex(preparation.tracked_before);
+        output.write(") to 0x");
+        output.hex(preparation.current_after);
+        output.write("\r\n");
+    }
+    if (preparation.ready) return true;
+
+    output.write(command);
+    output.write(": unavailable: e1000e MMIO mapping invariant failed; current 0x");
+    output.hex(preparation.current_after);
+    output.write(" kernel 0x");
+    output.hex(preparation.kernel_root);
+    output.write(" mapped ");
+    output.line(if (preparation.kernel_mapped) "yes" else "no");
+    state.network_failures +%= 1;
+    state.failed_commands +%= 1;
+    return false;
+}
+
+fn parseIpv4(bytes: []const u8) ?[4]u8 {
+    var result: [4]u8 = undefined;
+    var start: usize = 0;
+    for (0..4) |index| {
+        const end = if (index == 3) bytes.len else std.mem.indexOfScalarPos(u8, bytes, start, '.') orelse return null;
+        if (end == start) return null;
+        result[index] = std.fmt.parseInt(u8, bytes[start..end], 10) catch return null;
+        start = end + 1;
+    }
+    if (start != bytes.len + 1) return null;
+    return result;
+}
+
+fn outputIpv4(output: *Output, address: [4]u8) void {
+    for (address, 0..) |octet, index| {
+        if (index != 0) output.byte('.');
+        output.decimal(octet);
+    }
+}
+
+fn outputMac(output: *Output, address: [6]u8) void {
+    for (address, 0..) |octet, index| {
+        if (index != 0) output.byte(':');
+        output.hexFixed(octet, 2);
+    }
 }
 
 fn commandEnv(output: *Output) void {
@@ -1299,7 +1851,7 @@ fn readPseudo(node: u16, output: *Output) bool {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
     const path = state.vfs.canonicalPath(node, &path_buffer) catch return false;
     if (equal(path, "/proc/version")) {
-        output.line("ZigOs 18.0.0 x86_64 persistent runtime");
+        output.line("ZigOs 19.0.0 x86_64 persistent runtime");
     } else if (equal(path, "/proc/uptime")) {
         output.decimal(currentTick() / 100);
         output.byte('.');
@@ -1367,6 +1919,14 @@ fn finishRuntime() noreturn {
     const fs_report = state.vfs.report();
     const process_report = state.processes.report();
     const descriptor_report = state.descriptors.report();
+    const userspace_report = runtime_user.report();
+    const userspace_clean = userspace_report.used_pages == 0 and
+        userspace_report.live_contexts == 0 and userspace_report.launches >= 6 and
+        userspace_report.exits >= 4 and userspace_report.faults >= 1 and
+        userspace_report.preemptions >= 1 and userspace_report.blocking_returns >= 2 and
+        userspace_report.syscalls >= 10 and userspace_report.reclaimed_pages > 0;
+    const network_clean = state.network_failures == 0 and
+        (!state.config.network_ready or (state.live_ping_passes >= 1 and state.live_dns_passes >= 1));
     const descriptor_clean = state.descriptors.validate(&state.vfs, &state.processes) and
         descriptor_report.namespaces == 1 and descriptor_report.descriptors == 3 and
         descriptor_report.open_descriptions == 3 and descriptor_report.terminal_descriptions == 3 and
@@ -1444,7 +2004,45 @@ fn finishRuntime() noreturn {
     emit(" clean ");
     emit(if (descriptor_clean) "yes" else "no");
     emit("\r\n");
-    emit("ZigOs x86-64 persistent runtime verified: loop permanent shell yes navigation yes files yes descriptors yes processes yes network-diagnostics yes explicit-shutdown yes\r\n");
+    emit("ZigOs permanent userspace: arena ");
+    emitDecimal(userspace_report.arena_pages);
+    emit(" used ");
+    emitDecimal(userspace_report.used_pages);
+    emit(" peak ");
+    emitDecimal(userspace_report.peak_pages);
+    emit(" contexts ");
+    emitDecimal(userspace_report.live_contexts);
+    emit(" launches/exits/faults ");
+    emitDecimal(userspace_report.launches);
+    emit("/");
+    emitDecimal(userspace_report.exits);
+    emit("/");
+    emitDecimal(userspace_report.faults);
+    emit(" preemptions/blocking/syscalls ");
+    emitDecimal(userspace_report.preemptions);
+    emit("/");
+    emitDecimal(userspace_report.blocking_returns);
+    emit("/");
+    emitDecimal(userspace_report.syscalls);
+    emit(" reclaimed ");
+    emitDecimal(userspace_report.reclaimed_pages);
+    emit(" clean ");
+    emit(if (userspace_clean) "yes" else "no");
+    emit("\r\n");
+    emit("ZigOs permanent network: device ");
+    emit(if (state.config.network_ready) "yes" else "no");
+    emit(" ping ");
+    emitDecimal(state.live_ping_passes);
+    emit(" dns ");
+    emitDecimal(state.live_dns_passes);
+    emit(" failures ");
+    emitDecimal(state.network_failures);
+    emit(" clean ");
+    emit(if (network_clean) "yes" else "no");
+    emit("\r\n");
+    emit("ZigOs x86-64 persistent runtime verified: loop permanent shell yes navigation yes files yes descriptors yes processes yes userspace-exec yes network-state yes live-network ");
+    emit(if (state.config.network_ready) "yes" else "no");
+    emit(" canned-results no explicit-shutdown yes\r\n");
     if (state.fd_contract_passed and descriptor_clean) {
         emit("ZigOs x86-64 Capstone 18 verified: goals 0x000001D1 new-goals 0x00000020 fd-namespaces yes open-descriptions yes shared-offsets yes duplication yes inheritance yes cloexec yes blocking-pipes yes shell-io yes cleanup yes\r\n");
     } else {
@@ -1452,6 +2050,19 @@ fn finishRuntime() noreturn {
         emit(if (state.fd_contract_passed) "yes" else "no");
         emit(" descriptor-clean ");
         emit(if (descriptor_clean) "yes" else "no");
+        emit("\r\n");
+    }
+    if (state.fd_contract_passed and descriptor_clean and userspace_clean and network_clean) {
+        emit("ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes\r\n");
+    } else {
+        emit("ZigOs x86-64 Capstone 19 incomplete: fd-contract ");
+        emit(if (state.fd_contract_passed) "yes" else "no");
+        emit(" descriptor-clean ");
+        emit(if (descriptor_clean) "yes" else "no");
+        emit(" userspace-clean ");
+        emit(if (userspace_clean) "yes" else "no");
+        emit(" network-clean ");
+        emit(if (network_clean) "yes" else "no");
         emit("\r\n");
     }
     while (true) zigos_wait_for_interrupt();

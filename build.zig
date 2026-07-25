@@ -66,6 +66,13 @@ pub fn build(b: *std.Build) void {
     install_service.step.dependOn(&assets.step);
     install_process.step.dependOn(&assets.step);
     install_exec.step.dependOn(&assets.step);
+    inline for (.{ "hello", "sleep", "crash", "spin", "pipe-reader", "pipe-writer" }) |program| {
+        const source = b.fmt("build/runtime-{s}.elf", .{program});
+        const destination = b.fmt("artifacts/runtime-{s}.elf", .{program});
+        const install_runtime_program = b.addInstallFile(b.path(source), destination);
+        install_runtime_program.step.dependOn(&assets.step);
+        b.getInstallStep().dependOn(&install_runtime_program.step);
+    }
 
     b.getInstallStep().dependOn(&install_efi.step);
     b.getInstallStep().dependOn(&install_service.step);
@@ -74,6 +81,8 @@ pub fn build(b: *std.Build) void {
 
     const verify_efi = b.addSystemCommand(&.{ python, "scripts/verify-efi.py" });
     verify_efi.addFileArg(kernel.getEmittedBin());
+    const verify_permanent_userspace = b.addSystemCommand(&.{ python, "scripts/verify-permanent-userspace.py" });
+    verify_permanent_userspace.setCwd(b.path("."));
 
     const fmt = b.addFmt(.{
         .paths = &.{ b.path("build.zig"), b.path("src") },
@@ -100,4 +109,5 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&fmt.step);
     check_step.dependOn(unit_step);
     check_step.dependOn(&verify_efi.step);
+    check_step.dependOn(&verify_permanent_userspace.step);
 }

@@ -69,6 +69,15 @@ def main() -> int:
     process_exec_elf = build / "process-exec.elf"
     cpu_object = build / "cpu.obj"
     trampoline = generated / "ap_trampoline.bin"
+    runtime_program_data = {
+        "hello": b"hello from VFS-loaded CPL3 ELF64\r\n",
+        "sleep": b"sleep: before\r\n" + bytes(17) + b"sleep: after\r\n",
+        "crash": b"crash: real page fault follows\r\n",
+        "spin": b"runtime spin loop",
+        "pipe-reader": b"pipe reader data",
+        "pipe-writer": b"PIPE-CPL",
+    }
+    runtime_outputs: list[Path] = []
 
     run([nasm, "-w+error", "-f", "bin", str(user / "service.asm"), "-o", str(service_bin)], root)
     run(
@@ -108,6 +117,28 @@ def main() -> int:
     run([python, str(scripts / "verify-x86-64-process-elf.py"), str(process_elf), "--kind", "main"], root)
     run([python, str(scripts / "verify-x86-64-process-elf.py"), str(process_exec_elf), "--kind", "exec"], root)
 
+    for program_name, data_bytes in runtime_program_data.items():
+        code_path = build / f"runtime-{program_name}.bin"
+        data_path = build / f"runtime-{program_name}.data"
+        elf_path = build / f"runtime-{program_name}.elf"
+        data_path.write_bytes(data_bytes)
+        run([nasm, "-w+error", "-f", "bin", str(user / f"runtime-{program_name}.asm"), "-o", str(code_path)], root)
+        run(
+            [
+                python,
+                str(scripts / "create-runtime-user-elf.py"),
+                "--code",
+                str(code_path),
+                "--data",
+                str(data_path),
+                "--output",
+                str(elf_path),
+            ],
+            root,
+        )
+        run([python, str(scripts / "verify-runtime-user-elf.py"), str(elf_path)], root)
+        runtime_outputs.append(elf_path)
+
     run([nasm, "-w+error", "-f", "win64", str(arch / "cpu.asm"), "-o", str(cpu_object)], root)
     run([nasm, "-w+error", "-f", "bin", str(arch / "ap_trampoline.asm"), "-o", str(trampoline)], root)
     if trampoline.stat().st_size != 4096:
@@ -118,6 +149,8 @@ def main() -> int:
         generated / "process_user.elf": process_elf,
         generated / "process_exec.elf": process_exec_elf,
     }
+    for runtime_elf in runtime_outputs:
+        embedded[generated / runtime_elf.name.replace("-", "_")] = runtime_elf
     for destination, source in embedded.items():
         shutil.copyfile(source, destination)
 
@@ -125,6 +158,7 @@ def main() -> int:
         service_elf,
         process_elf,
         process_exec_elf,
+        *runtime_outputs,
         cpu_object,
         trampoline,
         *embedded.keys(),

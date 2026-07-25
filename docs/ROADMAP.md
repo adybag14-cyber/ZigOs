@@ -2144,3 +2144,21 @@ Status: released after successful portable Linux and Windows integration CI.
 - G175 and G193 remain open because permanent arbitrary CPL3 executable contexts and a general SMP-safe multiwriter append contract are not implemented.
 - Locally verified reference `BOOTX64.EFI`: 2,716,672 bytes, SHA-256 `4C7D5F0FC945F6F53306363C47418E3C63C60979CAA6E06C0B41C101E9382FA1`.
 - Exact release contract: [`CAPSTONE-18.0.md`](CAPSTONE-18.0.md).
+
+## Capstone 19.0 - permanent VFS-loaded ELF64 execution
+
+Status: implementation and full local Windows validation complete; hosted CI remains pending.
+
+- Connected the permanent process table, descriptor namespaces and scheduler to up to eight genuine retained CPL3 executable contexts.
+- Added a recyclable 256-page runtime arena, private CR3 roots, strict W^X mappings, one-page argv stacks, guard pages and complete frame/page-table reclamation.
+- Added full GPR/FX context entry, 64 KiB canary-protected bootstrap and permanent IST1 stacks, and non-cooperative permanent userspace preemption.
+- Added a bounded permanent `int 0x80` ABI for identity, terminal I/O, sleep/yield, files, descriptor duplication and pipes.
+- Changed `run`, `exec` and `spawn` from timed pseudo-jobs into real VFS-loaded executable launches; `exec` remains a foreground-child command rather than in-place POSIX image replacement.
+- Changed `crash` from fabricated process accounting into a genuine CPL3 page fault at CR2 `0x8000180000`.
+- Added `pipex`, proving a real executable reader block, a separate executable writer wakeup, exact `PIPE-CPL` transfer and endpoint reclamation.
+- Removed canned permanent-shell network results; retained the initialized e1000e owner for real bounded ICMP/DNS transactions, with explicit unavailable status in the no-NIC profile.
+- Expanded the canonical COM1 session to 37 commands; both live-network and offline profiles pass locally, and the portable source-contract verifier rejects pseudo-job and canned-network regressions.
+- Cumulative historical x86-64 accounting is 497 goals (`0x1F1`), with 32 (`0x20`) new in Capstone 19.
+- The separate 500-goal general roadmap now has 113 complete and 387 open; retained interface configuration closes G340.
+- Locally verified Windows `BOOTX64.EFI`: 2,819,584 bytes, SHA-256 `E4736349B960AD665C44878CD7F27D246E719AE0AE7E8B42A55F4BD1332F0953`.
+- Exact release contract: [`CAPSTONE-19.0.md`](CAPSTONE-19.0.md).

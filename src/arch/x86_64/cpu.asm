@@ -348,9 +348,9 @@ zigos_isr_apic_timer:
     pop rax
     iretq
 
-; Persistent runtime timer vector 0x4A, delivered on the interrupted kernel
-; stack (IST0). Unlike the context-switch timer, this entry makes no assumption
-; about the hardware frame length or incoming stack alignment.
+; Persistent runtime timer vector 0x4A, delivered on the dedicated IST1 stack.
+; Kernel ticks return normally; a CPL3 quantum may request restoration of the
+; saved kernel call frame so the retained scheduler regains control.
 zigos_isr_runtime_timer:
     cld
     push rax
@@ -375,7 +375,11 @@ zigos_isr_runtime_timer:
     mov r13, rsp
     fxsave64 [r13]
     sub rsp, 32
+    mov rcx, r12
+    mov rdx, r13
     call zigos_runtime_timer_interrupt_handler
+    test rax, rax
+    jnz .runtime_return_to_kernel
     add rsp, 32
     fxrstor64 [r13]
     mov rsp, r12
@@ -396,6 +400,30 @@ zigos_isr_runtime_timer:
     pop rcx
     pop rax
     iretq
+
+.runtime_return_to_kernel:
+    cli
+    mov rsp, [rel zigos_user_kernel_rsp]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rdi
+    pop rbp
+    pop rbx
+    movdqu xmm6, [rsp + 0]
+    movdqu xmm7, [rsp + 16]
+    movdqu xmm8, [rsp + 32]
+    movdqu xmm9, [rsp + 48]
+    movdqu xmm10, [rsp + 64]
+    movdqu xmm11, [rsp + 80]
+    movdqu xmm12, [rsp + 96]
+    movdqu xmm13, [rsp + 112]
+    movdqu xmm14, [rsp + 128]
+    movdqu xmm15, [rsp + 144]
+    add rsp, 160
+    ret
 
 ; Per-AP local timer vector 0x43, delivered on the AP-private IST1 stack.
 ; The timer is armed by the AP itself and wakes it autonomously from HLT.
@@ -1061,6 +1089,7 @@ zigos_high_half_probe:
 extern zigos_user_syscall_handler
 
 global zigos_enter_user
+global zigos_enter_user_context
 global zigos_isr_syscall
 global zigos_user_program_source
 global zigos_user_program_size
@@ -1106,6 +1135,73 @@ zigos_enter_user:
     push qword 0x202
     push rax
     push r10
+    iretq
+
+; void zigos_enter_user_context(Frame *frame, FxState *fx_state)
+; Resume a complete retained CPL3 context. The frame layout is shared with the
+; syscall and timer entries, so every integer register plus RIP/RSP/RFLAGS is
+; restored exactly; the existing kernel-return frame remains the escape path.
+zigos_enter_user_context:
+    mov r10, rcx
+    mov r11, rdx
+
+    sub rsp, 160
+    movdqu [rsp + 0], xmm6
+    movdqu [rsp + 16], xmm7
+    movdqu [rsp + 32], xmm8
+    movdqu [rsp + 48], xmm9
+    movdqu [rsp + 64], xmm10
+    movdqu [rsp + 80], xmm11
+    movdqu [rsp + 96], xmm12
+    movdqu [rsp + 112], xmm13
+    movdqu [rsp + 128], xmm14
+    movdqu [rsp + 144], xmm15
+    push rbx
+    push rbp
+    push rdi
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    mov [rel zigos_user_kernel_rsp], rsp
+
+    fxrstor64 [r11]
+    push qword [r10 + 152]
+    push qword [r10 + 144]
+    push qword [r10 + 136]
+    push qword [r10 + 128]
+    push qword [r10 + 120]
+    push qword [r10 + 112]
+    push qword [r10 + 104]
+    push qword [r10 + 96]
+    push qword [r10 + 88]
+    push qword [r10 + 80]
+    push qword [r10 + 72]
+    push qword [r10 + 64]
+    push qword [r10 + 56]
+    push qword [r10 + 48]
+    push qword [r10 + 40]
+    push qword [r10 + 32]
+    push qword [r10 + 24]
+    push qword [r10 + 16]
+    push qword [r10 + 8]
+    push qword [r10 + 0]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
     iretq
 
 ; DPL3 interrupt gate vector 0x80, delivered on IST1. The Zig handler returns

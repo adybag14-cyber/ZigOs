@@ -2,9 +2,9 @@
 
 This roadmap converts the broad runtime, process, filesystem, userland, networking, build, testing, hardware and security gaps into 500 individually trackable engineering goals. A checked item means the repository contains an implementation and a corresponding release or test contract; it does not imply production readiness.
 
-**Status at Capstone 18.0:** 100 complete, 400 open.
+**Status at Capstone 19.0:** 113 complete, 387 open.
 
-Capstone 18 completes the broad roadmap items **G112, G191, G192 and G194**. Its 32-entry release contract is more granular than this roadmap, so the two accounting systems are intentionally separate.
+Capstone 19 additionally completes **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. Its 32-entry release contract is more granular than this roadmap, so the two accounting systems are intentionally separate.
 
 ## Completed in Capstone 17
 
@@ -107,21 +107,21 @@ Capstone 18 completes the broad roadmap items **G112, G191, G192 and G194**. Its
 
 ## General x86-64 processes and virtual memory
 
-- [ ] **G097** — Unify the runtime process table with executable CPL3 context records.
-- [ ] **G098** — Retain executable process contexts after the validation suites finish.
-- [ ] **G099** — Allocate reusable private CR3 roots for long-lived processes.
+- [x] **G097** — Unify the runtime process table with executable CPL3 context records.
+- [x] **G098** — Retain executable process contexts after the validation suites finish.
+- [x] **G099** — Allocate reusable private CR3 roots for long-lived processes.
 - [ ] **G100** — Allocate and reclaim a private privilege stack for every executable process.
 - [ ] **G101** — Allocate flexible multi-page user stacks rather than one fixed stack page.
 - [ ] **G102** — Load ELF64 executables directly from a mounted storage backend.
 - [ ] **G103** — Support arbitrary valid ELF64 program-header counts within a documented bound.
 - [ ] **G104** — Map multiple non-overlapping PT_LOAD segments per executable.
-- [ ] **G105** — Reject overlapping or aliasing ELF64 load segments transactionally.
-- [ ] **G106** — Validate ELF64 file, virtual-address and alignment constraints completely.
+- [x] **G105** — Reject overlapping or aliasing ELF64 load segments transactionally.
+- [x] **G106** — Validate ELF64 file, virtual-address and alignment constraints completely.
 - [ ] **G107** — Support ET_DYN position-independent executables with a selected load base.
 - [ ] **G108** — Construct a System V-compatible initial argv stack.
 - [ ] **G109** — Construct a bounded envp vector in new process address spaces.
 - [ ] **G110** — Provide a minimal auxiliary-vector contract to userspace.
-- [ ] **G111** — Inherit and validate current working directories on spawn and fork.
+- [x] **G111** — Inherit and validate current working directories on spawn and fork.
 - [x] **G112** — Provide per-process numeric file-descriptor namespaces.
 - [ ] **G113** — Replace the calling process image during exec instead of creating a pseudo job.
 - [ ] **G114** — Implement a real spawn syscall that enters storage-loaded CPL3 code.
@@ -133,14 +133,14 @@ Capstone 18 completes the broad roadmap items **G112, G191, G192 and G194**. Its
 - [ ] **G120** — Implement munmap with partial-region splitting.
 - [ ] **G121** — Implement mprotect with W^X and user-range enforcement.
 - [ ] **G122** — Implement brk/sbrk-compatible heap-region growth.
-- [ ] **G123** — Install unmapped guard pages around every user stack.
+- [x] **G123** — Install unmapped guard pages around every user stack.
 - [ ] **G124** — Grow user stacks on eligible guard faults within a resource limit.
 - [ ] **G125** — Generalize demand-zero mapping to arbitrary anonymous regions.
 - [ ] **G126** — Classify not-present, protection, execute, reserved-bit and user page faults.
-- [ ] **G127** — Terminate only the offending userspace task on unrecoverable faults.
-- [ ] **G128** — Release every user mapping and page-table page on process exit.
+- [x] **G127** — Terminate only the offending userspace task on unrecoverable faults.
+- [x] **G128** — Release every user mapping and page-table page on process exit.
 - [ ] **G129** — Release every per-process privilege stack on process exit.
-- [ ] **G130** — Save and restore FPU state for every scheduled executable process.
+- [x] **G130** — Save and restore FPU state for every scheduled executable process.
 - [ ] **G131** — Save and restore extended SIMD state with XSAVE when supported.
 - [ ] **G132** — Construct userspace signal-delivery frames.
 - [ ] **G133** — Support installable userspace signal handlers.
@@ -185,7 +185,7 @@ Capstone 18 completes the broad roadmap items **G112, G191, G192 and G194**. Its
 - [ ] **G172** — Record executable paths and argv for live processes.
 - [ ] **G173** — Support a parent-death notification signal.
 - [ ] **G174** — Apply effective credentials to every process permission decision.
-- [ ] **G175** — Make pipes block and wake persistent executable processes through the scheduler.
+- [x] **G175** — Make pipes block and wake persistent executable processes through the scheduler.
 - [ ] **G176** — Stress persistent process create/exec/exit/reap cycles for thousands of iterations.
 
 ## Persistent filesystem and storage
@@ -310,7 +310,7 @@ Capstone 18 completes the broad roadmap items **G112, G191, G192 and G194**. Its
 - [ ] **G291** — Provide a file-copy utility with partial-I/O handling.
 - [ ] **G292** — Provide a minimal dynamic-free C-compatible userspace ABI description.
 - [ ] **G293** — Provide a Zig userspace support library wrapping syscalls.
-- [ ] **G294** — Build every userspace program as a separate ELF64 artifact.
+- [x] **G294** — Build every userspace program as a separate ELF64 artifact.
 - [ ] **G295** — Install userspace programs into the persistent filesystem image.
 - [ ] **G296** — Run a multi-program boot smoke test entirely through the shell.
 
@@ -359,7 +359,7 @@ Capstone 18 completes the broad roadmap items **G112, G191, G192 and G194**. Its
 - [ ] **G337** — Rebind DHCP leases after T2.
 - [ ] **G338** — Expire addresses when lease renewal fails.
 - [ ] **G339** — Handle DHCP NAK and server changes.
-- [ ] **G340** — Persist interface configuration state outside one test sequence.
+- [x] **G340** ? Persist interface configuration state outside one test sequence.
 - [ ] **G341** — Maintain an IPv4 route table.
 - [ ] **G342** — Select the longest-prefix matching route.
 - [ ] **G343** — Support multiple interfaces and per-route gateways.

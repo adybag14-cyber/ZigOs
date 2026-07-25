@@ -6,34 +6,36 @@ ZigOs is an experimental x86 operating system written in freestanding Zig and ha
 
 ZigOs is a research and learning system. It is not production-ready, POSIX-compatible, secure against hostile workloads, or broadly validated on physical hardware.
 
-## Current release: Capstone 18.0
+## Current release: Capstone 19.0
 
-Capstone 18 promotes process-local numeric file descriptors, shared open-file descriptions and scheduler-aware bounded pipes into the permanent x86-64 runtime. The serial shell now performs ordinary regular-file reads, writes, appends and redirection through the same descriptor core exercised by the live process/pipe contract.
+Capstone 19 connects the permanent x86-64 process table, descriptor layer and scheduler to genuine retained CPL3 contexts. `run`, `exec` and `spawn` now read ELF64 bytes from the VFS, map them into private CR3 address spaces and execute their entry points instead of creating timed pseudo-jobs. `crash` runs a real faulting executable, and `pipex` proves that permanent pipes block and wake real executables.
 
-The release adds 32 verified goals to the inherited 433 x86-64 goals, reaching **465 cumulative goals (`0x1D1`)**:
+The release adds 32 verified goals to the inherited 465 x86-64 goals, reaching **497 cumulative goals (`0x1F1`)**:
 
 ```text
-ZigOs x86-64 Capstone 18 verified: goals 0x000001D1 new-goals 0x00000020 fd-namespaces yes open-descriptions yes shared-offsets yes duplication yes inheritance yes cloexec yes blocking-pipes yes shell-io yes cleanup yes
+ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes
 ```
 
-The exact contract is documented in [`docs/CAPSTONE-18.0.md`](docs/CAPSTONE-18.0.md). The broader program remains 500 separately tracked goals in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md): 100 complete and 400 open at this release. Capstone's granular historical proof count and the broader roadmap count are deliberately not conflated.
+The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap.
+
+Local Windows validation is complete for the canonical build, pinned Zig tests, source contract, live-network runtime and offline runtime. Hosted CI has not been run in this working session.
 
 ## What runs after boot
 
-The x86-64 kernel now remains alive after validation unless an explicit `shutdown` command is entered. Its permanent runtime provides:
+The x86-64 kernel remains alive after validation unless an explicit `shutdown` command is entered. Its permanent runtime provides:
 
-- a dedicated LAPIC timer vector and ISR that are independent of the temporary Capstone 16 scheduler;
-- an interrupt-enabled HLT idle loop;
-- continued device and retained network service passes;
-- sleeping, blocked, runnable, stopped, zombie and faulted task states;
-- PID 1 orphan adoption and terminal-child reaping;
-- a persistent COM1 prompt;
-- a bounded writable VFS and mount table;
-- process, device and network pseudo namespaces;
+- a dedicated 100 Hz LAPIC timer and interrupt-enabled HLT idle loop;
+- PID 1 init and PID 2 COM1 shell processes;
+- a bounded writable VFS and five mounted namespaces;
 - a generation-safe 64-slot process table;
-- process-local numeric descriptor namespaces and shared open-file descriptions;
-- bounded blocking pipes with reader/writer scheduler wakeups;
-- command parsing, pipelines, descriptor-backed file redirection, background syntax and history.
+- process-local numeric descriptors, shared open-file descriptions and bounded blocking pipes;
+- up to eight retained CPL3 executable contexts backed by a recyclable 256-page arena;
+- private CR3 roots, strict W^X `PT_LOAD` mappings, one-page stacks and unmapped guards;
+- complete GPR and FXSAVE context preservation across syscalls and timer preemption;
+- a small pointer-validated permanent userspace syscall ABI;
+- real executable exit, sleep, preemption, fault containment, wait/reap and pipe block/wakeup;
+- a retained bounded e1000e owner with real shell ICMP echo and DNS A queries when present, plus explicit offline status when absent;
+- command parsing, bounded shell pipelines, descriptor-backed file redirection and history.
 
 The default serial prompt is:
 
@@ -46,12 +48,12 @@ root@zigos:/home/root#
 ```text
 Filesystem and descriptors:
   pwd cd ls cat echo touch mkdir rm rmdir mv
-  write append stat chmod mount df fds fdtest sync fsck
+  write append stat chmod mount df fds fdtest pipex sync fsck
 
 Processes:
   ps jobs spawn kill wait crash sleep uptime elf exec run
 
-Devices and networking:
+Device and network status:
   devices ifconfig netstat sockets routes arp ping dns
 
 Shell and utilities:
@@ -59,28 +61,45 @@ Shell and utilities:
   hash hexdump grep wc head shutdown
 ```
 
-`spawn`, `exec` and `run` currently operate on the bounded runtime process model. `elf` performs real ELF64 header and `PT_LOAD` inspection, but the permanent shell does **not yet execute arbitrary storage-loaded ELF64 code at CPL3**. The fd core is kernel-resident; it is not yet exposed as a general permanent CPL3 file syscall ABI.
+`run PATH [ARGS...]` and `exec PATH [ARGS...]` launch a foreground CPL3 child from VFS-resident ELF64 bytes. The current `exec` command does **not** replace the shell image in place. `spawn PATH [ARGS...]` launches the same retained executable model in the background. `/bin` is currently boot-seeded RAM-VFS content, not a disk-backed executable filesystem.
+
+`ping` and `dns` use the retained e1000e device for real bounded ICMP and UDP/DNS transactions when the network profile is present. `ifconfig`, `netstat`, `routes` and `arp` expose retained device state. With no e1000e device, all of these commands report explicit unavailability; none emits canned success, addresses or packets.
 
 ## Persistent-runtime validation
 
 Run the bidirectional COM1 session:
 
 ```powershell
-.\scripts\test-runtime.ps1 -TimeoutSeconds 150
+# Honest offline profile
+.\scripts\test-runtime.ps1 -TimeoutSeconds 180
+
+# Retained e1000e with real ping and DNS
+.\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 ```
 
-The harness boots the finished EFI image, waits for the permanent prompt and drives 30 commands covering navigation, descriptor-backed mutation and redirection, pipelines, ELF inspection, task creation, hardware-tick sleep/wake, wait/reap, contained fault reporting, live fd inheritance/duplication/close-on-exec, blocking pipe wakeups, EOF, broken-pipe handling, device/network diagnostics, fsck, sync, history and explicit shutdown.
+Each harness run boots the finished EFI image, waits for the permanent prompt and drives 37 commands. It preserves the previous navigation, mutation, redirection, parser, descriptor, device, fsck, sync and history coverage, then additionally requires:
+
+- `run` and `exec` to enter VFS-loaded CPL3 code;
+- a real hardware-tick sleep and saved-context resume;
+- a genuine vector-14 page fault with CR2 `0x8000180000`;
+- a real CPL3 reader block and separate CPL3 writer wakeup;
+- non-cooperative timer preemption of a background spin process;
+- signal, wait, reap, descriptor and frame cleanup;
+- real `10.0.2.2` ICMP and `localhost` DNS results in the network profile;
+- explicit unavailable responses in the offline profile;
+- absence of the former canned DNS and ping strings in permanent-runtime output.
 
 A representative run reports:
 
 ```text
-ZigOs persistent runtime shutdown: commands 30 failed 0 ticks 459 idle-halts 458 service-passes 459
-ZigOs persistent VFS: nodes 40 files 10 directories 18 pseudo 12 mounts 5 bytes 30950 clean yes
-ZigOs persistent processes: live 2 created 7 reaped 5 switches 41 signals 0 faults 1
-ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/7/1 blocked 1/1 wakeups 1/1 eof 4 broken 1 clean yes
+ZigOs persistent runtime shutdown: commands 37 failed 0 ticks 607 idle-halts 561 service-passes 607
+ZigOs persistent processes: live 2 created 11 reaped 9 switches 110 signals 1 faults 1
+ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/29/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
+ZigOs permanent userspace: arena 256 used 0 peak 16 contexts 0 launches/exits/faults 6/4/1 preemptions/blocking/syscalls 43/2/15 reclaimed 48 clean yes
+ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 ```
 
-Tick totals vary slightly with host scheduling. The harness verifies the semantic results and continued servicing rather than one exact tick value.
+Tick, switch and preemption totals vary slightly with host scheduling. Process states, exit/fault results, descriptor deltas, payload bytes and final cleanup are exact.
 
 ## Runtime VFS
 
@@ -129,23 +148,22 @@ The permanent descriptor layer provides:
 
 Ordinary `cat`, `write`, `append`, `<`, `>` and `>>` file paths use this layer. Shell pipeline stages still exchange bounded intermediate buffers rather than live descriptor-connected processes, and general permanent CPL3 file syscalls remain future work.
 
-## Runtime process table
+## Runtime process table and executable contexts
 
-The permanent process table is distinct from the bounded executable CPL3 suite inherited from Capstone 16. It currently provides:
+The permanent process table now owns real executable lifecycle records. It provides:
 
-- 64 recyclable slots and monotonic PIDs;
-- generation-tagged handles;
-- PPID, process group, session, current directory, UID and GID fields;
+- 64 recyclable process slots and monotonic PIDs;
+- generation-tagged handles and parent/current-directory metadata;
 - runnable, running, sleeping, blocked, stopped, zombie and faulted states;
-- bounded round-robin scheduling and tick accounting;
-- wait, terminal status and one-time reaping;
-- orphan adoption by PID 1;
-- directed and process-group signals;
-- pending masks and basic UID permission checks;
+- bounded round-robin scheduling, hardware-tick accounting and targeted wakeups;
+- waits, terminal status, one-time reaping and PID 1 adoption;
+- directed/process-group signals and basic UID permission checks;
 - page, descriptor, socket, child and CPU quotas;
-- fault vector, address and terminal-status records.
+- fault vector/address records derived from genuine CPL3 exceptions.
 
-It does not yet own persistent private CR3 contexts for arbitrary executable processes. Unifying this table with the Capstone 16 CPL3 engine is one of the next major milestones.
+A separate bounded executor currently supports up to eight simultaneous retained CPL3 contexts, 32 mappings per context and a 256-page recyclable physical arena. Each process receives a private CR3, a complete saved integer/FX context, a one-page stack, an unmapped guard page and cloned descriptor namespace.
+
+This is still not a general POSIX process implementation. There is no persistent-runtime fork/COW, in-place exec, dynamic linker, flexible stack growth, environment/auxiliary vector or SMP userspace scheduler.
 
 ## Existing bounded x86-64 capabilities
 
@@ -165,7 +183,7 @@ These components are validated against deterministic QEMU scenarios. They are no
 
 A precise networking description is:
 
-> ZigOs contains bounded in-kernel UDP, DNS, NTP and TCP components validated against deterministic QEMU scenarios, but does not yet expose a general userspace socket API or production network stack.
+> ZigOs retains one bounded e1000e device into the permanent runtime and can perform real shell ICMP echo and DNS A queries, while its broader UDP, NTP and TCP components remain assertion-heavy kernel mechanisms rather than a general userspace socket API or production network stack.
 
 ## Legacy BIOS/i686 path
 
@@ -178,7 +196,7 @@ The legacy path boots through a native 512-byte BIOS stage 0, an eight-sector st
 - process scheduling, fork/exec, waits, signals and fault containment;
 - persistent file creation and a two-boot filesystem verification sequence.
 
-Capstone 18 does not change the legacy functional contract. The complete i686 build and two-boot persistence regression remain required release gates.
+Capstone 19 does not change the legacy functional contract. The complete i686 build and two-boot persistence regression remain required release gates.
 
 ## Requirements
 
@@ -278,14 +296,14 @@ make clean
 
 ## Artifact identity
 
-Capstone 18 reference UEFI image:
+Capstone 19 reference UEFI image:
 
 ```text
-Size:    2,716,672 bytes
-SHA-256: 4C7D5F0FC945F6F53306363C47418E3C63C60979CAA6E06C0B41C101E9382FA1
+Size:    2,819,584 bytes
+SHA-256: E4736349B960AD665C44878CD7F27D246E719AE0AE7E8B42A55F4BD1332F0953
 ```
 
-A clean Windows build and a clean Ubuntu/WSL build produced byte-identical EFI images with this identity.
+This identity is from the locally validated Windows build after the IST1 and retained-network fixes. Cross-platform byte-identity remains for hosted CI to confirm.
 
 ## QEMU validation
 
@@ -328,13 +346,17 @@ Makefile                          conventional POSIX targets
 .toolchain-version                exact canonical Zig revision
 VERSION                           release version
 
-docs/CAPSTONE-18.0.md            exact 32-goal release contract
+docs/CAPSTONE-19.0.md            exact permanent-userspace release contract
+docs/CAPSTONE-18.0.md            inherited descriptor release contract
 docs/CAPSTONE-17.0.md            inherited permanent-runtime contract
 docs/ROADMAP-500.md              500-goal general-OS program
 docs/ROADMAP.md                  historical milestone record
 
 scripts/build-assets.py           portable generated-asset pipeline
 scripts/verify-efi.py             portable PE/COFF verifier
+scripts/verify-permanent-userspace.py source/release contract verifier
+scripts/create-runtime-user-elf.py deterministic permanent ELF generator
+scripts/verify-runtime-user-elf.py independent permanent ELF verifier
 scripts/bootstrap-toolchain.sh    checksum-pinned Linux bootstrap
 scripts/build.sh                  Linux zig-build wrapper
 scripts/build.ps1                 Windows zig-build wrapper
@@ -346,6 +368,7 @@ scripts/test-legacy-i686.ps1      legacy two-boot persistence test
 src/main.zig                      UEFI entry and firmware handoff
 src/kernel.zig                    post-UEFI integration and inherited gates
 src/runtime.zig                   permanent x86-64 runtime and command dispatch
+src/runtime_user.zig              retained CPL3 executor and syscall/fault bridge
 src/runtime_vfs.zig               bounded VFS and mount model
 src/runtime_fd.zig                numeric descriptors, shared descriptions and pipes
 src/runtime_process.zig           generation-safe process table
@@ -358,16 +381,18 @@ src/serial.zig                    COM1 transmit and receive
 
 ## Current limitations
 
-- The permanent shell and its pseudo jobs still run as kernel-owned runtime services, not as arbitrary CPL3 programs.
-- Storage-loaded ELF64 execution is not yet connected to the permanent process table.
-- The writable x86-64 root filesystem is RAM-backed and does not survive reboot.
-- The x86-64 boot FAT mount is read-only.
-- The VFS is bounded and is not yet exposed through a complete userspace file syscall ABI.
-- There is no general userspace socket API, long-lived production TCP service, IPv6 stack or firewall.
-- Routing, ARP expiry and DHCP renewal are not yet general long-lived services.
+- `/bin` is boot-seeded RAM-VFS content; executable files are not yet fetched from a disk-backed filesystem at launch.
+- Permanent execution accepts only the strict static x86-64 `ET_EXEC` layouts supported by `elf64.zig`; there is no `ET_DYN`, dynamic linker or relocation support.
+- The permanent executor is bounded to eight contexts, 32 mappings per context, one stack page and 4,096 captured output bytes.
+- The shell `exec` command launches a foreground child instead of replacing the shell process image.
+- Persistent-runtime fork, copy-on-write, flexible stack growth, environment vectors and auxiliary vectors are not implemented.
+- Shell pipeline stages still exchange bounded kernel buffers; `pipex` is the real executable pipe proof rather than a general process pipeline.
+- The writable x86-64 root filesystem is RAM-backed and does not survive reboot; `/boot` remains read-only.
+- There is no userspace socket API, IPv6 stack or production network stack. The shell `ping` and `dns` commands are bounded kernel operations on one retained e1000e device.
+- Permanent userspace scheduling currently runs on the BSP rather than an SMP scheduler.
 - Hardware support remains strongly aligned with QEMU q35, QEMU NVMe/xHCI and Intel 82574L emulation.
 - There is no complete user/group permission model, ASLR, IOMMU DMA isolation, executable-signing policy or stable ABI.
-- Kernel and driver recovery behavior remains experimental; invariant failures may still halt the machine deliberately.
+- ZigOs remains experimental, non-POSIX and not secure against hostile workloads.
 
 ## Design principles
 
