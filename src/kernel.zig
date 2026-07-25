@@ -45,6 +45,7 @@ const TimerSetup = struct {
 };
 
 var normalized_memory_layout: memory.Layout = undefined;
+var physical_memory_manager: memory.PhysicalMemoryManager = undefined;
 var kernel_heap: heap.Heap = undefined;
 var kernel_heap_ready: bool = false;
 
@@ -252,8 +253,20 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     }
 
     debugWrite("ZigOs boot sequence complete: kernel foundations and hardware probes passed.\r\n");
+    if (!physical_memory_manager.initializeFromBootstrap(&frame_allocator))
+        allocatorFailure("post-bootstrap physical-memory handoff failed");
+    const physical_report = physical_memory_manager.report();
+    debugWrite("Post-bootstrap physical memory manager active: ");
+    debugWriteU64Decimal(physical_report.total_pages);
+    debugWrite(" free pages in ");
+    debugWriteUsizeDecimal(physical_report.managed_extents);
+    debugWrite(" extent(s), low/high ");
+    debugWriteU64Decimal(physical_report.low_pages);
+    debugWrite("/");
+    debugWriteU64Decimal(physical_report.high_pages);
+    debugWrite("; bootstrap allocator sealed\r\n");
     runtime.run(.{
-        .allocator = &frame_allocator,
+        .physical_memory = &physical_memory_manager,
         .ticks_per_second = timer_setup.result.ticks_per_second,
         .network_ready = network_ready,
         .usb_keyboard_ready = usb_keyboard_ready,

@@ -33,6 +33,8 @@ def main() -> int:
     assets = text("scripts/build-assets.py")
     runtime_test = text("scripts/test-runtime.ps1")
     runtime_abi = text("src/runtime_abi.zig")
+    memory_source = text("src/memory.zig")
+    page_pool_source = text("src/runtime_page_pool.zig")
     vfs_source = text("src/runtime_vfs.zig")
     build_graph = text("build.zig")
     workflow = text(".github/workflows/build.yml")
@@ -68,6 +70,10 @@ def main() -> int:
     require(runtime, "state.shell_waiting = true", "shell wait enters a real blocking state")
     require(runtime, "state.processes.wait(state.shell_handle, handle, false)", "shell wait uses process-table blocking wait")
     forbid(runtime, "wait: process is still running", "wait remained a status query")
+    require(runtime, "state.config.physical_memory.report()", "runtime shutdown validates the post-bootstrap physical manager")
+    require(runtime, "physical_report.clean", "release gate requires physical-page reclamation")
+    require(runtime, "ZigOs post-bootstrap physical memory:", "runtime reports physical-memory handoff accounting")
+    require(runtime, "ZigOs permanent userspace: page-limit", "runtime distinguishes ownership slots from reserved pages")
 
     require(executor, "paging.activateAddressSpace", "private CR3 activation")
     require(executor, "zigos_enter_user_context", "complete context entry")
@@ -99,10 +105,40 @@ def main() -> int:
     require(executor, "excluded_handle", "retained scheduler excludes the shell-owned foreground context")
     require(executor, "childForWait(context.handle, target_pid)", "userspace wait queries children without materializing a process snapshot")
     forbid(executor, "activeProcesses().snapshot()", "userspace wait copies the full process table onto the syscall stack")
+    require(executor, "initializeManager(physical_memory, page_limit, memory.four_gib, true)", "permanent userspace allocates pages on demand from physical memory")
+    forbid(executor, "allocateContiguousBelow(arena_pages", "permanent userspace reserves a fixed physical slab")
+
+    require(memory_source, "pub const PhysicalMemoryManager", "post-bootstrap reclaiming physical-memory manager")
+    require(memory_source, "initializeFromBootstrap", "explicit bootstrap-to-permanent allocator handoff")
+    require(memory_source, "current_region_full_end", "low-address allocation preserves deferred high-memory pages")
+    require(memory_source, "bootstrap.sealed = true", "monotonic bootstrap allocator is sealed after handoff")
+    require(memory_source, "pub fn allocateBelow", "physical allocations support explicit address limits")
+    require(memory_source, "PhysicalMemoryError.DoubleFree", "physical manager detects double frees")
+    require(memory_source, 'test "physical manager handoff preserves low and high remaining regions"', "handoff retains untouched high-memory extents")
+    require(memory_source, 'test "physical manager merges fragmented releases"', "physical free extents are coalesced")
+    require(page_pool_source, "manager.free(address)", "final page-owner release returns the page to physical memory")
+    require(page_pool_source, "poison_on_free", "released permanent-runtime pages are poisoned before physical reuse")
+    require(page_pool_source, 'test "manager-backed pages return to post-bootstrap physical memory"', "manager-backed page ownership integration test")
 
     require(runtime_abi, "pub fn fromError", "stable kernel-error to userspace-errno mapping")
     require(runtime_abi, "descriptor arguments reject narrowing aliases", "hostile descriptor-width tests")
     require(runtime_abi, "open flags reject every high bit before narrowing", "hostile open-flag tests")
+
+    canonical_test_sources = (
+        "src/runtime_fd.zig",
+        "src/runtime_command.zig",
+        "src/runtime_process.zig",
+        "src/runtime_vfs.zig",
+        "src/runtime_abi.zig",
+        "src/runtime_page_pool.zig",
+        "src/memory.zig",
+    )
+    declared_tests = sum(
+        len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
+        for source_path in canonical_test_sources
+    )
+    if declared_tests != 44:
+        raise SystemExit(f"canonical isolated-test declaration total must be 44, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -130,12 +166,14 @@ def main() -> int:
         raise SystemExit("generated-asset release manifest is empty")
 
     require(cpu, "zigos_enter_user_context:", "assembly retained-context entry")
+    require(cpu, "zigos_trace_probe_level1:", "deterministic exception unwind frame chain")
+    require(cpu, "zigos_trace_probe_level3:", "deterministic invalid-opcode caller frame")
     require(cpu, ".runtime_return_to_kernel:", "timer return to scheduler")
     require(paging, "createUserAddressSpaceFromFrames", "recyclable private page tables")
     require(exceptions, "runtime_user.handleException", "permanent exception routing")
     require(syscalls, "runtime_user.handleSyscall", "permanent syscall routing")
 
-    for name in ("hello", "sleep", "crash", "spin", "pipe-reader", "pipe-writer"):
+    for name in ("hello", "sleep", "crash", "spin", "pipe-reader", "pipe-writer", "wait"):
         require(assets, f'"{name}"', f"generated {name} ELF fixture")
         if not (ROOT / "src" / "user" / f"runtime-{name}.asm").is_file():
             raise SystemExit(f"permanent-userspace contract missing fixture source: {name}")
@@ -150,7 +188,11 @@ def main() -> int:
         "localhost A 127.0.0.1",
         "ping: unavailable: e1000e was not initialized for this boot",
         "dns: unavailable: e1000e was not initialized for this boot",
-        "ZigOs permanent userspace: arena 256 used 0",
+        "Post-bootstrap physical memory manager active:",
+        "bootstrap allocator sealed",
+        "ZigOs post-bootstrap physical memory: total ",
+        "peak 16 alloc/free 80/80 failed/rejected 0/0 clean yes",
+        "ZigOs permanent userspace: page-limit 256 used 0",
         "ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes",
         "ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes",
         "ZigOs x86-64 Capstone 19 verified:",

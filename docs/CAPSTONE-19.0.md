@@ -55,7 +55,7 @@ The permanent runtime now owns up to eight retained executable contexts. Each co
 - a bounded 4,096-byte terminal-output capture;
 - exact image identity, fault information and preemption counts.
 
-The runtime reserves 256 physical pages at initialization. It does not return those pages to the boot allocator, but it recycles them through an ownership-aware pool with generations, reference counts, poison-on-release and explicit invalid-address, double-free, wrong-owner, overflow and OOM accounting. The release marker requires zero active/shared pages, exact allocation/free balance and zero allocator rejections. The earlier 16 KiB bootstrap IST1 was expanded to 64 KiB after real multiprocess preemption proved it could overflow into an adjacent kernel page-table frame; a bottom canary is now checked after the complete boot-time CPL3 suite.
+After boot validation, the monotonic frame allocator is sealed and its unused usable extents are transferred in place to a reclaiming post-bootstrap physical-memory manager. The runtime no longer reserves a 256-page physical slab: it requests pages on demand below 4 GiB through a 256-slot ownership table with generations, reference counts, poison-on-final-release and explicit invalid-address, double-free, wrong-owner, backing-failure and OOM accounting. Final releases return pages to the physical manager, and the release marker requires both ownership-layer and physical-manager allocation/free balance. Extents above 4 GiB are retained and counted but are not yet directly accessible to the permanent runtime. The earlier 16 KiB bootstrap IST1 was expanded to 64 KiB after real multiprocess preemption proved it could overflow into an adjacent kernel page-table frame; a bottom canary is now checked after the complete boot-time CPL3 suite.
 
 ### Current userspace address window
 
@@ -165,10 +165,11 @@ The canonical harness scopes its forbidden-fixture scan to output after `ZigOs p
 The canonical COM1 harness sends 40 commands and requires zero failures. One representative run reported:
 
 ```text
-ZigOs persistent runtime shutdown: commands 40 failed 0 ticks 1007 idle-halts 956 service-passes 1007
-ZigOs persistent processes: live 2 created 15 reaped 13 switches 1092 signals 1 faults 1
+ZigOs persistent runtime shutdown: commands 40 failed 0 ticks 1009 idle-halts 958 service-passes 1009
+ZigOs persistent processes: live 2 created 15 reaped 13 switches 1094 signals 1 faults 1
 ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/41/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
-ZigOs permanent userspace: arena 256 used 0 peak 16 contexts 0 launches/exits/faults 10/8/1 preemptions/blocking/syscalls 41/6/36 reclaimed 80 allocator alloc/release/retains 80/80/0 shared/oom/rejected 0/0/0 clean yes
+ZigOs post-bootstrap physical memory: total 39932 free 39932 allocated 0 low/high 39932/0 extents 5/5 peak 16 alloc/free 80/80 failed/rejected 0/0 clean yes
+ZigOs permanent userspace: page-limit 256 used 0 peak 16 contexts 0 launches/exits/faults 10/8/1 preemptions/blocking/syscalls 41/6/36 reclaimed 80 allocator alloc/release/retains 80/80/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 ```
 

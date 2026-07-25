@@ -12,6 +12,9 @@ extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_halt_forever() callconv(cc) noreturn;
 extern fn zigos_read_cr2() callconv(cc) u64;
 extern fn zigos_trigger_ud2() callconv(cc) void;
+extern fn zigos_trace_probe_level1() callconv(cc) void;
+extern fn zigos_trace_probe_level2() callconv(cc) void;
+extern fn zigos_trace_probe_level3() callconv(cc) void;
 
 pub const ExceptionFrame = interrupt_context.ExceptionFrame;
 
@@ -30,7 +33,6 @@ var last_error_code: u64 = 0;
 var last_fault_rip: u64 = 0;
 var last_resumed_rip: u64 = 0;
 var last_trace: stack_trace.Report = stack_trace.Report.empty();
-var trace_guard: u64 = 0;
 
 pub fn testInvalidOpcodeRecovery() ?RecoveryResult {
     recovery_succeeded = false;
@@ -42,7 +44,7 @@ pub fn testInvalidOpcodeRecovery() ?RecoveryResult {
     if (!registerRecoverySymbols()) return null;
 
     recovery_armed = true;
-    traceProbeLevel1();
+    zigos_trace_probe_level1();
     recovery_armed = false;
 
     if (!recovery_succeeded or last_vector != 6) return null;
@@ -110,33 +112,13 @@ export fn zigos_exception_handler(
 
 fn registerRecoverySymbols() bool {
     return stack_trace.registerSymbol("zigos_trigger_ud2", @intFromPtr(&zigos_trigger_ud2)) and
-        stack_trace.registerSymbol("exceptions.traceProbeLevel3", @intFromPtr(&traceProbeLevel3)) and
-        stack_trace.registerSymbol("exceptions.traceProbeLevel2", @intFromPtr(&traceProbeLevel2)) and
-        stack_trace.registerSymbol("exceptions.traceProbeLevel1", @intFromPtr(&traceProbeLevel1)) and
+        stack_trace.registerSymbol("exceptions.traceProbeLevel3", @intFromPtr(&zigos_trace_probe_level3)) and
+        stack_trace.registerSymbol("exceptions.traceProbeLevel2", @intFromPtr(&zigos_trace_probe_level2)) and
+        stack_trace.registerSymbol("exceptions.traceProbeLevel1", @intFromPtr(&zigos_trace_probe_level1)) and
         stack_trace.registerSymbol(
             "exceptions.testInvalidOpcodeRecovery",
             @intFromPtr(&testInvalidOpcodeRecovery),
         );
-}
-
-noinline fn traceProbeLevel1() void {
-    traceProbeLevel2();
-    touchTraceGuard(1);
-}
-
-noinline fn traceProbeLevel2() void {
-    traceProbeLevel3();
-    touchTraceGuard(2);
-}
-
-noinline fn traceProbeLevel3() void {
-    zigos_trigger_ud2();
-    touchTraceGuard(3);
-}
-
-fn touchTraceGuard(value: u64) void {
-    const pointer: *volatile u64 = &trace_guard;
-    pointer.* +%= value;
 }
 
 fn printStackTrace(report: stack_trace.Report) void {

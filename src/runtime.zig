@@ -29,7 +29,7 @@ extern fn zigos_wait_for_interrupt() callconv(cc) void;
 extern fn zigos_enable_interrupts() callconv(cc) void;
 
 pub const Configuration = struct {
-    allocator: *memory.FrameAllocator,
+    physical_memory: *memory.PhysicalMemoryManager,
     ticks_per_second: u64,
     network_ready: bool,
     usb_keyboard_ready: bool,
@@ -264,7 +264,7 @@ fn initialize(configuration: Configuration) !void {
     try state.processes.setRunning(state.shell_handle);
     try state.processes.setResourceUsage(state.shell_handle, 8, 0, 0);
     try state.descriptors.bindProcess(&state.processes, state.shell_handle, true);
-    try runtime_user.initialize(configuration.allocator, &state.vfs, &state.processes, &state.descriptors);
+    try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
 }
 
 fn initializeFilesystem() !void {
@@ -1943,6 +1943,9 @@ fn finishRuntime() noreturn {
     const process_report = state.processes.report();
     const descriptor_report = state.descriptors.report();
     const userspace_report = runtime_user.report();
+    const physical_report = state.config.physical_memory.report();
+    const physical_rejections = physical_report.invalid_frees + physical_report.double_frees + physical_report.metadata_failures;
+    const physical_clean = physical_report.clean and physical_report.failed_allocations == 0 and physical_rejections == 0;
     const userspace_clean = userspace_report.used_pages == 0 and
         userspace_report.live_contexts == 0 and userspace_report.launches >= 10 and
         userspace_report.exits >= 8 and userspace_report.faults >= 1 and
@@ -1950,7 +1953,7 @@ fn finishRuntime() noreturn {
         userspace_report.syscalls >= 30 and userspace_report.reclaimed_pages > 0 and
         userspace_report.shared_pages == 0 and userspace_report.allocator_clean and
         userspace_report.allocator_allocations == userspace_report.reclaimed_pages and
-        userspace_report.allocator_out_of_memory == 0 and userspace_report.allocator_rejections == 0;
+        userspace_report.allocator_out_of_memory == 0 and userspace_report.allocator_rejections == 0 and physical_clean;
     const network_clean = state.network_failures == 0 and
         (!state.config.network_ready or (state.live_ping_passes >= 1 and state.live_dns_passes >= 1));
     const descriptor_clean = state.descriptors.validate(&state.vfs, &state.processes) and
@@ -2030,8 +2033,35 @@ fn finishRuntime() noreturn {
     emit(" clean ");
     emit(if (descriptor_clean) "yes" else "no");
     emit("\r\n");
-    emit("ZigOs permanent userspace: arena ");
-    emitDecimal(userspace_report.arena_pages);
+    emit("ZigOs post-bootstrap physical memory: total ");
+    emitDecimal(physical_report.total_pages);
+    emit(" free ");
+    emitDecimal(physical_report.free_pages);
+    emit(" allocated ");
+    emitDecimal(physical_report.allocated_pages);
+    emit(" low/high ");
+    emitDecimal(physical_report.low_pages);
+    emit("/");
+    emitDecimal(physical_report.high_pages);
+    emit(" extents ");
+    emitDecimal(physical_report.managed_extents);
+    emit("/");
+    emitDecimal(physical_report.free_extents);
+    emit(" peak ");
+    emitDecimal(physical_report.peak_allocated_pages);
+    emit(" alloc/free ");
+    emitDecimal(physical_report.allocations);
+    emit("/");
+    emitDecimal(physical_report.frees);
+    emit(" failed/rejected ");
+    emitDecimal(physical_report.failed_allocations);
+    emit("/");
+    emitDecimal(physical_rejections);
+    emit(" clean ");
+    emit(if (physical_clean) "yes" else "no");
+    emit("\r\n");
+    emit("ZigOs permanent userspace: page-limit ");
+    emitDecimal(userspace_report.page_limit);
     emit(" used ");
     emitDecimal(userspace_report.used_pages);
     emit(" peak ");

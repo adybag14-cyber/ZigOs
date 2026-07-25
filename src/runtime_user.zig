@@ -12,7 +12,7 @@ const runtime_vfs = @import("runtime_vfs.zig");
 
 const cc = std.os.uefi.cc;
 const page_bytes: usize = @intCast(memory.page_size);
-const arena_pages: usize = runtime_page_pool.maximum_pages;
+const page_limit: usize = runtime_page_pool.maximum_pages;
 const maximum_contexts: usize = 8;
 const maximum_mappings: usize = 32;
 const maximum_output_bytes: usize = 4096;
@@ -60,7 +60,7 @@ pub const SpawnRegisters = struct {
 };
 
 pub const Report = struct {
-    arena_pages: usize,
+    page_limit: usize,
     used_pages: usize,
     peak_pages: usize,
     live_contexts: usize,
@@ -147,15 +147,13 @@ var blocking_returns: u64 = 0;
 var syscall_count: u64 = 0;
 
 pub fn initialize(
-    allocator: *memory.FrameAllocator,
+    physical_memory: *memory.PhysicalMemoryManager,
     vfs: *runtime_vfs.Vfs,
     processes: *runtime_process.Table,
     descriptors: *runtime_fd.System,
 ) !void {
     if (initialized) return error.AlreadyInitialized;
     if (!paging.noExecuteEnabled() and !paging.enableNoExecute()) return error.NoExecuteUnavailable;
-    const base = allocator.allocateContiguousBelow(arena_pages, memory.four_gib) orelse return error.NoRuntimeFrames;
-    if ((base & (page_bytes - 1)) != 0) return error.UnalignedRuntimeArena;
     vfs_pointer = vfs;
     process_pointer = processes;
     descriptor_pointer = descriptors;
@@ -171,8 +169,8 @@ pub fn initialize(
     preemptions = 0;
     blocking_returns = 0;
     syscall_count = 0;
-    try page_pool.initialize(base, arena_pages);
-    if (page_pool.report().capacity != arena_pages) return error.RuntimePagePoolUnavailable;
+    try page_pool.initializeManager(physical_memory, page_limit, memory.four_gib, true);
+    if (page_pool.report().capacity != page_limit) return error.RuntimePagePoolUnavailable;
     initialized = true;
 }
 
@@ -521,7 +519,7 @@ pub fn report() Report {
         live_contexts += 1;
     };
     return .{
-        .arena_pages = allocator_report.capacity,
+        .page_limit = allocator_report.capacity,
         .used_pages = allocator_report.active,
         .peak_pages = allocator_report.peak,
         .live_contexts = live_contexts,
@@ -537,7 +535,7 @@ pub fn report() Report {
         .allocator_releases = allocator_report.releases,
         .allocator_retains = allocator_report.retains,
         .allocator_out_of_memory = allocator_report.out_of_memory,
-        .allocator_rejections = allocator_report.invalid_addresses + allocator_report.double_frees + allocator_report.owner_mismatches + allocator_report.reference_overflows,
+        .allocator_rejections = allocator_report.invalid_addresses + allocator_report.double_frees + allocator_report.owner_mismatches + allocator_report.reference_overflows + allocator_report.backing_failures,
         .allocator_clean = allocator_report.clean,
     };
 }
@@ -948,8 +946,8 @@ fn rollbackProcess(parent_handle: u64, handle: u64) void {
 }
 
 fn requirePagePool(comptime stage: []const u8) !void {
-    if (page_pool.base == 0) return @field(anyerror, "PagePoolBaseZero-" ++ stage);
-    if (page_pool.page_count != arena_pages) return @field(anyerror, "PagePoolCountCorrupted-" ++ stage);
+    if (!page_pool.initialized()) return @field(anyerror, "PagePoolUninitialized-" ++ stage);
+    if (page_pool.page_count != page_limit) return @field(anyerror, "PagePoolCountCorrupted-" ++ stage);
 }
 
 fn allocatePage(owner: u64) ?usize {
@@ -959,12 +957,7 @@ fn allocatePage(owner: u64) ?usize {
 }
 
 fn releasePage(physical: usize, owner: u64) void {
-    const result = page_pool.release(physical, owner) catch return;
-    if (result != .freed) return;
-    @memset(
-        @as([*]u8, @ptrFromInt(physical))[0..page_bytes],
-        runtime_page_pool.poison_byte,
-    );
+    _ = page_pool.release(physical, owner) catch return;
 }
 
 fn findFreeContext() ?usize {

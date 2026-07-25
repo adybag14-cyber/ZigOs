@@ -27,13 +27,13 @@ Status: closed by the correctness/CI remediation.
 
 ## Priority 1 — memory and process architecture
 
-Status: in progress. A bounded permanent-runtime allocator and userspace spawn/wait slice are integrated and required by QEMU tests; the system-wide milestones remain open.
+Status: in progress. A post-bootstrap reclaiming physical-memory handoff, bounded permanent-runtime ownership layer and userspace spawn/wait slice are integrated and required by QEMU tests; the system-wide milestones remain open.
 
 ### P1-M1: system physical-memory manager
 
-Delivered bounded slice: the permanent executor's 256-page arena is now managed by an ownership-aware reclaiming pool with arbitrary release/reuse, generations, reference counts, poison-on-release, OOM and invalid/double/wrong-owner release accounting. Both 40-command runtime profiles finish with 80 allocations, 80 releases, zero shared pages, zero OOMs and zero rejected operations.
+Delivered bounded slice: after all boot-time validation and hardware setup, the monotonic allocator transfers every unused usable firmware extent in place to a reclaiming physical-memory manager and is sealed against further allocation. The permanent executor no longer reserves a 256-page slab; it requests pages below 4 GiB on demand through a 256-slot ownership table with arbitrary release/reuse, generations, reference counts, poison-on-final-release, OOM and invalid/double/wrong-owner/backing-failure accounting. Final releases return physical pages to coalescing free extents. Isolated tests retain and classify untouched above-4-GiB extents, and both 40-command runtime profiles require 80 allocations, 80 frees, zero live physical pages, zero OOMs and zero rejected operations.
 
-Still open: replace the monotonic bootstrap allocator with a system-wide reclaiming allocator, add memory-pressure callbacks and an explicit OOM victim policy, permit ordinary allocations above 4 GiB through a direct physical-memory map, and apply low-memory restrictions only through per-device DMA masks or bounce buffers.
+Still open: move boot-time page tables, stacks, DMA buffers, heaps and retained drivers onto the permanent manager rather than handing off only after validation; add synchronization, memory-pressure callbacks and an explicit OOM victim policy; permit ordinary allocations above 4 GiB through a direct physical-memory map; and apply low-memory restrictions only through per-device DMA masks or bounce buffers.
 
 Roadmap links: G100, G101, G118–G129, G159–G167, G203, G448, G478–G480.
 

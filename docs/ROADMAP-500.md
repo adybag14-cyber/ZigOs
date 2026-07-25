@@ -2,9 +2,9 @@
 
 This roadmap converts the broad runtime, process, filesystem, userland, networking, build, testing, hardware and security gaps into 500 individually trackable engineering goals. A checked item means the repository contains the claimed implementation and at least one executable test or release contract; it does not imply production readiness. Each completed goal should also state whether its evidence is source-only, isolated-unit, QEMU integration or required hosted CI. Bounded Capstone fixtures do not automatically satisfy a general-runtime goal.
 
-**Status after the bounded Priority 1 runtime advance:** 122 complete, 378 open.
+**Status after the post-bootstrap Priority 1 memory advance:** 122 complete, 378 open.
 
-Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. The bounded Priority 1 runtime advance completes **G138, G139 and G140** through permanent CPL3 integration; broader allocator and scheduler milestones remain open. Its release contract is more granular than this roadmap, so the two accounting systems remain separate.
+Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. The bounded Priority 1 runtime advance completes **G138, G139 and G140** through permanent CPL3 integration. The subsequent post-bootstrap memory slice seals the monotonic allocator, imports all remaining usable firmware extents into a reclaiming manager and returns permanent-runtime pages after use, but does not close a broader roadmap item because boot-time allocations, high-memory direct access, DMA policy, synchronization and OOM selection remain incomplete. Its release contract is more granular than this roadmap, so the two accounting systems remain separate.
 
 ## Completed in Capstone 17
 

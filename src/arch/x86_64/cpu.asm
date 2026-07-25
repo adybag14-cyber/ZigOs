@@ -816,6 +816,9 @@ extern zigos_exception_handler
 global zigos_exception_stub_address
 global zigos_read_cr2
 global zigos_trigger_ud2
+global zigos_trace_probe_level1
+global zigos_trace_probe_level2
+global zigos_trace_probe_level3
 
 %macro ZIGOS_EXCEPTION_NO_ERROR 1
 zigos_exception_%1:
@@ -922,6 +925,34 @@ zigos_exception_stub_address:
 ; u64 zigos_read_cr2(void)
 zigos_read_cr2:
     mov rax, cr2
+    ret
+
+; Deterministic frame-pointer chain for exception unwinding validation.
+zigos_trace_probe_level1:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    call zigos_trace_probe_level2
+    add rsp, 32
+    pop rbp
+    ret
+
+zigos_trace_probe_level2:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    call zigos_trace_probe_level3
+    add rsp, 32
+    pop rbp
+    ret
+
+zigos_trace_probe_level3:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    call zigos_trigger_ud2
+    add rsp, 32
+    pop rbp
     ret
 
 ; Controlled invalid-opcode test. The Zig handler advances RIP by two bytes.

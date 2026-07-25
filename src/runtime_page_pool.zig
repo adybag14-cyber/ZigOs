@@ -1,4 +1,5 @@
 const std = @import("std");
+const memory = @import("memory.zig");
 
 pub const page_bytes: usize = 4096;
 pub const maximum_pages: usize = 256;
@@ -10,6 +11,7 @@ pub const Error = error{
     DoubleFree,
     OwnerMismatch,
     ReferenceOverflow,
+    BackingAllocatorFailure,
 };
 
 pub const State = enum(u8) {
@@ -25,6 +27,7 @@ pub const ReleaseResult = enum(u8) {
 
 pub const Entry = struct {
     state: State = .free,
+    address: usize = 0,
     owner: u64 = 0,
     references: u32 = 0,
     generation: u32 = 0,
@@ -44,12 +47,16 @@ pub const Report = struct {
     double_frees: u64,
     owner_mismatches: u64,
     reference_overflows: u64,
+    backing_failures: u64,
     clean: bool,
 };
 
 pub const Pool = struct {
     base: usize = 0,
     page_count: usize = 0,
+    manager: ?*memory.PhysicalMemoryManager = null,
+    limit_exclusive: u64 = std.math.maxInt(u64),
+    poison_on_free: bool = false,
     entries: [maximum_pages]Entry = @splat(.{}),
     active: usize = 0,
     shared: usize = 0,
@@ -63,6 +70,7 @@ pub const Pool = struct {
     double_frees: u64 = 0,
     owner_mismatches: u64 = 0,
     reference_overflows: u64 = 0,
+    backing_failures: u64 = 0,
 
     pub fn init(base: usize, page_count: usize) Error!Pool {
         var self = Pool{};
@@ -80,24 +88,61 @@ pub const Pool = struct {
         self.page_count = page_count;
     }
 
+    pub fn initializeManager(
+        self: *Pool,
+        manager: *memory.PhysicalMemoryManager,
+        page_count: usize,
+        limit_exclusive: u64,
+        poison_on_free: bool,
+    ) Error!void {
+        if (page_count == 0 or page_count > maximum_pages or limit_exclusive < page_bytes) {
+            return Error.InvalidConfiguration;
+        }
+        self.* = .{};
+        self.manager = manager;
+        self.page_count = page_count;
+        self.limit_exclusive = limit_exclusive;
+        self.poison_on_free = poison_on_free;
+    }
+
+    pub fn initialized(self: *const Pool) bool {
+        return self.page_count != 0 and (self.base != 0 or self.manager != null);
+    }
+
     pub fn allocate(self: *Pool, owner: u64) ?usize {
         if (owner == 0) {
             self.owner_mismatches +|= 1;
             return null;
         }
-        for (self.entries[0..self.page_count], 0..) |*entry, index| {
-            if (entry.state != .free) continue;
-            entry.state = .exclusive;
-            entry.owner = owner;
-            entry.references = 1;
-            entry.generation = nextGeneration(entry.generation);
-            self.active += 1;
-            self.peak = @max(self.peak, self.active);
-            self.allocations +|= 1;
-            return self.base + index * page_bytes;
+        var free_index: ?usize = null;
+        for (self.entries[0..self.page_count], 0..) |entry, index| {
+            if (entry.state == .free) {
+                free_index = index;
+                break;
+            }
         }
-        self.out_of_memory +|= 1;
-        return null;
+        const index = free_index orelse {
+            self.out_of_memory +|= 1;
+            return null;
+        };
+        const address = if (self.manager) |manager|
+            manager.allocateBelow(self.limit_exclusive) orelse {
+                self.out_of_memory +|= 1;
+                return null;
+            }
+        else
+            self.base + index * page_bytes;
+
+        const entry = &self.entries[index];
+        entry.state = .exclusive;
+        entry.address = address;
+        entry.owner = owner;
+        entry.references = 1;
+        entry.generation = nextGeneration(entry.generation);
+        self.active += 1;
+        self.peak = @max(self.peak, self.active);
+        self.allocations +|= 1;
+        return address;
     }
 
     pub fn retainShared(self: *Pool, address: usize, owner: u64) Error!void {
@@ -125,6 +170,15 @@ pub const Pool = struct {
             entry.references -= 1;
             self.releases +|= 1;
             return .retained;
+        }
+        if (self.poison_on_free) {
+            @memset(@as([*]u8, @ptrFromInt(address))[0..page_bytes], poison_byte);
+        }
+        if (self.manager) |manager| {
+            manager.free(address) catch {
+                self.backing_failures +|= 1;
+                return Error.BackingAllocatorFailure;
+            };
         }
         if (entry.state == .shared) self.shared -= 1;
         entry.state = .free;
@@ -155,11 +209,21 @@ pub const Pool = struct {
             .double_frees = self.double_frees,
             .owner_mismatches = self.owner_mismatches,
             .reference_overflows = self.reference_overflows,
-            .clean = self.active == 0 and self.shared == 0,
+            .backing_failures = self.backing_failures,
+            .clean = self.active == 0 and self.shared == 0 and self.backing_failures == 0,
         };
     }
 
     fn resolve(self: *Pool, address: usize) Error!*Entry {
+        if (self.manager != null) {
+            var released_match: ?*Entry = null;
+            for (self.entries[0..self.page_count]) |*entry| {
+                if (entry.address != address) continue;
+                if (entry.state != .free) return entry;
+                if (released_match == null) released_match = entry;
+            }
+            return released_match orelse self.rejectAddress();
+        }
         if (address < self.base) return self.rejectAddress();
         const offset = address - self.base;
         if ((offset & (page_bytes - 1)) != 0) return self.rejectAddress();
@@ -240,4 +304,24 @@ test "out of memory is explicit and accounting remains consistent" {
     try std.testing.expectEqual(@as(usize, 2), report.peak);
     try std.testing.expectEqual(@as(u64, 1), report.out_of_memory);
     try std.testing.expect(!report.clean);
+}
+
+test "manager-backed pages return to post-bootstrap physical memory" {
+    const extents = [_]memory.PhysicalExtent{.{ .base = 0x60_0000, .end = 0x60_4000 }};
+    var manager = memory.PhysicalMemoryManager.initForTesting(&extents).?;
+    var pool = Pool{};
+    try pool.initializeManager(&manager, 2, memory.four_gib, false);
+    const first = pool.allocate(10).?;
+    const second = pool.allocate(20).?;
+    try std.testing.expectEqual(@as(usize, 0x60_0000), first);
+    try std.testing.expectEqual(@as(usize, 0x60_1000), second);
+    try std.testing.expectEqual(ReleaseResult.freed, try pool.release(first, 10));
+    try std.testing.expectEqual(first, pool.allocate(30).?);
+    try std.testing.expectEqual(ReleaseResult.freed, try pool.release(second, 20));
+    try std.testing.expectEqual(ReleaseResult.freed, try pool.release(first, 30));
+    try std.testing.expect(pool.report().clean);
+    const manager_report = manager.report();
+    try std.testing.expectEqual(@as(u64, 3), manager_report.allocations);
+    try std.testing.expectEqual(@as(u64, 3), manager_report.frees);
+    try std.testing.expect(manager_report.clean);
 }

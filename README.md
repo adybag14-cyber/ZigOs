@@ -18,7 +18,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 39 isolated tests, source contract, live-network runtime and offline runtime. The required hosted workflow includes those gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 44 isolated tests, source contract, live-network runtime and offline runtime. The required hosted workflow includes those gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -29,7 +29,7 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 - a bounded writable VFS and five mounted namespaces;
 - a generation-safe 64-slot process table;
 - process-local numeric descriptors, shared open-file descriptions and bounded blocking pipes;
-- up to eight retained CPL3 executable contexts backed by an ownership-aware, reclaiming 256-page runtime pool;
+- up to eight retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 256-slot ownership table;
 - private CR3 roots, strict W^X `PT_LOAD` mappings, one-page stacks and unmapped guards;
 - complete GPR and FXSAVE context preservation across syscalls and timer preemption;
 - a small pointer-validated permanent userspace syscall ABI with VFS-backed spawn, exact waitpid, wait-any and WNOHANG;
@@ -93,10 +93,11 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 A representative run reports:
 
 ```text
-ZigOs persistent runtime shutdown: commands 40 failed 0 ticks 1007 idle-halts 956 service-passes 1007
-ZigOs persistent processes: live 2 created 15 reaped 13 switches 1092 signals 1 faults 1
+ZigOs persistent runtime shutdown: commands 40 failed 0 ticks 1009 idle-halts 958 service-passes 1009
+ZigOs persistent processes: live 2 created 15 reaped 13 switches 1094 signals 1 faults 1
 ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/41/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
-ZigOs permanent userspace: arena 256 used 0 peak 16 contexts 0 launches/exits/faults 10/8/1 preemptions/blocking/syscalls 41/6/36 reclaimed 80 allocator alloc/release/retains 80/80/0 shared/oom/rejected 0/0/0 clean yes
+ZigOs post-bootstrap physical memory: total 39932 free 39932 allocated 0 low/high 39932/0 extents 5/5 peak 16 alloc/free 80/80 failed/rejected 0/0 clean yes
+ZigOs permanent userspace: page-limit 256 used 0 peak 16 contexts 0 launches/exits/faults 10/8/1 preemptions/blocking/syscalls 41/6/36 reclaimed 80 allocator alloc/release/retains 80/80/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 ```
 
@@ -162,7 +163,7 @@ The permanent process table now owns real executable lifecycle records. It provi
 - page, descriptor, socket, child and CPU quotas;
 - fault vector/address records derived from genuine CPL3 exceptions.
 
-A separate bounded executor currently supports up to eight simultaneous retained CPL3 contexts, 32 mappings per context and a 256-page ownership-aware runtime pool. The pool tracks owners, generations and reference counts, poisons released pages, rejects invalid/double/wrong-owner releases and requires exact allocation/free balance at shutdown. Each process receives a private CR3, a complete saved integer/FX context, a one-page stack, an unmapped guard page and cloned descriptor namespace.
+A separate bounded executor currently supports up to eight simultaneous retained CPL3 contexts and 32 mappings per context. After boot validation, the monotonic allocator is sealed and every remaining usable firmware extent is transferred to a reclaiming physical-memory manager. The executor requests pages on demand below 4 GiB through a 256-slot ownership table; final releases poison pages, return them to the manager and require exact ownership-layer and physical-manager allocation/free balance at shutdown. Each process receives a private CR3, a complete saved integer/FX context, a one-page stack, an unmapped guard page and cloned descriptor namespace. Untouched extents above 4 GiB are retained and counted, but ordinary runtime use of them awaits a direct physical-memory map.
 
 This is still not a general POSIX process implementation. There is no persistent-runtime fork/COW, in-place exec, dynamic linker, flexible stack growth, environment/auxiliary vector or SMP userspace scheduler.
 
@@ -300,11 +301,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    2,835,456 bytes
-SHA-256: C5F35F7846F9EC53036AD32DA3FF60839B49C80F10B84C8FCDF18B6DB75D3999
+Size:    2,855,424 bytes
+SHA-256: D21DFFE17CDCC65526C16AF201AF8CA11E69F96B15E6CB42CE80B2ABC1052B4E
 ```
 
-This identity is from the locally validated Windows build after the bounded Priority 1 runtime advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows build after the post-bootstrap Priority 1 physical-memory advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
@@ -335,7 +336,7 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 39 isolated tests, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 44 isolated tests, x86-64 UEFI build, portable PE verification and artifact upload.
 - **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, both offline and live-network 40-command permanent COM1 sessions, legacy i686 build and two-boot persistence regression.
 - **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 
