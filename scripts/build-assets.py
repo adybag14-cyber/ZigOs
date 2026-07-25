@@ -173,7 +173,8 @@ def main() -> int:
         },
     }
     manifest_path = build / "assets-manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with manifest_path.open("w", encoding="utf-8", newline="\n") as manifest_file:
+        manifest_file.write(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
     print(f"Generated {len(outputs)} verified x86-64 build assets")
     print(f"Manifest: {manifest_path}")

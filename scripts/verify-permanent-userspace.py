@@ -102,6 +102,7 @@ def main() -> int:
     require(asset_builder, '"schema": 2', "host-independent generated-asset manifest schema")
     forbid(asset_builder, '"python": sys.version', "host Python version leaked into compared manifest")
     forbid(asset_builder, '"nasm": nasm', "host NASM path leaked into compared manifest")
+    require(asset_builder, 'newline="\\n"', "release manifest uses explicit cross-platform LF newlines")
     if asset_manifest.get("schema") != 2:
         raise SystemExit("generated-asset manifest does not use deterministic schema 2")
     manifest_outputs = asset_manifest.get("outputs", {})
