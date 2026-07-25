@@ -2157,8 +2157,8 @@ Status: implementation and full local Windows validation complete; required host
 - Changed `crash` from fabricated process accounting into a genuine CPL3 page fault at CR2 `0x8000180000`.
 - Added `pipex`, proving a real executable reader block, a separate executable writer wakeup, exact `PIPE-CPL` transfer and endpoint reclamation.
 - Removed canned permanent-shell network results; retained the initialized e1000e owner for real bounded ICMP/DNS transactions, with explicit unavailable status in the no-NIC profile.
-- Expanded the canonical COM1 session to 39 commands; both live-network and offline profiles pass locally, including blocking wait and default forced kill, and the source-contract verifier rejects syscall narrowing, stale help, incomplete test-graph and CI-gate regressions.
+- Expanded the canonical COM1 session to 40 commands; both live-network and offline profiles pass locally, including blocking wait and default forced kill, and the source-contract verifier rejects syscall narrowing, stale help, incomplete test-graph and CI-gate regressions.
 - Cumulative historical x86-64 accounting is 497 goals (`0x1F1`), with 32 (`0x20`) new in Capstone 19.
 - The separate 500-goal general roadmap now has 119 complete and 381 open after reconciling bounded multi-segment ELF loading, syscall/signal/pipe tests, required live-network CI and cross-platform artifact comparison.
-- Locally verified Windows `BOOTX64.EFI`: 2,820,608 bytes, SHA-256 `24C450E9F1BA1ED2D008982B59D2AF155B27DA043AE13A05E330F22ACCE976C6`.
+- Locally verified Windows `BOOTX64.EFI`: 2,835,456 bytes, SHA-256 `C5F35F7846F9EC53036AD32DA3FF60839B49C80F10B84C8FCDF18B6DB75D3999`.
 - Exact release contract: [`CAPSTONE-19.0.md`](CAPSTONE-19.0.md).

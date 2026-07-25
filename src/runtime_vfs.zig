@@ -212,7 +212,7 @@ pub const Vfs = struct {
 
     pub fn statNode(self: *const Vfs, node_index: u16) Error!Stat {
         if (node_index >= self.nodes.len or !self.nodes[node_index].used) return Error.NotFound;
-        const node = self.nodes[node_index];
+        const node = &self.nodes[node_index];
         return .{
             .node = node_index,
             .generation = node.generation,
@@ -229,7 +229,8 @@ pub const Vfs = struct {
         const directory = try self.resolve(cwd, path);
         if (self.nodes[directory].kind != .directory) return Error.NotDirectory;
         var result = DirectoryList{};
-        for (self.nodes, 0..) |node, index| {
+        for (0..self.nodes.len) |index| {
+            const node = &self.nodes[index];
             if (!node.used or index == directory or node.parent != directory) continue;
             if (result.count >= result.records.len) return Error.NoSpace;
             var record = DirectoryRecord{
@@ -289,13 +290,21 @@ pub const Vfs = struct {
 
     pub fn read(self: *const Vfs, cwd: u16, path: []const u8, offset: usize, output: []u8) Error!usize {
         const node_index = try self.resolve(cwd, path);
-        const node = self.nodes[node_index];
+        const node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if ((node.mode & 0o444) == 0) return Error.PermissionDenied;
         if (offset > node.size) return Error.InvalidOffset;
         const count = @min(output.len, node.size - offset);
         @memcpy(output[0..count], node.data[offset .. offset + count]);
         return count;
+    }
+
+    pub fn readOnlyView(self: *const Vfs, cwd: u16, path: []const u8) Error![]const u8 {
+        const node_index = try self.resolve(cwd, path);
+        const node = &self.nodes[node_index];
+        if (node.kind == .directory) return Error.IsDirectory;
+        if ((node.mode & 0o444) == 0) return Error.PermissionDenied;
+        return node.data[0..node.size];
     }
 
     pub fn write(self: *Vfs, cwd: u16, path: []const u8, offset: usize, bytes: []const u8, truncate_first: bool, tick: u64) Error!usize {
@@ -329,7 +338,8 @@ pub const Vfs = struct {
     pub fn rmdir(self: *Vfs, cwd: u16, path: []const u8) Error!void {
         const node_index = try self.resolve(cwd, path);
         if (node_index == 0 or self.nodes[node_index].kind != .directory) return Error.NotDirectory;
-        for (self.nodes, 0..) |node, index| {
+        for (0..self.nodes.len) |index| {
+            const node = &self.nodes[index];
             if (node.used and index != node_index and node.parent == node_index) return Error.DirectoryNotEmpty;
         }
         try self.removeNode(node_index);
@@ -486,7 +496,7 @@ pub const Vfs = struct {
         const index = try self.resolveOpen(owner_pid, handle);
         var open_file = &self.open_files[index];
         if (!open_file.readable) return Error.PermissionDenied;
-        const node = self.nodes[open_file.node];
+        const node = &self.nodes[open_file.node];
         if (open_file.offset > node.size) return Error.InvalidOffset;
         const count = @min(output.len, node.size - open_file.offset);
         @memcpy(output[0..count], node.data[open_file.offset .. open_file.offset + count]);
@@ -547,7 +557,8 @@ pub const Vfs = struct {
 
     pub fn validate(self: *const Vfs) bool {
         if (!self.nodes[0].used or self.nodes[0].kind != .directory or self.nodes[0].parent != 0) return false;
-        for (self.nodes, 0..) |node, index| {
+        for (0..self.nodes.len) |index| {
+            const node = &self.nodes[index];
             if (!node.used) continue;
             if (node.generation == 0 or node.name_length > maximum_name_length or node.size > maximum_file_size) return false;
             if (index != 0) {
@@ -557,7 +568,8 @@ pub const Vfs = struct {
                 while (current != 0 and depth < self.nodes.len) : (depth += 1) current = self.nodes[current].parent;
                 if (current != 0) return false;
             }
-            for (self.nodes[index + 1 ..]) |other| {
+            for (index + 1..self.nodes.len) |other_index| {
+                const other = &self.nodes[other_index];
                 if (!other.used or other.parent != node.parent or other.name_length != node.name_length) continue;
                 if (std.ascii.eqlIgnoreCase(other.nameSlice(), node.nameSlice())) return false;
             }
@@ -586,7 +598,8 @@ pub const Vfs = struct {
             .mutations = self.mutations,
             .rejected_operations = self.rejected_operations,
         };
-        for (self.nodes) |node| {
+        for (0..self.nodes.len) |node_index| {
+            const node = &self.nodes[node_index];
             if (!node.used) continue;
             result.nodes_used += 1;
             result.bytes_used += node.size;
@@ -608,7 +621,8 @@ pub const Vfs = struct {
     }
 
     fn findChild(self: *const Vfs, parent: u16, name: []const u8) ?u16 {
-        for (self.nodes, 0..) |node, index| {
+        for (0..self.nodes.len) |index| {
+            const node = &self.nodes[index];
             if (!node.used or node.parent != parent or node.name_length != name.len) continue;
             if (std.ascii.eqlIgnoreCase(node.nameSlice(), name)) return @intCast(index);
         }
@@ -678,7 +692,7 @@ pub const Vfs = struct {
 
     fn requireWritableFile(self: *const Vfs, node_index: u16) Error!void {
         if (node_index >= self.nodes.len or !self.nodes[node_index].used) return Error.NotFound;
-        const node = self.nodes[node_index];
+        const node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if (node.kind == .pseudo or node.readonly or self.mountReadonly(node.mount_id)) return Error.ReadOnly;
         if ((node.mode & 0o222) == 0) return Error.PermissionDenied;
@@ -702,7 +716,8 @@ pub const Vfs = struct {
     fn assignMountRecursive(self: *Vfs, node_index: u16, mount_id: u8, readonly: bool) void {
         self.nodes[node_index].mount_id = mount_id;
         if (readonly) self.nodes[node_index].readonly = true;
-        for (self.nodes, 0..) |node, index| {
+        for (0..self.nodes.len) |index| {
+            const node = &self.nodes[index];
             if (node.used and index != node_index and node.parent == node_index) self.assignMountRecursive(@intCast(index), mount_id, readonly);
         }
     }

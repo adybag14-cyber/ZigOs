@@ -33,6 +33,7 @@ def main() -> int:
     assets = text("scripts/build-assets.py")
     runtime_test = text("scripts/test-runtime.ps1")
     runtime_abi = text("src/runtime_abi.zig")
+    vfs_source = text("src/runtime_vfs.zig")
     build_graph = text("build.zig")
     workflow = text(".github/workflows/build.yml")
     asset_builder = text("scripts/build-assets.py")
@@ -74,14 +75,30 @@ def main() -> int:
     require(executor, "activeProcesses().fault(context.handle", "exception-derived fault recording")
     require(executor, "copyToUser", "validated userspace copyout")
     require(executor, "std.math.add(u64, address, index)", "overflow-safe user strings")
-    require(executor, "reclaimed_pages", "arena reclamation accounting")
-    require(executor, "releasePage(physical);", "failed owned mappings release their arena page")
+    require(executor, "allocator_report.frees", "owned page-pool reclamation accounting")
+    require(executor, "releasePage(physical, context.handle);", "failed owned mappings release their owned page")
     require(executor, "paging.userAddressSpaceEmpty", "teardown requires an empty private page table")
     require(executor, "std.math.add(u64, current_tick, frame.rdi)", "overflow-safe sleep deadlines")
     require(executor, "runtime_abi.descriptor(frame.rdi)", "descriptor registers are range-checked before narrowing")
     require(executor, "runtime_abi.openFlagBits(frame.rsi)", "open flags are validated before narrowing")
     forbid(executor, "const fd: u16 = @truncate(frame.rdi)", "descriptor arguments truncate before validation")
     forbid(executor, "const bits: u8 = @truncate(frame.rsi)", "open flags truncate before validation")
+    forbid(vfs_source, "const node = self.nodes[", "full 16 KiB VFS nodes are copied onto the retained kernel stack")
+    forbid(vfs_source, "for (self.nodes", "VFS node arrays are iterated by value on the retained kernel stack")
+    forbid(vfs_source, "for (self.nodes[", "VFS node slices are iterated by value on the retained kernel stack")
+    forbid(executor, "for (contexts) |context|", "full retained userspace contexts are copied onto the kernel stack")
+    forbid(executor, "for (contexts,", "retained context lookup copies multi-kilobyte contexts onto the kernel stack")
+    forbid(executor, "context: Context", "syscall helpers copy the full retained context onto the kernel stack")
+    forbid(executor, "context.*", "syscall paths pass retained contexts by value")
+    forbid(executor, "const context = contexts[service_cursor]", "scheduler copies a retained context onto the kernel stack")
+    require(vfs_source, "const node = &self.nodes[node_index]", "VFS node access stays pointer-based")
+    require(vfs_source, "pub fn readOnlyView", "executable loading uses a bounded read-only VFS view")
+    require(runtime, "state.vfs.readOnlyView", "shell executable loading avoids a 16 KiB staging copy")
+    require(executor, "activeVfs().readOnlyView", "userspace spawn avoids a 16 KiB staging copy")
+    require(runtime, "state.foreground_handle", "foreground execution has one explicit scheduler owner")
+    require(executor, "excluded_handle", "retained scheduler excludes the shell-owned foreground context")
+    require(executor, "childForWait(context.handle, target_pid)", "userspace wait queries children without materializing a process snapshot")
+    forbid(executor, "activeProcesses().snapshot()", "userspace wait copies the full process table onto the syscall stack")
 
     require(runtime_abi, "pub fn fromError", "stable kernel-error to userspace-errno mapping")
     require(runtime_abi, "descriptor arguments reject narrowing aliases", "hostile descriptor-width tests")
@@ -93,6 +110,7 @@ def main() -> int:
         '"src/runtime_process.zig"',
         '"src/runtime_vfs.zig"',
         '"src/runtime_abi.zig"',
+        '"src/runtime_page_pool.zig"',
     ):
         require(build_graph, source_path, f"isolated test graph includes {source_path}")
 

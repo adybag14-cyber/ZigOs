@@ -48,7 +48,7 @@ pub fn fromError(err: anyerror) i64 {
         error.NotFound => errno_not_found,
         error.NoProcess, error.AlreadyTerminal => errno_no_process,
         error.NotChild => errno_no_child,
-        error.StillRunning, error.NoSlots, error.QuotaExceeded => errno_would_block,
+        error.StillRunning, error.NoSlots, error.NoContext, error.ContextLimit, error.QuotaExceeded => errno_would_block,
         error.PermissionDenied => errno_access,
         error.InvalidHandle, error.BadDescriptor, error.NotReadable, error.NotWritable => errno_bad_fd,
         error.InvalidPath, error.InvalidOffset, error.InvalidOperation, error.InvalidState, error.InvalidSignal => errno_invalid,
@@ -59,6 +59,7 @@ pub fn fromError(err: anyerror) i64 {
         error.IsDirectory => errno_is_directory,
         error.DirectoryNotEmpty => errno_not_empty,
         error.ReadOnly => errno_read_only,
+        error.NoRuntimeFrames, error.AddressSpaceFailure, error.MappingLimit, error.MappingFailure => errno_no_memory,
         error.NoSpace, error.PipeLimit => errno_no_space,
         error.FileTooLarge => errno_file_too_large,
         error.Busy => errno_busy,
@@ -99,5 +100,8 @@ test "kernel errors retain distinct userspace errno values" {
     try std.testing.expectEqual(errno_is_directory, fromError(error.IsDirectory));
     try std.testing.expectEqual(errno_broken_pipe, fromError(error.BrokenPipe));
     try std.testing.expectEqual(errno_process_file_limit, fromError(error.DescriptorLimit));
+    try std.testing.expectEqual(errno_would_block, fromError(error.NoContext));
+    try std.testing.expectEqual(errno_would_block, fromError(error.ContextLimit));
+    try std.testing.expectEqual(errno_no_memory, fromError(error.NoRuntimeFrames));
     try std.testing.expectEqual(errno_system_file_limit, fromError(error.OpenDescriptionLimit));
 }

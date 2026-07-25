@@ -18,7 +18,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 33 isolated tests, source contract, live-network runtime and offline runtime. The required hosted workflow includes those gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 39 isolated tests, source contract, live-network runtime and offline runtime. The required hosted workflow includes those gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -29,10 +29,10 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 - a bounded writable VFS and five mounted namespaces;
 - a generation-safe 64-slot process table;
 - process-local numeric descriptors, shared open-file descriptions and bounded blocking pipes;
-- up to eight retained CPL3 executable contexts backed by a recyclable 256-page arena;
+- up to eight retained CPL3 executable contexts backed by an ownership-aware, reclaiming 256-page runtime pool;
 - private CR3 roots, strict W^X `PT_LOAD` mappings, one-page stacks and unmapped guards;
 - complete GPR and FXSAVE context preservation across syscalls and timer preemption;
-- a small pointer-validated permanent userspace syscall ABI;
+- a small pointer-validated permanent userspace syscall ABI with VFS-backed spawn, exact waitpid, wait-any and WNOHANG;
 - real executable exit, sleep, preemption, fault containment, wait/reap and pipe block/wakeup;
 - a retained bounded e1000e owner with real shell ICMP echo and DNS A queries when present, plus explicit offline status when absent;
 - command parsing, bounded shell pipelines, descriptor-backed file redirection and history.
@@ -77,7 +77,7 @@ Run the bidirectional COM1 session:
 .\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 ```
 
-Each harness run boots the finished EFI image, waits for the permanent prompt and drives 39 commands. It preserves the previous navigation, mutation, redirection, parser, descriptor, device, fsck, sync and history coverage, then additionally requires:
+Each harness run boots the finished EFI image, waits for the permanent prompt and drives 40 commands. It preserves the previous navigation, mutation, redirection, parser, descriptor, device, fsck, sync and history coverage, then additionally requires:
 
 - `run` and `exec` to enter VFS-loaded CPL3 code;
 - a real hardware-tick sleep and saved-context resume;
@@ -85,6 +85,7 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 - a real CPL3 reader block and separate CPL3 writer wakeup;
 - non-cooperative timer preemption of a background spin process;
 - a genuinely blocking shell `wait` over a sleeping CPL3 child, default forced `kill` through signal 9, one-time reap, descriptor cleanup and frame cleanup;
+- `/bin/wait.elf` spawning two VFS-backed CPL3 children and proving exact waitpid, wait-any and WNOHANG before exiting with status `0x31`;
 - real `10.0.2.2` ICMP and `localhost` DNS results in the network profile;
 - explicit unavailable responses in the offline profile;
 - absence of the former canned DNS and ping strings in permanent-runtime output.
@@ -92,10 +93,10 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 A representative run reports:
 
 ```text
-ZigOs persistent runtime shutdown: commands 39 failed 0 ticks 878 idle-halts 830 service-passes 878
-ZigOs persistent processes: live 2 created 12 reaped 10 switches 112 signals 1 faults 1
-ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/32/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
-ZigOs permanent userspace: arena 256 used 0 peak 16 contexts 0 launches/exits/faults 7/5/1 preemptions/blocking/syscalls 42/3/19 reclaimed 56 clean yes
+ZigOs persistent runtime shutdown: commands 40 failed 0 ticks 1007 idle-halts 956 service-passes 1007
+ZigOs persistent processes: live 2 created 15 reaped 13 switches 1092 signals 1 faults 1
+ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/41/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
+ZigOs permanent userspace: arena 256 used 0 peak 16 contexts 0 launches/exits/faults 10/8/1 preemptions/blocking/syscalls 41/6/36 reclaimed 80 allocator alloc/release/retains 80/80/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 ```
 
@@ -161,7 +162,7 @@ The permanent process table now owns real executable lifecycle records. It provi
 - page, descriptor, socket, child and CPU quotas;
 - fault vector/address records derived from genuine CPL3 exceptions.
 
-A separate bounded executor currently supports up to eight simultaneous retained CPL3 contexts, 32 mappings per context and a 256-page recyclable physical arena. Each process receives a private CR3, a complete saved integer/FX context, a one-page stack, an unmapped guard page and cloned descriptor namespace.
+A separate bounded executor currently supports up to eight simultaneous retained CPL3 contexts, 32 mappings per context and a 256-page ownership-aware runtime pool. The pool tracks owners, generations and reference counts, poisons released pages, rejects invalid/double/wrong-owner releases and requires exact allocation/free balance at shutdown. Each process receives a private CR3, a complete saved integer/FX context, a one-page stack, an unmapped guard page and cloned descriptor namespace.
 
 This is still not a general POSIX process implementation. There is no persistent-runtime fork/COW, in-place exec, dynamic linker, flexible stack growth, environment/auxiliary vector or SMP userspace scheduler.
 
@@ -299,11 +300,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    2,820,608 bytes
-SHA-256: 24C450E9F1BA1ED2D008982B59D2AF155B27DA043AE13A05E330F22ACCE976C6
+Size:    2,835,456 bytes
+SHA-256: C5F35F7846F9EC53036AD32DA3FF60839B49C80F10B84C8FCDF18B6DB75D3999
 ```
 
-This identity is from the locally validated Windows build after the runtime correctness remediation. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows build after the bounded Priority 1 runtime advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
@@ -334,8 +335,8 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 33 isolated tests, x86-64 UEFI build, portable PE verification and artifact upload.
-- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, both offline and live-network 39-command permanent COM1 sessions, legacy i686 build and two-boot persistence regression.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 39 isolated tests, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, both offline and live-network 40-command permanent COM1 sessions, legacy i686 build and two-boot persistence regression.
 - **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 
 A green badge therefore represents substantially more than the former reduced single-boot profile.

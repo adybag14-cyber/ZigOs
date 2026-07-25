@@ -8,13 +8,13 @@ Status: closed by the correctness/CI remediation.
 
 | Finding | Resolution | Evidence |
 | --- | --- | --- |
-| The advertised isolated-test total was not actually executed | `build.zig` now runs `runtime_fd.zig`, `runtime_command.zig`, `runtime_process.zig`, `runtime_vfs.zig` and `runtime_abi.zig`: 33 declarations in total | canonical `zig build test` and `zig build check` |
+| The advertised isolated-test total was not actually executed | `build.zig` now runs `runtime_fd.zig`, `runtime_command.zig`, `runtime_process.zig`, `runtime_vfs.zig`, `runtime_abi.zig` and `runtime_page_pool.zig`: 39 declarations in total | canonical `zig build test` and `zig build check` |
 | Syscall descriptor and flag registers were narrowed before validation | `runtime_abi.zig` range-checks full-width descriptor, open-flag and mode arguments before conversion | hostile tests cover 65536, `u64` maximum and high flag bits; source-contract verifier forbids the old truncation forms |
 | Descriptor/VFS errors collapsed to bad-FD | one kernel-error-to-userspace-errno mapping now preserves not-found, access, read-only, directory, broken-pipe and resource-limit distinctions | isolated errno mapping tests plus full UEFI build |
-| Default `kill PID` sent signal 15 without a delivery/default-action path | the kernel shell now defaults explicitly to forced signal 9; other signals remain opt-in and the absence of general userspace delivery is still documented | 39-command COM1 session proves PID 9 becomes zombie and is reaped |
-| `wait PID` was a status query | the shell validates direct parentage, blocks itself through the process table, services the runtime until the target is terminal, then reaps once | 39-command COM1 session waits over a sleeping CPL3 PID before the next command is accepted |
+| Default `kill PID` sent signal 15 without a delivery/default-action path | the kernel shell now defaults explicitly to forced signal 9; other signals remain opt-in and the absence of general userspace delivery is still documented | 40-command COM1 session proves PID 9 becomes zombie and is reaped |
+| `wait PID` was a status query | the shell validates direct parentage, blocks itself through the process table, services the runtime until the target is terminal, then reaps once | 40-command COM1 session waits over a sleeping CPL3 PID before the next command is accepted |
 | Built-in network help contradicted retained ping/DNS | help now describes retained e1000e packet I/O and explicit offline unavailability | source-contract check plus offline/live runtime sessions |
-| Hosted CI omitted live permanent-shell ping/DNS | Windows CI now runs both offline and `-Network` 39-command sessions | required workflow step |
+| Hosted CI omitted live permanent-shell ping/DNS | Windows CI now runs both offline and `-Network` 40-command sessions | required workflow step |
 | Cross-platform identity was printed but not enforced | a dependent job downloads both artifact sets, compares path sets, then compares every file byte-for-byte | required workflow job; G423 |
 
 ## Evidence model used by the roadmap
@@ -27,17 +27,21 @@ Status: closed by the correctness/CI remediation.
 
 ## Priority 1 — memory and process architecture
 
-Status: accepted and open; these are multi-milestone kernel changes, not release-note corrections.
+Status: in progress. A bounded permanent-runtime allocator and userspace spawn/wait slice are integrated and required by QEMU tests; the system-wide milestones remain open.
 
 ### P1-M1: system physical-memory manager
 
-Replace the monotonic bootstrap allocator with a reclaiming allocator that supports arbitrary free, ownership metadata, shared/COW reference counts, leak/double-free diagnostics, memory-pressure callbacks and an explicit OOM policy. Ordinary allocations must be allowed above 4 GiB through a direct physical-memory map; per-device DMA masks, not a global low-memory rule, decide when low pages or bounce buffers are required.
+Delivered bounded slice: the permanent executor's 256-page arena is now managed by an ownership-aware reclaiming pool with arbitrary release/reuse, generations, reference counts, poison-on-release, OOM and invalid/double/wrong-owner release accounting. Both 40-command runtime profiles finish with 80 allocations, 80 releases, zero shared pages, zero OOMs and zero rejected operations.
+
+Still open: replace the monotonic bootstrap allocator with a system-wide reclaiming allocator, add memory-pressure callbacks and an explicit OOM victim policy, permit ordinary allocations above 4 GiB through a direct physical-memory map, and apply low-memory restrictions only through per-device DMA masks or bounce buffers.
 
 Roadmap links: G100, G101, G118–G129, G159–G167, G203, G448, G478–G480.
 
 ### P1-M2: unified permanent scheduler
 
-Retire the separate fixed runtime-job dispatcher. One scheduler must own saved contexts, runnable queues, time slices, blocking, wakeups, signal consumption, process groups, orphan adoption and reaping. The newly blocking shell wait is an integration improvement, not completion of general userspace `waitpid`/wait-any syscalls.
+Delivered bounded slice: syscall 76 spawns a VFS-backed direct CPL3 child; syscall 77 implements exact waitpid, wait-any and WNOHANG. The scheduler excludes the shell-owned foreground context while servicing its runnable children, and `/bin/wait.elf` proves both blocking forms and nonblocking wait in the permanent runtime. Roadmap goals G138-G140 are closed.
+
+Still open: retire the separate bounded executor/job structure entirely. One system scheduler must own saved contexts, runnable queues, time slices, all blocking/wakeups, signal consumption, process groups, orphan adoption and reaping across the kernel.
 
 Roadmap links: G113–G176, especially G132–G160.
 

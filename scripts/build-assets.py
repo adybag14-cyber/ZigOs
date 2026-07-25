@@ -37,6 +37,19 @@ def require_tool(name: str) -> str:
     return resolved
 
 
+
+def runtime_wait_data() -> bytes:
+    data = bytearray(280)
+    fields = {
+        0: b"wait-api: start\r\n",
+        32: b"wait-api: waitpid/WNOHANG/wait-any passed\r\n",
+        128: b"/bin/sleep.elf",
+        160: b"/bin/hello.elf",
+    }
+    for offset, value in fields.items():
+        data[offset : offset + len(value)] = value
+    return bytes(data)
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -76,6 +89,7 @@ def main() -> int:
         "spin": b"runtime spin loop",
         "pipe-reader": b"pipe reader data",
         "pipe-writer": b"PIPE-CPL",
+        "wait": runtime_wait_data(),
     }
     runtime_outputs: list[Path] = []
 

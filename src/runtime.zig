@@ -22,6 +22,7 @@ const runtime_crash_elf = @embedFile("generated/runtime_crash.elf");
 const runtime_spin_elf = @embedFile("generated/runtime_spin.elf");
 const runtime_pipe_reader_elf = @embedFile("generated/runtime_pipe_reader.elf");
 const runtime_pipe_writer_elf = @embedFile("generated/runtime_pipe_writer.elf");
+const runtime_wait_elf = @embedFile("generated/runtime_wait.elf");
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_wait_for_interrupt() callconv(cc) void;
@@ -167,6 +168,7 @@ const State = struct {
     last_serviced_tick: u64 = 0,
     shell_sleeping: bool = false,
     shell_waiting: bool = false,
+    foreground_handle: ?u64 = null,
     shutdown_requested: bool = false,
     prompt_visible: bool = false,
     ignore_next_lf: bool = false,
@@ -237,6 +239,7 @@ fn initialize(configuration: Configuration) !void {
     state.last_serviced_tick = 0;
     state.shell_sleeping = false;
     state.shell_waiting = false;
+    state.foreground_handle = null;
     state.shutdown_requested = false;
     state.prompt_visible = false;
     state.ignore_next_lf = false;
@@ -286,6 +289,7 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/spin.elf", runtime_spin_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/pipe-reader.elf", runtime_pipe_reader_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/pipe-writer.elf", runtime_pipe_writer_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/wait.elf", runtime_wait_elf, 0o555, false, 0);
 
     const pseudo_paths = [_][]const u8{
         "/proc/version",   "/proc/uptime", "/proc/meminfo", "/proc/processes",
@@ -346,20 +350,14 @@ fn serviceJobs(tick: u64) void {
             job.active = false;
             continue;
         };
-        if (process.terminal()) {
-            runtime_user.finalize(job.handle) catch {};
-            continue;
-        }
-        if (process.state != .runnable and process.state != .running) continue;
-        runtime_user.dispatch(job.handle, tick) catch |err| {
-            state.processes.fault(job.handle, 13, 0) catch {};
-            runtime_user.finalize(job.handle) catch {};
-            emit("runtime dispatch failure: ");
-            emit(@errorName(err));
-            emit("\r\n");
-        };
-        if (!state.shell_sleeping and !state.shell_waiting) state.processes.setRunning(state.shell_handle) catch {};
+        if (process.terminal()) runtime_user.finalize(job.handle) catch {};
     }
+    _ = runtime_user.serviceOne(tick, state.foreground_handle) catch |err| {
+        emit("runtime dispatch failure: ");
+        emit(@errorName(err));
+        emit("\r\n");
+    };
+    if (!state.shell_sleeping and !state.shell_waiting) state.processes.setRunning(state.shell_handle) catch {};
 }
 
 fn consumeInput(byte: u8) void {
@@ -1134,12 +1132,11 @@ fn spawnExecutablePath(
         }
     }
 
-    var bytes: [runtime_vfs.maximum_file_size]u8 = undefined;
-    const count = state.vfs.read(state.cwd, path, 0, &bytes) catch |err| {
+    const image_bytes = state.vfs.readOnlyView(state.cwd, path) catch |err| {
         shellError(if (background) "spawn" else "exec", err, output);
         return null;
     };
-    const image = elf64.parse(bytes[0..count]) orelse {
+    const image = elf64.parse(image_bytes) orelse {
         output.line("exec: invalid or unsupported ELF64 image");
         state.failed_commands +%= 1;
         return null;
@@ -1162,7 +1159,7 @@ fn spawnExecutablePath(
         name,
         arguments[0 .. extra_arguments.len + 1],
         state.cwd,
-        bytes[0..count],
+        image_bytes,
         currentTick(),
         registers,
     ) catch |err| {
@@ -1194,6 +1191,12 @@ fn spawnExecutablePath(
 }
 
 fn driveForeground(handle: u64, output: *Output) ?runtime_process.Status {
+    if (state.foreground_handle != null) {
+        output.line("exec: another foreground process is already active");
+        return null;
+    }
+    state.foreground_handle = handle;
+    defer state.foreground_handle = null;
     while (true) {
         const process = state.processes.get(handle) catch |err| {
             shellError("exec", err, output);
@@ -1941,10 +1944,13 @@ fn finishRuntime() noreturn {
     const descriptor_report = state.descriptors.report();
     const userspace_report = runtime_user.report();
     const userspace_clean = userspace_report.used_pages == 0 and
-        userspace_report.live_contexts == 0 and userspace_report.launches >= 6 and
-        userspace_report.exits >= 4 and userspace_report.faults >= 1 and
-        userspace_report.preemptions >= 1 and userspace_report.blocking_returns >= 2 and
-        userspace_report.syscalls >= 10 and userspace_report.reclaimed_pages > 0;
+        userspace_report.live_contexts == 0 and userspace_report.launches >= 10 and
+        userspace_report.exits >= 8 and userspace_report.faults >= 1 and
+        userspace_report.preemptions >= 1 and userspace_report.blocking_returns >= 5 and
+        userspace_report.syscalls >= 30 and userspace_report.reclaimed_pages > 0 and
+        userspace_report.shared_pages == 0 and userspace_report.allocator_clean and
+        userspace_report.allocator_allocations == userspace_report.reclaimed_pages and
+        userspace_report.allocator_out_of_memory == 0 and userspace_report.allocator_rejections == 0;
     const network_clean = state.network_failures == 0 and
         (!state.config.network_ready or (state.live_ping_passes >= 1 and state.live_dns_passes >= 1));
     const descriptor_clean = state.descriptors.validate(&state.vfs, &state.processes) and
@@ -2046,6 +2052,18 @@ fn finishRuntime() noreturn {
     emitDecimal(userspace_report.syscalls);
     emit(" reclaimed ");
     emitDecimal(userspace_report.reclaimed_pages);
+    emit(" allocator alloc/release/retains ");
+    emitDecimal(userspace_report.allocator_allocations);
+    emit("/");
+    emitDecimal(userspace_report.allocator_releases);
+    emit("/");
+    emitDecimal(userspace_report.allocator_retains);
+    emit(" shared/oom/rejected ");
+    emitDecimal(userspace_report.shared_pages);
+    emit("/");
+    emitDecimal(userspace_report.allocator_out_of_memory);
+    emit("/");
+    emitDecimal(userspace_report.allocator_rejections);
     emit(" clean ");
     emit(if (userspace_clean) "yes" else "no");
     emit("\r\n");

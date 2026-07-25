@@ -2,9 +2,9 @@
 
 This roadmap converts the broad runtime, process, filesystem, userland, networking, build, testing, hardware and security gaps into 500 individually trackable engineering goals. A checked item means the repository contains the claimed implementation and at least one executable test or release contract; it does not imply production readiness. Each completed goal should also state whether its evidence is source-only, isolated-unit, QEMU integration or required hosted CI. Bounded Capstone fixtures do not automatically satisfy a general-runtime goal.
 
-**Status after the Capstone 19 correctness/CI remediation:** 119 complete, 381 open.
+**Status after the bounded Priority 1 runtime advance:** 122 complete, 378 open.
 
-Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. Its release contract is more granular than this roadmap, so the two accounting systems remain separate.
+Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. The bounded Priority 1 runtime advance completes **G138, G139 and G140** through permanent CPL3 integration; broader allocator and scheduler milestones remain open. Its release contract is more granular than this roadmap, so the two accounting systems remain separate.
 
 ## Completed in Capstone 17
 
@@ -148,9 +148,9 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [ ] **G135** — Apply blocked signal masks during delivery.
 - [ ] **G136** — Queue more than one distinct pending signal per process.
 - [ ] **G137** — Implement a validated sigreturn path.
-- [ ] **G138** — Implement waitpid for a specific child.
-- [ ] **G139** — Implement wait-any across direct children.
-- [ ] **G140** — Implement WNOHANG-style nonblocking wait behavior.
+- [x] **G138** - Implement waitpid for a specific child.
+- [x] **G139** - Implement wait-any across direct children.
+- [x] **G140** - Implement WNOHANG-style nonblocking wait behavior.
 - [ ] **G141** — Implement stable process-group membership operations.
 - [ ] **G142** — Implement session creation and leadership rules.
 - [ ] **G143** — Associate sessions with controlling terminal objects.
@@ -444,7 +444,7 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [ ] **G416** — Run process create/exit/reap stress under timer preemption.
 - [ ] **G417** — Run filesystem mutation stress across simulated power failures.
 - [ ] **G418** — Run concurrent network connections with injected packet loss.
-- [x] **G419** — Require both the network-enabled boot profile and the 39-command live-network permanent-shell profile in hosted CI.
+- [x] **G419** — Require both the network-enabled boot profile and the 40-command live-network permanent-shell profile in hosted CI.
 - [ ] **G420** — Publish an SMP-enabled QEMU profile as a required CI gate.
 - [ ] **G421** — Publish a framebuffer and USB-keyboard profile as a required CI gate.
 - [ ] **G422** — Publish NVMe and AHCI fallback profiles as required CI gates.

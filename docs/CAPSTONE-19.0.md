@@ -10,12 +10,12 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 ## Exact 32-goal contract
 
-1. **C19-01** — Generate six deterministic permanent-runtime ELF64 executables from warning-as-error NASM sources.
+1. **C19-01** - Generate the original six deterministic permanent-runtime ELF64 executables from warning-as-error NASM sources.
 2. **C19-02** — Independently verify each generated ELF64 identity, header, two `PT_LOAD` entries, permissions, offsets and exact image size.
 3. **C19-03** — Install the verified executables as ordinary `/bin/*.elf` files in the permanent VFS and as release artifacts.
 4. **C19-04** — Make `run` and `exec` read executable bytes from the VFS and enter the parsed ELF64 entry point instead of creating a timed pseudo-job.
 5. **C19-05** — Reserve a bounded 256-page physical arena for permanent executable contexts below 4 GiB.
-6. **C19-06** — Recycle arena pages with zero-on-allocation, zero-on-release and exact peak/reclamation accounting.
+6. **C19-06** - Recycle owned arena pages with zero-on-allocation, poison-on-release and exact allocation/reclamation accounting.
 7. **C19-07** — Allocate a reusable private PML4, PDPT, directory and page table for every retained executable context.
 8. **C19-08** — Map executable `PT_LOAD` pages read-only/executable and writable data pages writable/non-executable under W^X.
 9. **C19-09** — Construct a bounded one-page initial stack containing `argc`, `argv[]` and terminating null pointers.
@@ -39,7 +39,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 27. **C19-27** — Launch a non-terminating CPL3 spin executable in the background, preempt it repeatedly, signal it, wait for it and reap it.
 28. **C19-28** — Make `spawn PATH [ARGS...]` and executable-only trailing `&` create real retained userspace contexts rather than diagnostic records.
 29. **C19-29** — Unmap every user page, release every page-table frame, restore the kernel CR3 and report zero live executable contexts at shutdown.
-30. **C19-30** — Expand the canonical bidirectional COM1 session to 39 commands covering real `run`, `exec`, sleep, fault, pipe, preemption, default forced kill, blocking wait and cleanup.
+30. **C19-30** - Expand the original canonical bidirectional COM1 session to 39 commands covering real `run`, `exec`, sleep, fault, pipe, preemption, default forced kill, blocking wait and cleanup.
 31. **C19-31** — Remove canned network answers, retain the initialized e1000e owner for real bounded ICMP echo and DNS A queries when present, and report explicit unavailability when booted without the NIC.
 32. **C19-32** — Add a portable source-contract verifier that rejects pseudo-job launchers, fabricated crash paths, canned network results and missing cleanup gates.
 
@@ -55,7 +55,7 @@ The permanent runtime now owns up to eight retained executable contexts. Each co
 - a bounded 4,096-byte terminal-output capture;
 - exact image identity, fault information and preemption counts.
 
-The runtime reserves 256 physical pages at initialization. It does not return those pages to the boot allocator, but it does recycle them internally and requires all pages to be free before the Capstone 19 marker can be emitted. The earlier 16 KiB bootstrap IST1 was expanded to 64 KiB after real multiprocess preemption proved it could overflow into an adjacent kernel page-table frame; a bottom canary is now checked after the complete boot-time CPL3 suite.
+The runtime reserves 256 physical pages at initialization. It does not return those pages to the boot allocator, but it recycles them through an ownership-aware pool with generations, reference counts, poison-on-release and explicit invalid-address, double-free, wrong-owner, overflow and OOM accounting. The release marker requires zero active/shared pages, exact allocation/free balance and zero allocator rejections. The earlier 16 KiB bootstrap IST1 was expanded to 64 KiB after real multiprocess preemption proved it could overflow into an adjacent kernel page-table frame; a bottom canary is now checked after the complete boot-time CPL3 suite.
 
 ### Current userspace address window
 
@@ -87,9 +87,19 @@ The retained executor uses a small ZigOs-specific `int 0x80` ABI:
 | 73 | dup2 |
 | 74 | open |
 | 75 | ticks |
+| 76 | spawn a VFS-backed direct child |
+| 77 | waitpid, wait-any (`pid = 0`) and WNOHANG (`flags = 1`) |
 | 78 | kernel-installed fault-trampoline return |
 
 This is not a POSIX or Linux syscall ABI. Calls are bounded, pointer-validated and routed into the existing permanent VFS, descriptor and process-table implementations.
+
+### Post-release Priority 1 process slice
+
+This slice adds a seventh deterministic runtime executable and a 40th canonical COM1 command without changing the historical 32-goal release count.
+
+`/bin/wait.elf` is a genuine CPL3 parent integration program. It spawns `/bin/sleep.elf`, proves wait-any with WNOHANG returns zero while the child is live, blocks in exact waitpid and receives status `7`, then spawns `/bin/hello.elf`, blocks in wait-any and receives status `0x2A`. It prints `wait-api: waitpid/WNOHANG/wait-any passed` and exits with status `0x31`.
+
+This maintained extension closes general-roadmap goals G138-G140 for the bounded permanent runtime. It does not add to the historical 32-goal Capstone 19 release count and does not claim a system-wide physical-memory manager or fully unified scheduler.
 
 ## Real command behavior
 
@@ -152,13 +162,13 @@ The canonical harness scopes its forbidden-fixture scan to output after `ZigOs p
 
 ## Complete runtime result
 
-The canonical COM1 harness sends 39 commands and requires zero failures. One representative run reported:
+The canonical COM1 harness sends 40 commands and requires zero failures. One representative run reported:
 
 ```text
-ZigOs persistent runtime shutdown: commands 39 failed 0 ticks 878 idle-halts 830 service-passes 878
-ZigOs persistent processes: live 2 created 12 reaped 10 switches 112 signals 1 faults 1
-ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/32/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
-ZigOs permanent userspace: arena 256 used 0 peak 16 contexts 0 launches/exits/faults 7/5/1 preemptions/blocking/syscalls 42/3/19 reclaimed 56 clean yes
+ZigOs persistent runtime shutdown: commands 40 failed 0 ticks 1007 idle-halts 956 service-passes 1007
+ZigOs persistent processes: live 2 created 15 reaped 13 switches 1092 signals 1 faults 1
+ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/41/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
+ZigOs permanent userspace: arena 256 used 0 peak 16 contexts 0 launches/exits/faults 10/8/1 preemptions/blocking/syscalls 41/6/36 reclaimed 80 allocator alloc/release/retains 80/80/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 ```
 

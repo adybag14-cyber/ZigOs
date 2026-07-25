@@ -66,7 +66,7 @@ pub fn build(b: *std.Build) void {
     install_service.step.dependOn(&assets.step);
     install_process.step.dependOn(&assets.step);
     install_exec.step.dependOn(&assets.step);
-    inline for (.{ "hello", "sleep", "crash", "spin", "pipe-reader", "pipe-writer" }) |program| {
+    inline for (.{ "hello", "sleep", "crash", "spin", "pipe-reader", "pipe-writer", "wait" }) |program| {
         const source = b.fmt("build/runtime-{s}.elf", .{program});
         const destination = b.fmt("artifacts/runtime-{s}.elf", .{program});
         const install_runtime_program = b.addInstallFile(b.path(source), destination);
@@ -96,6 +96,7 @@ pub fn build(b: *std.Build) void {
         "src/runtime_process.zig",
         "src/runtime_vfs.zig",
         "src/runtime_abi.zig",
+        "src/runtime_page_pool.zig",
     }) |source_path| {
         const tests = b.addTest(.{
             .root_module = b.createModule(.{

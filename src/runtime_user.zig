@@ -7,11 +7,12 @@ const paging = @import("paging.zig");
 const runtime_abi = @import("runtime_abi.zig");
 const runtime_fd = @import("runtime_fd.zig");
 const runtime_process = @import("runtime_process.zig");
+const runtime_page_pool = @import("runtime_page_pool.zig");
 const runtime_vfs = @import("runtime_vfs.zig");
 
 const cc = std.os.uefi.cc;
 const page_bytes: usize = @intCast(memory.page_size);
-const arena_pages: usize = 256;
+const arena_pages: usize = runtime_page_pool.maximum_pages;
 const maximum_contexts: usize = 8;
 const maximum_mappings: usize = 32;
 const maximum_output_bytes: usize = 4096;
@@ -34,6 +35,8 @@ const syscall_dup: u64 = 72;
 const syscall_dup2: u64 = 73;
 const syscall_open: u64 = 74;
 const syscall_ticks: u64 = 75;
+const syscall_spawn: u64 = 76;
+const syscall_wait: u64 = 77;
 const syscall_fault_return: u64 = 78;
 
 const errno_bad_fd = runtime_abi.errno_bad_fd;
@@ -41,6 +44,7 @@ const errno_would_block = runtime_abi.errno_would_block;
 const errno_fault = runtime_abi.errno_fault;
 const errno_invalid = runtime_abi.errno_invalid;
 const errno_no_syscall = runtime_abi.errno_no_syscall;
+const wait_nohang: u64 = 1;
 
 const fault_trampoline = [_]u8{
     0xB8, @truncate(syscall_fault_return), 0x00, 0x00, 0x00, // mov eax, SYS_FAULT_RETURN
@@ -67,6 +71,21 @@ pub const Report = struct {
     blocking_returns: u64,
     syscalls: u64,
     reclaimed_pages: u64,
+    shared_pages: usize,
+    allocator_allocations: u64,
+    allocator_releases: u64,
+    allocator_retains: u64,
+    allocator_out_of_memory: u64,
+    allocator_rejections: u64,
+    allocator_clean: bool,
+};
+
+const UserWaitStatus = extern struct {
+    pid: u32,
+    exit_status: u32,
+    state: u32,
+    fault_vector: u32,
+    fault_address: u64,
 };
 
 const Mapping = struct {
@@ -113,21 +132,19 @@ var initialized = false;
 var vfs_pointer: ?*runtime_vfs.Vfs = null;
 var process_pointer: ?*runtime_process.Table = null;
 var descriptor_pointer: ?*runtime_fd.System = null;
-var arena_base: usize = 0;
-var arena_used: [arena_pages]bool = @splat(false);
+var page_pool: runtime_page_pool.Pool = .{};
 var contexts: [maximum_contexts]Context = @splat(.{});
 var baseline_fx: interrupt_context.FxState align(16) = std.mem.zeroes(interrupt_context.FxState);
 var current_context: ?usize = null;
 var user_active = false;
 var current_tick: u64 = 0;
-var peak_pages: usize = 0;
+var service_cursor: usize = 0;
 var launches: u64 = 0;
 var exits: u64 = 0;
 var faults: u64 = 0;
 var preemptions: u64 = 0;
 var blocking_returns: u64 = 0;
 var syscall_count: u64 = 0;
-var reclaimed_pages: u64 = 0;
 
 pub fn initialize(
     allocator: *memory.FrameAllocator,
@@ -142,21 +159,20 @@ pub fn initialize(
     vfs_pointer = vfs;
     process_pointer = processes;
     descriptor_pointer = descriptors;
-    arena_base = base;
-    arena_used = @splat(false);
     contexts = @splat(.{});
     zigos_fxsave(&baseline_fx);
     current_context = null;
     user_active = false;
     current_tick = 0;
-    peak_pages = 0;
+    service_cursor = 0;
     launches = 0;
     exits = 0;
     faults = 0;
     preemptions = 0;
     blocking_returns = 0;
     syscall_count = 0;
-    reclaimed_pages = 0;
+    try page_pool.initialize(base, arena_pages);
+    if (page_pool.report().capacity != arena_pages) return error.RuntimePagePoolUnavailable;
     initialized = true;
 }
 
@@ -174,6 +190,7 @@ pub fn spawn(
     registers: SpawnRegisters,
 ) !u64 {
     if (!initialized) return error.NotInitialized;
+    try requirePagePool("spawn-entry");
     const image = elf64.parse(image_bytes) orelse return error.InvalidElf;
     try validateImage(image);
     const context_index = findFreeContext() orelse return error.ContextLimit;
@@ -191,7 +208,7 @@ pub fn spawn(
             .maximum_pages = maximum_mappings + 4,
             .maximum_descriptors = runtime_fd.maximum_descriptors_per_process,
             .maximum_sockets = 0,
-            .maximum_children = 0,
+            .maximum_children = maximum_contexts - 1,
             .maximum_cpu_ticks = 100_000,
         },
     );
@@ -201,13 +218,13 @@ pub fn spawn(
     contexts[context_index] = .{ .used = true, .handle = handle };
     errdefer releaseContext(context_index);
     const context = &contexts[context_index];
-    for (&context.table_frames) |*frame| frame.* = allocatePage() orelse return error.NoRuntimeFrames;
+    for (&context.table_frames) |*frame| frame.* = allocatePage(context.handle) orelse return error.NoRuntimeFrames;
     context.space = paging.createUserAddressSpaceFromFrames(context.table_frames) orelse return error.AddressSpaceFailure;
     try loadImage(context, image, image_bytes);
-    const trampoline_frame = allocatePage() orelse return error.NoRuntimeFrames;
+    const trampoline_frame = allocatePage(context.handle) orelse return error.NoRuntimeFrames;
     @memcpy(@as([*]u8, @ptrFromInt(trampoline_frame))[0..fault_trampoline.len], &fault_trampoline);
     try mapOwned(context, trampoline_virtual, trampoline_frame, false, true);
-    const stack_frame = allocatePage() orelse return error.NoRuntimeFrames;
+    const stack_frame = allocatePage(context.handle) orelse return error.NoRuntimeFrames;
     try mapOwned(context, stack_virtual, stack_frame, true, false);
     if (paging.inspectUserPageInSpace(context.space, guard_virtual) != null) return error.GuardMapped;
 
@@ -229,6 +246,7 @@ pub fn spawn(
     context.image_hash = image.file_hash;
     context.image_bytes = image_bytes.len;
     try processes.setResourceUsage(handle, @intCast(context.mapping_count + 4), (try processes.get(handle)).descriptor_count, 0);
+    try requirePagePool("spawn-complete");
     launches +%= 1;
     return handle;
 }
@@ -261,6 +279,25 @@ pub fn dispatch(handle: u64, tick: u64) !void {
     if (process.terminal()) try finalize(handle);
 }
 
+pub fn serviceOne(tick: u64, excluded_handle: ?u64) !?u64 {
+    if (!initialized or user_active) return error.InvalidDispatchState;
+    var scanned: usize = 0;
+    while (scanned < contexts.len) : (scanned += 1) {
+        service_cursor = (service_cursor + 1) % contexts.len;
+        const context = &contexts[service_cursor];
+        if (!context.used or (excluded_handle != null and context.handle == excluded_handle.?)) continue;
+        const process = activeProcesses().get(context.handle) catch continue;
+        if (process.terminal()) {
+            try finalize(context.handle);
+            continue;
+        }
+        if (process.state != .runnable and process.state != .running) continue;
+        try dispatch(context.handle, tick);
+        return context.handle;
+    }
+    return null;
+}
+
 pub fn handleSyscall(
     frame: *interrupt_context.Frame,
     fx_state: *align(16) interrupt_context.FxState,
@@ -268,7 +305,7 @@ pub fn handleSyscall(
     if (!isActive()) return 1;
     const index = current_context orelse return 1;
     const context = &contexts[index];
-    if (!validFrame(context.*, frame)) return forceFault(frame, fx_state, 13, frame.rip);
+    if (!validFrame(context, frame)) return forceFault(frame, fx_state, 13, frame.rip);
     activeProcesses().accountSyscall(context.handle) catch return forceFault(frame, fx_state, 13, frame.rip);
     syscall_count +%= 1;
 
@@ -309,7 +346,7 @@ pub fn handleSyscall(
             return 1;
         },
         syscall_pipe => {
-            if (!validateRange(context.*, frame.rdi, 8, true)) {
+            if (!validateRange(context, frame.rdi, 8, true)) {
                 frame.rax = reject(errno_fault);
                 return 0;
             }
@@ -318,7 +355,7 @@ pub fn handleSyscall(
                 return 0;
             };
             const values = [2]u32{ fds[0], fds[1] };
-            if (!copyToUser(context.*, frame.rdi, std.mem.asBytes(&values))) {
+            if (!copyToUser(context, frame.rdi, std.mem.asBytes(&values))) {
                 activeDescriptors().close(activeVfs(), activeProcesses(), context.handle, fds[0]) catch {};
                 activeDescriptors().close(activeVfs(), activeProcesses(), context.handle, fds[1]) catch {};
                 frame.rax = reject(errno_fault);
@@ -378,6 +415,8 @@ pub fn handleSyscall(
             frame.rax = current_tick;
             return 0;
         },
+        syscall_spawn => return syscallSpawn(context, frame),
+        syscall_wait => return syscallWait(context, frame, fx_state),
         syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
@@ -476,18 +515,15 @@ pub fn closeDescriptorFor(handle: u64, fd: u16) !void {
 }
 
 pub fn report() Report {
-    var used_pages: usize = 0;
-    for (arena_used) |used| if (used) {
-        used_pages += 1;
-    };
+    const allocator_report = page_pool.report();
     var live_contexts: usize = 0;
-    for (contexts) |context| if (context.used) {
+    for (0..contexts.len) |context_index| if (contexts[context_index].used) {
         live_contexts += 1;
     };
     return .{
-        .arena_pages = arena_pages,
-        .used_pages = used_pages,
-        .peak_pages = peak_pages,
+        .arena_pages = allocator_report.capacity,
+        .used_pages = allocator_report.active,
+        .peak_pages = allocator_report.peak,
         .live_contexts = live_contexts,
         .launches = launches,
         .exits = exits,
@@ -495,8 +531,133 @@ pub fn report() Report {
         .preemptions = preemptions,
         .blocking_returns = blocking_returns,
         .syscalls = syscall_count,
-        .reclaimed_pages = reclaimed_pages,
+        .reclaimed_pages = allocator_report.frees,
+        .shared_pages = allocator_report.shared,
+        .allocator_allocations = allocator_report.allocations,
+        .allocator_releases = allocator_report.releases,
+        .allocator_retains = allocator_report.retains,
+        .allocator_out_of_memory = allocator_report.out_of_memory,
+        .allocator_rejections = allocator_report.invalid_addresses + allocator_report.double_frees + allocator_report.owner_mismatches + allocator_report.reference_overflows,
+        .allocator_clean = allocator_report.clean,
     };
+}
+
+fn syscallSpawn(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const path_length: usize = std.math.cast(usize, frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (path_length == 0 or path_length > runtime_vfs.maximum_path_length or
+        !validateRange(context, frame.rdi, path_length, false))
+    {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    var path_buffer: [runtime_vfs.maximum_path_length]u8 = undefined;
+    if (!copyFromUser(context, frame.rdi, path_buffer[0..path_length])) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const path = path_buffer[0..path_length];
+    const parent = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const image_bytes = activeVfs().readOnlyView(parent.cwd_node, path) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/');
+    const raw_name = if (slash) |index| path[index + 1 ..] else path;
+    const name = raw_name[0..@min(raw_name.len, runtime_process.maximum_name_length)];
+    if (name.len == 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const handle = spawn(
+        context.handle,
+        name,
+        &.{name},
+        parent.cwd_node,
+        image_bytes,
+        current_tick,
+        .{},
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const child = activeProcesses().get(handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = child.pid;
+    return 0;
+}
+
+fn syscallWait(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    if ((frame.rsi & ~wait_nohang) != 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    if (!validateRange(context, frame.rdx, @sizeOf(UserWaitStatus), true)) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const target_pid: u32 = std.math.cast(u32, frame.rdi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const target_handle = activeProcesses().childForWait(context.handle, target_pid) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (target_handle) |handle| {
+        const child = activeProcesses().get(handle) catch |err| {
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        };
+        if (child.terminal()) {
+            const user_status = UserWaitStatus{
+                .pid = child.pid,
+                .exit_status = child.exit_status,
+                .state = @intFromEnum(child.state),
+                .fault_vector = child.fault_vector,
+                .fault_address = child.fault_address,
+            };
+            // Copy first: an invalid destination must not consume the one-shot child status.
+            if (!copyToUser(context, frame.rdx, std.mem.asBytes(&user_status))) {
+                frame.rax = reject(errno_fault);
+                return 0;
+            }
+            finalize(handle) catch |err| {
+                frame.rax = reject(runtime_abi.fromError(err));
+                return 0;
+            };
+            const status = activeProcesses().wait(context.handle, handle, true) catch |err| {
+                frame.rax = reject(runtime_abi.fromError(err));
+                return 0;
+            } orelse {
+                frame.rax = reject(errno_would_block);
+                return 0;
+            };
+            forget(handle);
+            frame.rax = status.pid;
+            return 0;
+        }
+    }
+    if ((frame.rsi & wait_nohang) != 0) {
+        frame.rax = 0;
+        return 0;
+    }
+    _ = activeProcesses().wait(context.handle, target_handle, false) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    return blockAndRetry(context, frame, fx_state);
 }
 
 fn syscallWrite(
@@ -508,12 +669,12 @@ fn syscallWrite(
         frame.rax = reject(errno_invalid);
         return 0;
     };
-    if (length > maximum_io_bytes or !validateRange(context.*, frame.rsi, length, false)) {
+    if (length > maximum_io_bytes or !validateRange(context, frame.rsi, length, false)) {
         frame.rax = reject(errno_fault);
         return 0;
     }
     var bytes: [maximum_io_bytes]u8 = undefined;
-    if (!copyFromUser(context.*, frame.rsi, bytes[0..length])) {
+    if (!copyFromUser(context, frame.rsi, bytes[0..length])) {
         frame.rax = reject(errno_fault);
         return 0;
     }
@@ -555,7 +716,7 @@ fn syscallRead(
         frame.rax = reject(errno_invalid);
         return 0;
     };
-    if (length > maximum_io_bytes or !validateRange(context.*, frame.rsi, length, true)) {
+    if (length > maximum_io_bytes or !validateRange(context, frame.rsi, length, true)) {
         frame.rax = reject(errno_fault);
         return 0;
     }
@@ -583,7 +744,7 @@ fn syscallRead(
         return 0;
     };
     if (result.status == .blocked) return blockAndRetry(context, frame, fx_state);
-    if (result.count != 0 and !copyToUser(context.*, frame.rsi, bytes[0..result.count])) {
+    if (result.count != 0 and !copyToUser(context, frame.rsi, bytes[0..result.count])) {
         frame.rax = reject(errno_fault);
         return 0;
     }
@@ -593,7 +754,7 @@ fn syscallRead(
 
 fn syscallOpen(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context.*, frame.rdi, &path_buffer) orelse {
+    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
         frame.rax = reject(errno_fault);
         return 0;
     };
@@ -677,7 +838,7 @@ fn loadImage(context: *Context, image: elf64.Image, file: []const u8) !void {
         const segment_file_end: usize = @intCast(segment.virtual_address + segment.file_size);
         var page = segment_start & ~(page_bytes - 1);
         while (page < alignForward(segment_memory_end, page_bytes)) : (page += page_bytes) {
-            const physical = allocatePage() orelse return error.NoRuntimeFrames;
+            const physical = allocatePage(context.handle) orelse return error.NoRuntimeFrames;
             const copy_start = @max(page, segment_start);
             const copy_end = @min(page + page_bytes, segment_file_end);
             if (copy_end > copy_start) {
@@ -695,11 +856,11 @@ fn loadImage(context: *Context, image: elf64.Image, file: []const u8) !void {
 
 fn mapOwned(context: *Context, virtual: usize, physical: usize, writable: bool, executable: bool) !void {
     if (context.mapping_count >= context.mappings.len) {
-        releasePage(physical);
+        releasePage(physical, context.handle);
         return error.MappingLimit;
     }
     if (!paging.mapUserPageInSpace(context.space, virtual, physical, writable, executable)) {
-        releasePage(physical);
+        releasePage(physical, context.handle);
         return error.MappingFailure;
     }
     context.mappings[context.mapping_count] = .{
@@ -755,12 +916,12 @@ fn releaseMappings(index: usize) bool {
     if (!paging.userAddressSpaceEmpty(context.space)) return false;
     for (context.mappings[0..context.mapping_count]) |*mapping| {
         if (!mapping.used) continue;
-        releasePage(mapping.physical_address);
+        releasePage(mapping.physical_address, context.handle);
         mapping.used = false;
     }
     context.mapping_count = 0;
     for (&context.table_frames) |*frame| {
-        if (frame.* != 0) releasePage(frame.*);
+        if (frame.* != 0) releasePage(frame.*, context.handle);
         frame.* = 0;
     }
     context.space = .{ .pml4_address = 0, .pdpt_address = 0, .directory_address = 0, .table_address = 0, .table_pages = 0 };
@@ -773,7 +934,7 @@ fn releaseContext(index: usize) void {
         if (!releaseMappings(index)) return;
     } else {
         for (&contexts[index].table_frames) |*frame| {
-            if (frame.* != 0) releasePage(frame.*);
+            if (frame.* != 0) releasePage(frame.*, contexts[index].handle);
             frame.* = 0;
         }
     }
@@ -786,40 +947,33 @@ fn rollbackProcess(parent_handle: u64, handle: u64) void {
     _ = activeProcesses().wait(parent_handle, handle, true) catch null;
 }
 
-fn allocatePage() ?usize {
-    for (&arena_used, 0..) |*used, index| {
-        if (used.*) continue;
-        used.* = true;
-        const physical = arena_base + index * page_bytes;
-        @memset(@as([*]u8, @ptrFromInt(physical))[0..page_bytes], 0);
-        var count: usize = 0;
-        for (arena_used) |entry| if (entry) {
-            count += 1;
-        };
-        peak_pages = @max(peak_pages, count);
-        return physical;
-    }
-    return null;
+fn requirePagePool(comptime stage: []const u8) !void {
+    if (page_pool.base == 0) return @field(anyerror, "PagePoolBaseZero-" ++ stage);
+    if (page_pool.page_count != arena_pages) return @field(anyerror, "PagePoolCountCorrupted-" ++ stage);
 }
 
-fn releasePage(physical: usize) void {
-    if (physical < arena_base or physical >= arena_base + arena_pages * page_bytes) return;
-    const offset = physical - arena_base;
-    if ((offset & (page_bytes - 1)) != 0) return;
-    const index = offset / page_bytes;
-    if (!arena_used[index]) return;
+fn allocatePage(owner: u64) ?usize {
+    const physical = page_pool.allocate(owner) orelse return null;
     @memset(@as([*]u8, @ptrFromInt(physical))[0..page_bytes], 0);
-    arena_used[index] = false;
-    reclaimed_pages +%= 1;
+    return physical;
+}
+
+fn releasePage(physical: usize, owner: u64) void {
+    const result = page_pool.release(physical, owner) catch return;
+    if (result != .freed) return;
+    @memset(
+        @as([*]u8, @ptrFromInt(physical))[0..page_bytes],
+        runtime_page_pool.poison_byte,
+    );
 }
 
 fn findFreeContext() ?usize {
-    for (contexts, 0..) |context, index| if (!context.used) return index;
+    for (0..contexts.len) |index| if (!contexts[index].used) return index;
     return null;
 }
 
 fn findContext(handle: u64) ?usize {
-    for (contexts, 0..) |context, index| if (context.used and context.handle == handle) return index;
+    for (0..contexts.len) |index| if (contexts[index].used and contexts[index].handle == handle) return index;
     return null;
 }
 
@@ -829,7 +983,7 @@ fn descriptorKind(handle: u64, fd: u16) ?runtime_fd.DescriptionKind {
     return null;
 }
 
-fn validFrame(context: Context, frame: *const interrupt_context.Frame) bool {
+fn validFrame(context: *const Context, frame: *const interrupt_context.Frame) bool {
     if (frame.cs != descriptor_tables.user_code_selector or frame.ss != descriptor_tables.user_data_selector) return false;
     if (frame.rsp < stack_virtual or frame.rsp >= stack_virtual + page_bytes) return false;
     return paging.translateUserAddressInSpace(context.space, @intCast(frame.rip), false, true) != null;
@@ -848,7 +1002,7 @@ fn copyFx(destination: *align(16) interrupt_context.FxState, source: *align(16) 
     @memcpy(destination.bytes[0..], source.bytes[0..]);
 }
 
-fn validateRange(context: Context, address: u64, length: usize, write: bool) bool {
+fn validateRange(context: *const Context, address: u64, length: usize, write: bool) bool {
     if (length == 0) return true;
     const end = std.math.add(u64, address, length - 1) catch return false;
     var page: usize = @as(usize, @intCast(address)) & ~(page_bytes - 1);
@@ -861,7 +1015,7 @@ fn validateRange(context: Context, address: u64, length: usize, write: bool) boo
     return true;
 }
 
-fn copyFromUser(context: Context, address: u64, destination: []u8) bool {
+fn copyFromUser(context: *const Context, address: u64, destination: []u8) bool {
     var offset: usize = 0;
     while (offset < destination.len) {
         const virtual = std.math.add(u64, address, offset) catch return false;
@@ -873,7 +1027,7 @@ fn copyFromUser(context: Context, address: u64, destination: []u8) bool {
     return true;
 }
 
-fn copyToUser(context: Context, address: u64, source: []const u8) bool {
+fn copyToUser(context: *const Context, address: u64, source: []const u8) bool {
     var offset: usize = 0;
     while (offset < source.len) {
         const virtual = std.math.add(u64, address, offset) catch return false;
@@ -885,7 +1039,7 @@ fn copyToUser(context: Context, address: u64, source: []const u8) bool {
     return true;
 }
 
-fn copyUserString(context: Context, address: u64, destination: []u8) ?usize {
+fn copyUserString(context: *const Context, address: u64, destination: []u8) ?usize {
     if (destination.len == 0) return null;
     for (0..destination.len - 1) |index| {
         var byte: [1]u8 = undefined;

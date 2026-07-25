@@ -110,7 +110,7 @@ pub const Process = struct {
         return self.name[0..self.name_length];
     }
 
-    pub fn terminal(self: Process) bool {
+    pub fn terminal(self: *const Process) bool {
         return self.state == .zombie or self.state == .faulted;
     }
 };
@@ -406,6 +406,20 @@ pub const Table = struct {
 
     pub fn setSignalMask(self: *Table, handle: u64, mask: u64) Error!void {
         self.processes[try self.resolve(handle)].signal_mask = mask & ~(@as(u64, 1) << 9);
+    }
+
+    pub fn childForWait(self: *const Table, parent_handle: u64, target_pid: u32) Error!?u64 {
+        const parent_slot = try self.resolve(parent_handle);
+        var first_child: ?u64 = null;
+        for (0..self.processes.len) |slot| {
+            const process = &self.processes[slot];
+            if (!process.used or process.parent_slot != parent_slot) continue;
+            if (target_pid != 0 and process.pid != target_pid) continue;
+            if (first_child == null) first_child = process.handle;
+            if (process.terminal()) return process.handle;
+        }
+        if (first_child == null) return Error.NotChild;
+        return first_child;
     }
 
     pub fn wait(self: *Table, parent_handle: u64, target_handle: ?u64, nonblocking: bool) Error!?Status {
@@ -750,4 +764,33 @@ test "fault status preserves vector address and counters" {
     try std.testing.expectEqual(@as(u16, 14), status.fault_vector);
     try std.testing.expectEqual(@as(u64, 0xDEAD_BEEF), status.fault_address);
     try std.testing.expectEqual(@as(u64, 1), status.syscall_count);
+}
+
+test "wait any and WNOHANG preserve children until a terminal result exists" {
+    var table = Table.init(0);
+    const parent = table.initHandle();
+    const first = try table.spawn(parent, .userspace, "first", &.{}, 0, 0, 0, 1, .{});
+    const second = try table.spawn(parent, .userspace, "second", &.{}, 0, 0, 0, 1, .{});
+    try std.testing.expect((try table.wait(parent, null, true)) == null);
+    try std.testing.expectEqual(@as(u16, 2), (try table.get(parent)).child_count);
+    try table.exit(second, 22);
+    const any = (try table.wait(parent, null, false)).?;
+    try std.testing.expectEqual(@as(u32, 22), any.exit_status);
+    try std.testing.expectEqual(@as(u16, 1), (try table.get(parent)).child_count);
+    try std.testing.expect((try table.wait(parent, first, true)) == null);
+    try table.exit(first, 11);
+    const exact = (try table.wait(parent, first, false)).?;
+    try std.testing.expectEqual(@as(u32, 11), exact.exit_status);
+}
+
+test "childForWait selects exact and terminal children without a process snapshot" {
+    var table = Table.init(0);
+    const parent = table.initHandle();
+    const first = try table.spawn(parent, .userspace, "first", &.{}, 0, 0, 0, 1, .{});
+    const second = try table.spawn(parent, .userspace, "second", &.{}, 0, 0, 0, 1, .{});
+    const first_pid = (try table.get(first)).pid;
+    try std.testing.expectEqual(first, (try table.childForWait(parent, first_pid)).?);
+    try table.exit(second, 9);
+    try std.testing.expectEqual(second, (try table.childForWait(parent, 0)).?);
+    try std.testing.expectError(Error.NotChild, table.childForWait(first, 0));
 }
