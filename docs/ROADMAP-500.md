@@ -2,9 +2,9 @@
 
 This roadmap converts the broad runtime, process, filesystem, userland, networking, build, testing, hardware and security gaps into 500 individually trackable engineering goals. A checked item means the repository contains the claimed implementation and at least one executable test or release contract; it does not imply production readiness. Each completed goal should also state whether its evidence is source-only, isolated-unit, QEMU integration or required hosted CI. Bounded Capstone fixtures do not automatically satisfy a general-runtime goal.
 
-**Status after the persistent-storage, TTY, Zig-SDK and userspace-shell advances:** 146 complete, 354 open.
+**Status after the persistent-storage, TTY, Zig-SDK, userspace-shell and startup-vector advances:** 152 complete, 348 open.
 
-Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. The first bounded Priority 1 runtime advance completes **G138, G139 and G140**. The maintained ABI/VM/I/O/UDP slice additionally completes **G102, G114, G118, G120-G122, G162-G164, G184, G253, G296-G299, G308-G309, G311, G328 and G330** through generated ABI contracts, CPL3 integration fixtures and required 44/45-command QEMU sessions. The post-bootstrap memory manager remains a bounded handoff rather than a system-wide PMM because boot-time allocations, high-memory direct access, DMA policy, synchronization and OOM selection remain incomplete. The later persistent-storage, Zig-SDK and normal-shell slices additionally complete **G219, G220, G252 and G293**. Historical Capstone release accounting remains separate from this broader roadmap.
+Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. The first bounded Priority 1 runtime advance completes **G138, G139 and G140**. The maintained ABI/VM/I/O/UDP slice additionally completes **G102, G114, G118, G120-G122, G162-G164, G184, G253, G296-G299, G308-G309, G311, G328 and G330** through generated ABI contracts, CPL3 integration fixtures and required 44/45-command QEMU sessions. The post-bootstrap memory manager remains a bounded handoff rather than a system-wide PMM because boot-time allocations, high-memory direct access, DMA policy, synchronization and OOM selection remain incomplete. The later persistent-storage, Zig-SDK and normal-shell slices additionally complete **G219, G220, G252 and G293**. ABI 1.2 startup-vector and `spawnv` integration additionally complete **G108-G110 and G255-G257**. Historical Capstone release accounting remains separate from this broader roadmap.
 
 ## Completed in Capstone 17
 
@@ -41,7 +41,7 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [x] **G031** — Preserve crash vector, fault address and terminal status metadata.
 - [x] **G032** — Reject operations through reaped or otherwise stale process handles.
 - [x] **G033** — Provide a bounded 96-node x86-64 virtual filesystem.
-- [x] **G034** — Provide bounded ordinary files of up to 16 KiB each.
+- [x] **G034** — Provide bounded ordinary files of up to 32 KiB each.
 - [x] **G035** — Resolve both absolute and current-directory-relative paths.
 - [x] **G036** — Normalize repeated separators, dot and parent path components.
 - [x] **G037** — Maintain a five-entry mount table.
@@ -118,9 +118,9 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [x] **G105** — Reject overlapping or aliasing ELF64 load segments transactionally.
 - [x] **G106** — Validate ELF64 file, virtual-address and alignment constraints completely.
 - [ ] **G107** — Support ET_DYN position-independent executables with a selected load base.
-- [ ] **G108** — Construct a System V-compatible initial argv stack.
-- [ ] **G109** — Construct a bounded envp vector in new process address spaces.
-- [ ] **G110** — Provide a minimal auxiliary-vector contract to userspace.
+- [x] **G108** — Construct a System V-compatible initial argv stack.
+- [x] **G109** — Construct a bounded envp vector in new process address spaces.
+- [x] **G110** — Provide a minimal auxiliary-vector contract to userspace.
 - [x] **G111** — Inherit and validate current working directories for permanent-runtime spawn; the bounded Capstone fork fixture separately preserves its working directory, while general persistent fork remains G115.
 - [x] **G112** — Provide per-process numeric file-descriptor namespaces.
 - [ ] **G113** — Replace the calling process image during exec instead of creating a pseudo job.
@@ -271,9 +271,9 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [x] **G252** — Move the persistent shell itself into a real CPL3 process.
 - [x] **G253** — Connect shell stdin, stdout and stderr to a terminal descriptor.
 - [ ] **G254** — Execute external storage-backed programs from command names.
-- [ ] **G255** — Search executable paths through the PATH environment variable.
-- [ ] **G256** — Pass parsed argv to external programs.
-- [ ] **G257** — Pass the shell environment to external programs.
+- [x] **G255** — Search executable paths through the PATH environment variable.
+- [x] **G256** — Pass parsed argv to external programs.
+- [x] **G257** — Pass the shell environment to external programs.
 - [ ] **G258** — Implement shell exit-status propagation.
 - [ ] **G259** — Implement conditional execution with && and ||.
 - [ ] **G260** — Implement sequential command lists with semicolons.

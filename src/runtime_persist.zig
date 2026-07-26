@@ -567,23 +567,27 @@ const TestDisk = struct {
 
 test "alternating snapshots restore a persistent VFS subtree" {
     var disk: TestDisk = .{};
-    var first_vfs = runtime_vfs.Vfs.init();
+    const first_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(first_vfs);
+    first_vfs.initialize();
     var first_store: Store = .{};
-    try first_store.mount(&first_vfs, disk.device(), 1);
+    try first_store.mount(first_vfs, disk.device(), 1);
     _ = try first_vfs.ensureDirectory(0, "/persist/config", 0o755, 2);
     _ = try first_vfs.putFile(0, "/persist/config/name.txt", "zigos\n", 0o640, false, 3);
-    try first_store.sync(&first_vfs);
+    try first_store.sync(first_vfs);
     try std.testing.expectEqual(@as(u64, 1), first_store.report().generation);
     try first_store.check();
 
-    var second_vfs = runtime_vfs.Vfs.init();
+    const second_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(second_vfs);
+    second_vfs.initialize();
     var second_store: Store = .{};
-    try second_store.mount(&second_vfs, disk.device(), 10);
+    try second_store.mount(second_vfs, disk.device(), 10);
     try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/config/name.txt"));
     try std.testing.expectEqual(@as(u64, 1), second_store.report().generation);
 
     _ = try second_vfs.putFile(0, "/persist/config/name.txt", "second\n", 0o600, false, 11);
-    try second_store.sync(&second_vfs);
+    try second_store.sync(second_vfs);
     try std.testing.expectEqual(@as(u64, 2), second_store.report().generation);
     try std.testing.expectEqual(@as(u8, 1), second_store.report().active_slot);
     try std.testing.expect(disk.flushes >= 4);
@@ -591,19 +595,23 @@ test "alternating snapshots restore a persistent VFS subtree" {
 
 test "mount falls back to the previous valid generation" {
     var disk: TestDisk = .{};
-    var vfs = runtime_vfs.Vfs.init();
+    const vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(vfs);
+    vfs.initialize();
     var store: Store = .{};
-    try store.mount(&vfs, disk.device(), 1);
+    try store.mount(vfs, disk.device(), 1);
     _ = try vfs.putFile(0, "/persist/value", "one", 0o644, false, 2);
-    try store.sync(&vfs);
+    try store.sync(vfs);
     _ = try vfs.putFile(0, "/persist/value", "two", 0o644, false, 3);
-    try store.sync(&vfs);
+    try store.sync(vfs);
 
     // Corrupt the newest slot's committed header. Slot 1 contains generation 2.
     disk.blocks[1 + 1][0] ^= 0xFF;
-    var recovered_vfs = runtime_vfs.Vfs.init();
+    const recovered_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(recovered_vfs);
+    recovered_vfs.initialize();
     var recovered: Store = .{};
-    try recovered.mount(&recovered_vfs, disk.device(), 4);
+    try recovered.mount(recovered_vfs, disk.device(), 4);
     try std.testing.expectEqualStrings("one", try recovered_vfs.readOnlyView(0, "/persist/value"));
     try std.testing.expectEqual(@as(u64, 1), recovered.report().generation);
     try std.testing.expectEqual(@as(u64, 1), recovered.report().recoveries);

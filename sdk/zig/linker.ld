@@ -11,19 +11,19 @@ SECTIONS
   . = 0x0000008000000000;
   .text : ALIGN(0x1000)
   {
-    *(.text .text.*)
-    *(.rodata .rodata.*)
+    *(.text .text.* .ltext .ltext.*)
+    *(.rodata .rodata.* .lrodata .lrodata.*)
   } :text
 
   . = ALIGN(0x1000);
   .data : ALIGN(0x1000)
   {
-    *(.data .data.*)
+    *(.data .data.* .ldata .ldata.*)
   } :data
 
   .bss : ALIGN(16)
   {
-    *(.bss .bss.*)
+    *(.bss .bss.* .lbss .lbss.*)
     *(COMMON)
   } :data
 
@@ -31,6 +31,6 @@ SECTIONS
   {
     *(.comment)
     *(.note .note.*)
-    *(.eh_frame .eh_frame.*)
+    *(.eh_frame .eh_frame.* .eh_frame_hdr)
   }
 }

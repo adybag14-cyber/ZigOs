@@ -29,6 +29,24 @@ def generate(spec: dict) -> tuple[str, str, str]:
         f"%define ZIGOS_ABI_MINOR {abi['minor']}\n",
         f"%define ZIGOS_PAGE_SIZE {abi['page_size']}\n",
     ]
+    limits = spec["limits"]
+    zig.extend([
+        f"pub const maximum_arguments: usize = {limits['arguments']};\n",
+        f"pub const maximum_argument_bytes: usize = {limits['argument_bytes']};\n",
+        f"pub const maximum_environment: usize = {limits['environment']};\n",
+        f"pub const maximum_environment_bytes: usize = {limits['environment_bytes']};\n",
+    ])
+    nasm.extend([
+        f"%define ZIGOS_MAX_ARGUMENTS {limits['arguments']}\n",
+        f"%define ZIGOS_MAX_ARGUMENT_BYTES {limits['argument_bytes']}\n",
+        f"%define ZIGOS_MAX_ENVIRONMENT {limits['environment']}\n",
+        f"%define ZIGOS_MAX_ENVIRONMENT_BYTES {limits['environment_bytes']}\n",
+    ])
+    zig.append("\n")
+    nasm.append("\n")
+    for name, value in spec["auxiliary_vector"].items():
+        zig.append(f"pub const aux_{name}: u64 = {value};\n")
+        nasm.append(f"%define ZIGOS_AUX_{name.upper()} {value}\n")
     for group in ("capabilities", "syscalls", "errno"):
         zig.append("\n")
         nasm.append("\n")
@@ -124,6 +142,25 @@ def generate(spec: dict) -> tuple[str, str, str]:
         "    family: u16,\n",
         "    port_be: u16,\n",
         "    address_be: u32,\n",
+        "};\n",
+        "\npub const UserString = extern struct {\n",
+        "    pointer: u64,\n",
+        "    length: u16,\n",
+        "    reserved0: u16 = 0,\n",
+        "    reserved1: u32 = 0,\n",
+        "};\n\n",
+        "pub const SpawnRequest = extern struct {\n",
+        "    path_pointer: u64,\n",
+        "    arguments_pointer: u64,\n",
+        "    environment_pointer: u64,\n",
+        "    path_length: u16,\n",
+        "    argument_count: u16,\n",
+        "    environment_count: u16,\n",
+        "    flags: u16 = 0,\n",
+        "};\n\n",
+        "pub const AuxvEntry = extern struct {\n",
+        "    kind: u64,\n",
+        "    value: u64,\n",
         "};\n",
     ])
     return "".join(zig), "".join(nasm), "".join(sdk)

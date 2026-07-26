@@ -160,8 +160,39 @@ def main() -> int:
     require(sdk_shell, "zigos.spawn", "userspace shell launches child ELF programs through the ABI")
     require(sdk_shell, "zigos.wait", "userspace shell waits and reports child status")
     require(normal_boot_test, "process 3 exited 42", "normal QEMU gate proves userspace shell spawn/wait")
-    require(normal_boot_test, "alloc/free 33/33 clean yes", "normal QEMU gate requires exact physical reclamation")
+    require(normal_boot_test, "alloc/free 51/51 clean yes", "normal QEMU gate requires exact physical reclamation")
     require(normal_boot_test, "forbidden", "normal QEMU gate rejects diagnostic proof markers")
+    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 2:
+        raise SystemExit("permanent-userspace contract missing: ABI version 1.2")
+    if abi_spec["syscalls"].get("spawnv") != 96:
+        raise SystemExit("permanent-userspace contract missing: spawnv syscall 96")
+    if abi_spec.get("limits") != {
+        "arguments": 8,
+        "argument_bytes": 31,
+        "environment": 8,
+        "environment_bytes": 63,
+    }:
+        raise SystemExit("permanent-userspace contract missing: bounded spawn-vector limits")
+    require(runtime_abi, "pub const UserString = extern struct", "ABI publishes bounded user-string descriptors")
+    require(runtime_abi, "pub const SpawnRequest = extern struct", "ABI publishes spawnv request layout")
+    require(runtime_abi, "pub const AuxvEntry = extern struct", "ABI publishes auxiliary-vector entries")
+    require(runtime_abi, 'test "spawnv request and startup vector layouts are stable"', "spawnv structures have exact layout tests")
+    require(executor, "syscallSpawnv", "kernel implements copied and validated spawn vectors")
+    require(executor, "fn buildInitialStack", "kernel builds argv, envp and auxiliary vectors")
+    require(executor, "const auxiliary = [_]runtime_abi.AuxvEntry", "initial stack carries the bounded auxiliary contract")
+    require(sdk_startup, ".scan_environment:", "SDK startup locates envp termination and auxv")
+    require(sdk_source, "pub fn spawnv", "SDK exposes argument and environment propagation")
+    require(sdk_source, "pub fn environmentValue", "SDK exposes bounded environment lookup")
+    require(sdk_source, "pub fn auxiliaryValue", "SDK exposes bounded auxiliary lookup")
+    require(sdk_shell, "zigos.spawnv", "userspace shell passes argv and envp to external programs")
+    require(sdk_shell, 'environmentValue(startup_environment, "PATH")', "userspace shell searches PATH")
+    require(sdk_conformance, "zig-sdk: envp/auxv passed", "SDK conformance validates startup vectors")
+    require(normal_boot_test, "sdk alpha beta", "normal QEMU gate proves PATH, argv and inherited envp")
+    require(normal_boot_test, "process 4 exited 86", "normal QEMU gate proves spawnv child status")
+    require(elf_source, 'test "parser accepts a pure BSS writable load segment"', "ELF loader accepts standard pure-BSS RW segments")
+    require(sdk_verifier, "memory_size == 0 or memory_size < file_size", "SDK ELF verifier accepts pure-BSS PT_LOAD")
+    require(vfs_source, "pub const maximum_file_size: usize = 32 * 1024", "runtime VFS accepts the linked userspace shell")
+    require(vfs_source, 'test "VFS accepts the full 32 KiB file boundary"', "32 KiB VFS boundary is isolated-tested")
     require(runtime, '"/bin/sdk.elf"', "directly linked Zig SDK conformance executable is installed in the VFS")
     require(build_graph, 'sdk/zig/conformance.zig', "build graph compiles the SDK conformance program as Zig source")
     require(build_graph, '.code_model = .large', "SDK supports the high permanent userspace address window")
@@ -292,8 +323,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 56:
-        raise SystemExit(f"canonical isolated-test declaration total must be 56, found {declared_tests}")
+    if declared_tests != 59:
+        raise SystemExit(f"canonical isolated-test declaration total must be 59, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',

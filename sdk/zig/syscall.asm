@@ -15,6 +15,15 @@ _start:
     mov r12, rsp
     mov rdi, [r12]
     lea rsi, [r12 + 8]
+    lea rdx, [rsi + rdi * 8 + 8]
+    mov rcx, rdx
+.scan_environment:
+    cmp qword [rcx], 0
+    je .environment_end
+    add rcx, 8
+    jmp .scan_environment
+.environment_end:
+    add rcx, 8
     and rsp, -16
     call zigos_main
     mov edi, eax

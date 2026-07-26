@@ -8,7 +8,7 @@ Status: closed by the correctness/CI remediation.
 
 | Finding | Resolution | Evidence |
 | --- | --- | --- |
-| The advertised isolated-test total was not actually executed | `build.zig` now runs `runtime_fd.zig`, `runtime_command.zig`, `runtime_process.zig`, `runtime_vfs.zig`, `runtime_abi.zig` and `runtime_page_pool.zig`: 47 unique declarations in total (62 direct-runner executions including imported tests) | canonical `zig build test` and `zig build check` |
+| The advertised isolated-test total was not actually executed | `build.zig` now runs nine canonical host-test roots spanning descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence and ELF loading: 59 unique declarations in total | canonical `zig build test` and `zig build check` |
 | Syscall descriptor and flag registers were narrowed before validation | `runtime_abi.zig` range-checks full-width descriptor, open-flag and mode arguments before conversion | hostile tests cover 65536, `u64` maximum and high flag bits; source-contract verifier forbids the old truncation forms |
 | Descriptor/VFS errors collapsed to bad-FD | one kernel-error-to-userspace-errno mapping now preserves not-found, access, read-only, directory, broken-pipe and resource-limit distinctions | isolated errno mapping tests plus full UEFI build |
 | Default `kill PID` sent signal 15 without a delivery/default-action path | the kernel shell now defaults explicitly to forced signal 9; other signals remain opt-in and the absence of general userspace delivery is still documented | 44/45-command COM1 sessions prove PID 9 becomes zombie and is reaped |
@@ -49,7 +49,7 @@ Roadmap links: G113–G176, especially G132–G160.
 
 Delivered bounded slice: the permanent ABI now provides page-granular anonymous `mmap`, arbitrary page-aligned anonymous subrange `munmap`, W^X-enforced `mprotect`, `brk` growth/shrink and dynamically added/reclaimed user page tables. `/bin/vm.elf` proves the complete sequence and final reclamation.
 
-Still open: replace the eight-context and fixed userspace-window bounds with general VMA objects, flexible multi-page stacks, eligible guard-fault growth, file-backed mappings, lazy demand paging, argv/envp/auxv completeness and scalable rollback under concurrency.
+Still open: replace the fixed userspace-window bounds with general VMA objects, eligible guard-fault stack growth, file-backed mappings, lazy demand paging and scalable rollback under concurrency. The current eight-page stack and bounded argv/envp/auxv contract are fixed-size rather than fully POSIX-general.
 
 Roadmap links: G100–G125 and G161–G176.
 
@@ -83,9 +83,9 @@ Status: accepted and open.
 
 ### P2-U1: documented userspace ABI and SDK
 
-Delivered bounded slice: `abi/zigos-abi.json` defines ABI major version 1, page size, capability bits, syscall numbers 64-92 and errno values; the build generates matching kernel Zig, NASM and public SDK Zig constants/structures. `sdk/zig` now publishes a fixed-window linker script, a SysV AMD64 startup/syscall bridge and typed wrappers for descriptors, files, process/wait, VM, poll and UDP. A directly linked compiler-generated Zig ELF verifies argc/argv, ABI discovery, pseudo-file I/O, memory protection and errno mapping in both required runtime profiles.
+Delivered bounded slice: `abi/zigos-abi.json` defines ABI version 1.2, page size, capability bits, syscall numbers 64-96, errno values, bounded spawn-vector limits and auxiliary keys; the build generates matching kernel Zig, NASM and public SDK Zig constants/structures. `sdk/zig` publishes a W^X linker script, a SysV AMD64 startup/syscall bridge and typed wrappers for descriptors, files, process/wait, VM, poll and UDP. `spawnv` copies and validates argv/envp, while the kernel creates a 16-byte-aligned argc/argv/envp/auxv stack. A directly linked Zig ELF verifies these startup vectors plus ABI discovery, pseudo-file I/O, memory protection and errno mapping in both required runtime profiles.
 
-Still open: a generated C header/library, environment and auxiliary vectors, ioctl, broader clocks/signals/filesystem mutation syscalls, independent package/version distribution and a formal within-major compatibility suite.
+Still open: a generated C header/library, ioctl, broader clocks/signals/filesystem mutation syscalls, independent package/version distribution and a formal within-major compatibility suite.
 
 Roadmap links: G138–G165, G182–G199, G252–G296 and G494–G495.
 
@@ -111,7 +111,7 @@ Roadmap links: G297–G339 and G341–G343.
 
 ### P2-B1: normal boot profile
 
-Delivered bounded slice: `-Dnormal-boot=true` branches after retained hardware/storage discovery and before the kernel heap, cooperative/preemptive scheduler demonstrations and Capstone 15/16 software proof workloads. It mounts the runtime VFS and persistent NVMe subtree, keeps PID 1 blocked as init, launches the Zig userspace shell as PID 2, runs a child ELF, then requires exact 33/33 physical-page reclamation and zero descriptors/contexts at shutdown. The default diagnostic profile remains available and continues to run the exhaustive release workload.
+Delivered bounded slice: `-Dnormal-boot=true` branches after retained hardware/storage discovery and before the kernel heap, cooperative/preemptive scheduler demonstrations and Capstone 15/16 software proof workloads. It mounts the runtime VFS and persistent NVMe subtree, keeps PID 1 blocked as init, launches the Zig userspace shell as PID 2, runs both assembly and Zig child ELFs through spawn/wait, then requires exact 51/51 physical-page reclamation and zero descriptors/contexts at shutdown. The default diagnostic profile remains available and continues to run the exhaustive release workload.
 
 Still open: split the large hardware discovery routines into minimal initialisation and optional validation phases so normal boot can also skip assertion-heavy NIC/NVMe protocol proofs, and promote a disk-installed userspace root/PID 1 rather than the current kernel-created init record and boot-seeded RAM VFS.
 

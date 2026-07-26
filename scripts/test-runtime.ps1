@@ -290,6 +290,7 @@ try {
         'exec: PID 15 state zombie status 0x55',
         'zig-sdk: start',
         'zig-sdk: argc/argv passed',
+        'zig-sdk: envp/auxv passed',
         'zig-sdk: ABI discovery passed',
         'zig-sdk: startup/argv/abi/files/vm/errno passed',
         'exec: PID 16 state zombie status 0x56',

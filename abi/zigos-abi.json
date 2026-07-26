@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 1,
+    "minor": 2,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -51,7 +51,8 @@
     "getsockname": 92,
     "shutdown": 93,
     "getcwd": 94,
-    "chdir": 95
+    "chdir": 95,
+    "spawnv": 96
   },
   "errno": {
     "permission": -1,
@@ -87,5 +88,22 @@
     "address_in_use": -98,
     "not_connected": -107,
     "connection_refused": -111
+  },
+  "limits": {
+    "arguments": 8,
+    "argument_bytes": 31,
+    "environment": 8,
+    "environment_bytes": 63
+  },
+  "auxiliary_vector": {
+    "null": 0,
+    "pagesz": 6,
+    "uid": 11,
+    "euid": 12,
+    "gid": 13,
+    "egid": 14,
+    "secure": 23,
+    "zigos_abi": 23040,
+    "zigos_capabilities": 23041
   }
 }

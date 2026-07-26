@@ -18,22 +18,22 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 56 unique isolated-test declarations, the source contract, the 44-command offline runtime, the 45-command live-network runtime, the x86-64 NVMe two-boot persistence proof and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 59 unique isolated-test declarations, the source contract, the 44-command offline runtime, the 45-command live-network runtime, the x86-64 NVMe two-boot persistence proof and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
 The x86-64 kernel remains alive after validation unless an explicit `shutdown` command is entered. Its permanent runtime provides:
 
 - a dedicated 100 Hz LAPIC timer and interrupt-enabled HLT idle loop;
-- PID 1 init and PID 2 COM1 shell processes;
-- a bounded writable VFS and five mounted namespaces;
+- PID 1 init and either the diagnostic kernel shell or a real Zig userspace PID 2 shell;
+- a bounded writable VFS and six mounted namespaces;
 - a generation-safe 64-slot process table;
 - process-local numeric descriptors, shared open-file descriptions and bounded blocking pipes;
-- up to eight retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 256-slot ownership table;
-- private CR3 roots, strict W^X `PT_LOAD` mappings, one-page stacks and unmapped guards;
+- up to 64 retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 4,096-slot ownership table;
+- private CR3 roots, strict W^X `PT_LOAD` mappings, eight-page stacks and unmapped guards;
 - complete GPR and FXSAVE context preservation across syscalls and timer preemption;
-- a versioned pointer-validated permanent userspace ABI with generated Zig/NASM constants, capability discovery, VFS-backed spawn, exact waitpid, wait-any and WNOHANG;
-- a freestanding Zig SDK with generated ABI structures, a SysV AMD64 startup shim, typed file/process/VM/poll/UDP wrappers and an independently verified directly linked `/bin/sdk.elf` conformance program;
+- a pointer-validated ABI 1.2 with generated Zig/NASM constants, capability discovery, bounded `spawnv`, System V-style argv/envp/auxv startup, exact waitpid, wait-any and WNOHANG;
+- a freestanding Zig SDK with generated ABI structures, a SysV AMD64 startup shim, typed file/process/VM/poll/UDP wrappers, environment/auxiliary helpers and an independently verified `/bin/sdk.elf` conformance program;
 - an explicit `-Dnormal-boot=true` profile that skips the software proof suite and launches a directly linked Zig `/bin/sh.elf` as the interactive CPL3 PID 2 shell;
 - page-granular anonymous `mmap`, subrange `munmap`, W^X `mprotect` and expandable/shrinkable `brk`;
 - descriptor-backed `fstat`, directory iteration and `poll`;
@@ -82,7 +82,7 @@ Run the bidirectional COM1 session:
 .\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 ```
 
-Each harness run boots the finished EFI image, waits for the permanent prompt and drives 42 commands offline or 43 commands with the live e1000e profile. It preserves the previous navigation, mutation, redirection, parser, descriptor, device, fsck, sync and history coverage, then additionally requires:
+Each harness run boots the finished EFI image, waits for the permanent prompt and drives 44 commands offline or 45 commands with the live e1000e profile. It preserves the previous navigation, mutation, redirection, parser, descriptor, device, fsck, sync and history coverage, then additionally requires:
 
 - `run` and `exec` to enter VFS-loaded CPL3 code;
 - a real hardware-tick sleep and saved-context resume;
@@ -116,6 +116,11 @@ ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/fl
 ZigOs post-bootstrap physical memory: ... peak 32 alloc/free 247/247 failed/rejected 0/0 clean yes
 ZigOs permanent userspace: page-limit 4096 used 0 peak 32 contexts 0 launches/exits/faults 15/13/1 ... reclaimed 247 allocator alloc/release/retains 247/247/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
+
+# Normal userspace-shell profile
+ZigOs normal userspace shutdown: shell PID 2 status 0
+ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 51/51 clean yes
+ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes cleanup yes
 ```
 
 Tick, switch and preemption totals vary slightly with host scheduling. Process states, exit/fault results, descriptor deltas, payload bytes and final cleanup are exact.
@@ -125,7 +130,7 @@ Tick, switch and preemption totals vary slightly with host scheduling. Process s
 The x86-64 runtime VFS currently provides:
 
 - 96 bounded nodes;
-- ordinary files up to 16 KiB;
+- ordinary files up to 32 KiB;
 - absolute and relative path resolution;
 - repeated-separator, `.` and `..` normalization;
 - files, directories and pseudo-files;
@@ -180,9 +185,9 @@ The permanent process table now owns real executable lifecycle records. It provi
 - page, descriptor, socket, child and CPU quotas;
 - fault vector/address records derived from genuine CPL3 exceptions.
 
-The permanent executor supports up to 64 retained CPL3 process slots and 1,024 tracked mappings per context. After boot validation, the monotonic allocator is sealed and every remaining usable firmware extent is transferred to a reclaiming physical-memory manager. The executor requests pages on demand below 4 GiB through a 256-slot ownership table; final releases poison pages, return them to the manager and require exact ownership-layer and physical-manager allocation/free balance at shutdown. Each process receives a private CR3, a complete saved integer/FX context, a one-page stack, an unmapped guard page and cloned descriptor namespace. Untouched extents above 4 GiB are retained and counted, but ordinary runtime use of them awaits a direct physical-memory map.
+The permanent executor supports up to 64 retained CPL3 process slots and 1,024 tracked mappings per context. After boot validation, the monotonic allocator is sealed and every remaining usable firmware extent is transferred to a reclaiming physical-memory manager. The executor requests pages on demand below 4 GiB through a 256-slot ownership table; final releases poison pages, return them to the manager and require exact ownership-layer and physical-manager allocation/free balance at shutdown. Each process receives a private CR3, a complete saved integer/FX context, an eight-page stack, an unmapped guard page and cloned descriptor namespace. Untouched extents above 4 GiB are retained and counted, but ordinary runtime use of them awaits a direct physical-memory map.
 
-This is still not a general POSIX process implementation. There is no persistent-runtime fork/COW, in-place exec, dynamic linker, flexible stack growth, environment/auxiliary vector or SMP userspace scheduler.
+This is still not a general POSIX process implementation. There is no persistent-runtime fork/COW, in-place exec, dynamic linker, flexible stack growth, ASLR or SMP userspace scheduler.
 
 ## Existing bounded x86-64 capabilities
 
@@ -268,10 +273,13 @@ zig-out/
 `-- artifacts/
     |-- service-user.elf
     |-- process-user.elf
-    `-- process-exec.elf
+    |-- process-exec.elf
+    |-- sdk.elf
+    |-- sh.elf
+    `-- runtime-*.elf
 ```
 
-`zig build test` covers 47 unique `std.testing` declarations across descriptors/open descriptions/pipes, command parsing/editing, processes, VFS, ABI validation, page ownership and physical-memory management. The six direct module runners execute 62 tests in total because `runtime_fd.zig` imports the process tests and `runtime_page_pool.zig` imports the physical-memory tests.
+`zig build test` covers 59 unique `std.testing` declarations across the nine canonical host-test roots, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence and ELF loading. Imported tests may execute from more than one root, but the source contract counts each declaration once.
 
 `zig build check` runs formatting, all isolated tests, the UEFI build and portable PE/COFF verification.
 
@@ -318,11 +326,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    5,145,600 bytes
-SHA-256: BA260D90E17100D86E60F748D32ECA1058CADE8042E276688CBB947524058A45
+Size:    6,845,440 bytes
+SHA-256: 29A74B373BBC6EF14481338D43DBCEFF520D69F6FB4E66401DD98D25324DF3CF
 ```
 
-This identity is from the locally validated Windows build after the post-bootstrap Priority 1 physical-memory advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic build after the ABI 1.2 startup-vector advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
@@ -356,7 +364,7 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 56 unique isolated declarations, directly linked Zig SDK verification, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 59 unique isolated declarations, directly linked Zig SDK verification, x86-64 UEFI build, portable PE verification and artifact upload.
 - **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 44-command offline and 45-command live-network permanent COM1 sessions, the x86-64 NVMe two-boot proof, and the legacy i686 build/two-boot regression.
 - **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 
@@ -418,7 +426,7 @@ src/serial.zig                    COM1 transmit and receive
 - The userspace network ABI is UDP-only and bounded to eight descriptor-backed sockets with a fixed receive queue. There is no TCP listen/accept/data API, `sendto`/`recvfrom`, socket-option layer, IPv6 or production network stack.
 - Permanent userspace scheduling currently runs on the BSP rather than an SMP scheduler.
 - Hardware support remains strongly aligned with QEMU q35, QEMU NVMe/xHCI and Intel 82574L emulation.
-- ABI version 1 provides generated syscall numbers, capability discovery and errno conventions, but it is still experimental: there is no SDK compatibility guarantee, complete user/group permission model, ASLR, IOMMU DMA isolation or executable-signing policy.
+- ABI version 1.2 provides generated syscall numbers, bounded startup/spawn vectors, capability discovery and errno conventions, but it is still experimental: there is no SDK compatibility guarantee, complete user/group permission model, ASLR, IOMMU DMA isolation or executable-signing policy.
 - ZigOs remains experimental, non-POSIX and not secure against hostile workloads.
 
 ## Design principles

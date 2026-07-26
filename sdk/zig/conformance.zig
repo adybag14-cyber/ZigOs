@@ -7,10 +7,11 @@ const argv1_fail_message = "zig-sdk: bad argv1\r\n";
 const argv2_fail_message = "zig-sdk: bad argv2\r\n";
 const argv_message = "zig-sdk: argc/argv passed\r\n";
 const abi_message = "zig-sdk: ABI discovery passed\r\n";
+const startup_vector_message = "zig-sdk: envp/auxv passed\r\n";
 const pass_message = "zig-sdk: startup/argv/abi/files/vm/errno passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
-pub export fn zigos_main(argc: usize, argv: [*]const usize) callconv(.c) u32 {
+pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
     zigos.writeAll(1, start_message) catch return 0xE1;
     if (argc != 3) {
         zigos.writeAll(2, argc_fail_message) catch {};
@@ -29,6 +30,11 @@ pub export fn zigos_main(argc: usize, argv: [*]const usize) callconv(.c) u32 {
         return 0xE7;
     }
     zigos.writeAll(1, argv_message) catch return 0xE8;
+    if (!startupVectorsValid(envp, auxv)) {
+        zigos.writeAll(2, "zig-sdk: bad envp/auxv\r\n") catch {};
+        return 0xE9;
+    }
+    zigos.writeAll(1, startup_vector_message) catch return 0xEA;
     run() catch {
         zigos.writeAll(2, fail_message) catch {};
         return 0xE2;
@@ -39,6 +45,20 @@ pub export fn zigos_main(argc: usize, argv: [*]const usize) callconv(.c) u32 {
 
 fn argument(argv: [*]const usize, index: usize) [*:0]const u8 {
     return @ptrFromInt(argv[index]);
+}
+
+fn startupVectorsValid(envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) bool {
+    const path = zigos.environmentValue(envp, "PATH") orelse return false;
+    const home = zigos.environmentValue(envp, "HOME") orelse return false;
+    const term = zigos.environmentValue(envp, "TERM") orelse return false;
+    if (!equal(path, "/bin") or !equal(home, "/home/root") or !equal(term, "zigos")) return false;
+    if (zigos.auxiliaryValue(auxv, zigos.constants.aux_pagesz) != zigos.constants.abi_page_size) return false;
+    const version = zigos.auxiliaryValue(auxv, zigos.constants.aux_zigos_abi) orelse return false;
+    if (version != (@as(u64, zigos.constants.abi_major) << 32) | zigos.constants.abi_minor) return false;
+    const capabilities = zigos.auxiliaryValue(auxv, zigos.constants.aux_zigos_capabilities) orelse return false;
+    return (capabilities & zigos.constants.capability_process) != 0 and
+        (capabilities & zigos.constants.capability_vfs) != 0 and
+        (capabilities & zigos.constants.capability_terminal) != 0;
 }
 
 fn run() zigos.Error!void {
@@ -84,14 +104,20 @@ fn contains(haystack: []const u8, needle: []const u8) bool {
     if (haystack.len < needle.len) return false;
     var index: usize = 0;
     while (index + needle.len <= haystack.len) : (index += 1) {
-        var equal = true;
+        var matches = true;
         for (needle, 0..) |byte, offset| {
             if (haystack[index + offset] != byte) {
-                equal = false;
+                matches = false;
                 break;
             }
         }
-        if (equal) return true;
+        if (matches) return true;
     }
     return false;
+}
+
+fn equal(left: []const u8, right: []const u8) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |a, b| if (a != b) return false;
+    return true;
 }

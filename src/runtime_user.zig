@@ -34,6 +34,13 @@ const guard_virtual: usize = stack_virtual - page_bytes;
 const mmap_floor: usize = user_base + 64 * 1024 * 1024;
 const mmap_ceiling: usize = guard_virtual;
 const page_table_span: usize = 2 * 1024 * 1024;
+const maximum_auxiliary_entries: usize = 9;
+pub const default_environment = [_][]const u8{
+    "PATH=/bin",
+    "HOME=/home/root",
+    "TERM=zigos",
+    "SHELL=/bin/sh.elf",
+};
 
 const syscall = runtime_abi.constants;
 const errno_bad_fd = runtime_abi.errno_bad_fd;
@@ -231,7 +238,31 @@ pub fn spawn(
     tick: u64,
     registers: SpawnRegisters,
 ) !u64 {
+    return spawnWithEnvironment(
+        parent_handle,
+        name,
+        arguments,
+        &default_environment,
+        cwd_node,
+        image_bytes,
+        tick,
+        registers,
+    );
+}
+
+pub fn spawnWithEnvironment(
+    parent_handle: u64,
+    name: []const u8,
+    arguments: []const []const u8,
+    environment: []const []const u8,
+    cwd_node: u16,
+    image_bytes: []const u8,
+    tick: u64,
+    registers: SpawnRegisters,
+) !u64 {
     if (!initialized) return error.NotInitialized;
+    if (arguments.len == 0 or arguments.len > syscall.maximum_arguments) return error.TooManyArguments;
+    if (environment.len > syscall.maximum_environment) return error.TooManyArguments;
     const image = elf64.parse(image_bytes) orelse return error.InvalidElf;
     try validateImage(image);
     const context_index = findFreeContext() orelse return error.ContextLimit;
@@ -288,7 +319,16 @@ pub fn spawn(
     }
     if (paging.inspectUserPageInSpace(context.space, guard_virtual) != null) return error.GuardMapped;
 
-    const stack = try buildInitialStack(top_stack_frame, stack_top - page_bytes, arguments);
+    const child_process = try processes.get(handle);
+    const stack = try buildInitialStack(
+        top_stack_frame,
+        stack_top - page_bytes,
+        arguments,
+        environment,
+        child_process.uid,
+        child_process.gid,
+        availableCapabilities(),
+    );
     context.frame = std.mem.zeroes(interrupt_context.Frame);
     context.frame.rip = image.entry;
     context.frame.cs = descriptor_tables.user_code_selector;
@@ -297,6 +337,8 @@ pub fn spawn(
     context.frame.ss = descriptor_tables.user_data_selector;
     context.frame.rdi = stack.argc;
     context.frame.rsi = stack.argv;
+    context.frame.rdx = stack.envp;
+    context.frame.rcx = stack.auxv;
     if (registers.override) {
         context.frame.rdi = registers.rdi;
         context.frame.rsi = registers.rsi;
@@ -497,6 +539,7 @@ pub fn handleSyscall(
         syscall.syscall_shutdown => return syscallShutdown(context, frame, fx_state),
         syscall.syscall_getcwd => return syscallGetcwd(context, frame),
         syscall.syscall_chdir => return syscallChdir(context, frame),
+        syscall.syscall_spawnv => return syscallSpawnv(context, frame),
         syscall.syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
@@ -1182,6 +1225,21 @@ fn syscallPoll(context: *Context, frame: *interrupt_context.Frame) u64 {
     return 0;
 }
 
+fn availableCapabilities() u64 {
+    var capabilities = syscall.capability_process |
+        syscall.capability_descriptors |
+        syscall.capability_pipes |
+        syscall.capability_vfs |
+        syscall.capability_wait |
+        syscall.capability_virtual_memory |
+        syscall.capability_terminal |
+        syscall.capability_pseudo_files;
+    if (e1000e.activeDevice() != null) capabilities |= syscall.capability_udp_sockets;
+    if (persistent_storage_capability) capabilities |= syscall.capability_persistent_storage;
+    if (normal_boot_capability) capabilities |= syscall.capability_normal_boot;
+    return capabilities;
+}
+
 fn syscallAbiQuery(context: *Context, frame: *interrupt_context.Frame) u64 {
     if (frame.rdi == 0) {
         frame.rax = @sizeOf(runtime_abi.AbiInfo);
@@ -1197,19 +1255,8 @@ fn syscallAbiQuery(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(if (destination_size < @sizeOf(runtime_abi.AbiInfo)) errno_invalid else errno_fault);
         return 0;
     }
-    var capabilities = syscall.capability_process |
-        syscall.capability_descriptors |
-        syscall.capability_pipes |
-        syscall.capability_vfs |
-        syscall.capability_wait |
-        syscall.capability_virtual_memory |
-        syscall.capability_terminal |
-        syscall.capability_pseudo_files;
-    if (e1000e.activeDevice() != null) capabilities |= syscall.capability_udp_sockets;
-    if (persistent_storage_capability) capabilities |= syscall.capability_persistent_storage;
-    if (normal_boot_capability) capabilities |= syscall.capability_normal_boot;
     const info = runtime_abi.makeInfo(.{
-        .capabilities = capabilities,
+        .capabilities = availableCapabilities(),
         .user_base = user_base,
         .user_end = user_end,
         .maximum_io_bytes = maximum_io_bytes,
@@ -1619,6 +1666,146 @@ fn syscallSpawn(context: *Context, frame: *interrupt_context.Frame) u64 {
     return 0;
 }
 
+fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
+    if (!validateRange(context, frame.rdi, @sizeOf(runtime_abi.SpawnRequest), false)) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    var request: runtime_abi.SpawnRequest = undefined;
+    if (!copyFromUser(context, frame.rdi, std.mem.asBytes(&request))) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    if (request.flags != 0 or request.path_length == 0 or
+        request.path_length > runtime_vfs.maximum_path_length or
+        request.argument_count == 0 or request.argument_count > syscall.maximum_arguments or
+        request.environment_count > syscall.maximum_environment)
+    {
+        frame.rax = reject(if (request.argument_count > syscall.maximum_arguments or
+            request.environment_count > syscall.maximum_environment) runtime_abi.errno_too_big else errno_invalid);
+        return 0;
+    }
+    if (!validateRange(context, request.path_pointer, request.path_length, false)) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    var path_storage: [runtime_vfs.maximum_path_length]u8 = undefined;
+    if (!copyFromUser(context, request.path_pointer, path_storage[0..request.path_length])) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const path = path_storage[0..request.path_length];
+    if (std.mem.indexOfScalar(u8, path, 0) != null) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+
+    const argument_bytes = @as(usize, request.argument_count) * @sizeOf(runtime_abi.UserString);
+    const environment_bytes = @as(usize, request.environment_count) * @sizeOf(runtime_abi.UserString);
+    if (!validateRange(context, request.arguments_pointer, argument_bytes, false) or
+        (environment_bytes != 0 and !validateRange(context, request.environment_pointer, environment_bytes, false)))
+    {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    var argument_descriptors: [syscall.maximum_arguments]runtime_abi.UserString = @splat(.{
+        .pointer = 0,
+        .length = 0,
+    });
+    var environment_descriptors: [syscall.maximum_environment]runtime_abi.UserString = @splat(.{
+        .pointer = 0,
+        .length = 0,
+    });
+    if (!copyFromUser(
+        context,
+        request.arguments_pointer,
+        std.mem.asBytes(&argument_descriptors)[0..argument_bytes],
+    ) or (environment_bytes != 0 and !copyFromUser(
+        context,
+        request.environment_pointer,
+        std.mem.asBytes(&environment_descriptors)[0..environment_bytes],
+    ))) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+
+    var argument_storage: [syscall.maximum_arguments][syscall.maximum_argument_bytes + 1]u8 = @splat(@splat(0));
+    var environment_storage: [syscall.maximum_environment][syscall.maximum_environment_bytes + 1]u8 = @splat(@splat(0));
+    var arguments: [syscall.maximum_arguments][]const u8 = undefined;
+    var environment: [syscall.maximum_environment][]const u8 = undefined;
+    for (argument_descriptors[0..request.argument_count], 0..) |descriptor, index| {
+        if (descriptor.reserved0 != 0 or descriptor.reserved1 != 0 or descriptor.length == 0 or
+            descriptor.length > syscall.maximum_argument_bytes or
+            !validateRange(context, descriptor.pointer, descriptor.length, false))
+        {
+            frame.rax = reject(if (descriptor.length > syscall.maximum_argument_bytes) runtime_abi.errno_name_too_long else errno_invalid);
+            return 0;
+        }
+        const target = argument_storage[index][0..descriptor.length];
+        if (!copyFromUser(context, descriptor.pointer, target) or std.mem.indexOfScalar(u8, target, 0) != null) {
+            frame.rax = reject(errno_fault);
+            return 0;
+        }
+        arguments[index] = target;
+    }
+    for (environment_descriptors[0..request.environment_count], 0..) |descriptor, index| {
+        if (descriptor.reserved0 != 0 or descriptor.reserved1 != 0 or descriptor.length == 0 or
+            descriptor.length > syscall.maximum_environment_bytes or
+            !validateRange(context, descriptor.pointer, descriptor.length, false))
+        {
+            frame.rax = reject(if (descriptor.length > syscall.maximum_environment_bytes) runtime_abi.errno_name_too_long else errno_invalid);
+            return 0;
+        }
+        const target = environment_storage[index][0..descriptor.length];
+        if (!copyFromUser(context, descriptor.pointer, target) or !validEnvironmentString(target)) {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        }
+        environment[index] = target;
+    }
+
+    const parent = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const image_bytes = activeVfs().readOnlyView(parent.cwd_node, path) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/');
+    const raw_name = if (slash) |index| path[index + 1 ..] else path;
+    const name = raw_name[0..@min(raw_name.len, runtime_process.maximum_name_length)];
+    if (name.len == 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const handle = spawnWithEnvironment(
+        context.handle,
+        name,
+        arguments[0..request.argument_count],
+        environment[0..request.environment_count],
+        parent.cwd_node,
+        image_bytes,
+        current_tick,
+        .{},
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const child = activeProcesses().get(handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = child.pid;
+    return 0;
+}
+
+fn validEnvironmentString(value: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, value, 0) != null) return false;
+    const separator = std.mem.indexOfScalar(u8, value, '=') orelse return false;
+    return separator != 0;
+}
+
 fn syscallWait(
     context: *Context,
     frame: *interrupt_context.Frame,
@@ -1948,34 +2135,103 @@ fn unmapOwned(context: *Context, mapping_index: usize) !void {
     context.mapping_count -= 1;
 }
 
-const InitialStack = struct { rsp: u64, argc: u64, argv: u64 };
+const InitialStack = struct {
+    rsp: u64,
+    argc: u64,
+    argv: u64,
+    envp: u64,
+    auxv: u64,
+};
 
-fn buildInitialStack(stack_frame: usize, stack_page_virtual: usize, arguments: []const []const u8) !InitialStack {
+fn buildInitialStack(
+    stack_frame: usize,
+    stack_page_virtual: usize,
+    arguments: []const []const u8,
+    environment: []const []const u8,
+    uid: u32,
+    gid: u32,
+    capabilities: u64,
+) !InitialStack {
+    if (arguments.len == 0 or arguments.len > syscall.maximum_arguments or
+        environment.len > syscall.maximum_environment) return error.TooManyArguments;
     var cursor = page_bytes;
-    var addresses: [runtime_process.maximum_arguments]u64 = @splat(0);
-    var index = arguments.len;
+    var argument_addresses: [syscall.maximum_arguments]u64 = @splat(0);
+    var environment_addresses: [syscall.maximum_environment]u64 = @splat(0);
+
+    var index = environment.len;
+    while (index != 0) {
+        index -= 1;
+        const value = environment[index];
+        if (value.len == 0 or value.len > syscall.maximum_environment_bytes or
+            !validEnvironmentString(value) or cursor < value.len + 1) return error.ArgumentTooLong;
+        cursor -= value.len + 1;
+        const target = @as([*]u8, @ptrFromInt(stack_frame + cursor))[0 .. value.len + 1];
+        @memcpy(target[0..value.len], value);
+        target[value.len] = 0;
+        environment_addresses[index] = stack_page_virtual + cursor;
+    }
+    index = arguments.len;
     while (index != 0) {
         index -= 1;
         const argument = arguments[index];
-        if (argument.len > runtime_process.maximum_argument_length or cursor < argument.len + 1) return error.ArgumentTooLong;
+        if (argument.len == 0 or argument.len > syscall.maximum_argument_bytes or
+            std.mem.indexOfScalar(u8, argument, 0) != null or cursor < argument.len + 1) return error.ArgumentTooLong;
         cursor -= argument.len + 1;
         const target = @as([*]u8, @ptrFromInt(stack_frame + cursor))[0 .. argument.len + 1];
         @memcpy(target[0..argument.len], argument);
         target[argument.len] = 0;
-        addresses[index] = stack_page_virtual + cursor;
+        argument_addresses[index] = stack_page_virtual + cursor;
     }
-    cursor &= ~@as(usize, 0xF);
-    const vector_bytes = (arguments.len + 2) * @sizeOf(u64);
-    if (cursor < vector_bytes) return error.StackOverflow;
-    cursor -= vector_bytes;
-    const words = @as([*]u64, @ptrFromInt(stack_frame + cursor))[0 .. arguments.len + 2];
-    words[0] = arguments.len;
-    for (addresses[0..arguments.len], 0..) |address, argument_index| words[argument_index + 1] = address;
-    words[arguments.len + 1] = 0;
+
+    const abi_version = (@as(u64, syscall.abi_major) << 32) | syscall.abi_minor;
+    const auxiliary = [_]runtime_abi.AuxvEntry{
+        .{ .kind = syscall.aux_pagesz, .value = page_bytes },
+        .{ .kind = syscall.aux_uid, .value = uid },
+        .{ .kind = syscall.aux_euid, .value = uid },
+        .{ .kind = syscall.aux_gid, .value = gid },
+        .{ .kind = syscall.aux_egid, .value = gid },
+        .{ .kind = syscall.aux_secure, .value = 0 },
+        .{ .kind = syscall.aux_zigos_abi, .value = abi_version },
+        .{ .kind = syscall.aux_zigos_capabilities, .value = capabilities },
+        .{ .kind = syscall.aux_null, .value = 0 },
+    };
+    comptime if (auxiliary.len != maximum_auxiliary_entries) @compileError("auxiliary vector count changed");
+
+    const word_count = 1 + arguments.len + 1 + environment.len + 1 + auxiliary.len * 2;
+    const vector_bytes = word_count * @sizeOf(u64);
+    if (cursor < vector_bytes + 15) return error.StackOverflow;
+    cursor = (cursor - vector_bytes) & ~@as(usize, 0xF);
+    const words = @as([*]u64, @ptrFromInt(stack_frame + cursor))[0..word_count];
+    var word_index: usize = 0;
+    words[word_index] = arguments.len;
+    word_index += 1;
+    for (argument_addresses[0..arguments.len]) |address| {
+        words[word_index] = address;
+        word_index += 1;
+    }
+    words[word_index] = 0;
+    word_index += 1;
+    const envp_index = word_index;
+    for (environment_addresses[0..environment.len]) |address| {
+        words[word_index] = address;
+        word_index += 1;
+    }
+    words[word_index] = 0;
+    word_index += 1;
+    const auxv_index = word_index;
+    for (auxiliary) |entry| {
+        words[word_index] = entry.kind;
+        words[word_index + 1] = entry.value;
+        word_index += 2;
+    }
+    if (word_index != word_count) return error.StackOverflow;
+
     return .{
         .rsp = stack_page_virtual + cursor,
         .argc = arguments.len,
         .argv = stack_page_virtual + cursor + @sizeOf(u64),
+        .envp = stack_page_virtual + cursor + envp_index * @sizeOf(u64),
+        .auxv = stack_page_virtual + cursor + auxv_index * @sizeOf(u64),
     };
 }
 

@@ -4,6 +4,8 @@ const maximum_line: usize = 512;
 const maximum_words: usize = 8;
 const maximum_path: usize = 255;
 
+var startup_environment: [*]const usize = undefined;
+
 const Word = struct {
     start: usize = 0,
     length: usize = 0,
@@ -35,10 +37,18 @@ const help_text =
     "ls [PATH]            list a directory\r\n" ++
     "cat PATH             stream a file\r\n" ++
     "pid                  print the shell PID\r\n" ++
-    "run PROGRAM          spawn and wait for an ELF\r\n" ++
+    "run PROGRAM [ARGS]   spawn with argv/env and wait\r\n" ++
     "shutdown             exit PID 2 and stop ZigOs\r\n";
 
-pub export fn zigos_main(_: usize, _: [*]const usize) callconv(.c) u32 {
+pub export fn zigos_main(
+    _: usize,
+    _: [*]const usize,
+    envp: [*]const usize,
+    auxv: [*]const zigos.AuxvEntry,
+) callconv(.c) u32 {
+    startup_environment = envp;
+    if (zigos.environmentValue(envp, "PATH") == null or
+        zigos.auxiliaryValue(auxv, zigos.constants.aux_pagesz) != zigos.constants.abi_page_size) return 0xF0;
     zigos.writeAll(1, banner) catch return 0xF1;
     shellLoop();
     return 0xF2;
@@ -113,12 +123,12 @@ fn execute(command: *const Command) void {
     } else if (equal(name, "pid")) {
         commandPid();
     } else if (equal(name, "run")) {
-        if (command.count != 2) return usage("run PROGRAM");
-        commandRun(command.slice(1));
+        if (command.count < 2) return usage("run PROGRAM [ARGS...]");
+        commandRun(command, 1);
     } else if (equal(name, "shutdown") or equal(name, "exit")) {
         requestShutdown();
     } else {
-        commandRun(name);
+        commandRun(command, 0);
     }
 }
 
@@ -169,13 +179,27 @@ fn commandPid() void {
     zigos.writeAll(1, "\r\n") catch {};
 }
 
-fn commandRun(program: []const u8) void {
+fn commandRun(command: *const Command, program_index: usize) void {
+    const program = command.slice(program_index);
     var path_storage: [maximum_path + 1]u8 = @splat(0);
     const path = executablePath(program, &path_storage) orelse {
         zigos.writeAll(2, "run: program name too long\r\n") catch {};
         return;
     };
-    const pid = zigos.spawn(path) catch |err| return printError("run", err);
+    const extra_count = command.count - program_index - 1;
+    if (extra_count + 1 > zigos.constants.maximum_arguments) {
+        zigos.writeAll(2, "run: too many arguments\r\n") catch {};
+        return;
+    }
+    var arguments: [zigos.constants.maximum_arguments][]const u8 = undefined;
+    arguments[0] = executableName(path);
+    for (0..extra_count) |index| arguments[index + 1] = command.slice(program_index + 1 + index);
+    var environment_storage: [zigos.constants.maximum_environment][]const u8 = undefined;
+    const environment = zigos.collectEnvironment(startup_environment, &environment_storage) orelse {
+        zigos.writeAll(2, "run: invalid inherited environment\r\n") catch {};
+        return;
+    };
+    const pid = zigos.spawnv(path, arguments[0 .. extra_count + 1], environment) catch |err| return printError("run", err);
     var status: zigos.WaitStatus = undefined;
     _ = zigos.wait(pid, false, &status) catch |err| return printError("wait", err);
     zigos.writeAll(1, "process ") catch {};
@@ -183,6 +207,14 @@ fn commandRun(program: []const u8) void {
     zigos.writeAll(1, " exited ") catch {};
     writeDecimal(status.exit_status);
     zigos.writeAll(1, "\r\n") catch {};
+}
+
+fn executableName(path: []const u8) []const u8 {
+    var last: usize = 0;
+    for (path, 0..) |byte, index| {
+        if (byte == '/') last = index + 1;
+    }
+    return path[last..];
 }
 
 fn executablePath(program: []const u8, output: *[maximum_path + 1]u8) ?[]const u8 {
@@ -193,13 +225,17 @@ fn executablePath(program: []const u8, output: *[maximum_path + 1]u8) ?[]const u
         output[program.len] = 0;
         return output[0..program.len];
     }
-    const prefix = "/bin/";
+    const path_value = zigos.environmentValue(startup_environment, "PATH") orelse "/bin";
+    if (path_value.len == 0 or containsScalar(path_value, ':')) return null;
+    const separator = if (path_value[path_value.len - 1] == '/') "" else "/";
     const suffix = if (endsWith(program, ".elf")) "" else ".elf";
-    const length = prefix.len + program.len + suffix.len;
+    const length = path_value.len + separator.len + program.len + suffix.len;
     if (length > maximum_path) return null;
-    @memcpy(output[0..prefix.len], prefix);
-    @memcpy(output[prefix.len .. prefix.len + program.len], program);
-    @memcpy(output[prefix.len + program.len .. length], suffix);
+    @memcpy(output[0..path_value.len], path_value);
+    @memcpy(output[path_value.len .. path_value.len + separator.len], separator);
+    const program_start = path_value.len + separator.len;
+    @memcpy(output[program_start .. program_start + program.len], program);
+    @memcpy(output[program_start + program.len .. length], suffix);
     output[length] = 0;
     return output[0..length];
 }

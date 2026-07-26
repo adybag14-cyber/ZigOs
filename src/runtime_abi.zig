@@ -128,6 +128,28 @@ pub const Ipv4SocketAddress = extern struct {
     address_be: u32,
 };
 
+pub const UserString = extern struct {
+    pointer: u64,
+    length: u16,
+    reserved0: u16 = 0,
+    reserved1: u32 = 0,
+};
+
+pub const SpawnRequest = extern struct {
+    path_pointer: u64,
+    arguments_pointer: u64,
+    environment_pointer: u64,
+    path_length: u16,
+    argument_count: u16,
+    environment_count: u16,
+    flags: u16 = 0,
+};
+
+pub const AuxvEntry = extern struct {
+    kind: u64,
+    value: u64,
+};
+
 pub const AbiLimits = struct {
     capabilities: u64,
     user_base: u64,
@@ -269,4 +291,13 @@ test "kernel errors retain distinct userspace errno values" {
     try std.testing.expectEqual(errno_would_block, fromError(error.NoContext));
     try std.testing.expectEqual(errno_no_memory, fromError(error.NoRuntimeFrames));
     try std.testing.expectEqual(errno_system_file_limit, fromError(error.OpenDescriptionLimit));
+}
+
+test "spawnv request and startup vector layouts are stable" {
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(UserString));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(SpawnRequest));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(AuxvEntry));
+    try std.testing.expectEqual(@as(usize, 8), constants.maximum_arguments);
+    try std.testing.expectEqual(@as(usize, 8), constants.maximum_environment);
+    try std.testing.expect(constants.aux_zigos_abi > constants.aux_secure);
 }

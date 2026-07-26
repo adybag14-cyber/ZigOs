@@ -7,6 +7,9 @@ pub const Stat = abi.Stat;
 pub const DirectoryEntry = abi.DirectoryEntry;
 pub const PollDescriptor = abi.PollDescriptor;
 pub const Ipv4SocketAddress = abi.Ipv4SocketAddress;
+pub const UserString = abi.UserString;
+pub const SpawnRequest = abi.SpawnRequest;
+pub const AuxvEntry = abi.AuxvEntry;
 
 extern fn zigos_syscall6(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) callconv(.c) u64;
 
@@ -186,6 +189,31 @@ pub fn spawn(path: []const u8) Error!u32 {
     return @intCast(try result(zigos_syscall6(abi.syscall_spawn, ptrValue(path.ptr), path.len, 0, 0, 0, 0)));
 }
 
+pub fn spawnv(path: []const u8, arguments: []const []const u8, environment: []const []const u8) Error!u32 {
+    if (path.len == 0 or path.len > 255 or arguments.len == 0 or arguments.len > abi.maximum_arguments or
+        environment.len > abi.maximum_environment) return Error.TooBig;
+    var argument_descriptors: [abi.maximum_arguments]UserString = @splat(.{ .pointer = 0, .length = 0 });
+    var environment_descriptors: [abi.maximum_environment]UserString = @splat(.{ .pointer = 0, .length = 0 });
+    for (arguments, 0..) |argument, index| {
+        if (argument.len == 0 or argument.len > abi.maximum_argument_bytes) return Error.NameTooLong;
+        argument_descriptors[index] = .{ .pointer = ptrValue(argument.ptr), .length = @intCast(argument.len) };
+    }
+    for (environment, 0..) |entry, index| {
+        if (entry.len == 0 or entry.len > abi.maximum_environment_bytes or !validEnvironmentEntry(entry))
+            return Error.InvalidArgument;
+        environment_descriptors[index] = .{ .pointer = ptrValue(entry.ptr), .length = @intCast(entry.len) };
+    }
+    const request = SpawnRequest{
+        .path_pointer = ptrValue(path.ptr),
+        .arguments_pointer = ptrValue(&argument_descriptors),
+        .environment_pointer = if (environment.len == 0) 0 else ptrValue(&environment_descriptors),
+        .path_length = @intCast(path.len),
+        .argument_count = @intCast(arguments.len),
+        .environment_count = @intCast(environment.len),
+    };
+    return @intCast(try result(zigos_syscall6(abi.syscall_spawnv, ptrValue(&request), 0, 0, 0, 0, 0)));
+}
+
 pub fn wait(pid: u32, nohang: bool, status: *WaitStatus) Error!u32 {
     return @intCast(try result(zigos_syscall6(abi.syscall_wait, pid, @intFromBool(nohang), ptrValue(status), 0, 0, 0)));
 }
@@ -268,6 +296,56 @@ pub fn getcwd(buffer: []u8) Error![]const u8 {
 
 pub fn chdir(path: [*:0]const u8) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_chdir, ptrValue(path), 0, 0, 0, 0, 0));
+}
+
+pub fn environmentValue(envp: [*]const usize, key: []const u8) ?[]const u8 {
+    var index: usize = 0;
+    while (index < abi.maximum_environment and envp[index] != 0) : (index += 1) {
+        const pointer: [*:0]const u8 = @ptrFromInt(envp[index]);
+        const length = stringLength(pointer);
+        const entry = pointer[0..length];
+        if (entry.len > key.len and entry[key.len] == '=' and bytesEqual(entry[0..key.len], key))
+            return entry[key.len + 1 ..];
+    }
+    return null;
+}
+
+pub fn collectEnvironment(envp: [*]const usize, output: [][]const u8) ?[]const []const u8 {
+    var count: usize = 0;
+    while (count < output.len and count < abi.maximum_environment and envp[count] != 0) : (count += 1) {
+        const pointer: [*:0]const u8 = @ptrFromInt(envp[count]);
+        const length = stringLength(pointer);
+        const entry = pointer[0..length];
+        if (!validEnvironmentEntry(entry)) return null;
+        output[count] = entry;
+    }
+    if (count == output.len and count < abi.maximum_environment and envp[count] != 0) return null;
+    return output[0..count];
+}
+
+pub fn auxiliaryValue(auxv: [*]const AuxvEntry, kind: u64) ?u64 {
+    var index: usize = 0;
+    while (index < 32) : (index += 1) {
+        const entry = auxv[index];
+        if (entry.kind == abi.aux_null) return null;
+        if (entry.kind == kind) return entry.value;
+    }
+    return null;
+}
+
+fn validEnvironmentEntry(entry: []const u8) bool {
+    var separator: ?usize = null;
+    for (entry, 0..) |byte, index| {
+        if (byte == 0) return false;
+        if (byte == '=' and separator == null) separator = index;
+    }
+    return if (separator) |index| index != 0 else false;
+}
+
+fn bytesEqual(left: []const u8, right: []const u8) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |a, b| if (a != b) return false;
+    return true;
 }
 
 pub fn writeAll(fd: u16, bytes: []const u8) Error!void {

@@ -3,7 +3,7 @@ const std = @import("std");
 pub const maximum_nodes: usize = 96;
 pub const maximum_name_length: usize = 31;
 pub const maximum_path_length: usize = 255;
-pub const maximum_file_size: usize = 16 * 1024;
+pub const maximum_file_size: usize = 32 * 1024;
 pub const maximum_mounts: usize = 8;
 pub const maximum_open_files: usize = 64;
 pub const maximum_directory_entries: usize = 64;
@@ -857,6 +857,14 @@ test "VFS file create write append truncate and read" {
     try std.testing.expectEqual(@as(usize, 5), (try fs.stat(0, "/tmp/note.txt")).size);
 }
 
+test "VFS accepts the full 32 KiB file boundary" {
+    var fs = Vfs.init();
+    const payload: [maximum_file_size]u8 = @splat(0x5A);
+    const oversized: [maximum_file_size + 1]u8 = @splat(0xA5);
+    _ = try fs.putFile(0, "/large.bin", &payload, 0o444, false, 1);
+    try std.testing.expectEqual(maximum_file_size, (try fs.stat(0, "/large.bin")).size);
+    try std.testing.expectError(Error.FileTooLarge, fs.putFile(0, "/too-large.bin", &oversized, 0o444, false, 2));
+}
 test "VFS directory mutation rejects cycles and nonempty removal" {
     var fs = Vfs.init();
     const a = try fs.mkdir(0, "/a", 0o755, 1);

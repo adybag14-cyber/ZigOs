@@ -208,6 +208,7 @@ def main() -> int:
             send(client, process, serial, "cat /proc/version", b"ZigOs 19.0.0 x86_64 persistent runtime")
             send(client, process, serial, "pid", b"\r\n2\r\n")
             send(client, process, serial, "run hello", b"process 3 exited 42", 40)
+            send(client, process, serial, "sdk alpha beta", b"process 4 exited 86", 40)
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")
@@ -219,9 +220,12 @@ def main() -> int:
                 "ZigOs userspace shell PID 2",
                 "hello from VFS-loaded CPL3 ELF64",
                 "process 3 exited 42",
+                "zig-sdk: envp/auxv passed",
+                "zig-sdk: startup/argv/abi/files/vm/errno passed",
+                "process 4 exited 86",
                 "userspace shell requested shutdown",
                 "ZigOs normal userspace shutdown: shell PID 2 status 0",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 33/33 clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 51/51 clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes cleanup yes",
             )
             forbidden = (

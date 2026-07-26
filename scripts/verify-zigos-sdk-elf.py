@@ -58,7 +58,7 @@ def main() -> int:
             fail(f"SDK ELF program header {index} violates readable/W^X policy")
         if physical not in (0, virtual):
             fail(f"SDK ELF program header {index} has unsupported physical address")
-        if file_size == 0 or memory_size < file_size:
+        if memory_size == 0 or memory_size < file_size:
             fail(f"SDK ELF program header {index} has invalid file/memory sizes")
         if alignment != PAGE_SIZE or offset % PAGE_SIZE != virtual % PAGE_SIZE:
             fail(f"SDK ELF program header {index} is not page-congruent")

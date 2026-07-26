@@ -109,7 +109,7 @@ pub fn parse(file: []const u8) ?Image {
         if (kind != pt_load) return null;
         if ((physical_address != 0 and physical_address != virtual_address) or flags == 0 or (flags & ~(pf_read | pf_write | pf_execute)) != 0) return null;
         if ((flags & pf_read) == 0 or (flags & pf_write) != 0 and (flags & pf_execute) != 0) return null;
-        if (file_size == 0 or memory_size < file_size or memory_size == 0) return null;
+        if (memory_size < file_size or memory_size == 0) return null;
         if (alignment != page_size or file_offset % page_size != virtual_address % page_size) return null;
         if (!isCanonicalUser(virtual_address)) return null;
         const memory_end = std.math.add(u64, virtual_address, memory_size) catch return null;
@@ -223,6 +223,24 @@ test "parser accepts conventional physical addresses and a bounded section table
     try std.testing.expect(image.load_segments[0].executable());
 }
 
+test "parser accepts a pure BSS writable load segment" {
+    const base: u64 = 0x0000_0080_0000_0000;
+    var bytes = conventionalElfFixture();
+    put16(&bytes, 56, 2);
+    const offset: usize = 64 + 56;
+    put32(&bytes, offset, pt_load);
+    put32(&bytes, offset + 4, pf_read | pf_write);
+    put64(&bytes, offset + 8, 0);
+    put64(&bytes, offset + 16, base + page_size);
+    put64(&bytes, offset + 24, base + page_size);
+    put64(&bytes, offset + 32, 0);
+    put64(&bytes, offset + 40, 8);
+    put64(&bytes, offset + 48, page_size);
+    const image = parse(&bytes) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 2), image.load_count);
+    try std.testing.expect(image.load_segments[1].writable());
+    try std.testing.expectEqual(@as(u64, 0), image.load_segments[1].file_size);
+}
 test "parser rejects malformed optional section metadata" {
     var bytes = conventionalElfFixture();
     put16(&bytes, 62, 2);
