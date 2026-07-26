@@ -49,6 +49,17 @@ pub const Stage = struct {
     }
 };
 
+/// Copy argument views from the stable token array. Indexing the stage directly
+/// is deliberate: slicing a by-value loop capture would make every view alias
+/// the same temporary token storage.
+pub fn stableArgumentSlices(stage: *const Stage, start: usize, output: [][]const u8) ?[]const []const u8 {
+    if (start > stage.count) return null;
+    const count = stage.count - start;
+    if (count > output.len) return null;
+    for (0..count) |index| output[index] = stage.arguments[start + index].slice();
+    return output[0..count];
+}
+
 const Redirection = enum { none, input, output, append };
 
 pub const CommandLine = struct {
@@ -568,4 +579,16 @@ test "line editor retains deduplicated history and ANSI navigation" {
     _ = editor.feed('[');
     _ = editor.feed('B');
     try std.testing.expectEqualStrings("second", editor.line());
+}
+
+test "stable argument slices preserve distinct extra arguments" {
+    const environment = Environment.init();
+    const command = try parse("exec /bin/sdk.elf alpha beta", &environment);
+    var slices: [3][]const u8 = undefined;
+    const arguments = stableArgumentSlices(&command.stages[0], 1, &slices) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), arguments.len);
+    try std.testing.expectEqualStrings("/bin/sdk.elf", arguments[0]);
+    try std.testing.expectEqualStrings("alpha", arguments[1]);
+    try std.testing.expectEqualStrings("beta", arguments[2]);
+    try std.testing.expect(arguments[1].ptr != arguments[2].ptr);
 }

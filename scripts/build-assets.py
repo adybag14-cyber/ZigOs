@@ -132,6 +132,7 @@ def main() -> int:
     process_elf = build / "process-user.elf"
     process_exec_elf = build / "process-exec.elf"
     cpu_object = build / "cpu.obj"
+    sdk_syscall_object = build / "sdk" / "syscall.o"
     trampoline = generated / "ap_trampoline.bin"
     runtime_program_data = {
         "hello": b"hello from VFS-loaded CPL3 ELF64\r\n",
@@ -147,6 +148,7 @@ def main() -> int:
         "socket": runtime_socket_data(),
     }
     runtime_outputs: list[Path] = []
+    sdk_syscall_object.parent.mkdir(parents=True, exist_ok=True)
 
     run([nasm, "-w+error", "-f", "bin", str(user / "service.asm"), "-o", str(service_bin)], root)
     run(
@@ -208,6 +210,7 @@ def main() -> int:
         run([python, str(scripts / "verify-runtime-user-elf.py"), str(elf_path)], root)
         runtime_outputs.append(elf_path)
 
+    run([nasm, "-w+error", "-f", "elf64", str(root / "sdk" / "zig" / "syscall.asm"), "-o", str(sdk_syscall_object)], root)
     run([nasm, "-w+error", "-f", "win64", str(arch / "cpu.asm"), "-o", str(cpu_object)], root)
     run([nasm, "-w+error", "-f", "bin", str(arch / "ap_trampoline.asm"), "-o", str(trampoline)], root)
     if trampoline.stat().st_size != 4096:

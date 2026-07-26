@@ -55,11 +55,23 @@ pub fn parse(file: []const u8) ?Image {
 
     const entry = read64(file, 24);
     const program_header_offset = read64(file, 32);
-    if (read64(file, 40) != 0 or read32(file, 48) != 0) return null;
+    const section_header_offset = read64(file, 40);
+    if (read32(file, 48) != 0) return null;
     if (read16(file, 52) != 64 or read16(file, 54) != 56) return null;
     const program_header_count = read16(file, 56);
     if (program_header_count == 0 or program_header_count > 16) return null;
-    if (read16(file, 58) != 0 or read16(file, 60) != 0 or read16(file, 62) != 0) return null;
+    const section_header_size = read16(file, 58);
+    const section_header_count = read16(file, 60);
+    const section_name_index = read16(file, 62);
+    if (section_header_offset == 0) {
+        if (section_header_size != 0 or section_header_count != 0 or section_name_index != 0) return null;
+    } else {
+        if (section_header_size != 64 or section_header_count == 0 or section_header_count > 256 or
+            section_name_index >= section_header_count) return null;
+        const shoff: usize = std.math.cast(usize, section_header_offset) orelse return null;
+        const sh_bytes = std.math.mul(usize, section_header_count, 64) catch return null;
+        if (shoff > file.len or sh_bytes > file.len - shoff) return null;
+    }
 
     const phoff: usize = std.math.cast(usize, program_header_offset) orelse return null;
     const ph_bytes = std.math.mul(usize, program_header_count, 56) catch return null;
@@ -95,7 +107,7 @@ pub fn parse(file: []const u8) ?Image {
         const memory_size = read64(file, offset + 40);
         const alignment = read64(file, offset + 48);
         if (kind != pt_load) return null;
-        if (physical_address != 0 or flags == 0 or (flags & ~(pf_read | pf_write | pf_execute)) != 0) return null;
+        if ((physical_address != 0 and physical_address != virtual_address) or flags == 0 or (flags & ~(pf_read | pf_write | pf_execute)) != 0) return null;
         if ((flags & pf_read) == 0 or (flags & pf_write) != 0 and (flags & pf_execute) != 0) return null;
         if (file_size == 0 or memory_size < file_size or memory_size == 0) return null;
         if (alignment != page_size or file_offset % page_size != virtual_address % page_size) return null;
@@ -153,4 +165,69 @@ fn read32(bytes: []const u8, offset: usize) u32 {
 
 fn read64(bytes: []const u8, offset: usize) u64 {
     return @as(u64, read32(bytes, offset)) | (@as(u64, read32(bytes, offset + 4)) << 32);
+}
+
+fn put16(bytes: []u8, offset: usize, value: u16) void {
+    bytes[offset] = @truncate(value);
+    bytes[offset + 1] = @truncate(value >> 8);
+}
+
+fn put32(bytes: []u8, offset: usize, value: u32) void {
+    put16(bytes, offset, @truncate(value));
+    put16(bytes, offset + 2, @truncate(value >> 16));
+}
+
+fn put64(bytes: []u8, offset: usize, value: u64) void {
+    put32(bytes, offset, @truncate(value));
+    put32(bytes, offset + 4, @truncate(value >> 32));
+}
+
+fn conventionalElfFixture() [0x300]u8 {
+    const base: u64 = 0x0000_0080_0000_0000;
+    var bytes: [0x300]u8 = @splat(0);
+    @memcpy(bytes[0..4], "\x7FELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    put16(&bytes, 16, 2);
+    put16(&bytes, 18, 0x3E);
+    put32(&bytes, 20, 1);
+    put64(&bytes, 24, base + 0x100);
+    put64(&bytes, 32, 64);
+    put64(&bytes, 40, 0x200);
+    put32(&bytes, 48, 0);
+    put16(&bytes, 52, 64);
+    put16(&bytes, 54, 56);
+    put16(&bytes, 56, 1);
+    put16(&bytes, 58, 64);
+    put16(&bytes, 60, 2);
+    put16(&bytes, 62, 1);
+
+    put32(&bytes, 64, pt_load);
+    put32(&bytes, 68, pf_read | pf_execute);
+    put64(&bytes, 72, 0);
+    put64(&bytes, 80, base);
+    put64(&bytes, 88, base);
+    put64(&bytes, 96, bytes.len);
+    put64(&bytes, 104, bytes.len);
+    put64(&bytes, 112, page_size);
+    bytes[0x100] = 0xC3;
+    return bytes;
+}
+
+test "parser accepts conventional physical addresses and a bounded section table" {
+    const bytes = conventionalElfFixture();
+    const image = parse(&bytes) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 1), image.load_count);
+    try std.testing.expectEqual(@as(u64, 0x0000_0080_0000_0100), image.entry);
+    try std.testing.expect(image.load_segments[0].executable());
+}
+
+test "parser rejects malformed optional section metadata" {
+    var bytes = conventionalElfFixture();
+    put16(&bytes, 62, 2);
+    try std.testing.expect(parse(&bytes) == null);
+    bytes = conventionalElfFixture();
+    put64(&bytes, 40, bytes.len - 32);
+    try std.testing.expect(parse(&bytes) == null);
 }

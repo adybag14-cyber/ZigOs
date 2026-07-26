@@ -25,6 +25,37 @@ pub fn build(b: *std.Build) void {
     const assets_step = b.step("assets", "Generate and verify assembly/ELF build assets");
     assets_step.dependOn(&assets.step);
 
+    const sdk_target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+    const sdk_module = b.createModule(.{
+        .root_source_file = b.path("sdk/zig/conformance.zig"),
+        .target = sdk_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+        .code_model = .large,
+        .pic = false,
+        .stack_protector = false,
+        .stack_check = false,
+    });
+    sdk_module.addObjectFile(b.path("build/sdk/syscall.o"));
+    const sdk_conformance = b.addExecutable(.{
+        .name = "sdk",
+        .root_module = sdk_module,
+    });
+    sdk_conformance.entry = .{ .symbol_name = "_start" };
+    sdk_conformance.setLinkerScript(b.path("sdk/zig/linker.ld"));
+    sdk_conformance.step.dependOn(&assets.step);
+
+    const sdk_embed = b.addWriteFiles();
+    _ = sdk_embed.addCopyFile(sdk_conformance.getEmittedBin(), "sdk.elf");
+    const sdk_embed_module = sdk_embed.add(
+        "runtime_sdk.zig",
+        "pub const bytes = @embedFile(\"sdk.elf\");\n",
+    );
+
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
         .os_tag = .uefi,
@@ -41,6 +72,9 @@ pub fn build(b: *std.Build) void {
         .omit_frame_pointer = false,
     });
     kernel_module.addObjectFile(b.path("build/cpu.obj"));
+    kernel_module.addAnonymousImport("runtime_sdk", .{
+        .root_source_file = sdk_embed_module,
+    });
 
     const kernel = b.addExecutable(.{
         .name = "BOOTX64",
@@ -64,6 +98,10 @@ pub fn build(b: *std.Build) void {
         b.path("build/process-exec.elf"),
         "artifacts/process-exec.elf",
     );
+    const install_sdk = b.addInstallFile(
+        sdk_conformance.getEmittedBin(),
+        "artifacts/sdk.elf",
+    );
     install_service.step.dependOn(&assets.step);
     install_process.step.dependOn(&assets.step);
     install_exec.step.dependOn(&assets.step);
@@ -79,9 +117,12 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_service.step);
     b.getInstallStep().dependOn(&install_process.step);
     b.getInstallStep().dependOn(&install_exec.step);
+    b.getInstallStep().dependOn(&install_sdk.step);
 
     const verify_efi = b.addSystemCommand(&.{ python, "scripts/verify-efi.py" });
     verify_efi.addFileArg(kernel.getEmittedBin());
+    const verify_sdk = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
+    verify_sdk.addFileArg(sdk_conformance.getEmittedBin());
     const verify_permanent_userspace = b.addSystemCommand(&.{ python, "scripts/verify-permanent-userspace.py" });
     verify_permanent_userspace.setCwd(b.path("."));
     verify_permanent_userspace.step.dependOn(&assets.step);
@@ -107,6 +148,7 @@ pub fn build(b: *std.Build) void {
         "src/runtime_abi.zig",
         "src/runtime_page_pool.zig",
         "src/runtime_persist.zig",
+        "src/elf64.zig",
     }) |source_path| {
         const tests = b.addTest(.{
             .root_module = b.createModule(.{
@@ -124,5 +166,6 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&fmt.step);
     check_step.dependOn(unit_step);
     check_step.dependOn(&verify_efi.step);
+    check_step.dependOn(&verify_sdk.step);
     check_step.dependOn(&verify_permanent_userspace.step);
 }

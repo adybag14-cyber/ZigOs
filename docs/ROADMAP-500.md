@@ -2,9 +2,9 @@
 
 This roadmap converts the broad runtime, process, filesystem, userland, networking, build, testing, hardware and security gaps into 500 individually trackable engineering goals. A checked item means the repository contains the claimed implementation and at least one executable test or release contract; it does not imply production readiness. Each completed goal should also state whether its evidence is source-only, isolated-unit, QEMU integration or required hosted CI. Bounded Capstone fixtures do not automatically satisfy a general-runtime goal.
 
-**Status after the maintained ABI/VM/I/O/UDP advance:** 142 complete, 358 open.
+**Status after the persistent-storage, TTY and Zig-SDK advances:** 145 complete, 355 open.
 
-Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. The first bounded Priority 1 runtime advance completes **G138, G139 and G140**. The maintained ABI/VM/I/O/UDP slice additionally completes **G102, G114, G118, G120-G122, G162-G164, G184, G253, G296-G299, G308-G309, G311, G328 and G330** through generated ABI contracts, CPL3 integration fixtures and required 42/43-command QEMU sessions. The post-bootstrap memory manager remains a bounded handoff rather than a system-wide PMM because boot-time allocations, high-memory direct access, DMA policy, synchronization and OOM selection remain incomplete. Historical Capstone release accounting remains separate from this broader roadmap.
+Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. The first bounded Priority 1 runtime advance completes **G138, G139 and G140**. The maintained ABI/VM/I/O/UDP slice additionally completes **G102, G114, G118, G120-G122, G162-G164, G184, G253, G296-G299, G308-G309, G311, G328 and G330** through generated ABI contracts, CPL3 integration fixtures and required 44/45-command QEMU sessions. The post-bootstrap memory manager remains a bounded handoff rather than a system-wide PMM because boot-time allocations, high-memory direct access, DMA policy, synchronization and OOM selection remain incomplete. The later persistent-storage and Zig-SDK slices additionally complete **G219, G220 and G293**. Historical Capstone release accounting remains separate from this broader roadmap.
 
 ## Completed in Capstone 17
 
@@ -232,8 +232,8 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [ ] **G216** — Delete files from the persistent FAT mount.
 - [ ] **G217** — Rename files on the persistent FAT mount.
 - [ ] **G218** — Create and remove directories on the persistent FAT mount.
-- [ ] **G219** — Persist shell-created data across a real reboot.
-- [ ] **G220** — Verify reboot persistence against an unchanged expected filesystem state.
+- [x] **G219** — Persist shell-created data across a real reboot.
+- [x] **G220** — Verify reboot persistence against an unchanged expected filesystem state.
 - [ ] **G221** — Detect FAT chain loops and cross-links.
 - [ ] **G222** — Detect out-of-range FAT cluster references.
 - [ ] **G223** — Repair or quarantine recoverable FAT inconsistencies.
@@ -309,7 +309,7 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [ ] **G290** — Provide a basic text editor suitable for serial consoles.
 - [ ] **G291** — Provide a file-copy utility with partial-I/O handling.
 - [ ] **G292** — Provide a minimal dynamic-free C-compatible userspace ABI description.
-- [ ] **G293** — Provide a Zig userspace support library wrapping syscalls.
+- [x] **G293** — Provide a Zig userspace support library wrapping syscalls.
 - [x] **G294** — Build every userspace program as a separate ELF64 artifact.
 - [ ] **G295** — Install userspace programs into the persistent filesystem image.
 - [x] **G296** — Run a multi-program boot smoke test entirely through the shell.
@@ -444,7 +444,7 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [ ] **G416** — Run process create/exit/reap stress under timer preemption.
 - [ ] **G417** — Run filesystem mutation stress across simulated power failures.
 - [ ] **G418** — Run concurrent network connections with injected packet loss.
-- [x] **G419** - Require both the network-enabled boot profile and the 43-command live-network permanent-shell profile in hosted CI.
+- [x] **G419** - Require both the network-enabled boot profile and the 45-command live-network permanent-shell profile in hosted CI.
 - [ ] **G420** — Publish an SMP-enabled QEMU profile as a required CI gate.
 - [ ] **G421** — Publish a framebuffer and USB-keyboard profile as a required CI gate.
 - [ ] **G422** — Publish NVMe and AHCI fallback profiles as required CI gates.

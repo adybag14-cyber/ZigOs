@@ -30,6 +30,7 @@ const runtime_vm_elf = @embedFile("generated/runtime_vm.elf");
 const runtime_io_elf = @embedFile("generated/runtime_io.elf");
 const runtime_tty_elf = @embedFile("generated/runtime_tty.elf");
 const runtime_socket_elf = @embedFile("generated/runtime_socket.elf");
+const runtime_sdk_elf = @import("runtime_sdk").bytes;
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_wait_for_interrupt() callconv(cc) void;
@@ -351,6 +352,7 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/io.elf", runtime_io_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/tty.elf", runtime_tty_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/socket.elf", runtime_socket_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/sdk.elf", runtime_sdk_elf, 0o555, false, 0);
 
     const pseudo_paths = [_][]const u8{
         "/proc/version",   "/proc/uptime", "/proc/meminfo", "/proc/processes",
@@ -1233,12 +1235,17 @@ fn launchExecutable(
         usage("exec PATH [up to 7 ARGS]", output);
         return null;
     }
-    for (stage.arguments[path_index + 1 .. stage.count], 0..) |argument, index| {
-        extra_arguments[index] = argument.slice();
-    }
+    const stable_arguments = runtime_command.stableArgumentSlices(
+        stage,
+        path_index + 1,
+        extra_arguments[0..],
+    ) orelse {
+        usage("exec PATH [up to 7 ARGS]", output);
+        return null;
+    };
     return spawnExecutablePath(
         stage.arguments[path_index].slice(),
-        extra_arguments[0..extra_count],
+        stable_arguments,
         registers,
         background,
         output,

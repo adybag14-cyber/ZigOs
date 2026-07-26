@@ -69,11 +69,11 @@ jobs:
         shell: pwsh
         run: .\scripts\test-qemu.ps1 -Network -NoHpet -NoPs2 -CpuCount 1 -NoUsbKeyboard -NoGraphics -TimeoutSeconds 180
 
-      - name: Drive 43-command permanent-userspace COM1 runtime (offline)
+      - name: Drive 44-command permanent-userspace COM1 runtime (offline)
         shell: pwsh
         run: .\scripts\test-runtime.ps1 -TimeoutSeconds 180
 
-      - name: Drive 44-command permanent-userspace COM1 runtime (live network)
+      - name: Drive 45-command permanent-userspace COM1 runtime (live network)
         shell: pwsh
         run: .\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 

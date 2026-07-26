@@ -18,7 +18,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 47 unique isolated-test declarations, the source contract, the 42-command offline runtime, the 43-command live-network runtime and the legacy two-boot persistence regression. Direct per-module runners execute 62 tests because imported process and memory tests are deliberately exercised from more than one root. The required hosted workflow includes the canonical gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 56 unique isolated-test declarations, the source contract, the 44-command offline runtime, the 45-command live-network runtime, the x86-64 NVMe two-boot persistence proof and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -33,6 +33,7 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 - private CR3 roots, strict W^X `PT_LOAD` mappings, one-page stacks and unmapped guards;
 - complete GPR and FXSAVE context preservation across syscalls and timer preemption;
 - a versioned pointer-validated permanent userspace ABI with generated Zig/NASM constants, capability discovery, VFS-backed spawn, exact waitpid, wait-any and WNOHANG;
+- a freestanding Zig SDK with generated ABI structures, a SysV AMD64 startup shim, typed file/process/VM/poll/UDP wrappers and an independently verified directly linked `/bin/sdk.elf` conformance program;
 - page-granular anonymous `mmap`, subrange `munmap`, W^X `mprotect` and expandable/shrinkable `brk`;
 - descriptor-backed `fstat`, directory iteration and `poll`;
 - up to eight descriptor-backed retained UDP sockets with bind, connect, send, receive, local-name lookup, readiness and blocked-reader wakeup;
@@ -100,17 +101,19 @@ Representative exact shutdown contracts are:
 
 ```text
 # Offline
-ZigOs persistent runtime shutdown: commands 42 failed 0
-ZigOs persistent descriptors: ... dup/inherited/cloexec 2/47/1 ... clean yes
-ZigOs post-bootstrap physical memory: ... peak 32 alloc/free 197/197 failed/rejected 0/0 clean yes
-ZigOs permanent userspace: page-limit 4096 used 0 peak 32 contexts 0 launches/exits/faults 12/10/1 ... reclaimed 197 allocator alloc/release/retains 197/197/0 shared/oom/rejected 0/0/0 clean yes
+ZigOs persistent runtime shutdown: commands 44 failed 0
+ZigOs persistent descriptors: ... dup/inherited/cloexec 2/53/1 ... clean yes
+ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
+ZigOs post-bootstrap physical memory: ... peak 32 alloc/free 231/231 failed/rejected 0/0 clean yes
+ZigOs permanent userspace: page-limit 4096 used 0 peak 32 contexts 0 launches/exits/faults 14/12/1 ... reclaimed 231 allocator alloc/release/retains 231/231/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes
 
 # Live e1000e
-ZigOs persistent runtime shutdown: commands 43 failed 0
-ZigOs persistent descriptors: ... dup/inherited/cloexec 2/50/1 ... clean yes
-ZigOs post-bootstrap physical memory: ... peak 32 alloc/free 213/213 failed/rejected 0/0 clean yes
-ZigOs permanent userspace: page-limit 4096 used 0 peak 32 contexts 0 launches/exits/faults 13/11/1 ... reclaimed 213 allocator alloc/release/retains 213/213/0 shared/oom/rejected 0/0/0 clean yes
+ZigOs persistent runtime shutdown: commands 45 failed 0
+ZigOs persistent descriptors: ... dup/inherited/cloexec 2/56/1 ... clean yes
+ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
+ZigOs post-bootstrap physical memory: ... peak 32 alloc/free 247/247 failed/rejected 0/0 clean yes
+ZigOs permanent userspace: page-limit 4096 used 0 peak 32 contexts 0 launches/exits/faults 15/13/1 ... reclaimed 247 allocator alloc/release/retains 247/247/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 ```
 
@@ -143,7 +146,7 @@ Mounted namespaces:
 /net    netfs       retained network information
 ```
 
-The root filesystem is currently RAM-backed. `sync` therefore reports zero persistent block flushes, and `/boot` remains read-only.
+The general root remains RAM-backed, while `/persist` is a writable NVMe-backed `zigos_persist` mount using alternating checksummed generations. `sync` writes the payload, flushes it, commits a FUA generation header and flushes again; `/boot` remains read-only.
 
 ## Runtime file descriptors and pipes
 
@@ -176,7 +179,7 @@ The permanent process table now owns real executable lifecycle records. It provi
 - page, descriptor, socket, child and CPU quotas;
 - fault vector/address records derived from genuine CPL3 exceptions.
 
-A separate bounded executor currently supports up to eight simultaneous retained CPL3 contexts and 32 mappings per context. After boot validation, the monotonic allocator is sealed and every remaining usable firmware extent is transferred to a reclaiming physical-memory manager. The executor requests pages on demand below 4 GiB through a 256-slot ownership table; final releases poison pages, return them to the manager and require exact ownership-layer and physical-manager allocation/free balance at shutdown. Each process receives a private CR3, a complete saved integer/FX context, a one-page stack, an unmapped guard page and cloned descriptor namespace. Untouched extents above 4 GiB are retained and counted, but ordinary runtime use of them awaits a direct physical-memory map.
+The permanent executor supports up to 64 retained CPL3 process slots and 1,024 tracked mappings per context. After boot validation, the monotonic allocator is sealed and every remaining usable firmware extent is transferred to a reclaiming physical-memory manager. The executor requests pages on demand below 4 GiB through a 256-slot ownership table; final releases poison pages, return them to the manager and require exact ownership-layer and physical-manager allocation/free balance at shutdown. Each process receives a private CR3, a complete saved integer/FX context, a one-page stack, an unmapped guard page and cloned descriptor namespace. Untouched extents above 4 GiB are retained and counted, but ordinary runtime use of them awaits a direct physical-memory map.
 
 This is still not a general POSIX process implementation. There is no persistent-runtime fork/COW, in-place exec, dynamic linker, flexible stack growth, environment/auxiliary vector or SMP userspace scheduler.
 
@@ -349,8 +352,8 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 47 unique isolated declarations, x86-64 UEFI build, portable PE verification and artifact upload.
-- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 42-command offline and 43-command live-network permanent COM1 sessions, legacy i686 build and two-boot persistence regression.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 56 unique isolated declarations, directly linked Zig SDK verification, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 44-command offline and 45-command live-network permanent COM1 sessions, the x86-64 NVMe two-boot proof, and the legacy i686 build/two-boot regression.
 - **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 
 A green badge therefore represents substantially more than the former reduced single-boot profile.

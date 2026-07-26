@@ -11,10 +11,10 @@ Status: closed by the correctness/CI remediation.
 | The advertised isolated-test total was not actually executed | `build.zig` now runs `runtime_fd.zig`, `runtime_command.zig`, `runtime_process.zig`, `runtime_vfs.zig`, `runtime_abi.zig` and `runtime_page_pool.zig`: 47 unique declarations in total (62 direct-runner executions including imported tests) | canonical `zig build test` and `zig build check` |
 | Syscall descriptor and flag registers were narrowed before validation | `runtime_abi.zig` range-checks full-width descriptor, open-flag and mode arguments before conversion | hostile tests cover 65536, `u64` maximum and high flag bits; source-contract verifier forbids the old truncation forms |
 | Descriptor/VFS errors collapsed to bad-FD | one kernel-error-to-userspace-errno mapping now preserves not-found, access, read-only, directory, broken-pipe and resource-limit distinctions | isolated errno mapping tests plus full UEFI build |
-| Default `kill PID` sent signal 15 without a delivery/default-action path | the kernel shell now defaults explicitly to forced signal 9; other signals remain opt-in and the absence of general userspace delivery is still documented | 42/43-command COM1 sessions prove PID 9 becomes zombie and is reaped |
-| `wait PID` was a status query | the shell validates direct parentage, blocks itself through the process table, services the runtime until the target is terminal, then reaps once | 42/43-command COM1 sessions wait over a sleeping CPL3 PID before the next command is accepted |
+| Default `kill PID` sent signal 15 without a delivery/default-action path | the kernel shell now defaults explicitly to forced signal 9; other signals remain opt-in and the absence of general userspace delivery is still documented | 44/45-command COM1 sessions prove PID 9 becomes zombie and is reaped |
+| `wait PID` was a status query | the shell validates direct parentage, blocks itself through the process table, services the runtime until the target is terminal, then reaps once | 44/45-command COM1 sessions wait over a sleeping CPL3 PID before the next command is accepted |
 | Built-in network help contradicted retained ping/DNS | help now describes retained e1000e packet I/O and explicit offline unavailability | source-contract check plus offline/live runtime sessions |
-| Hosted CI omitted live permanent-shell ping/DNS | Windows CI now runs the 42-command offline and 43-command `-Network` sessions | required workflow step |
+| Hosted CI omitted live permanent-shell ping/DNS | Windows CI now runs the 44-command offline and 45-command `-Network` sessions | required workflow step |
 | Cross-platform identity was printed but not enforced | a dependent job downloads both artifact sets, compares path sets, then compares every file byte-for-byte | required workflow job; G423 |
 
 ## Evidence model used by the roadmap
@@ -31,7 +31,7 @@ Status: in progress. A post-bootstrap reclaiming physical-memory handoff, bounde
 
 ### P1-M1: system physical-memory manager
 
-Delivered bounded slice: after all boot-time validation and hardware setup, the monotonic allocator transfers every unused usable firmware extent in place to a reclaiming physical-memory manager and is sealed against further allocation. The permanent executor requests pages below 4 GiB on demand through 256 generation-tagged ownership slots with arbitrary release/reuse, reference counts, poison-on-final-release, duplicate-backing rejection, OOM and invalid/double/wrong-owner/backing-failure accounting. Final releases return physical pages to coalescing free extents. The 42-command offline profile requires 197 allocations/frees and the 43-command live profile requires 213; both finish with zero allocated physical pages, zero owned pages, zero OOMs and zero rejected operations.
+Delivered bounded slice: after all boot-time validation and hardware setup, the monotonic allocator transfers every unused usable firmware extent in place to a reclaiming physical-memory manager and is sealed against further allocation. The permanent executor requests pages below 4 GiB on demand through 256 generation-tagged ownership slots with arbitrary release/reuse, reference counts, poison-on-final-release, duplicate-backing rejection, OOM and invalid/double/wrong-owner/backing-failure accounting. Final releases return physical pages to coalescing free extents. The 44-command offline profile requires 231 allocations/frees and the 45-command live profile requires 247; both finish with zero allocated physical pages, zero owned pages, zero OOMs and zero rejected operations.
 
 Still open: move boot-time page tables, stacks, DMA buffers, heaps and retained drivers onto the permanent manager rather than handing off only after validation; add synchronization, memory-pressure callbacks and an explicit OOM victim policy; permit ordinary allocations above 4 GiB through a direct physical-memory map; and apply low-memory restrictions only through per-device DMA masks or bounce buffers.
 
@@ -71,7 +71,9 @@ const KernelServices = struct {
 };
 ```
 
-Drivers must register live interfaces rather than return boot-success booleans. The VFS must dispatch through filesystem and file-operation tables rather than only assigning mount metadata. Required milestones are retained block devices, GPT/MBR partition objects, a filesystem-driver interface, a writable disk filesystem, flush/error propagation, reboot persistence and execution of an ELF placed on disk independently of the EFI build.
+Delivered bounded slice: the primary NVMe controller and namespace survive boot in polling mode; a dedicated GPT data partition is mounted at `/persist`; an A/B checksummed journal commits payload-before-header with flush/FUA ordering; shell-created files and directories are serialised through the VFS; and a required two-boot QEMU gate restores a file from generation 1 before committing generation 2 to the alternate slot. Controller and journal errors propagate into `sync`, `fsck` and the shutdown invariant.
+
+Still open: a general block-device registry, multiple devices/namespaces, a filesystem-driver operation table, scalable allocation/free-space metadata, disk-backed executable installation independent of the EFI build, larger files, concurrent mutation and broader crash/fault injection.
 
 Roadmap links: G102, G177–G251 and G295.
 
@@ -81,15 +83,15 @@ Status: accepted and open.
 
 ### P2-U1: documented userspace ABI and SDK
 
-Delivered bounded slice: `abi/zigos-abi.json` defines ABI major version 1, page size, capability bits, syscall numbers 64-92 and errno values; the build generates matching Zig and NASM constants, userspace can query the ABI, and hostile full-width argument tests enforce narrowing and flag rules.
+Delivered bounded slice: `abi/zigos-abi.json` defines ABI major version 1, page size, capability bits, syscall numbers 64-92 and errno values; the build generates matching kernel Zig, NASM and public SDK Zig constants/structures. `sdk/zig` now publishes a fixed-window linker script, a SysV AMD64 startup/syscall bridge and typed wrappers for descriptors, files, process/wait, VM, poll and UDP. A directly linked compiler-generated Zig ELF verifies argc/argv, ABI discovery, pseudo-file I/O, memory protection and errno mapping in both required runtime profiles.
 
-Still open: publish startup code, linker scripts, C/Zig SDK libraries, compatibility policy/conformance binaries, ioctl and the broader file/process/clock interfaces required by independent applications.
+Still open: a generated C header/library, environment and auxiliary vectors, ioctl, broader clocks/signals/filesystem mutation syscalls, independent package/version distribution and a formal within-major compatibility suite.
 
 Roadmap links: G138–G165, G182–G199, G252–G296 and G494–G495.
 
 ### P2-U2: real TTY
 
-The kernel shell and spawned processes now inherit numeric terminal descriptors, and userspace writes stream through descriptors 1 and 2. Still open are blocking userspace terminal input, line discipline, echo/editing controls, foreground process groups, Ctrl-C generation, `/dev/console` and pseudo-terminals. The kernel-shell model remains a bounded transition stage.
+Delivered bounded slice: terminal descriptors provide blocking userspace input, canonical line buffering, echo, Backspace editing, poll readiness, foreground process-group routing, targeted scheduler wakeups and Ctrl-C default action. `/bin/tty.elf` proves an edited COM1 line blocks and wakes in CPL3. Still open are termios/ioctl controls, `/dev/console` as a general openable device, pseudo-terminals, sessions beyond the single console and replacing the kernel command loop with a userspace shell.
 
 Roadmap links: G143–G146, G252–G266 and G454.
 

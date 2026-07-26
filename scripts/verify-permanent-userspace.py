@@ -37,6 +37,7 @@ def main() -> int:
     abi_generator = text("scripts/generate-abi.py")
     memory_source = text("src/memory.zig")
     process_source = text("src/runtime_process.zig")
+    command_source = text("src/runtime_command.zig")
     e1000e_source = text("src/e1000e.zig")
     page_pool_source = text("src/runtime_page_pool.zig")
     vfs_source = text("src/runtime_vfs.zig")
@@ -48,6 +49,12 @@ def main() -> int:
     nvme_image_builder = text("scripts/create-nvme-test-image.py")
     qemu_test = text("scripts/test-qemu.ps1")
     persistence_test = text("scripts/test-x86_64-persistence.py")
+    elf_source = text("src/elf64.zig")
+    sdk_source = text("sdk/zig/zigos.zig")
+    sdk_startup = text("sdk/zig/syscall.asm")
+    sdk_conformance = text("sdk/zig/conformance.zig")
+    sdk_abi = text("sdk/zig/abi.zig")
+    sdk_verifier = text("scripts/verify-zigos-sdk-elf.py")
     workflow = text(".github/workflows/build.yml")
     build_graph = text("build.zig")
     workflow = text(".github/workflows/build.yml")
@@ -130,6 +137,25 @@ def main() -> int:
     require(persistence_test, "parse_header", "host gate validates on-disk A/B header CRCs")
     require(persistence_test, "after_second_hash == after_first_hash", "host gate requires a second physical disk mutation")
     require(workflow, "test-x86_64-persistence.py", "Windows CI runs the two-boot persistence gate")
+    require(runtime, '"/bin/sdk.elf"', "directly linked Zig SDK conformance executable is installed in the VFS")
+    require(build_graph, 'sdk/zig/conformance.zig', "build graph compiles the SDK conformance program as Zig source")
+    require(build_graph, '.code_model = .large', "SDK supports the high permanent userspace address window")
+    require(build_graph, 'verify-zigos-sdk-elf.py', "directly linked SDK ELF has an independent host verifier")
+    require(asset_builder, 'sdk_syscall_object', "asset graph assembles the freestanding syscall/startup bridge")
+    require(abi_generator, 'sdk" / "zig" / "abi.zig"', "machine-readable ABI generator emits the public Zig SDK ABI")
+    require(sdk_startup, "mov rdi, [r12]", "SDK startup reads argc from the canonical initial stack")
+    require(sdk_startup, "lea rsi, [r12 + 8]", "SDK startup derives argv from the canonical initial stack")
+    require(sdk_startup, "zigos_syscall6:", "SDK supplies the six-register int 0x80 bridge")
+    require(sdk_source, "pub fn queryAbi", "SDK exposes typed ABI discovery")
+    require(sdk_source, "pub fn mmap", "SDK exposes typed virtual-memory wrappers")
+    require(sdk_source, "pub fn socket", "SDK exposes typed UDP socket wrappers")
+    require(sdk_conformance, "startup/argv/abi/files/vm/errno passed", "Zig conformance binary spans startup and core wrappers")
+    require(sdk_abi, "pub const AbiInfo = extern struct", "generated SDK ABI publishes stable structure layouts")
+    require(sdk_verifier, "physical not in (0, virtual)", "SDK ELF verifier accepts only zero or conventional p_paddr")
+    require(elf_source, "section_header_offset", "production loader validates optional standard section tables")
+    require(elf_source, "physical_address != virtual_address", "production loader accepts conventional p_paddr only")
+    require(elf_source, 'test "parser accepts conventional physical addresses and a bounded section table"', "ELF compatibility regression test")
+    require(command_source, "stable argument slices preserve distinct extra arguments", "multi-argument launch regression is tested")
 
     require(executor, "paging.activateAddressSpace", "private CR3 activation")
     require(executor, "zigos_enter_user_context", "complete context entry")
@@ -235,13 +261,14 @@ def main() -> int:
         "src/runtime_page_pool.zig",
         "src/memory.zig",
         "src/runtime_persist.zig",
+        "src/elf64.zig",
     )
     declared_tests = sum(
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 53:
-        raise SystemExit(f"canonical isolated-test declaration total must be 53, found {declared_tests}")
+    if declared_tests != 56:
+        raise SystemExit(f"canonical isolated-test declaration total must be 56, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -252,6 +279,7 @@ def main() -> int:
         '"src/runtime_abi.zig"',
         '"src/runtime_page_pool.zig"',
         '"src/runtime_persist.zig"',
+        '"src/elf64.zig"',
     ):
         require(build_graph, source_path, f"isolated test graph includes {source_path}")
 
@@ -299,13 +327,15 @@ def main() -> int:
         "Post-bootstrap physical memory manager active:",
         "bootstrap allocator sealed",
         "ZigOs post-bootstrap physical memory: total ",
-        "peak 32 alloc/free 213/213 failed/rejected 0/0 clean yes",
-        "peak 32 alloc/free 229/229 failed/rejected 0/0 clean yes",
-        "launches/exits/faults 13/11/1",
+        "peak 32 alloc/free 231/231 failed/rejected 0/0 clean yes",
+        "peak 32 alloc/free 247/247 failed/rejected 0/0 clean yes",
         "launches/exits/faults 14/12/1",
-        "reclaimed 213 allocator alloc/release/retains 213/213/0",
-        "reclaimed 229 allocator alloc/release/retains 229/229/0",
+        "launches/exits/faults 15/13/1",
+        "reclaimed 231 allocator alloc/release/retains 231/231/0",
+        "reclaimed 247 allocator alloc/release/retains 247/247/0",
         "tty-api: blocking read/poll/line discipline passed",
+        "zig-sdk: startup/argv/abi/files/vm/errno passed",
+        "exec: PID 16 state zombie status 0x56",
         "ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes",
         "sync complete: ramfs mutations ",
         "fsck ramfs/persist: clean",
@@ -331,7 +361,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: real ELF/TTY/network execution, retained NVMe writes, crash-safe A/B persistence, and complete cleanup")
+    print("Verified permanent runtime contract: real Zig SDK/ELF/TTY/network execution, retained NVMe writes, crash-safe A/B persistence, and complete cleanup")
     return 0
 
 
