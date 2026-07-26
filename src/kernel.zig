@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const boot = @import("boot_info.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
@@ -88,6 +89,8 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     verifyFrameAllocator(&frame_allocator);
     installPaging(info, &frame_allocator);
     installDescriptorTables(info, &frame_allocator);
+    preemptive.retainInterruptHandler();
+    user_mode.retainSyscallHandler();
     testExceptionRecovery(info);
     initializeSerial();
 
@@ -205,6 +208,19 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWrite("Network interfaces ready: Intel 82574L ");
     debugWrite(if (network_ready) "yes" else "no");
     debugWrite("\r\n");
+    if (build_options.normal_boot) {
+        debugWrite("Normal boot selected: skipping kernel heap, scheduler, Capstone 15 and Capstone 16 proof workloads\r\n");
+        enterPersistentRuntime(
+            &frame_allocator,
+            timer_setup.result.ticks_per_second,
+            network_ready,
+            usb_keyboard_ready,
+            nvme_storage_ready,
+            ahci_storage_ready,
+            graphical_console != null,
+            .normal,
+        );
+    }
     initializeKernelHeap(&frame_allocator);
     testCooperativeScheduler(&frame_allocator);
     testPreemptiveScheduler(&frame_allocator, timer_setup.result.ticks_per_second);
@@ -257,7 +273,29 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     }
 
     debugWrite("ZigOs boot sequence complete: kernel foundations and hardware probes passed.\r\n");
-    if (!physical_memory_manager.initializeFromBootstrap(&frame_allocator))
+    enterPersistentRuntime(
+        &frame_allocator,
+        timer_setup.result.ticks_per_second,
+        network_ready,
+        usb_keyboard_ready,
+        nvme_storage_ready,
+        ahci_storage_ready,
+        graphical_console != null,
+        .diagnostic,
+    );
+}
+
+fn enterPersistentRuntime(
+    frame_allocator: *memory.FrameAllocator,
+    ticks_per_second: u64,
+    network_ready: bool,
+    usb_keyboard_ready: bool,
+    nvme_storage_ready: bool,
+    ahci_storage_ready: bool,
+    framebuffer_ready: bool,
+    profile: runtime.Profile,
+) noreturn {
+    if (!physical_memory_manager.initializeFromBootstrap(frame_allocator))
         allocatorFailure("post-bootstrap physical-memory handoff failed");
     const physical_report = physical_memory_manager.report();
     debugWrite("Post-bootstrap physical memory manager active: ");
@@ -270,8 +308,9 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     debugWriteU64Decimal(physical_report.high_pages);
     debugWrite("; bootstrap allocator sealed\r\n");
     runtime.run(.{
+        .profile = profile,
         .physical_memory = &physical_memory_manager,
-        .ticks_per_second = timer_setup.result.ticks_per_second,
+        .ticks_per_second = ticks_per_second,
         .network_ready = network_ready,
         .usb_keyboard_ready = usb_keyboard_ready,
         .nvme_ready = nvme_storage_ready,
@@ -279,7 +318,7 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
         .nvme_data_first_lba = if (retained_nvme_data_partition_ready) retained_nvme_data_partition.first_lba else 0,
         .nvme_data_sector_count = if (retained_nvme_data_partition_ready) retained_nvme_data_partition.sectorCount().? else 0,
         .ahci_ready = ahci_storage_ready,
-        .framebuffer_ready = graphical_console != null,
+        .framebuffer_ready = framebuffer_ready,
     });
 }
 

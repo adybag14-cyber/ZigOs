@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 0,
+    "minor": 1,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -48,7 +48,10 @@
     "connect": 89,
     "send": 90,
     "recv": 91,
-    "getsockname": 92
+    "getsockname": 92,
+    "shutdown": 93,
+    "getcwd": 94,
+    "chdir": 95
   },
   "errno": {
     "permission": -1,

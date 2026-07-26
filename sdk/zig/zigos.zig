@@ -257,6 +257,19 @@ pub fn getsockname(fd: u16, address: *Ipv4SocketAddress) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_getsockname, fd, ptrValue(address), @sizeOf(Ipv4SocketAddress), 0, 0, 0));
 }
 
+pub fn shutdown() Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_shutdown, 0, 0, 0, 0, 0, 0));
+}
+
+pub fn getcwd(buffer: []u8) Error![]const u8 {
+    const length = try result(zigos_syscall6(abi.syscall_getcwd, ptrValue(buffer.ptr), buffer.len, 0, 0, 0, 0));
+    return buffer[0..@intCast(length)];
+}
+
+pub fn chdir(path: [*:0]const u8) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_chdir, ptrValue(path), 0, 0, 0, 0, 0));
+}
+
 pub fn writeAll(fd: u16, bytes: []const u8) Error!void {
     var offset: usize = 0;
     while (offset < bytes.len) {

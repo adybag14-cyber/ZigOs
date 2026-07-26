@@ -188,6 +188,10 @@ fn timerHook(
     loadTask(next_index, frame, fx_state);
 }
 
+pub fn retainInterruptHandler() void {
+    _ = &zigos_scheduler_interrupt_handler;
+}
+
 export fn zigos_scheduler_interrupt_handler(
     frame: *interrupt_context.Frame,
     fx_state: *align(16) interrupt_context.FxState,

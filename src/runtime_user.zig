@@ -166,6 +166,24 @@ var preemptions: u64 = 0;
 var blocking_returns: u64 = 0;
 var syscall_count: u64 = 0;
 
+pub const ShutdownFn = *const fn (context: ?*anyopaque, process_handle: u64) bool;
+var system_context: ?*anyopaque = null;
+var shutdown_fn: ?ShutdownFn = null;
+var normal_boot_capability: bool = false;
+var persistent_storage_capability: bool = false;
+
+pub fn setSystemBackend(
+    context: ?*anyopaque,
+    shutdown_callback: ?ShutdownFn,
+    normal_boot: bool,
+    persistent_storage: bool,
+) void {
+    system_context = context;
+    shutdown_fn = shutdown_callback;
+    normal_boot_capability = normal_boot;
+    persistent_storage_capability = persistent_storage;
+}
+
 pub fn initialize(
     physical_memory: *memory.PhysicalMemoryManager,
     vfs: *runtime_vfs.Vfs,
@@ -191,6 +209,10 @@ pub fn initialize(
     preemptions = 0;
     blocking_returns = 0;
     syscall_count = 0;
+    system_context = null;
+    shutdown_fn = null;
+    normal_boot_capability = false;
+    persistent_storage_capability = false;
     try page_pool.initializeManager(physical_memory, page_limit, memory.four_gib, true);
     if (page_pool.report().capacity != page_limit) return error.RuntimePagePoolUnavailable;
     initialized = true;
@@ -472,6 +494,9 @@ pub fn handleSyscall(
         syscall.syscall_send => return syscallSend(context, frame),
         syscall.syscall_recv => return syscallRecv(context, frame, fx_state),
         syscall.syscall_getsockname => return syscallGetSockName(context, frame),
+        syscall.syscall_shutdown => return syscallShutdown(context, frame, fx_state),
+        syscall.syscall_getcwd => return syscallGetcwd(context, frame),
+        syscall.syscall_chdir => return syscallChdir(context, frame),
         syscall.syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
@@ -587,7 +612,12 @@ pub fn takeOutput(handle: u64, destination: []u8) usize {
     const index = findContext(handle) orelse return 0;
     const context = &contexts[index];
     const count = @min(destination.len, context.output_length);
+    if (count == 0) return 0;
     @memcpy(destination[0..count], context.output[0..count]);
+    const remaining = context.output_length - count;
+    if (remaining != 0) std.mem.copyForwards(u8, context.output[0..remaining], context.output[count..context.output_length]);
+    @memset(context.output[remaining..context.output_length], 0);
+    context.output_length = remaining;
     return count;
 }
 
@@ -635,6 +665,97 @@ pub fn report() Report {
         .allocator_rejections = allocator_report.invalid_addresses + allocator_report.double_frees + allocator_report.owner_mismatches + allocator_report.reference_overflows + allocator_report.backing_failures,
         .allocator_clean = allocator_report.clean,
     };
+}
+
+fn syscallShutdown(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    const process = activeProcesses().get(context.handle) catch {
+        frame.rax = reject(runtime_abi.errno_no_process);
+        return 0;
+    };
+    const callback = shutdown_fn orelse {
+        frame.rax = reject(runtime_abi.errno_permission);
+        return 0;
+    };
+    if (process.pid != 2 or !normal_boot_capability or !callback(system_context, context.handle)) {
+        frame.rax = reject(runtime_abi.errno_permission);
+        return 0;
+    }
+    frame.rax = 0;
+    activeProcesses().exit(context.handle, 0) catch {
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    };
+    exits +%= 1;
+    saveContext(context, frame, fx_state);
+    return 1;
+}
+
+fn syscallGetcwd(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const capacity: usize = std.math.cast(usize, frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (capacity == 0 or capacity > runtime_vfs.maximum_path_length + 1 or
+        !validateRange(context, frame.rdi, capacity, true))
+    {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const path = activeVfs().canonicalPath(process.cwd_node, &path_buffer) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (path.len + 1 > capacity) {
+        frame.rax = reject(runtime_abi.errno_name_too_long);
+        return 0;
+    }
+    path_buffer[path.len] = 0;
+    if (!copyToUser(context, frame.rdi, path_buffer[0 .. path.len + 1])) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = path.len;
+    return 0;
+}
+
+fn syscallChdir(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const path = path_buffer[0..path_length];
+    const info = activeVfs().stat(process.cwd_node, path) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (info.kind != .directory) {
+        frame.rax = reject(runtime_abi.errno_not_directory);
+        return 0;
+    }
+    const node = activeVfs().resolve(process.cwd_node, path) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    activeProcesses().setWorkingDirectory(context.handle, node) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = 0;
+    return 0;
 }
 
 fn syscallSocket(context: *Context, frame: *interrupt_context.Frame) u64 {
@@ -1085,6 +1206,8 @@ fn syscallAbiQuery(context: *Context, frame: *interrupt_context.Frame) u64 {
         syscall.capability_terminal |
         syscall.capability_pseudo_files;
     if (e1000e.activeDevice() != null) capabilities |= syscall.capability_udp_sockets;
+    if (persistent_storage_capability) capabilities |= syscall.capability_persistent_storage;
+    if (normal_boot_capability) capabilities |= syscall.capability_normal_boot;
     const info = runtime_abi.makeInfo(.{
         .capabilities = capabilities,
         .user_base = user_base,

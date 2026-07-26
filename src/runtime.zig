@@ -30,13 +30,20 @@ const runtime_vm_elf = @embedFile("generated/runtime_vm.elf");
 const runtime_io_elf = @embedFile("generated/runtime_io.elf");
 const runtime_tty_elf = @embedFile("generated/runtime_tty.elf");
 const runtime_socket_elf = @embedFile("generated/runtime_socket.elf");
-const runtime_sdk_elf = @import("runtime_sdk").bytes;
+const runtime_sdk_elf = @import("runtime_sdk").sdk;
+const runtime_shell_elf = @import("runtime_sdk").shell;
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_wait_for_interrupt() callconv(cc) void;
 extern fn zigos_enable_interrupts() callconv(cc) void;
 
+pub const Profile = enum {
+    diagnostic,
+    normal,
+};
+
 pub const Configuration = struct {
+    profile: Profile = .diagnostic,
     physical_memory: *memory.PhysicalMemoryManager,
     ticks_per_second: u64,
     network_ready: bool,
@@ -205,9 +212,14 @@ pub fn run(configuration: Configuration) noreturn {
         runtimeFailure("persistent APIC runtime timer failed");
 
     emit("\r\nZigOs persistent runtime online\r\n");
-    emit("init PID 1; serial shell PID 2; APIC scheduling 100 Hz; writable ramfs mounted at /\r\n");
-    emit("Type 'help' for commands. The kernel remains live until an explicit shutdown command.\r\n");
-    printPrompt();
+    switch (configuration.profile) {
+        .diagnostic => {
+            emit("init PID 1; serial shell PID 2; APIC scheduling 100 Hz; writable ramfs mounted at /\r\n");
+            emit("Type 'help' for commands. The kernel remains live until an explicit shutdown command.\r\n");
+            printPrompt();
+        },
+        .normal => emit("ZigOs normal boot profile: init PID 1; userspace shell PID 2; diagnostic software suite skipped\r\n"),
+    }
 
     while (true) {
         serviceRuntime();
@@ -217,8 +229,15 @@ pub fn run(configuration: Configuration) noreturn {
             if (status.line_error) state.serial_line_errors +%= 1;
             const byte = status.byte orelse break;
             received = true;
-            consumeInput(byte);
+            if (configuration.profile == .normal)
+                consumeForegroundInput(byte)
+            else
+                consumeInput(byte);
             if (state.shutdown_requested) break;
+        }
+        if (configuration.profile == .normal and !state.shutdown_requested) {
+            const serviced = runtime_user.serviceOne(currentTick(), null) catch |err| runtimeFailure(@errorName(err));
+            if (serviced) |handle| flushUserspaceOutput(handle);
         }
         if (state.shutdown_requested) finishRuntime();
         if (!received) {
@@ -270,24 +289,46 @@ fn initialize(configuration: Configuration) !void {
     state.cwd = try state.vfs.resolve(0, "/home/root");
     const init_handle = state.processes.initHandle();
     try state.processes.block(init_handle, .device_io, 1);
-    state.shell_handle = try state.processes.spawn(
-        init_handle,
-        .kernel,
-        "zsh",
-        &.{ "zsh", "--login" },
-        state.cwd,
-        0,
-        0,
-        0,
-        .{ .maximum_pages = 128, .maximum_descriptors = 32, .maximum_sockets = 16, .maximum_children = 24 },
-    );
-    try state.processes.setRunning(state.shell_handle);
-    try state.processes.setResourceUsage(state.shell_handle, 8, 0, 0);
-    try state.descriptors.bindProcess(&state.processes, state.shell_handle, true);
-    state.tty.initialize(state.shell_handle);
-    try state.tty.setForeground(&state.processes, state.shell_handle);
     state.descriptors.setTerminalBackend(&state.tty);
-    try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
+    switch (configuration.profile) {
+        .diagnostic => {
+            state.shell_handle = try state.processes.spawn(
+                init_handle,
+                .kernel,
+                "zsh",
+                &.{ "zsh", "--login" },
+                state.cwd,
+                0,
+                0,
+                0,
+                .{ .maximum_pages = 128, .maximum_descriptors = 32, .maximum_sockets = 16, .maximum_children = 24 },
+            );
+            try state.processes.setRunning(state.shell_handle);
+            try state.processes.setResourceUsage(state.shell_handle, 8, 0, 0);
+            try state.descriptors.bindProcess(&state.processes, state.shell_handle, true);
+            state.tty.initialize(state.shell_handle);
+            try state.tty.setForeground(&state.processes, state.shell_handle);
+            try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
+            runtime_user.setSystemBackend(null, null, false, state.persistence.report().mounted);
+        },
+        .normal => {
+            try state.descriptors.bindProcess(&state.processes, init_handle, true);
+            try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
+            runtime_user.setSystemBackend(null, requestNormalShutdown, true, state.persistence.report().mounted);
+            state.shell_handle = try runtime_user.spawn(
+                init_handle,
+                "sh",
+                &.{ "sh", "--login" },
+                state.cwd,
+                runtime_shell_elf,
+                0,
+                .{},
+            );
+            _ = try state.descriptors.releaseProcess(&state.vfs, &state.processes, init_handle);
+            state.tty.initialize(state.shell_handle);
+            try state.tty.setForeground(&state.processes, state.shell_handle);
+        },
+    }
     if (configuration.network_ready) {
         const device = e1000e.activeDevice() orelse return error.NetworkStateMissing;
         _ = e1000e.prepareRuntimeMmio(device);
@@ -353,6 +394,7 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/tty.elf", runtime_tty_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/socket.elf", runtime_socket_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/sdk.elf", runtime_sdk_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/sh.elf", runtime_shell_elf, 0o555, false, 0);
 
     const pseudo_paths = [_][]const u8{
         "/proc/version",   "/proc/uptime", "/proc/meminfo", "/proc/processes",
@@ -423,12 +465,18 @@ fn serviceJobs(tick: u64) void {
         };
         if (process.terminal()) runtime_user.finalize(job.handle) catch {};
     }
-    _ = runtime_user.serviceOne(tick, state.foreground_handle) catch |err| {
+    const serviced = runtime_user.serviceOne(
+        tick,
+        if (state.config.profile == .diagnostic) state.foreground_handle else null,
+    ) catch |err| blk: {
         emit("runtime dispatch failure: ");
         emit(@errorName(err));
         emit("\r\n");
+        break :blk null;
     };
-    if (!state.shell_sleeping and !state.shell_waiting) state.processes.setRunning(state.shell_handle) catch {};
+    if (state.config.profile == .normal) if (serviced) |handle| flushUserspaceOutput(handle);
+    if (state.config.profile == .diagnostic and !state.shell_sleeping and !state.shell_waiting)
+        state.processes.setRunning(state.shell_handle) catch {};
 }
 
 fn consumeInput(byte: u8) void {
@@ -2121,7 +2169,81 @@ fn parseU32(text: []const u8) ?u32 {
     return std.fmt.parseInt(u32, text, 0) catch null;
 }
 
+fn flushUserspaceOutput(handle: u64) void {
+    var bytes: [4096]u8 = undefined;
+    while (true) {
+        const count = runtime_user.takeOutput(handle, &bytes);
+        if (count == 0) break;
+        emit(bytes[0..count]);
+    }
+}
+
+fn requestNormalShutdown(_: ?*anyopaque, process_handle: u64) bool {
+    if (state.config.profile != .normal or process_handle != state.shell_handle or state.shutdown_requested) return false;
+    state.shutdown_requested = true;
+    return true;
+}
+
 fn finishRuntime() noreturn {
+    if (state.config.profile == .normal) finishNormalRuntime();
+    finishDiagnosticRuntime();
+}
+
+fn finishNormalRuntime() noreturn {
+    apic.setTimerHook(null);
+    apic.stopCurrentProcessorTimer(descriptor_tables.persistent_runtime_timer_vector);
+    runtime_user.finalize(state.shell_handle) catch |err| switch (err) {
+        error.NoContext => {},
+        else => runtimeFailure(@errorName(err)),
+    };
+    const init_handle = state.processes.initHandle();
+    const status = state.processes.wait(init_handle, state.shell_handle, true) catch |err| runtimeFailure(@errorName(err)) orelse
+        runtimeFailure("userspace shell did not reach a terminal state");
+    runtime_user.forget(state.shell_handle);
+    const fs_report = state.vfs.report();
+    const process_report = state.processes.report();
+    const descriptor_report = state.descriptors.report();
+    const tty_report = state.tty.report();
+    const persistence_report = state.persistence.report();
+    const userspace_report = runtime_user.report();
+    const physical_report = state.config.physical_memory.report();
+    const physical_rejections = physical_report.invalid_frees + physical_report.double_frees + physical_report.metadata_failures;
+    const clean = status.pid == 2 and status.exit_status == 0 and state.vfs.validate() and fs_report.mounts >= 5 and
+        process_report.live == 1 and descriptor_report.namespaces == 0 and descriptor_report.descriptors == 0 and
+        descriptor_report.open_descriptions == 0 and tty_report.buffered_bytes == 0 and tty_report.edited_bytes == 0 and
+        tty_report.bytes_submitted == tty_report.bytes_read and tty_report.blocked_reads >= 1 and tty_report.reader_wakeups >= 1 and
+        persistence_report.mounted and persistence_report.io_failures == 0 and persistence_report.corrupt_headers == 0 and
+        userspace_report.used_pages == 0 and userspace_report.live_contexts == 0 and userspace_report.launches >= 2 and
+        userspace_report.exits >= 2 and userspace_report.allocator_allocations == userspace_report.allocator_releases and
+        userspace_report.allocator_out_of_memory == 0 and userspace_report.allocator_rejections == 0 and
+        physical_report.clean and physical_report.allocated_pages == 0 and physical_report.allocations == physical_report.frees and
+        physical_report.failed_allocations == 0 and physical_rejections == 0;
+
+    emit("\r\nZigOs normal userspace shutdown: shell PID ");
+    emitDecimal(status.pid);
+    emit(" status ");
+    emitDecimal(status.exit_status);
+    emit("\r\nZigOs normal userspace resources: processes ");
+    emitDecimal(process_report.live);
+    emit(" descriptors ");
+    emitDecimal(descriptor_report.descriptors);
+    emit(" contexts ");
+    emitDecimal(userspace_report.live_contexts);
+    emit(" pages ");
+    emitDecimal(userspace_report.used_pages);
+    emit(" alloc/free ");
+    emitDecimal(physical_report.allocations);
+    emit("/");
+    emitDecimal(physical_report.frees);
+    emit(" clean ");
+    emit(if (clean) "yes" else "no");
+    emit("\r\nZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes cleanup ");
+    emit(if (clean) "yes" else "no");
+    emit("\r\n");
+    while (true) zigos_wait_for_interrupt();
+}
+
+fn finishDiagnosticRuntime() noreturn {
     apic.setTimerHook(null);
     apic.stopCurrentProcessorTimer(descriptor_tables.persistent_runtime_timer_vector);
     const fs_report = state.vfs.report();

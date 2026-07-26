@@ -110,6 +110,10 @@ pub fn run(allocator: *memory.FrameAllocator) ?Report {
     };
 }
 
+pub fn retainSyscallHandler() void {
+    _ = &zigos_user_syscall_handler;
+}
+
 export fn zigos_user_syscall_handler(
     frame: *interrupt_context.Frame,
     fx_state: *align(16) interrupt_context.FxState,

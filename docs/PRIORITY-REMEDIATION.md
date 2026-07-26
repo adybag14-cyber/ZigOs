@@ -91,7 +91,7 @@ Roadmap links: G138–G165, G182–G199, G252–G296 and G494–G495.
 
 ### P2-U2: real TTY
 
-Delivered bounded slice: terminal descriptors provide blocking userspace input, canonical line buffering, echo, Backspace editing, poll readiness, foreground process-group routing, targeted scheduler wakeups and Ctrl-C default action. `/bin/tty.elf` proves an edited COM1 line blocks and wakes in CPL3. Still open are termios/ioctl controls, `/dev/console` as a general openable device, pseudo-terminals, sessions beyond the single console and replacing the kernel command loop with a userspace shell.
+Delivered bounded slice: terminal descriptors provide blocking userspace input, canonical line buffering, echo, Backspace editing, poll readiness, foreground process-group routing, targeted scheduler wakeups and Ctrl-C default action. `/bin/tty.elf` proves an edited COM1 line blocks and wakes in CPL3. The normal profile now launches a directly linked Zig `/bin/sh.elf` as PID 2; its prompt, `pwd`, `cd`, `ls`, `cat`, PID reporting, external spawn/wait and shutdown all execute in CPL3. Still open are termios/ioctl controls, `/dev/console` as a general openable device, pseudo-terminals and sessions beyond the single console.
 
 Roadmap links: G143–G146, G252–G266 and G454.
 
@@ -111,7 +111,9 @@ Roadmap links: G297–G339 and G341–G343.
 
 ### P2-B1: normal boot profile
 
-Boot validation must become an explicit test profile. Normal boot should initialise retained services, mount a root and launch userspace PID 1 without executing the entire proof sequence. Recovery/diagnostic boot should remain possible when optional devices are absent.
+Delivered bounded slice: `-Dnormal-boot=true` branches after retained hardware/storage discovery and before the kernel heap, cooperative/preemptive scheduler demonstrations and Capstone 15/16 software proof workloads. It mounts the runtime VFS and persistent NVMe subtree, keeps PID 1 blocked as init, launches the Zig userspace shell as PID 2, runs a child ELF, then requires exact 33/33 physical-page reclamation and zero descriptors/contexts at shutdown. The default diagnostic profile remains available and continues to run the exhaustive release workload.
+
+Still open: split the large hardware discovery routines into minimal initialisation and optional validation phases so normal boot can also skip assertion-heavy NIC/NVMe protocol proofs, and promote a disk-installed userspace root/PID 1 rather than the current kernel-created init record and boot-seeded RAM VFS.
 
 Roadmap links: G252, G295–G296, G424–G426 and G489.
 

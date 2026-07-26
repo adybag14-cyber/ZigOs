@@ -34,6 +34,7 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 - complete GPR and FXSAVE context preservation across syscalls and timer preemption;
 - a versioned pointer-validated permanent userspace ABI with generated Zig/NASM constants, capability discovery, VFS-backed spawn, exact waitpid, wait-any and WNOHANG;
 - a freestanding Zig SDK with generated ABI structures, a SysV AMD64 startup shim, typed file/process/VM/poll/UDP wrappers and an independently verified directly linked `/bin/sdk.elf` conformance program;
+- an explicit `-Dnormal-boot=true` profile that skips the software proof suite and launches a directly linked Zig `/bin/sh.elf` as the interactive CPL3 PID 2 shell;
 - page-granular anonymous `mmap`, subrange `munmap`, W^X `mprotect` and expandable/shrinkable `brk`;
 - descriptor-backed `fstat`, directory iteration and `poll`;
 - up to eight descriptor-backed retained UDP sockets with bind, connect, send, receive, local-name lookup, readiness and blocked-reader wakeup;
@@ -344,6 +345,9 @@ Persistent post-boot runtime:
 
 # Required live-network permanent-shell profile
 .\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
+
+# Normal profile: real Zig userspace PID 2 shell
+python .\scripts\test-normal-boot.py --boot-timeout 240
 ```
 
 Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `-LegacyAhci`, `-HighApicId`, `-SparseApicIds`, `-NoX2Apic`, `-NoGraphics`, `-NoUsbKeyboard` and `-UsbMouseOnly`.

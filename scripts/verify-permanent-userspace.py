@@ -25,6 +25,7 @@ def forbid(source: str, needle: str, description: str) -> None:
 
 def main() -> int:
     runtime = text("src/runtime.zig")
+    kernel = text("src/kernel.zig")
     executor = text("src/runtime_user.zig")
     cpu = text("src/arch/x86_64/cpu.asm")
     paging = text("src/paging.zig")
@@ -49,10 +50,12 @@ def main() -> int:
     nvme_image_builder = text("scripts/create-nvme-test-image.py")
     qemu_test = text("scripts/test-qemu.ps1")
     persistence_test = text("scripts/test-x86_64-persistence.py")
+    normal_boot_test = text("scripts/test-normal-boot.py")
     elf_source = text("src/elf64.zig")
     sdk_source = text("sdk/zig/zigos.zig")
     sdk_startup = text("sdk/zig/syscall.asm")
     sdk_conformance = text("sdk/zig/conformance.zig")
+    sdk_shell = text("sdk/zig/shell.zig")
     sdk_abi = text("sdk/zig/abi.zig")
     sdk_verifier = text("scripts/verify-zigos-sdk-elf.py")
     workflow = text(".github/workflows/build.yml")
@@ -137,6 +140,28 @@ def main() -> int:
     require(persistence_test, "parse_header", "host gate validates on-disk A/B header CRCs")
     require(persistence_test, "after_second_hash == after_first_hash", "host gate requires a second physical disk mutation")
     require(workflow, "test-x86_64-persistence.py", "Windows CI runs the two-boot persistence gate")
+    require(workflow, "test-normal-boot.py", "Windows CI runs the normal userspace-shell gate")
+    require(build_graph, '"normal-boot"', "build graph exposes an explicit normal-boot profile")
+    require(build_graph, 'sdk/zig/shell.zig', "build graph compiles the userspace shell")
+    require(build_graph, '"artifacts/sh.elf"', "userspace shell is installed as a standalone artifact")
+    require(kernel, "build_options.normal_boot", "kernel branches to the normal profile before software proof workloads")
+    require(kernel, "Normal boot selected: skipping kernel heap, scheduler, Capstone 15 and Capstone 16 proof workloads", "normal profile reports skipped diagnostic workloads")
+    require(runtime, "pub const Profile = enum", "runtime has explicit diagnostic and normal profiles")
+    require(runtime, '"/bin/sh.elf"', "userspace shell ELF is installed in the runtime VFS")
+    require(runtime, "finishNormalRuntime", "normal shutdown has a dedicated cleanup invariant")
+    require(runtime, "flushUserspaceOutput", "userspace shell and child output stream after every dispatch")
+    require(executor, "syscallShutdown", "PID 2 userspace shell has a privileged shutdown syscall")
+    require(executor, "syscallGetcwd", "userspace shell can query its process working directory")
+    require(executor, "syscallChdir", "userspace shell can change its process working directory")
+    require(sdk_source, "pub fn shutdown", "SDK wraps normal-profile shutdown")
+    require(sdk_source, "pub fn getcwd", "SDK wraps getcwd")
+    require(sdk_source, "pub fn chdir", "SDK wraps chdir")
+    require(sdk_shell, "ZigOs userspace shell PID 2", "standalone Zig shell identifies its real PID 2 role")
+    require(sdk_shell, "zigos.spawn", "userspace shell launches child ELF programs through the ABI")
+    require(sdk_shell, "zigos.wait", "userspace shell waits and reports child status")
+    require(normal_boot_test, "process 3 exited 42", "normal QEMU gate proves userspace shell spawn/wait")
+    require(normal_boot_test, "alloc/free 33/33 clean yes", "normal QEMU gate requires exact physical reclamation")
+    require(normal_boot_test, "forbidden", "normal QEMU gate rejects diagnostic proof markers")
     require(runtime, '"/bin/sdk.elf"', "directly linked Zig SDK conformance executable is installed in the VFS")
     require(build_graph, 'sdk/zig/conformance.zig', "build graph compiles the SDK conformance program as Zig source")
     require(build_graph, '.code_model = .large', "SDK supports the high permanent userspace address window")
@@ -361,7 +386,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: real Zig SDK/ELF/TTY/network execution, retained NVMe writes, crash-safe A/B persistence, and complete cleanup")
+    print("Verified permanent runtime contract: diagnostic and normal userspace profiles, real Zig SDK/ELF/TTY/network execution, retained NVMe writes, crash-safe A/B persistence, and complete cleanup")
     return 0
 
 

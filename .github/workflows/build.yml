@@ -112,6 +112,10 @@ jobs:
             zig-out/legacy/i686/ZIGOS386.IMG
           if-no-files-found: error
 
+      - name: Boot normal userspace PID 2 shell profile
+        shell: pwsh
+        run: python .\scripts\test-normal-boot.py --boot-timeout 240
+
   reproducibility:
     name: Cross-platform artifact identity gate
     runs-on: ubuntu-latest

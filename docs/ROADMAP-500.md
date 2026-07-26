@@ -2,9 +2,9 @@
 
 This roadmap converts the broad runtime, process, filesystem, userland, networking, build, testing, hardware and security gaps into 500 individually trackable engineering goals. A checked item means the repository contains the claimed implementation and at least one executable test or release contract; it does not imply production readiness. Each completed goal should also state whether its evidence is source-only, isolated-unit, QEMU integration or required hosted CI. Bounded Capstone fixtures do not automatically satisfy a general-runtime goal.
 
-**Status after the persistent-storage, TTY and Zig-SDK advances:** 145 complete, 355 open.
+**Status after the persistent-storage, TTY, Zig-SDK and userspace-shell advances:** 146 complete, 354 open.
 
-Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. The first bounded Priority 1 runtime advance completes **G138, G139 and G140**. The maintained ABI/VM/I/O/UDP slice additionally completes **G102, G114, G118, G120-G122, G162-G164, G184, G253, G296-G299, G308-G309, G311, G328 and G330** through generated ABI contracts, CPL3 integration fixtures and required 44/45-command QEMU sessions. The post-bootstrap memory manager remains a bounded handoff rather than a system-wide PMM because boot-time allocations, high-memory direct access, DMA policy, synchronization and OOM selection remain incomplete. The later persistent-storage and Zig-SDK slices additionally complete **G219, G220 and G293**. Historical Capstone release accounting remains separate from this broader roadmap.
+Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. The first bounded Priority 1 runtime advance completes **G138, G139 and G140**. The maintained ABI/VM/I/O/UDP slice additionally completes **G102, G114, G118, G120-G122, G162-G164, G184, G253, G296-G299, G308-G309, G311, G328 and G330** through generated ABI contracts, CPL3 integration fixtures and required 44/45-command QEMU sessions. The post-bootstrap memory manager remains a bounded handoff rather than a system-wide PMM because boot-time allocations, high-memory direct access, DMA policy, synchronization and OOM selection remain incomplete. The later persistent-storage, Zig-SDK and normal-shell slices additionally complete **G219, G220, G252 and G293**. Historical Capstone release accounting remains separate from this broader roadmap.
 
 ## Completed in Capstone 17
 
@@ -268,7 +268,7 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 
 ## Shell and standalone userland
 
-- [ ] **G252** — Move the persistent shell itself into a real CPL3 process.
+- [x] **G252** — Move the persistent shell itself into a real CPL3 process.
 - [x] **G253** — Connect shell stdin, stdout and stderr to a terminal descriptor.
 - [ ] **G254** — Execute external storage-backed programs from command names.
 - [ ] **G255** — Search executable paths through the PATH environment variable.
