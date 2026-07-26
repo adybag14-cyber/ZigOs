@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 2,
+    "minor": 3,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -52,7 +52,8 @@
     "shutdown": 93,
     "getcwd": 94,
     "chdir": 95,
-    "spawnv": 96
+    "spawnv": 96,
+    "sync": 97
   },
   "errno": {
     "permission": -1,

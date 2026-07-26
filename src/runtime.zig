@@ -6,6 +6,7 @@ const e1000e = @import("e1000e.zig");
 const interrupt_context = @import("interrupt_context.zig");
 const memory = @import("memory.zig");
 const nvme = @import("nvme.zig");
+const runtime_abi = @import("runtime_abi.zig");
 const runtime_command = @import("runtime_command.zig");
 const runtime_fd = @import("runtime_fd.zig");
 const runtime_process = @import("runtime_process.zig");
@@ -309,12 +310,12 @@ fn initialize(configuration: Configuration) !void {
             state.tty.initialize(state.shell_handle);
             try state.tty.setForeground(&state.processes, state.shell_handle);
             try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
-            runtime_user.setSystemBackend(null, null, false, state.persistence.report().mounted);
+            runtime_user.setSystemBackend(null, null, syncPersistentStorage, false, state.persistence.report().mounted);
         },
         .normal => {
             try state.descriptors.bindProcess(&state.processes, init_handle, true);
             try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
-            runtime_user.setSystemBackend(null, requestNormalShutdown, true, state.persistence.report().mounted);
+            runtime_user.setSystemBackend(null, requestNormalShutdown, syncPersistentStorage, true, state.persistence.report().mounted);
             state.shell_handle = try runtime_user.spawn(
                 init_handle,
                 "sh",
@@ -628,6 +629,7 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
     if (equal(name, "cd")) return commandCd(stage, output);
     if (equal(name, "ls")) return commandLs(stage, output);
     if (equal(name, "cat")) return commandCat(stage, input, output);
+    if (equal(name, "cp")) return commandCp(stage, output);
     if (equal(name, "echo")) return commandEcho(stage, output);
     if (equal(name, "touch")) return commandTouch(stage, output);
     if (equal(name, "mkdir")) return commandMkdir(stage, output);
@@ -683,7 +685,7 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
 }
 
 fn commandHelp(output: *Output) void {
-    output.line("Filesystem: pwd cd ls cat echo touch mkdir rm rmdir mv write append stat chmod mount df fds fdtest pipex sync fsck");
+    output.line("Filesystem: pwd cd ls cat cp echo touch mkdir rm rmdir mv write append stat chmod mount df fds fdtest pipex sync fsck");
     output.line("Processes: ps jobs spawn kill wait crash sleep uptime elf exec run (real VFS-loaded CPL3; kill defaults to forced signal 9)");
     output.line("Network: ping and dns use retained e1000e packet I/O when available; offline boots report explicit unavailability");
     output.line("Shell: env export unset history clear uname hash hexdump grep wc head shutdown");
@@ -728,6 +730,27 @@ fn commandCat(stage: *const runtime_command.Stage, input: []const u8, output: *O
         return;
     }
     for (stage.arguments[1..stage.count]) |argument| if (!readPath(argument.slice(), output)) return;
+}
+
+fn commandCp(stage: *const runtime_command.Stage, output: *Output) void {
+    if (stage.count != 3) return usage("cp SOURCE DESTINATION", output);
+    const source_path = stage.arguments[1].slice();
+    const destination_path = stage.arguments[2].slice();
+    const source = state.vfs.readOnlyView(state.cwd, source_path) catch |err| return shellError("cp", err, output);
+    if (source.len > state.input_buffer.len) return shellError("cp", runtime_vfs.Error.FileTooLarge, output);
+    @memcpy(state.input_buffer[0..source.len], source);
+    const info = state.vfs.stat(state.cwd, source_path) catch |err| return shellError("cp", err, output);
+    _ = state.vfs.putFile(
+        state.cwd,
+        destination_path,
+        state.input_buffer[0..source.len],
+        info.mode,
+        false,
+        currentTick(),
+    ) catch |err| return shellError("cp", err, output);
+    output.write("copied ");
+    output.decimal(source.len);
+    output.write(" bytes\r\n");
 }
 
 fn commandEcho(stage: *const runtime_command.Stage, output: *Output) void {
@@ -1918,8 +1941,8 @@ fn commandHistory(output: *Output) void {
 }
 
 fn commandSync(output: *Output) void {
-    state.filesystem_syncs +%= 1;
-    state.persistence.sync(&state.vfs) catch |err| return shellError("sync", err, output);
+    const result = syncPersistentStorage(null);
+    if (result < 0) return shellError("sync", error.PersistentSyncFailed, output);
     const report = state.persistence.report();
     output.write("sync complete: ramfs mutations ");
     output.decimal(state.vfs.report().mutations);
@@ -2176,6 +2199,12 @@ fn flushUserspaceOutput(handle: u64) void {
         if (count == 0) break;
         emit(bytes[0..count]);
     }
+}
+
+fn syncPersistentStorage(_: ?*anyopaque) i64 {
+    state.filesystem_syncs +%= 1;
+    state.persistence.sync(&state.vfs) catch |err| return runtime_abi.fromError(err);
+    return 0;
 }
 
 fn requestNormalShutdown(_: ?*anyopaque, process_handle: u64) bool {

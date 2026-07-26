@@ -110,6 +110,10 @@ def main() -> int:
     efi = root / "zig-out" / "EFI" / "BOOT" / "BOOTX64.EFI"
     if not efi.is_file():
         raise RuntimeError("normal profile produced no BOOTX64.EFI")
+    sdk_elf = root / "zig-out" / "artifacts" / "sdk.elf"
+    if not sdk_elf.is_file():
+        raise RuntimeError("normal profile produced no sdk.elf")
+    sdk_copy_marker = f"copied {sdk_elf.stat().st_size} bytes"
 
     (root / "build").mkdir(parents=True, exist_ok=True)
     work = pathlib.Path(tempfile.mkdtemp(prefix="normal-boot-", dir=root / "build"))
@@ -208,7 +212,9 @@ def main() -> int:
             send(client, process, serial, "cat /proc/version", b"ZigOs 19.0.0 x86_64 persistent runtime")
             send(client, process, serial, "pid", b"\r\n2\r\n")
             send(client, process, serial, "run hello", b"process 3 exited 42", 40)
-            send(client, process, serial, "sdk alpha beta", b"process 4 exited 86", 40)
+            send(client, process, serial, "cp /bin/sdk.elf /persist/persist-sdk.elf", sdk_copy_marker.encode("ascii"), 40)
+            send(client, process, serial, "sync", b"persistent storage synchronized", 40)
+            send(client, process, serial, "persist-sdk alpha beta", b"process 4 exited 86", 40)
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")
@@ -220,12 +226,14 @@ def main() -> int:
                 "ZigOs userspace shell PID 2",
                 "hello from VFS-loaded CPL3 ELF64",
                 "process 3 exited 42",
+                sdk_copy_marker,
+                "persistent storage synchronized",
                 "zig-sdk: envp/auxv passed",
                 "zig-sdk: startup/argv/abi/files/vm/errno passed",
                 "process 4 exited 86",
                 "userspace shell requested shutdown",
                 "ZigOs normal userspace shutdown: shell PID 2 status 0",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 51/51 clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 52/52 clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes cleanup yes",
             )
             forbidden = (

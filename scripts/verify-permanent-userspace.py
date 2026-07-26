@@ -160,12 +160,12 @@ def main() -> int:
     require(sdk_shell, "zigos.spawn", "userspace shell launches child ELF programs through the ABI")
     require(sdk_shell, "zigos.wait", "userspace shell waits and reports child status")
     require(normal_boot_test, "process 3 exited 42", "normal QEMU gate proves userspace shell spawn/wait")
-    require(normal_boot_test, "alloc/free 51/51 clean yes", "normal QEMU gate requires exact physical reclamation")
+    require(normal_boot_test, "alloc/free 52/52 clean yes", "normal QEMU gate requires exact physical reclamation")
     require(normal_boot_test, "forbidden", "normal QEMU gate rejects diagnostic proof markers")
-    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 2:
-        raise SystemExit("permanent-userspace contract missing: ABI version 1.2")
-    if abi_spec["syscalls"].get("spawnv") != 96:
-        raise SystemExit("permanent-userspace contract missing: spawnv syscall 96")
+    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 3:
+        raise SystemExit("permanent-userspace contract missing: ABI version 1.3")
+    if abi_spec["syscalls"].get("spawnv") != 96 or abi_spec["syscalls"].get("sync") != 97:
+        raise SystemExit("permanent-userspace contract missing: spawnv/sync syscall numbering")
     if abi_spec.get("limits") != {
         "arguments": 8,
         "argument_bytes": 31,
@@ -187,8 +187,17 @@ def main() -> int:
     require(sdk_shell, "zigos.spawnv", "userspace shell passes argv and envp to external programs")
     require(sdk_shell, 'environmentValue(startup_environment, "PATH")', "userspace shell searches PATH")
     require(sdk_conformance, "zig-sdk: envp/auxv passed", "SDK conformance validates startup vectors")
-    require(normal_boot_test, "sdk alpha beta", "normal QEMU gate proves PATH, argv and inherited envp")
+    require(normal_boot_test, "persist-sdk alpha beta", "normal QEMU gate proves persistent PATH lookup, argv and inherited envp")
     require(normal_boot_test, "process 4 exited 86", "normal QEMU gate proves spawnv child status")
+    require(executor, "syscallSync", "userspace can commit the persistent VFS through ABI 1.3")
+    require(runtime, "syncPersistentStorage", "sync syscall reaches the crash-safe journal backend")
+    require(sdk_source, "pub fn sync", "SDK exposes persistence sync")
+    require(sdk_shell, "fn commandCp", "userspace shell copies files through descriptors")
+    require(sdk_shell, "fn spawnFromPath", "userspace shell searches multiple PATH directories")
+    require(normal_boot_test, "cp /bin/sdk.elf /persist/persist-sdk.elf", "normal profile installs an ELF into the persistent mount")
+    require(normal_boot_test, "persistent storage synchronized", "normal profile commits the installed ELF")
+    require(persistence_test, "exec /persist/persist-sdk.elf alpha beta", "boot two executes the restored persistent ELF")
+    require(persistence_test, "record_count != 3", "two-boot gate requires directory, message and ELF records")
     require(elf_source, 'test "parser accepts a pure BSS writable load segment"', "ELF loader accepts standard pure-BSS RW segments")
     require(sdk_verifier, "memory_size == 0 or memory_size < file_size", "SDK ELF verifier accepts pure-BSS PT_LOAD")
     require(vfs_source, "pub const maximum_file_size: usize = 32 * 1024", "runtime VFS accepts the linked userspace shell")

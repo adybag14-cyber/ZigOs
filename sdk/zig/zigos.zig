@@ -285,6 +285,10 @@ pub fn getsockname(fd: u16, address: *Ipv4SocketAddress) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_getsockname, fd, ptrValue(address), @sizeOf(Ipv4SocketAddress), 0, 0, 0));
 }
 
+pub fn sync() Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_sync, 0, 0, 0, 0, 0, 0));
+}
+
 pub fn shutdown() Error!void {
     _ = try result(zigos_syscall6(abi.syscall_shutdown, 0, 0, 0, 0, 0, 0));
 }

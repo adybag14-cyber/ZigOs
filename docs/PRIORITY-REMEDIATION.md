@@ -2,7 +2,7 @@
 
 This document records the disposition of the post-Capstone audit. It distinguishes defects fixed in the current release line from architectural work that is now explicitly accepted but remains open. A source implementation, an isolated test, a QEMU integration proof and a required hosted-CI gate are separate evidence levels.
 
-## Priority 0 — release correctness
+## Priority 0 â€” release correctness
 
 Status: closed by the correctness/CI remediation.
 
@@ -25,7 +25,7 @@ Status: closed by the correctness/CI remediation.
 - **Hosted required** means failure blocks the GitHub Actions workflow.
 - **Bounded fixture only** must not be used to claim a general kernel facility.
 
-## Priority 1 — memory and process architecture
+## Priority 1 â€” memory and process architecture
 
 Status: in progress. A post-bootstrap reclaiming physical-memory handoff, bounded permanent-runtime ownership layer and userspace spawn/wait slice are integrated and required by QEMU tests; the system-wide milestones remain open.
 
@@ -35,7 +35,7 @@ Delivered bounded slice: after all boot-time validation and hardware setup, the 
 
 Still open: move boot-time page tables, stacks, DMA buffers, heaps and retained drivers onto the permanent manager rather than handing off only after validation; add synchronization, memory-pressure callbacks and an explicit OOM victim policy; permit ordinary allocations above 4 GiB through a direct physical-memory map; and apply low-memory restrictions only through per-device DMA masks or bounce buffers.
 
-Roadmap links: G100, G101, G118–G129, G159–G167, G203, G448, G478–G480.
+Roadmap links: G100, G101, G118â€“G129, G159â€“G167, G203, G448, G478â€“G480.
 
 ### P1-M2: unified permanent scheduler
 
@@ -43,7 +43,7 @@ Delivered bounded slice: syscall 76 spawns a VFS-backed direct CPL3 child; sysca
 
 Still open: retire the separate bounded executor/job structure entirely. One system scheduler must own saved contexts, runnable queues, time slices, all blocking/wakeups, signal consumption, process groups, orphan adoption and reaping across the kernel.
 
-Roadmap links: G113–G176, especially G132–G160.
+Roadmap links: G113â€“G176, especially G132â€“G160.
 
 ### P1-M3: scalable process virtual memory
 
@@ -51,9 +51,9 @@ Delivered bounded slice: the permanent ABI now provides page-granular anonymous 
 
 Still open: replace the fixed userspace-window bounds with general VMA objects, eligible guard-fault stack growth, file-backed mappings, lazy demand paging and scalable rollback under concurrency. The current eight-page stack and bounded argv/envp/auxv contract are fixed-size rather than fully POSIX-general.
 
-Roadmap links: G100–G125 and G161–G176.
+Roadmap links: G100â€“G125 and G161â€“G176.
 
-## Priority 1 — persistent storage and VFS
+## Priority 1 â€” persistent storage and VFS
 
 Status: accepted and open.
 
@@ -71,35 +71,35 @@ const KernelServices = struct {
 };
 ```
 
-Delivered bounded slice: the primary NVMe controller and namespace survive boot in polling mode; a dedicated GPT data partition is mounted at `/persist`; an A/B checksummed journal commits payload-before-header with flush/FUA ordering; shell-created files and directories are serialised through the VFS; and a required two-boot QEMU gate restores a file from generation 1 before committing generation 2 to the alternate slot. Controller and journal errors propagate into `sync`, `fsck` and the shutdown invariant.
+Delivered bounded slice: the primary NVMe controller and namespace survive boot in polling mode; a dedicated GPT data partition is mounted at `/persist`; an A/B checksummed journal commits payload-before-header with flush/FUA ordering; shell-created files, directories and linked ELF64 programs are serialised through the VFS. The normal userspace shell copies and commits `/persist/persist-sdk.elf`, while the required two-boot QEMU gate restores and executes that exact NVMe-backed ELF before committing generation 2 to the alternate slot. Controller and journal errors propagate into kernel/userspace `sync`, `fsck` and the shutdown invariant.
 
-Still open: a general block-device registry, multiple devices/namespaces, a filesystem-driver operation table, scalable allocation/free-space metadata, disk-backed executable installation independent of the EFI build, larger files, concurrent mutation and broader crash/fault injection.
+Still open: a general block-device registry, multiple devices/namespaces, a filesystem-driver operation table, scalable allocation/free-space metadata, package installation independent of copying a boot-seeded artifact, a disk-backed root, larger files, concurrent mutation and broader crash/fault injection.
 
-Roadmap links: G102, G177–G251 and G295.
+Roadmap links: G102, G177â€“G251 and G295.
 
-## Priority 2 — userspace environment, devices and networking
+## Priority 2 â€” userspace environment, devices and networking
 
 Status: accepted and open.
 
 ### P2-U1: documented userspace ABI and SDK
 
-Delivered bounded slice: `abi/zigos-abi.json` defines ABI version 1.2, page size, capability bits, syscall numbers 64-96, errno values, bounded spawn-vector limits and auxiliary keys; the build generates matching kernel Zig, NASM and public SDK Zig constants/structures. `sdk/zig` publishes a W^X linker script, a SysV AMD64 startup/syscall bridge and typed wrappers for descriptors, files, process/wait, VM, poll and UDP. `spawnv` copies and validates argv/envp, while the kernel creates a 16-byte-aligned argc/argv/envp/auxv stack. A directly linked Zig ELF verifies these startup vectors plus ABI discovery, pseudo-file I/O, memory protection and errno mapping in both required runtime profiles.
+Delivered bounded slice: `abi/zigos-abi.json` defines ABI version 1.3, page size, capability bits, syscall numbers 64-97, errno values, bounded spawn-vector limits and auxiliary keys; the build generates matching kernel Zig, NASM and public SDK Zig constants/structures. `sdk/zig` publishes a W^X linker script, a SysV AMD64 startup/syscall bridge and typed wrappers for descriptors, files, process/wait, VM, poll and UDP. `spawnv` copies and validates argv/envp, while the kernel creates a 16-byte-aligned argc/argv/envp/auxv stack. A directly linked Zig ELF verifies these startup vectors plus ABI discovery, pseudo-file I/O, memory protection and errno mapping in both required runtime profiles. ABI 1.3 additionally exposes a kernel-CR3-bridged `sync` wrapper so CPL3 can commit the retained NVMe journal without mapping controller MMIO into user address spaces.
 
 Still open: a generated C header/library, ioctl, broader clocks/signals/filesystem mutation syscalls, independent package/version distribution and a formal within-major compatibility suite.
 
-Roadmap links: G138–G165, G182–G199, G252–G296 and G494–G495.
+Roadmap links: G138â€“G165, G182â€“G199, G252â€“G296 and G494â€“G495.
 
 ### P2-U2: real TTY
 
 Delivered bounded slice: terminal descriptors provide blocking userspace input, canonical line buffering, echo, Backspace editing, poll readiness, foreground process-group routing, targeted scheduler wakeups and Ctrl-C default action. `/bin/tty.elf` proves an edited COM1 line blocks and wakes in CPL3. The normal profile now launches a directly linked Zig `/bin/sh.elf` as PID 2; its prompt, `pwd`, `cd`, `ls`, `cat`, PID reporting, external spawn/wait and shutdown all execute in CPL3. Still open are termios/ioctl controls, `/dev/console` as a general openable device, pseudo-terminals and sessions beyond the single console.
 
-Roadmap links: G143–G146, G252–G266 and G454.
+Roadmap links: G143â€“G146, G252â€“G266 and G454.
 
 ### P2-U3: real pseudo-files and device objects
 
 Introduce VFS operation tables for read/write/ioctl/poll/close and back `/dev`, `/proc` and `/net` with live registered objects. Shell-only `readPseudo()` conveniences do not satisfy this milestone.
 
-Roadmap links: G171–G174 and G230–G235.
+Roadmap links: G171â€“G174 and G230â€“G235.
 
 ### P2-N1: userspace sockets
 
@@ -107,17 +107,17 @@ Delivered bounded slice: ABI syscalls provide descriptor-backed UDP socket, bind
 
 Still open: sendto/recvfrom and explicit nonblocking mode, getpeername/options, resolver APIs, richer routing/ARP lifecycle, TCP application data/HTTP and decomposition of the monolithic e1000e protocol source.
 
-Roadmap links: G297–G339 and G341–G343.
+Roadmap links: G297â€“G339 and G341â€“G343.
 
 ### P2-B1: normal boot profile
 
-Delivered bounded slice: `-Dnormal-boot=true` branches after retained hardware/storage discovery and before the kernel heap, cooperative/preemptive scheduler demonstrations and Capstone 15/16 software proof workloads. It mounts the runtime VFS and persistent NVMe subtree, keeps PID 1 blocked as init, launches the Zig userspace shell as PID 2, runs both assembly and Zig child ELFs through spawn/wait, then requires exact 51/51 physical-page reclamation and zero descriptors/contexts at shutdown. The default diagnostic profile remains available and continues to run the exhaustive release workload.
+Delivered bounded slice: `-Dnormal-boot=true` branches after retained hardware/storage discovery and before the kernel heap, cooperative/preemptive scheduler demonstrations and Capstone 15/16 software proof workloads. It mounts the runtime VFS and persistent NVMe subtree, keeps PID 1 blocked as init, launches the Zig userspace shell as PID 2, copies, commits and executes a persistent Zig ELF in addition to assembly and RAM-seeded children, then requires exact 52/52 physical-page reclamation and zero descriptors/contexts at shutdown. The default diagnostic profile remains available and continues to run the exhaustive release workload.
 
 Still open: split the large hardware discovery routines into minimal initialisation and optional validation phases so normal boot can also skip assertion-heavy NIC/NVMe protocol proofs, and promote a disk-installed userspace root/PID 1 rather than the current kernel-created init record and boot-seeded RAM VFS.
 
-Roadmap links: G252, G295–G296, G424–G426 and G489.
+Roadmap links: G252, G295â€“G296, G424â€“G426 and G489.
 
-## Priority 3 — security and hardware robustness
+## Priority 3 â€” security and hardware robustness
 
 Status: accepted and open.
 
@@ -125,7 +125,7 @@ Security work includes credentials and permissions, syscall capability checks, S
 
 Hardware work includes physical Intel and AMD boots, RAM above 4 GiB, multiple controllers/namespaces/NICs, timeout/reset recovery, USB hubs/HID variation, ACPI power-off/reboot, interrupt-routing variation, DMA constraints and graceful RAM-backed recovery when no supported disk is usable.
 
-Roadmap links: G413–G426, G427–G465 and G466–G500.
+Roadmap links: G413â€“G426, G427â€“G465 and G466â€“G500.
 
 ## ?Usable hobby OS? acceptance gate
 

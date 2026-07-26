@@ -36,6 +36,8 @@ const help_text =
     "cd PATH              change working directory\r\n" ++
     "ls [PATH]            list a directory\r\n" ++
     "cat PATH             stream a file\r\n" ++
+    "cp SOURCE DEST       copy through descriptors\r\n" ++
+    "sync                 commit /persist to NVMe\r\n" ++
     "pid                  print the shell PID\r\n" ++
     "run PROGRAM [ARGS]   spawn with argv/env and wait\r\n" ++
     "shutdown             exit PID 2 and stop ZigOs\r\n";
@@ -120,6 +122,11 @@ fn execute(command: *const Command) void {
     } else if (equal(name, "cat")) {
         if (command.count != 2) return usage("cat PATH");
         commandCat(command.sentinel(1));
+    } else if (equal(name, "cp")) {
+        if (command.count != 3) return usage("cp SOURCE DESTINATION");
+        commandCp(command.sentinel(1), command.sentinel(2));
+    } else if (equal(name, "sync")) {
+        commandSync();
     } else if (equal(name, "pid")) {
         commandPid();
     } else if (equal(name, "run")) {
@@ -173,6 +180,36 @@ fn commandCat(path: [*:0]const u8) void {
     }
 }
 
+fn commandCp(source: [*:0]const u8, destination: [*:0]const u8) void {
+    const source_fd = zigos.open(source, .{ .read = true }, 0) catch |err| return printError("cp", err);
+    defer zigos.close(source_fd) catch {};
+    var info: zigos.Stat = undefined;
+    zigos.fstat(source_fd, &info) catch |err| return printError("cp", err);
+    if (info.kind == 1) return printError("cp", error.IsDirectory);
+    const destination_fd = zigos.open(
+        destination,
+        .{ .write = true, .create = true, .truncate = true },
+        info.mode | 0o200,
+    ) catch |err| return printError("cp", err);
+    defer zigos.close(destination_fd) catch {};
+    var total: usize = 0;
+    var bytes: [512]u8 = undefined;
+    while (true) {
+        const count = zigos.read(source_fd, &bytes) catch |err| return printError("cp", err);
+        if (count == 0) break;
+        zigos.writeAll(destination_fd, bytes[0..count]) catch |err| return printError("cp", err);
+        total += count;
+    }
+    zigos.writeAll(1, "copied ") catch {};
+    writeDecimal(total);
+    zigos.writeAll(1, " bytes\r\n") catch {};
+}
+
+fn commandSync() void {
+    zigos.sync() catch |err| return printError("sync", err);
+    zigos.writeAll(1, "persistent storage synchronized\r\n") catch {};
+}
+
 fn commandPid() void {
     const pid = zigos.getpid() catch |err| return printError("pid", err);
     writeDecimal(pid);
@@ -181,25 +218,20 @@ fn commandPid() void {
 
 fn commandRun(command: *const Command, program_index: usize) void {
     const program = command.slice(program_index);
-    var path_storage: [maximum_path + 1]u8 = @splat(0);
-    const path = executablePath(program, &path_storage) orelse {
-        zigos.writeAll(2, "run: program name too long\r\n") catch {};
-        return;
-    };
     const extra_count = command.count - program_index - 1;
     if (extra_count + 1 > zigos.constants.maximum_arguments) {
         zigos.writeAll(2, "run: too many arguments\r\n") catch {};
         return;
     }
     var arguments: [zigos.constants.maximum_arguments][]const u8 = undefined;
-    arguments[0] = executableName(path);
     for (0..extra_count) |index| arguments[index + 1] = command.slice(program_index + 1 + index);
     var environment_storage: [zigos.constants.maximum_environment][]const u8 = undefined;
     const environment = zigos.collectEnvironment(startup_environment, &environment_storage) orelse {
         zigos.writeAll(2, "run: invalid inherited environment\r\n") catch {};
         return;
     };
-    const pid = zigos.spawnv(path, arguments[0 .. extra_count + 1], environment) catch |err| return printError("run", err);
+    var path_storage: [maximum_path + 1]u8 = @splat(0);
+    const pid = spawnFromPath(program, &path_storage, &arguments, extra_count, environment) catch |err| return printError("run", err);
     var status: zigos.WaitStatus = undefined;
     _ = zigos.wait(pid, false, &status) catch |err| return printError("wait", err);
     zigos.writeAll(1, "process ") catch {};
@@ -217,27 +249,61 @@ fn executableName(path: []const u8) []const u8 {
     return path[last..];
 }
 
-fn executablePath(program: []const u8, output: *[maximum_path + 1]u8) ?[]const u8 {
-    if (program.len == 0) return null;
+fn spawnFromPath(
+    program: []const u8,
+    path_storage: *[maximum_path + 1]u8,
+    arguments: *[zigos.constants.maximum_arguments][]const u8,
+    extra_count: usize,
+    environment: []const []const u8,
+) zigos.Error!u32 {
+    if (program.len == 0) return error.InvalidArgument;
     if (containsScalar(program, '/')) {
-        if (program.len > maximum_path) return null;
-        @memcpy(output[0..program.len], program);
-        output[program.len] = 0;
-        return output[0..program.len];
+        const path = buildExecutablePath("", program, path_storage) orelse return error.NameTooLong;
+        arguments[0] = executableName(path);
+        return zigos.spawnv(path, arguments[0 .. extra_count + 1], environment);
     }
-    const path_value = zigos.environmentValue(startup_environment, "PATH") orelse "/bin";
-    if (path_value.len == 0 or containsScalar(path_value, ':')) return null;
-    const separator = if (path_value[path_value.len - 1] == '/') "" else "/";
+    const path_value = zigos.environmentValue(startup_environment, "PATH") orelse "/bin:/persist";
+    var start: usize = 0;
+    while (start <= path_value.len) {
+        const remaining = path_value[start..];
+        const separator = indexOfScalar(remaining, ':') orelse remaining.len;
+        const directory = remaining[0..separator];
+        if (directory.len != 0) {
+            const path = buildExecutablePath(directory, program, path_storage) orelse return error.NameTooLong;
+            arguments[0] = executableName(path);
+            const candidate: ?u32 = zigos.spawnv(path, arguments[0 .. extra_count + 1], environment) catch |err| switch (err) {
+                error.NotFound => null,
+                else => return err,
+            };
+            if (candidate) |pid| return pid;
+        }
+        if (separator == remaining.len) break;
+        start += separator + 1;
+    }
+    return error.NotFound;
+}
+
+fn buildExecutablePath(directory: []const u8, program: []const u8, output: *[maximum_path + 1]u8) ?[]const u8 {
+    const direct = containsScalar(program, '/');
+    const prefix = if (direct or directory.len == 0) "" else directory;
+    const separator = if (prefix.len == 0 or prefix[prefix.len - 1] == '/') "" else "/";
     const suffix = if (endsWith(program, ".elf")) "" else ".elf";
-    const length = path_value.len + separator.len + program.len + suffix.len;
+    const length = prefix.len + separator.len + program.len + suffix.len;
     if (length > maximum_path) return null;
-    @memcpy(output[0..path_value.len], path_value);
-    @memcpy(output[path_value.len .. path_value.len + separator.len], separator);
-    const program_start = path_value.len + separator.len;
+    @memcpy(output[0..prefix.len], prefix);
+    @memcpy(output[prefix.len .. prefix.len + separator.len], separator);
+    const program_start = prefix.len + separator.len;
     @memcpy(output[program_start .. program_start + program.len], program);
     @memcpy(output[program_start + program.len .. length], suffix);
     output[length] = 0;
     return output[0..length];
+}
+
+fn indexOfScalar(bytes: []const u8, value: u8) ?usize {
+    for (bytes, 0..) |byte, index| {
+        if (byte == value) return index;
+    }
+    return null;
 }
 
 fn requestShutdown() noreturn {

@@ -17,7 +17,7 @@ pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize
         zigos.writeAll(2, argc_fail_message) catch {};
         return 0xE4;
     }
-    if (!zigos.stringEqual(argument(argv, 0), "sdk.elf")) {
+    if (!validExecutableName(argument(argv, 0))) {
         zigos.writeAll(2, argv0_fail_message) catch {};
         return 0xE5;
     }
@@ -43,6 +43,16 @@ pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize
     return 0x56;
 }
 
+fn validExecutableName(value: [*:0]const u8) bool {
+    var length: usize = 0;
+    while (length < 64 and value[length] != 0) : (length += 1) {
+        if (value[length] == '/') return false;
+    }
+    if (length < 5 or length == 64) return false;
+    return value[length - 4] == '.' and value[length - 3] == 'e' and
+        value[length - 2] == 'l' and value[length - 1] == 'f';
+}
+
 fn argument(argv: [*]const usize, index: usize) [*:0]const u8 {
     return @ptrFromInt(argv[index]);
 }
@@ -51,7 +61,7 @@ fn startupVectorsValid(envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) boo
     const path = zigos.environmentValue(envp, "PATH") orelse return false;
     const home = zigos.environmentValue(envp, "HOME") orelse return false;
     const term = zigos.environmentValue(envp, "TERM") orelse return false;
-    if (!equal(path, "/bin") or !equal(home, "/home/root") or !equal(term, "zigos")) return false;
+    if (!equal(path, "/bin:/persist") or !equal(home, "/home/root") or !equal(term, "zigos")) return false;
     if (zigos.auxiliaryValue(auxv, zigos.constants.aux_pagesz) != zigos.constants.abi_page_size) return false;
     const version = zigos.auxiliaryValue(auxv, zigos.constants.aux_zigos_abi) orelse return false;
     if (version != (@as(u64, zigos.constants.abi_major) << 32) | zigos.constants.abi_minor) return false;

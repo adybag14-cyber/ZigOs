@@ -36,7 +36,7 @@ const mmap_ceiling: usize = guard_virtual;
 const page_table_span: usize = 2 * 1024 * 1024;
 const maximum_auxiliary_entries: usize = 9;
 pub const default_environment = [_][]const u8{
-    "PATH=/bin",
+    "PATH=/bin:/persist",
     "HOME=/home/root",
     "TERM=zigos",
     "SHELL=/bin/sh.elf",
@@ -174,19 +174,23 @@ var blocking_returns: u64 = 0;
 var syscall_count: u64 = 0;
 
 pub const ShutdownFn = *const fn (context: ?*anyopaque, process_handle: u64) bool;
+pub const SyncFn = *const fn (context: ?*anyopaque) i64;
 var system_context: ?*anyopaque = null;
 var shutdown_fn: ?ShutdownFn = null;
+var sync_fn: ?SyncFn = null;
 var normal_boot_capability: bool = false;
 var persistent_storage_capability: bool = false;
 
 pub fn setSystemBackend(
     context: ?*anyopaque,
     shutdown_callback: ?ShutdownFn,
+    sync_callback: ?SyncFn,
     normal_boot: bool,
     persistent_storage: bool,
 ) void {
     system_context = context;
     shutdown_fn = shutdown_callback;
+    sync_fn = sync_callback;
     normal_boot_capability = normal_boot;
     persistent_storage_capability = persistent_storage;
 }
@@ -218,6 +222,7 @@ pub fn initialize(
     syscall_count = 0;
     system_context = null;
     shutdown_fn = null;
+    sync_fn = null;
     normal_boot_capability = false;
     persistent_storage_capability = false;
     try page_pool.initializeManager(physical_memory, page_limit, memory.four_gib, true);
@@ -540,6 +545,7 @@ pub fn handleSyscall(
         syscall.syscall_getcwd => return syscallGetcwd(context, frame),
         syscall.syscall_chdir => return syscallChdir(context, frame),
         syscall.syscall_spawnv => return syscallSpawnv(context, frame),
+        syscall.syscall_sync => return syscallSync(context, frame, fx_state),
         syscall.syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
@@ -708,6 +714,35 @@ pub fn report() Report {
         .allocator_rejections = allocator_report.invalid_addresses + allocator_report.double_frees + allocator_report.owner_mismatches + allocator_report.reference_overflows + allocator_report.backing_failures,
         .allocator_clean = allocator_report.clean,
     };
+}
+
+fn syscallSync(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    if (!persistent_storage_capability) {
+        frame.rax = reject(runtime_abi.errno_read_only);
+        return 0;
+    }
+    const callback = sync_fn orelse {
+        frame.rax = reject(runtime_abi.errno_no_syscall);
+        return 0;
+    };
+    const user_root = context.space.pml4_address;
+    if (paging.currentCr3Address() != user_root or !paging.activateKernelAddressSpace()) {
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    }
+    const result = callback(system_context);
+    if (!paging.activateAddressSpace(user_root)) {
+        saveContext(context, frame, fx_state);
+        activeProcesses().fault(context.handle, 13, user_root) catch {};
+        faults +%= 1;
+        return 1;
+    }
+    frame.rax = if (result < 0) reject(result) else @intCast(result);
+    return 0;
 }
 
 fn syscallShutdown(
