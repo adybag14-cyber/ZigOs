@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const optimize = b.option(
@@ -85,10 +86,16 @@ pub fn build(b: *std.Build) void {
     verify_permanent_userspace.setCwd(b.path("."));
     verify_permanent_userspace.step.dependOn(&assets.step);
 
-    const fmt = b.addFmt(.{
-        .paths = &.{ b.path("build.zig"), b.path("src") },
-        .check = true,
-    });
+    const fmt = if (comptime builtin.zig_version.minor >= 17)
+        b.addFmt(.{
+            .paths = &.{ b.path("build.zig"), b.path("src") },
+            .check = true,
+        })
+    else
+        b.addFmt(.{
+            .paths = &.{ "build.zig", "src" },
+            .check = true,
+        });
 
     const unit_step = b.step("test", "Run isolated runtime unit tests");
     inline for (.{

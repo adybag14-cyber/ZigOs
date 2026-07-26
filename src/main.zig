@@ -7,6 +7,7 @@ const MemoryDescriptor = uefi.tables.MemoryDescriptor;
 const MemoryMapSlice = uefi.tables.MemoryMapSlice;
 const ConfigurationTable = uefi.tables.ConfigurationTable;
 const GraphicsOutput = uefi.protocol.GraphicsOutput;
+const kernel_stack_page_count: usize = 64;
 
 extern fn zigos_cpuid_vendor(out: [*]u8) callconv(uefi.cc) void;
 extern fn zigos_read_cr0() callconv(uefi.cc) u64;
@@ -31,8 +32,8 @@ pub fn main() noreturn {
     const console = system_table.con_out orelse fatal(null, "UEFI console output is unavailable.");
     const boot_services = system_table.boot_services orelse fatal(console, "UEFI boot services are unavailable.");
 
-    const kernel_stack_pages = boot_services.allocatePages(.any, .loader_data, 16) catch
-        fatal(console, "Unable to allocate the 64 KiB ZigOs kernel stack.");
+    const kernel_stack_pages = boot_services.allocatePages(.any, .loader_data, kernel_stack_page_count) catch
+        fatal(console, "Unable to allocate the 256 KiB ZigOs kernel stack.");
     boot_info.kernel_stack = .{
         .base = @intFromPtr(kernel_stack_pages.ptr),
         .size = kernel_stack_pages.len * @sizeOf(uefi.Page),

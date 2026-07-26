@@ -124,6 +124,10 @@ def main() -> int:
     require(executor, "excluded_handle", "retained scheduler excludes the shell-owned foreground context")
     require(executor, "childForWait(context.handle, target_pid)", "userspace wait queries children without materializing a process snapshot")
     forbid(executor, "activeProcesses().snapshot()", "userspace wait copies the full process table onto the syscall stack")
+    require(process_source, "pub fn processAt", "process inspection uses bounded slot views")
+    require(runtime, "state.processes.processAt", "the shell process listing avoids a full process-table return value")
+    forbid(runtime, "state.processes.snapshot()", "the shell process listing copies the full process table onto a kernel or IST stack")
+    forbid(process_source, "pub const Snapshot = struct", "process-table snapshots can materialize tens of kilobytes on an interrupt stack")
     require(executor, "initializeManager(physical_memory, page_limit, memory.four_gib, true)", "permanent userspace allocates pages on demand from physical memory")
     forbid(executor, "allocateContiguousBelow(arena_pages", "permanent userspace reserves a fixed physical slab")
 
@@ -182,8 +186,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 47:
-        raise SystemExit(f"canonical isolated-test declaration total must be 47, found {declared_tests}")
+    if declared_tests != 48:
+        raise SystemExit(f"canonical isolated-test declaration total must be 48, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',

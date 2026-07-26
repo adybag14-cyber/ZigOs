@@ -127,11 +127,6 @@ pub const Status = struct {
     syscall_count: u64,
 };
 
-pub const Snapshot = struct {
-    processes: [maximum_processes]Process = @splat(.{}),
-    count: usize = 0,
-};
-
 pub const Report = struct {
     live: usize,
     runnable: usize,
@@ -203,6 +198,14 @@ pub const Table = struct {
     pub fn getByPid(self: *const Table, pid: u32) Error!Process {
         const slot = self.findPid(pid) orelse return Error.NoProcess;
         return self.processes[slot];
+    }
+
+    /// Return a stable read-only view of one occupied process slot. Iterating
+    /// slots avoids materialising the complete process table on kernel or IST
+    /// stacks; callers must not retain the pointer across table mutation.
+    pub fn processAt(self: *const Table, slot: usize) ?*const Process {
+        if (slot >= self.processes.len or !self.processes[slot].used) return null;
+        return &self.processes[slot];
     }
 
     pub fn handleForPid(self: *const Table, pid: u32) Error!u64 {
@@ -503,18 +506,6 @@ pub const Table = struct {
         self.processes[target_slot].process_group = if (group == 0) self.processes[target_slot].pid else group;
     }
 
-    pub fn snapshot(self: *const Table) Snapshot {
-        var result = Snapshot{};
-        for (0..self.processes.len) |slot| {
-            const process = &self.processes[slot];
-            if (!process.used) continue;
-            result.processes[result.count] = process.*;
-            result.count += 1;
-        }
-        sortByPid(result.processes[0..result.count]);
-        return result;
-    }
-
     pub fn report(self: *const Table) Report {
         var result = Report{
             .live = 0,
@@ -678,13 +669,16 @@ fn makeHandle(slot: usize, generation: u32) u64 {
     return (@as(u64, generation) << 32) | @as(u64, @intCast(slot));
 }
 
-fn sortByPid(processes: []Process) void {
-    var index: usize = 1;
-    while (index < processes.len) : (index += 1) {
-        const value = processes[index];
-        var position = index;
-        while (position > 0 and value.pid < processes[position - 1].pid) : (position -= 1) processes[position] = processes[position - 1];
-        processes[position] = value;
+test "slot iteration does not require a full process-table snapshot" {
+    var table = Table.init(0);
+    const root = table.initHandle();
+    const child = try table.spawn(root, .userspace, "child", &.{}, 0, 0, 0, 1, .{});
+    try std.testing.expectEqual(root, table.processAt(0).?.handle);
+    try std.testing.expectEqual(child, table.processAt(1).?.handle);
+    try std.testing.expect(table.processAt(maximum_processes) == null);
+    comptime {
+        if (@sizeOf(Process) * maximum_processes < 16 * 1024)
+            @compileError("process-table stack regression guard no longer exercises a large table");
     }
 }
 

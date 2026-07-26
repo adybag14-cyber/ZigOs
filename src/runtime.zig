@@ -1076,8 +1076,30 @@ fn runFdContract() !void {
 
 fn commandPs(output: *Output) void {
     output.line("PID PPID STATE      TICKS FDS SOCK NAME");
-    const snapshot = state.processes.snapshot();
-    for (snapshot.processes[0..snapshot.count]) |process| {
+
+    // Keep only compact slot indexes on the current stack. A former Snapshot
+    // return copied all 64 Process records (about 29 KiB) and could overflow
+    // the syscall IST when /proc/processes was formatted from userspace.
+    var slots: [runtime_process.maximum_processes]u16 = @splat(runtime_process.invalid_slot);
+    var count: usize = 0;
+    for (0..runtime_process.maximum_processes) |slot| {
+        if (state.processes.processAt(slot) == null) continue;
+        slots[count] = @intCast(slot);
+        count += 1;
+    }
+    var index: usize = 1;
+    while (index < count) : (index += 1) {
+        const value = slots[index];
+        const value_pid = state.processes.processAt(value).?.pid;
+        var position = index;
+        while (position > 0 and value_pid < state.processes.processAt(slots[position - 1]).?.pid) : (position -= 1) {
+            slots[position] = slots[position - 1];
+        }
+        slots[position] = value;
+    }
+
+    for (slots[0..count]) |slot| {
+        const process = state.processes.processAt(slot).?;
         output.decimal(process.pid);
         output.byte(' ');
         output.decimal(process.ppid);
