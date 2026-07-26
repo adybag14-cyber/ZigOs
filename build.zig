@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
     verify_efi.addFileArg(kernel.getEmittedBin());
     const verify_permanent_userspace = b.addSystemCommand(&.{ python, "scripts/verify-permanent-userspace.py" });
     verify_permanent_userspace.setCwd(b.path("."));
+    verify_permanent_userspace.step.dependOn(&assets.step);
 
     const fmt = b.addFmt(.{
         .paths = &.{ b.path("build.zig"), b.path("src") },
