@@ -55,6 +55,7 @@ def main() -> int:
     sdk_source = text("sdk/zig/zigos.zig")
     sdk_startup = text("sdk/zig/syscall.asm")
     sdk_conformance = text("sdk/zig/conformance.zig")
+    fs_conformance = text("sdk/zig/fs_conformance.zig")
     sdk_shell = text("sdk/zig/shell.zig")
     sdk_abi = text("sdk/zig/abi.zig")
     sdk_verifier = text("scripts/verify-zigos-sdk-elf.py")
@@ -160,12 +161,15 @@ def main() -> int:
     require(sdk_shell, "zigos.spawn", "userspace shell launches child ELF programs through the ABI")
     require(sdk_shell, "zigos.wait", "userspace shell waits and reports child status")
     require(normal_boot_test, "process 3 exited 42", "normal QEMU gate proves userspace shell spawn/wait")
-    require(normal_boot_test, "alloc/free 52/52 clean yes", "normal QEMU gate requires exact physical reclamation")
+    require(normal_boot_test, "alloc/free 82/82 clean yes", "normal QEMU gate requires exact physical reclamation")
     require(normal_boot_test, "forbidden", "normal QEMU gate rejects diagnostic proof markers")
-    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 3:
-        raise SystemExit("permanent-userspace contract missing: ABI version 1.3")
-    if abi_spec["syscalls"].get("spawnv") != 96 or abi_spec["syscalls"].get("sync") != 97:
-        raise SystemExit("permanent-userspace contract missing: spawnv/sync syscall numbering")
+    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 4:
+        raise SystemExit("permanent-userspace contract missing: ABI version 1.4")
+    expected_fs_syscalls = {"lseek": 98, "mkdir": 99, "unlink": 100, "rmdir": 101, "rename": 102, "chmod": 103}
+    if abi_spec["syscalls"].get("spawnv") != 96 or abi_spec["syscalls"].get("sync") != 97 or any(abi_spec["syscalls"].get(name) != number for name, number in expected_fs_syscalls.items()):
+        raise SystemExit("permanent-userspace contract missing: ABI 1.4 syscall numbering")
+    if abi_spec.get("seek_whence") != {"start": 0, "current": 1, "end": 2}:
+        raise SystemExit("permanent-userspace contract missing: seek-whence values")
     if abi_spec.get("limits") != {
         "arguments": 8,
         "argument_bytes": 31,
@@ -189,7 +193,7 @@ def main() -> int:
     require(sdk_conformance, "zig-sdk: envp/auxv passed", "SDK conformance validates startup vectors")
     require(normal_boot_test, "persist-sdk alpha beta", "normal QEMU gate proves persistent PATH lookup, argv and inherited envp")
     require(normal_boot_test, "process 4 exited 86", "normal QEMU gate proves spawnv child status")
-    require(executor, "syscallSync", "userspace can commit the persistent VFS through ABI 1.3")
+    require(executor, "syscallSync", "userspace can commit the persistent VFS through ABI 1.4")
     require(runtime, "syncPersistentStorage", "sync syscall reaches the crash-safe journal backend")
     require(sdk_source, "pub fn sync", "SDK exposes persistence sync")
     require(sdk_shell, "fn commandCp", "userspace shell copies files through descriptors")
@@ -197,7 +201,22 @@ def main() -> int:
     require(normal_boot_test, "cp /bin/sdk.elf /persist/persist-sdk.elf", "normal profile installs an ELF into the persistent mount")
     require(normal_boot_test, "persistent storage synchronized", "normal profile commits the installed ELF")
     require(persistence_test, "exec /persist/persist-sdk.elf alpha beta", "boot two executes the restored persistent ELF")
-    require(persistence_test, "record_count != 3", "two-boot gate requires directory, message and ELF records")
+    require(persistence_test, "header_a.record_count != 5 or header_b.record_count != 3", "two-boot gate requires init objects then userspace cleanup")
+    require(executor, "syscallLseek", "ABI exposes descriptor seek without offset truncation")
+    require(executor, "syscallMkdir", "ABI exposes userspace directory creation")
+    require(executor, "syscallSinglePathMutation", "ABI exposes unlink and rmdir through one checked path")
+    require(executor, "syscallRename", "ABI copies both rename paths before mutation")
+    require(executor, "syscallChmod", "ABI exposes permission-bit mutation")
+    for wrapper in ("pub fn lseek", "pub fn mkdir", "pub fn unlink", "pub fn rmdir", "pub fn rename", "pub fn chmod"):
+        require(sdk_source, wrapper, f"SDK exposes {wrapper[7:]}")
+    require(build_graph, "sdk/zig/fs_conformance.zig", "build graph compiles the independent filesystem ABI fixture")
+    require(runtime, '"/bin/fs.elf"', "filesystem ABI fixture is installed into the runtime VFS")
+    require(fs_conformance, "init/mkdir/write/seek/rename/chmod/unlink/rmdir/sync passed", "fixture exercises every ABI 1.4 mutation")
+    require(fs_conformance, "recovery/mode/seek/cleanup passed", "fixture verifies rebooted data and cleans it through userspace")
+    require(normal_boot_test, "mkdir /persist/shell-state", "normal shell exercises userspace mkdir")
+    require(normal_boot_test, "chmod 600 /persist/shell-state/renamed.txt", "normal shell exercises write/append/rename/chmod")
+    require(persistence_test, "exec /bin/fs.elf init", "boot one commits mutations from a CPL3 fixture")
+    require(persistence_test, "exec /bin/fs.elf verify", "boot two verifies and removes the restored objects in CPL3")
     require(elf_source, 'test "parser accepts a pure BSS writable load segment"', "ELF loader accepts standard pure-BSS RW segments")
     require(sdk_verifier, "memory_size == 0 or memory_size < file_size", "SDK ELF verifier accepts pure-BSS PT_LOAD")
     require(vfs_source, "pub const maximum_file_size: usize = 32 * 1024", "runtime VFS accepts the linked userspace shell")

@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 3,
+    "minor": 4,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -53,7 +53,13 @@
     "getcwd": 94,
     "chdir": 95,
     "spawnv": 96,
-    "sync": 97
+    "sync": 97,
+    "lseek": 98,
+    "mkdir": 99,
+    "unlink": 100,
+    "rmdir": 101,
+    "rename": 102,
+    "chmod": 103
   },
   "errno": {
     "permission": -1,
@@ -106,5 +112,10 @@
     "secure": 23,
     "zigos_abi": 23040,
     "zigos_capabilities": 23041
+  },
+  "seek_whence": {
+    "start": 0,
+    "current": 1,
+    "end": 2
   }
 }

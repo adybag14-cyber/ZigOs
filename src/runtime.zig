@@ -33,6 +33,7 @@ const runtime_tty_elf = @embedFile("generated/runtime_tty.elf");
 const runtime_socket_elf = @embedFile("generated/runtime_socket.elf");
 const runtime_sdk_elf = @import("runtime_sdk").sdk;
 const runtime_shell_elf = @import("runtime_sdk").shell;
+const runtime_fs_elf = @import("runtime_sdk").fs;
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_wait_for_interrupt() callconv(cc) void;
@@ -396,6 +397,7 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/socket.elf", runtime_socket_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/sdk.elf", runtime_sdk_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/sh.elf", runtime_shell_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/fs.elf", runtime_fs_elf, 0o555, false, 0);
 
     const pseudo_paths = [_][]const u8{
         "/proc/version",   "/proc/uptime", "/proc/meminfo", "/proc/processes",

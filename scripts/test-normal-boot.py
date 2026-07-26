@@ -211,10 +211,20 @@ def main() -> int:
             send(client, process, serial, "ls /bin", b"sh.elf")
             send(client, process, serial, "cat /proc/version", b"ZigOs 19.0.0 x86_64 persistent runtime")
             send(client, process, serial, "pid", b"\r\n2\r\n")
+            send(client, process, serial, "mkdir /persist/shell-state", PROMPT_ROOT)
+            send(client, process, serial, "write /persist/shell-state/message.txt alpha", PROMPT_ROOT)
+            send(client, process, serial, "append /persist/shell-state/message.txt beta", PROMPT_ROOT)
+            send(client, process, serial, "mv /persist/shell-state/message.txt /persist/shell-state/renamed.txt", PROMPT_ROOT)
+            send(client, process, serial, "chmod 600 /persist/shell-state/renamed.txt", PROMPT_ROOT)
+            send(client, process, serial, "cat /persist/shell-state/renamed.txt", b"beta")
+            send(client, process, serial, "rm /persist/shell-state/renamed.txt", PROMPT_ROOT)
+            send(client, process, serial, "rmdir /persist/shell-state", PROMPT_ROOT)
             send(client, process, serial, "run hello", b"process 3 exited 42", 40)
             send(client, process, serial, "cp /bin/sdk.elf /persist/persist-sdk.elf", sdk_copy_marker.encode("ascii"), 40)
             send(client, process, serial, "sync", b"persistent storage synchronized", 40)
             send(client, process, serial, "persist-sdk alpha beta", b"process 4 exited 86", 40)
+            send(client, process, serial, "fs init", b"process 5 exited 88", 60)
+            send(client, process, serial, "fs verify", b"process 6 exited 89", 60)
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")
@@ -231,9 +241,13 @@ def main() -> int:
                 "zig-sdk: envp/auxv passed",
                 "zig-sdk: startup/argv/abi/files/vm/errno passed",
                 "process 4 exited 86",
+                "fs-api: init/mkdir/write/seek/rename/chmod/unlink/rmdir/sync passed",
+                "process 5 exited 88",
+                "fs-api: recovery/mode/seek/cleanup passed",
+                "process 6 exited 89",
                 "userspace shell requested shutdown",
                 "ZigOs normal userspace shutdown: shell PID 2 status 0",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 52/52 clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 82/82 clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes cleanup yes",
             )
             forbidden = (

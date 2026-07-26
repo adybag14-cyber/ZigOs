@@ -37,6 +37,13 @@ const help_text =
     "ls [PATH]            list a directory\r\n" ++
     "cat PATH             stream a file\r\n" ++
     "cp SOURCE DEST       copy through descriptors\r\n" ++
+    "write PATH TEXT      replace a file\r\n" ++
+    "append PATH TEXT     append to a file\r\n" ++
+    "mkdir PATH           create a directory\r\n" ++
+    "rm PATH              remove a file\r\n" ++
+    "rmdir PATH           remove an empty directory\r\n" ++
+    "mv SOURCE DEST       rename within a mount\r\n" ++
+    "chmod MODE PATH      change permission bits\r\n" ++
     "sync                 commit /persist to NVMe\r\n" ++
     "pid                  print the shell PID\r\n" ++
     "run PROGRAM [ARGS]   spawn with argv/env and wait\r\n" ++
@@ -125,6 +132,25 @@ fn execute(command: *const Command) void {
     } else if (equal(name, "cp")) {
         if (command.count != 3) return usage("cp SOURCE DESTINATION");
         commandCp(command.sentinel(1), command.sentinel(2));
+    } else if (equal(name, "write") or equal(name, "append")) {
+        if (command.count < 3) return usage(if (equal(name, "append")) "append PATH TEXT..." else "write PATH TEXT...");
+        commandWrite(command, equal(name, "append"));
+    } else if (equal(name, "mkdir")) {
+        if (command.count != 2) return usage("mkdir PATH");
+        zigos.mkdir(command.sentinel(1), 0o755) catch |err| return printError("mkdir", err);
+    } else if (equal(name, "rm")) {
+        if (command.count != 2) return usage("rm PATH");
+        zigos.unlink(command.sentinel(1)) catch |err| return printError("rm", err);
+    } else if (equal(name, "rmdir")) {
+        if (command.count != 2) return usage("rmdir PATH");
+        zigos.rmdir(command.sentinel(1)) catch |err| return printError("rmdir", err);
+    } else if (equal(name, "mv")) {
+        if (command.count != 3) return usage("mv SOURCE DESTINATION");
+        zigos.rename(command.sentinel(1), command.sentinel(2)) catch |err| return printError("mv", err);
+    } else if (equal(name, "chmod")) {
+        if (command.count != 3) return usage("chmod MODE PATH");
+        const mode = parseOctal(command.slice(1)) orelse return usage("chmod MODE PATH");
+        zigos.chmod(command.sentinel(2), mode) catch |err| return printError("chmod", err);
     } else if (equal(name, "sync")) {
         commandSync();
     } else if (equal(name, "pid")) {
@@ -203,6 +229,20 @@ fn commandCp(source: [*:0]const u8, destination: [*:0]const u8) void {
     zigos.writeAll(1, "copied ") catch {};
     writeDecimal(total);
     zigos.writeAll(1, " bytes\r\n") catch {};
+}
+
+fn commandWrite(command: *const Command, append: bool) void {
+    const fd = zigos.open(
+        command.sentinel(1),
+        .{ .write = true, .create = true, .truncate = !append, .append = append },
+        0o644,
+    ) catch |err| return printError(if (append) "append" else "write", err);
+    defer zigos.close(fd) catch {};
+    for (2..command.count) |index| {
+        if (index != 2) zigos.writeAll(fd, " ") catch |err| return printError("write", err);
+        zigos.writeAll(fd, command.slice(index)) catch |err| return printError("write", err);
+    }
+    zigos.writeAll(fd, "\n") catch |err| return printError("write", err);
 }
 
 fn commandSync() void {
@@ -339,6 +379,10 @@ fn errorName(err: zigos.Error) []const u8 {
         error.OutOfMemory, error.NoSpace => "no space",
         error.NameTooLong => "name too long",
         error.Unsupported => "unsupported",
+        error.AlreadyExists => "already exists",
+        error.NotEmpty => "directory not empty",
+        error.CrossDevice => "cross-device operation",
+        error.ReadOnly => "read-only filesystem",
         else => "operation failed",
     };
 }
@@ -358,6 +402,16 @@ fn writeDecimal(value: u64) void {
     var output: [20]u8 = undefined;
     for (0..count) |index| output[index] = digits[count - index - 1];
     zigos.writeAll(1, output[0..count]) catch {};
+}
+
+fn parseOctal(value: []const u8) ?u16 {
+    if (value.len == 0) return null;
+    var result: u16 = 0;
+    for (value) |byte| {
+        if (byte < '0' or byte > '7' or result > 0o77) return null;
+        result = result * 8 + (byte - '0');
+    }
+    return result;
 }
 
 fn equal(left: []const u8, right: []const u8) bool {

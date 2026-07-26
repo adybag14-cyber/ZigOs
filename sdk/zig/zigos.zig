@@ -285,6 +285,44 @@ pub fn getsockname(fd: u16, address: *Ipv4SocketAddress) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_getsockname, fd, ptrValue(address), @sizeOf(Ipv4SocketAddress), 0, 0, 0));
 }
 
+pub const SeekWhence = enum(u64) {
+    start = abi.seek_start,
+    current = abi.seek_current,
+    end = abi.seek_end,
+};
+
+pub fn lseek(fd: u16, offset: i64, whence: SeekWhence) Error!usize {
+    return @intCast(try result(zigos_syscall6(
+        abi.syscall_lseek,
+        fd,
+        @bitCast(offset),
+        @intFromEnum(whence),
+        0,
+        0,
+        0,
+    )));
+}
+
+pub fn mkdir(path: [*:0]const u8, mode: u16) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_mkdir, ptrValue(path), mode, 0, 0, 0, 0));
+}
+
+pub fn unlink(path: [*:0]const u8) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_unlink, ptrValue(path), 0, 0, 0, 0, 0));
+}
+
+pub fn rmdir(path: [*:0]const u8) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_rmdir, ptrValue(path), 0, 0, 0, 0, 0));
+}
+
+pub fn rename(old_path: [*:0]const u8, new_path: [*:0]const u8) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_rename, ptrValue(old_path), ptrValue(new_path), 0, 0, 0, 0));
+}
+
+pub fn chmod(path: [*:0]const u8, mode: u16) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_chmod, ptrValue(path), mode, 0, 0, 0, 0));
+}
+
 pub fn sync() Error!void {
     _ = try result(zigos_syscall6(abi.syscall_sync, 0, 0, 0, 0, 0, 0));
 }

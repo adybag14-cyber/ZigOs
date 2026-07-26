@@ -546,6 +546,12 @@ pub fn handleSyscall(
         syscall.syscall_chdir => return syscallChdir(context, frame),
         syscall.syscall_spawnv => return syscallSpawnv(context, frame),
         syscall.syscall_sync => return syscallSync(context, frame, fx_state),
+        syscall.syscall_lseek => return syscallLseek(context, frame),
+        syscall.syscall_mkdir => return syscallMkdir(context, frame),
+        syscall.syscall_unlink => return syscallUnlink(context, frame),
+        syscall.syscall_rmdir => return syscallRmdir(context, frame),
+        syscall.syscall_rename => return syscallRename(context, frame),
+        syscall.syscall_chmod => return syscallChmod(context, frame),
         syscall.syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
@@ -714,6 +720,139 @@ pub fn report() Report {
         .allocator_rejections = allocator_report.invalid_addresses + allocator_report.double_frees + allocator_report.owner_mismatches + allocator_report.reference_overflows + allocator_report.backing_failures,
         .allocator_clean = allocator_report.clean,
     };
+}
+
+fn syscallLseek(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const whence: runtime_fd.SeekWhence = switch (frame.rdx) {
+        syscall.seek_start => .start,
+        syscall.seek_current => .current,
+        syscall.seek_end => .end,
+        else => {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        },
+    };
+    const position = activeDescriptors().seek(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        fd,
+        @bitCast(frame.rsi),
+        whence,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = position;
+    return 0;
+}
+
+fn syscallMkdir(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const mode = runtime_abi.mode(frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    _ = activeVfs().mkdir(process.cwd_node, path_buffer[0..path_length], mode, current_tick) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallUnlink(context: *Context, frame: *interrupt_context.Frame) u64 {
+    return syscallSinglePathMutation(context, frame, .unlink);
+}
+
+fn syscallRmdir(context: *Context, frame: *interrupt_context.Frame) u64 {
+    return syscallSinglePathMutation(context, frame, .rmdir);
+}
+
+const PathMutation = enum { unlink, rmdir };
+
+fn syscallSinglePathMutation(context: *Context, frame: *interrupt_context.Frame, operation: PathMutation) u64 {
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const path = path_buffer[0..path_length];
+    (switch (operation) {
+        .unlink => activeVfs().unlink(process.cwd_node, path),
+        .rmdir => activeVfs().rmdir(process.cwd_node, path),
+    }) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallRename(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var old_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    var new_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const old_length = copyUserString(context, frame.rdi, &old_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const new_length = copyUserString(context, frame.rsi, &new_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    activeVfs().rename(
+        process.cwd_node,
+        old_buffer[0..old_length],
+        new_buffer[0..new_length],
+        current_tick,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallChmod(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const mode = runtime_abi.mode(frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    activeVfs().chmod(process.cwd_node, path_buffer[0..path_length], mode, current_tick) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = 0;
+    return 0;
 }
 
 fn syscallSync(

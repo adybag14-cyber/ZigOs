@@ -32,8 +32,8 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 - up to 64 retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 4,096-slot ownership table;
 - private CR3 roots, strict W^X `PT_LOAD` mappings, eight-page stacks and unmapped guards;
 - complete GPR and FXSAVE context preservation across syscalls and timer preemption;
-- a pointer-validated ABI 1.3 with generated Zig/NASM constants, capability discovery, bounded `spawnv`, System V-style argv/envp/auxv startup, persistent `sync`, exact waitpid, wait-any and WNOHANG;
-- a freestanding Zig SDK with generated ABI structures, a SysV AMD64 startup shim, typed file/process/VM/poll/UDP wrappers, environment/auxiliary helpers and an independently verified `/bin/sdk.elf` conformance program;
+- a pointer-validated ABI 1.4 with generated Zig/NASM constants, capability discovery, bounded `spawnv`, System V-style argv/envp/auxv startup, persistent `sync`, descriptor `lseek`, pathname mutation, exact waitpid, wait-any and WNOHANG;
+- a freestanding Zig SDK with generated ABI structures, a SysV AMD64 startup shim, typed file/process/VM/poll/UDP/filesystem wrappers, environment/auxiliary helpers and independently verified `/bin/sdk.elf` and `/bin/fs.elf` conformance programs;
 - an explicit `-Dnormal-boot=true` profile that skips the software proof suite and launches a directly linked Zig `/bin/sh.elf` as the interactive CPL3 PID 2 shell;
 - page-granular anonymous `mmap`, subrange `munmap`, W^X `mprotect` and expandable/shrinkable `brk`;
 - descriptor-backed `fstat`, directory iteration and `poll`;
@@ -66,7 +66,7 @@ Shell and utilities:
   hash hexdump grep wc head shutdown
 ```
 
-`run PATH [ARGS...]` and `exec PATH [ARGS...]` launch a foreground CPL3 child from VFS-resident ELF64 bytes. The current `exec` command does **not** replace the shell image in place. `spawn PATH [ARGS...]` launches the same retained executable model in the background. `/bin` remains boot-seeded RAM-VFS content, but the userspace shell can copy an ELF into `/persist`, commit it with ABI 1.3 `sync`, search `/bin:/persist`, and execute the restored NVMe-backed file after reboot.
+`run PATH [ARGS...]` and `exec PATH [ARGS...]` launch a foreground CPL3 child from VFS-resident ELF64 bytes. The current `exec` command does **not** replace the shell image in place. `spawn PATH [ARGS...]` launches the same retained executable model in the background. `/bin` remains boot-seeded RAM-VFS content, but the userspace shell can copy an ELF into `/persist`, mutate persistent files and directories through ABI 1.4, commit with `sync`, search `/bin:/persist`, and execute the restored NVMe-backed file after reboot.
 
 `ping` and `dns` use the retained e1000e device for real bounded ICMP and UDP/DNS transactions when the network profile is present. `ifconfig`, `netstat`, `routes` and `arp` expose retained device state. With no e1000e device, all of these commands report explicit unavailability; none emits canned success, addresses or packets.
 
@@ -96,6 +96,8 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 - `/bin/socket.elf` proving UDP socket/bind/connect/send/poll/getsockname/close on the live profile before exiting with status `0x54`;
 - the normal userspace shell copying `/bin/sdk.elf` to `/persist/persist-sdk.elf`, committing it through syscall 97, resolving `persist-sdk` through `PATH=/bin:/persist` and receiving status `0x56`;
 - the two-boot NVMe gate restoring and executing `/persist/persist-sdk.elf` before committing the alternate journal generation;
+- `/bin/fs.elf` proving userspace `mkdir`, write, `lseek`, rename, chmod, unlink, rmdir and sync, then reboot-verifying mode/content/offset and committing cleanup from CPL3;
+- the normal Zig shell exercising write, append, mkdir, rm, rmdir, mv and chmod without invoking the diagnostic kernel command implementation;
 - real `10.0.2.2` ICMP and `localhost` DNS results in the network profile;
 - explicit unavailable responses in the offline profile;
 - absence of the former canned DNS and ping strings in permanent-runtime output.
@@ -121,7 +123,7 @@ ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 
 # Normal userspace-shell profile
 ZigOs normal userspace shutdown: shell PID 2 status 0
-ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 52/52 clean yes
+ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 82/82 clean yes
 ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes cleanup yes
 ```
 
@@ -278,6 +280,7 @@ zig-out/
     |-- process-exec.elf
     |-- sdk.elf
     |-- sh.elf
+    |-- fs.elf
     `-- runtime-*.elf
 ```
 
@@ -328,11 +331,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    6,850,560 bytes
-SHA-256: 26F37C0E3039FD81F97F225FB540AD30F69B38DC6FB774453B91E890E0965C82
+Size:    6,860,288 bytes
+SHA-256: 5749293B9C287451F002912846ACF4D6F8FA0AE9EE78E655283CE85C1C8B0143
 ```
 
-This identity is from the locally validated Windows diagnostic build after the ABI 1.3 persistent-executable advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic build after the ABI 1.4 userspace-filesystem advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
