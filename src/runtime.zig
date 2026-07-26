@@ -8,6 +8,7 @@ const memory = @import("memory.zig");
 const runtime_command = @import("runtime_command.zig");
 const runtime_fd = @import("runtime_fd.zig");
 const runtime_process = @import("runtime_process.zig");
+const runtime_tty = @import("runtime_tty.zig");
 const runtime_user = @import("runtime_user.zig");
 const runtime_vfs = @import("runtime_vfs.zig");
 const serial = @import("serial.zig");
@@ -25,6 +26,7 @@ const runtime_pipe_writer_elf = @embedFile("generated/runtime_pipe_writer.elf");
 const runtime_wait_elf = @embedFile("generated/runtime_wait.elf");
 const runtime_vm_elf = @embedFile("generated/runtime_vm.elf");
 const runtime_io_elf = @embedFile("generated/runtime_io.elf");
+const runtime_tty_elf = @embedFile("generated/runtime_tty.elf");
 const runtime_socket_elf = @embedFile("generated/runtime_socket.elf");
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
@@ -149,6 +151,7 @@ const State = struct {
     vfs: runtime_vfs.Vfs = undefined,
     processes: runtime_process.Table = undefined,
     descriptors: runtime_fd.System = undefined,
+    tty: runtime_tty.Tty = .{},
     environment: runtime_command.Environment = undefined,
     editor: runtime_command.LineEditor = .{},
     cwd: u16 = 0,
@@ -272,6 +275,9 @@ fn initialize(configuration: Configuration) !void {
     try state.processes.setRunning(state.shell_handle);
     try state.processes.setResourceUsage(state.shell_handle, 8, 0, 0);
     try state.descriptors.bindProcess(&state.processes, state.shell_handle, true);
+    state.tty.initialize(state.shell_handle);
+    try state.tty.setForeground(&state.processes, state.shell_handle);
+    state.descriptors.setTerminalBackend(&state.tty);
     try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
     if (configuration.network_ready) {
         const device = e1000e.activeDevice() orelse return error.NetworkStateMissing;
@@ -305,6 +311,7 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/wait.elf", runtime_wait_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/vm.elf", runtime_vm_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/io.elf", runtime_io_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/tty.elf", runtime_tty_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/socket.elf", runtime_socket_elf, 0o555, false, 0);
 
     const pseudo_paths = [_][]const u8{
@@ -385,6 +392,10 @@ fn serviceJobs(tick: u64) void {
 }
 
 fn consumeInput(byte: u8) void {
+    if (state.foreground_handle != null) {
+        consumeForegroundInput(byte);
+        return;
+    }
     if (state.shell_sleeping) return;
     if (state.ignore_next_lf and byte == '\n') {
         state.ignore_next_lf = false;
@@ -406,6 +417,38 @@ fn consumeInput(byte: u8) void {
             state.editor.reset();
             if (!state.shutdown_requested and !state.shell_sleeping) printPrompt();
         },
+    }
+}
+
+fn serviceForegroundInput() bool {
+    var received = false;
+    while (true) {
+        const status = serial.tryRead();
+        if (status.line_error) state.serial_line_errors +%= 1;
+        const byte = status.byte orelse break;
+        received = true;
+        consumeForegroundInput(byte);
+    }
+    return received;
+}
+
+fn consumeForegroundInput(byte: u8) void {
+    const result = state.tty.feed(&state.processes, byte);
+    state.descriptors.accountTerminalWakeups(result.wakeups);
+    switch (result.echo) {
+        .none => {},
+        .byte => {
+            const echoed = [1]u8{result.byte};
+            emit(&echoed);
+        },
+        .erase_one => emit("\x08 \x08"),
+        .erase_line => {
+            var remaining = result.erased;
+            while (remaining != 0) : (remaining -= 1) emit("\x08 \x08");
+        },
+        .newline => emit("\r\n"),
+        .interrupt => emit("^C\r\n"),
+        .bell => emit("\x07"),
     }
 }
 
@@ -1215,6 +1258,12 @@ fn spawnExecutablePath(
         return null;
     };
 
+    state.processes.setProcessGroup(state.shell_handle, handle, 0) catch |err| {
+        abortExecutable(handle);
+        shellError(if (background) "spawn process group" else "exec process group", err, output);
+        return null;
+    };
+
     const identity = runtime_user.imageIdentity(handle) orelse unreachable;
     if (background) {
         var job = Job{
@@ -1244,8 +1293,17 @@ fn driveForeground(handle: u64, output: *Output) ?runtime_process.Status {
         return null;
     }
     state.foreground_handle = handle;
-    defer state.foreground_handle = null;
+    state.tty.setForeground(&state.processes, handle) catch |err| {
+        state.foreground_handle = null;
+        shellError("exec terminal foreground", err, output);
+        return null;
+    };
+    defer {
+        state.tty.setForeground(&state.processes, state.shell_handle) catch {};
+        state.foreground_handle = null;
+    }
     while (true) {
+        const received_input = serviceForegroundInput();
         const process = state.processes.get(handle) catch |err| {
             shellError("exec", err, output);
             return null;
@@ -1263,7 +1321,7 @@ fn driveForeground(handle: u64, output: *Output) ?runtime_process.Status {
             },
             .sleeping, .blocked => {
                 serviceRuntime();
-                zigos_wait_for_interrupt();
+                if (!received_input) zigos_wait_for_interrupt();
             },
             .stopped => {
                 output.line("exec: process stopped; resume or kill it from a background job");
@@ -2003,6 +2061,7 @@ fn finishRuntime() noreturn {
     const fs_report = state.vfs.report();
     const process_report = state.processes.report();
     const descriptor_report = state.descriptors.report();
+    const tty_report = state.tty.report();
     const userspace_report = runtime_user.report();
     const physical_report = state.config.physical_memory.report();
     const physical_rejections = physical_report.invalid_frees + physical_report.double_frees + physical_report.metadata_failures;
@@ -2017,6 +2076,12 @@ fn finishRuntime() noreturn {
         userspace_report.allocator_out_of_memory == 0 and userspace_report.allocator_rejections == 0 and physical_clean;
     const network_clean = state.network_failures == 0 and
         (!state.config.network_ready or (state.live_ping_passes >= 1 and state.live_dns_passes >= 1));
+    const shell_process = state.processes.get(state.shell_handle) catch runtime_process.Process{};
+    const tty_clean = tty_report.foreground_process_group == shell_process.process_group and
+        tty_report.foreground_session == shell_process.session and tty_report.buffered_bytes == 0 and
+        tty_report.edited_bytes == 0 and tty_report.eof_events == 0 and tty_report.submitted_lines >= 1 and
+        tty_report.bytes_submitted == tty_report.bytes_read and tty_report.blocked_reads >= 1 and
+        tty_report.reader_wakeups >= 1 and tty_report.overflow_events == 0;
     const descriptor_clean = state.descriptors.validate(&state.vfs, &state.processes) and
         descriptor_report.namespaces == 1 and descriptor_report.descriptors == 3 and
         descriptor_report.open_descriptions == 3 and descriptor_report.terminal_descriptions == 3 and
@@ -2093,6 +2158,35 @@ fn finishRuntime() noreturn {
     emitDecimal(descriptor_report.broken_pipe_writes);
     emit(" clean ");
     emit(if (descriptor_clean) "yes" else "no");
+    emit("\r\n");
+    emit("ZigOs permanent TTY: foreground group/session ");
+    emitDecimal(tty_report.foreground_process_group);
+    emit("/");
+    emitDecimal(tty_report.foreground_session);
+    emit(" buffered/edit/eof ");
+    emitDecimal(tty_report.buffered_bytes);
+    emit("/");
+    emitDecimal(tty_report.edited_bytes);
+    emit("/");
+    emitDecimal(tty_report.eof_events);
+    emit(" lines ");
+    emitDecimal(tty_report.submitted_lines);
+    emit(" bytes submitted/read ");
+    emitDecimal(tty_report.bytes_submitted);
+    emit("/");
+    emitDecimal(tty_report.bytes_read);
+    emit(" blocked/wakeups ");
+    emitDecimal(tty_report.blocked_reads);
+    emit("/");
+    emitDecimal(tty_report.reader_wakeups);
+    emit(" erase/interrupt/overflow ");
+    emitDecimal(tty_report.erase_events);
+    emit("/");
+    emitDecimal(tty_report.interrupt_events);
+    emit("/");
+    emitDecimal(tty_report.overflow_events);
+    emit(" clean ");
+    emit(if (tty_clean) "yes" else "no");
     emit("\r\n");
     emit("ZigOs post-bootstrap physical memory: total ");
     emitDecimal(physical_report.total_pages);
@@ -2181,13 +2275,15 @@ fn finishRuntime() noreturn {
         emit(if (descriptor_clean) "yes" else "no");
         emit("\r\n");
     }
-    if (state.fd_contract_passed and descriptor_clean and userspace_clean and network_clean) {
+    if (state.fd_contract_passed and descriptor_clean and tty_clean and userspace_clean and network_clean) {
         emit("ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes\r\n");
     } else {
         emit("ZigOs x86-64 Capstone 19 incomplete: fd-contract ");
         emit(if (state.fd_contract_passed) "yes" else "no");
         emit(" descriptor-clean ");
         emit(if (descriptor_clean) "yes" else "no");
+        emit(" tty-clean ");
+        emit(if (tty_clean) "yes" else "no");
         emit(" userspace-clean ");
         emit(if (userspace_clean) "yes" else "no");
         emit(" network-clean ");

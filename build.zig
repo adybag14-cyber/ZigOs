@@ -102,6 +102,7 @@ pub fn build(b: *std.Build) void {
         "src/runtime_fd.zig",
         "src/runtime_command.zig",
         "src/runtime_process.zig",
+        "src/runtime_tty.zig",
         "src/runtime_vfs.zig",
         "src/runtime_abi.zig",
         "src/runtime_page_pool.zig",

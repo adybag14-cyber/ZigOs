@@ -1,5 +1,6 @@
 const std = @import("std");
 const runtime_process = @import("runtime_process.zig");
+const runtime_tty = @import("runtime_tty.zig");
 const runtime_vfs = @import("runtime_vfs.zig");
 const runtime_abi = @import("runtime_abi.zig");
 
@@ -156,6 +157,7 @@ pub const System = struct {
     eof_reads: u64 = 0,
     broken_pipe_writes: u64 = 0,
     stale_namespace_sweeps: u64 = 0,
+    terminal_backend: ?*runtime_tty.Tty = null,
     external_context: ?*anyopaque = null,
     external_close: ?ExternalCloseFn = null,
     external_poll: ?ExternalPollFn = null,
@@ -168,6 +170,14 @@ pub const System = struct {
 
     pub fn initialize(self: *System) void {
         self.* = .{};
+    }
+
+    pub fn setTerminalBackend(self: *System, terminal: ?*runtime_tty.Tty) void {
+        self.terminal_backend = terminal;
+    }
+
+    pub fn accountTerminalWakeups(self: *System, wakeups: usize) void {
+        self.reader_wakeups +%= wakeups;
     }
 
     pub fn setExternalBackend(
@@ -545,8 +555,25 @@ pub const System = struct {
         if (output.len == 0) return .{ .status = .complete };
         switch (description.kind) {
             .terminal => {
-                self.eof_reads +%= 1;
-                return .{ .status = .eof };
+                const terminal = self.terminal_backend orelse {
+                    self.eof_reads +%= 1;
+                    return .{ .status = .eof };
+                };
+                const result = try terminal.read(processes, process_handle, output);
+                return switch (result.status) {
+                    .complete => blk: {
+                        self.bytes_read +%= result.count;
+                        break :blk .{ .status = .complete, .count = result.count };
+                    },
+                    .eof => blk: {
+                        self.eof_reads +%= 1;
+                        break :blk .{ .status = .eof };
+                    },
+                    .blocked => blk: {
+                        self.blocked_reads +%= 1;
+                        break :blk .{ .status = .blocked };
+                    },
+                };
             },
             .udp_socket => return Error.InvalidOperation,
             .vfs => {
@@ -771,6 +798,10 @@ pub const System = struct {
         var ready: u16 = 0;
         switch (description.kind) {
             .terminal => {
+                if (description.readable) {
+                    const terminal = self.terminal_backend orelse return Error.InvalidOperation;
+                    ready |= try terminal.poll(processes, process_handle, requested);
+                }
                 if (description.writable) ready |= runtime_abi.poll_writable;
             },
             .vfs => {

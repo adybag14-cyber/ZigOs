@@ -52,6 +52,17 @@ def runtime_wait_data() -> bytes:
 
 
 
+def runtime_tty_data() -> bytes:
+    data = bytearray(512)
+    fields = {
+        0: b"tty-api: start\r\n",
+        64: b"tty-api: blocking read/poll/line discipline passed\r\n",
+    }
+    for offset, value in fields.items():
+        data[offset : offset + len(value)] = value
+    return bytes(data)
+
+
 def runtime_socket_data() -> bytes:
     data = bytearray(512)
     fields = {
@@ -132,6 +143,7 @@ def main() -> int:
         "wait": runtime_wait_data(),
         "vm": runtime_vm_data(),
         "io": runtime_io_data(),
+        "tty": runtime_tty_data(),
         "socket": runtime_socket_data(),
     }
     runtime_outputs: list[Path] = []

@@ -146,6 +146,13 @@ try {
         Read-SerialAvailable
     }
 
+    function Send-SerialBytes([byte[]]$Bytes) {
+        $stream.Write($Bytes, 0, $Bytes.Length)
+        $stream.Flush()
+        Start-Sleep -Milliseconds 140
+        Read-SerialAvailable
+    }
+
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $promptObserved = $false
     while ((Get-Date) -lt $deadline) {
@@ -192,6 +199,7 @@ try {
         'exec /bin/wait.elf',
         'exec /bin/vm.elf',
         'exec /bin/io.elf',
+        'exec /bin/tty.elf',
         'devices',
         'ifconfig',
         $pingCommand,
@@ -212,6 +220,14 @@ try {
     }
     foreach ($command in $commands) {
         Send-SerialLine $command
+        if ($command -eq 'exec /bin/tty.elf') {
+            Start-Sleep -Milliseconds 300
+            $ttyInput = [System.Collections.Generic.List[byte]]::new()
+            foreach ($byte in [System.Text.Encoding]::ASCII.GetBytes('zigtx')) { $ttyInput.Add($byte) }
+            $ttyInput.Add(0x7F)
+            foreach ($byte in [System.Text.Encoding]::ASCII.GetBytes("ty`r")) { $ttyInput.Add($byte) }
+            Send-SerialBytes $ttyInput.ToArray()
+        }
         if ($command -like 'sleep *' -or $command -like 'exec *' -or $command -eq 'pipex' -or $command -like 'wait *' -or ($Network -and ($command -like 'ping *' -or $command -like 'dns *'))) { Start-Sleep -Milliseconds 600; Read-SerialAvailable }
     }
 
@@ -268,28 +284,32 @@ try {
         'io-api: start',
         'io-api: open/read/fstat/getdents/poll passed',
         'exec: PID 14 state zombie status 0x53',
+        'tty-api: start',
+        'tty-api: blocking read/poll/line discipline passed',
+        'exec: PID 15 state zombie status 0x55',
         'serial COM1 online',
         'fsck ramfs: clean',
         'sync complete:',
         'fdtest: descriptors 3 open 3 pipes 0 shared-offset yes clone yes cloexec yes read-block yes write-block yes eof yes broken-pipe yes ring yes clean yes',
-        $(if ($Network) { 'fdtest counters: dup 2 inherited 50 cloexec 1 blocked 2/1 wakeups 2/1' } else { 'fdtest counters: dup 2 inherited 47 cloexec 1 blocked 2/1 wakeups 2/1' }),
+        $(if ($Network) { 'fdtest counters: dup 2 inherited 53 cloexec 1 blocked 3/1 wakeups 3/1' } else { 'fdtest counters: dup 2 inherited 50 cloexec 1 blocked 3/1 wakeups 3/1' }),
         'FD KIND       MODE OFD      REFS FLAGS OFFSET/BUFFERED',
         '0 terminal',
         '1 terminal',
         '2 terminal',
-        $(if ($Network) { 'ZigOs persistent runtime shutdown: commands 43 failed 0' } else { 'ZigOs persistent runtime shutdown: commands 42 failed 0' }),
+        $(if ($Network) { 'ZigOs persistent runtime shutdown: commands 44 failed 0' } else { 'ZigOs persistent runtime shutdown: commands 43 failed 0' }),
         'ZigOs persistent VFS:',
         'ZigOs persistent processes:',
         'faults 1',
-        $(if ($Network) { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/50/1 blocked 2/1 wakeups 2/1' } else { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/47/1 blocked 2/1 wakeups 2/1' }),
+        $(if ($Network) { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/53/1 blocked 3/1 wakeups 3/1' } else { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/50/1 blocked 3/1 wakeups 3/1' }),
+        'ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes',
         'broken 1 clean yes',
         'Post-bootstrap physical memory manager active:',
         'bootstrap allocator sealed',
         'ZigOs post-bootstrap physical memory: total ',
-        $(if ($Network) { 'peak 32 alloc/free 213/213 failed/rejected 0/0 clean yes' } else { 'peak 32 alloc/free 197/197 failed/rejected 0/0 clean yes' }),
+        $(if ($Network) { 'peak 32 alloc/free 229/229 failed/rejected 0/0 clean yes' } else { 'peak 32 alloc/free 213/213 failed/rejected 0/0 clean yes' }),
         'ZigOs permanent userspace: page-limit 4096 used 0',
-        $(if ($Network) { 'launches/exits/faults 13/11/1' } else { 'launches/exits/faults 12/10/1' }),
-        $(if ($Network) { 'reclaimed 213 allocator alloc/release/retains 213/213/0' } else { 'reclaimed 197 allocator alloc/release/retains 197/197/0' }),
+        $(if ($Network) { 'launches/exits/faults 14/12/1' } else { 'launches/exits/faults 13/11/1' }),
+        $(if ($Network) { 'reclaimed 229 allocator alloc/release/retains 229/229/0' } else { 'reclaimed 213 allocator alloc/release/retains 213/213/0' }),
         'ZigOs x86-64 Capstone 18 verified: goals 0x000001D1',
         'ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes'
     )
@@ -297,7 +317,7 @@ try {
         $required += @(
             'socket-api: start',
             'socket-api: socket/bind/connect/send/poll/close passed',
-            'exec: PID 15 state zombie status 0x54',
+            'exec: PID 16 state zombie status 0x54',
             'serial COM1 online; framebuffer no; USB keyboard no; NVMe yes; AHCI no; e1000e yes',
             'e1000e0: up mac 52:54:00:12:34:56 ipv4 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 dns 10.0.2.3',
             'reply from 10.0.2.2: bytes=16',

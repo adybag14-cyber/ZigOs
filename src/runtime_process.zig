@@ -38,6 +38,7 @@ pub const WaitReason = enum(u8) {
     none,
     sleep,
     child,
+    terminal_read,
     pipe_read,
     pipe_write,
     socket_read,

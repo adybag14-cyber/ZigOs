@@ -40,6 +40,8 @@ def main() -> int:
     e1000e_source = text("src/e1000e.zig")
     page_pool_source = text("src/runtime_page_pool.zig")
     vfs_source = text("src/runtime_vfs.zig")
+    tty_source = text("src/runtime_tty.zig")
+    fd_source = text("src/runtime_fd.zig")
     build_graph = text("build.zig")
     workflow = text(".github/workflows/build.yml")
     asset_builder = text("scripts/build-assets.py")
@@ -78,6 +80,19 @@ def main() -> int:
     require(runtime, "physical_report.clean", "release gate requires physical-page reclamation")
     require(runtime, "ZigOs post-bootstrap physical memory:", "runtime reports physical-memory handoff accounting")
     require(runtime, "ZigOs permanent userspace: page-limit", "runtime distinguishes ownership slots from reserved pages")
+    require(runtime, "state.descriptors.setTerminalBackend(&state.tty)", "standard input is backed by the retained terminal")
+    require(runtime, "state.tty.setForeground", "foreground process groups own terminal input")
+    require(runtime, "serviceForegroundInput", "foreground execution services COM1 while a syscall is blocked")
+    require(runtime, "state.processes.setProcessGroup(state.shell_handle, handle, 0)", "top-level jobs receive independent process groups")
+    require(runtime, "ZigOs permanent TTY:", "shutdown reports terminal line-discipline accounting")
+    require(runtime, "tty_report.bytes_submitted == tty_report.bytes_read", "release gate requires complete terminal input consumption")
+    require(fd_source, "terminal.read(processes, process_handle, output)", "fd 0 delegates to the terminal input backend")
+    require(fd_source, "terminal.poll(processes, process_handle, requested)", "terminal readiness is visible through poll")
+    require(tty_source, "try processes.block(process_handle, .terminal_read", "empty foreground reads block in the process table")
+    require(tty_source, "wakeMatching(.terminal_read", "committed lines wake terminal readers")
+    require(tty_source, "process.process_group == self.foreground_process_group", "background process groups cannot read the terminal")
+    require(tty_source, "0x08, 0x7F", "canonical erase accepts Backspace and DEL")
+    require(tty_source, "sendGroupSignal(self.controller_handle, self.foreground_process_group, 2)", "Ctrl-C targets the foreground process group")
 
     require(executor, "paging.activateAddressSpace", "private CR3 activation")
     require(executor, "zigos_enter_user_context", "complete context entry")
@@ -177,6 +192,7 @@ def main() -> int:
         "src/runtime_fd.zig",
         "src/runtime_command.zig",
         "src/runtime_process.zig",
+        "src/runtime_tty.zig",
         "src/runtime_vfs.zig",
         "src/runtime_abi.zig",
         "src/runtime_page_pool.zig",
@@ -186,13 +202,14 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 48:
-        raise SystemExit(f"canonical isolated-test declaration total must be 48, found {declared_tests}")
+    if declared_tests != 50:
+        raise SystemExit(f"canonical isolated-test declaration total must be 50, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
         '"src/runtime_command.zig"',
         '"src/runtime_process.zig"',
+        '"src/runtime_tty.zig"',
         '"src/runtime_vfs.zig"',
         '"src/runtime_abi.zig"',
         '"src/runtime_page_pool.zig"',
@@ -225,7 +242,7 @@ def main() -> int:
     require(exceptions, "runtime_user.handleException", "permanent exception routing")
     require(syscalls, "runtime_user.handleSyscall", "permanent syscall routing")
 
-    for name in ("hello", "sleep", "crash", "spin", "pipe-reader", "pipe-writer", "wait", "vm", "io", "socket"):
+    for name in ("hello", "sleep", "crash", "spin", "pipe-reader", "pipe-writer", "wait", "vm", "io", "tty", "socket"):
         require(assets, f'"{name}"', f"generated {name} ELF fixture")
         if not (ROOT / "src" / "user" / f"runtime-{name}.asm").is_file():
             raise SystemExit(f"permanent-userspace contract missing fixture source: {name}")
@@ -243,12 +260,14 @@ def main() -> int:
         "Post-bootstrap physical memory manager active:",
         "bootstrap allocator sealed",
         "ZigOs post-bootstrap physical memory: total ",
-        "peak 32 alloc/free 197/197 failed/rejected 0/0 clean yes",
         "peak 32 alloc/free 213/213 failed/rejected 0/0 clean yes",
-        "launches/exits/faults 12/10/1",
+        "peak 32 alloc/free 229/229 failed/rejected 0/0 clean yes",
         "launches/exits/faults 13/11/1",
-        "reclaimed 197 allocator alloc/release/retains 197/197/0",
+        "launches/exits/faults 14/12/1",
         "reclaimed 213 allocator alloc/release/retains 213/213/0",
+        "reclaimed 229 allocator alloc/release/retains 229/229/0",
+        "tty-api: blocking read/poll/line discipline passed",
+        "ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes",
         "ZigOs permanent userspace: page-limit 4096 used 0",
         "ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes",
         "ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes",
@@ -268,7 +287,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent userspace contract: real ELF execution, faults, blocking, cleanup, live networking, and honest offline status")
+    print("Verified permanent userspace contract: real ELF execution, blocking TTY input, faults, cleanup, live networking, and honest offline status")
     return 0
 
 
