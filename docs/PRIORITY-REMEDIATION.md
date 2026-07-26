@@ -8,13 +8,13 @@ Status: closed by the correctness/CI remediation.
 
 | Finding | Resolution | Evidence |
 | --- | --- | --- |
-| The advertised isolated-test total was not actually executed | `build.zig` now runs `runtime_fd.zig`, `runtime_command.zig`, `runtime_process.zig`, `runtime_vfs.zig`, `runtime_abi.zig` and `runtime_page_pool.zig`: 39 declarations in total | canonical `zig build test` and `zig build check` |
+| The advertised isolated-test total was not actually executed | `build.zig` now runs `runtime_fd.zig`, `runtime_command.zig`, `runtime_process.zig`, `runtime_vfs.zig`, `runtime_abi.zig` and `runtime_page_pool.zig`: 47 unique declarations in total (62 direct-runner executions including imported tests) | canonical `zig build test` and `zig build check` |
 | Syscall descriptor and flag registers were narrowed before validation | `runtime_abi.zig` range-checks full-width descriptor, open-flag and mode arguments before conversion | hostile tests cover 65536, `u64` maximum and high flag bits; source-contract verifier forbids the old truncation forms |
 | Descriptor/VFS errors collapsed to bad-FD | one kernel-error-to-userspace-errno mapping now preserves not-found, access, read-only, directory, broken-pipe and resource-limit distinctions | isolated errno mapping tests plus full UEFI build |
-| Default `kill PID` sent signal 15 without a delivery/default-action path | the kernel shell now defaults explicitly to forced signal 9; other signals remain opt-in and the absence of general userspace delivery is still documented | 40-command COM1 session proves PID 9 becomes zombie and is reaped |
-| `wait PID` was a status query | the shell validates direct parentage, blocks itself through the process table, services the runtime until the target is terminal, then reaps once | 40-command COM1 session waits over a sleeping CPL3 PID before the next command is accepted |
+| Default `kill PID` sent signal 15 without a delivery/default-action path | the kernel shell now defaults explicitly to forced signal 9; other signals remain opt-in and the absence of general userspace delivery is still documented | 42/43-command COM1 sessions prove PID 9 becomes zombie and is reaped |
+| `wait PID` was a status query | the shell validates direct parentage, blocks itself through the process table, services the runtime until the target is terminal, then reaps once | 42/43-command COM1 sessions wait over a sleeping CPL3 PID before the next command is accepted |
 | Built-in network help contradicted retained ping/DNS | help now describes retained e1000e packet I/O and explicit offline unavailability | source-contract check plus offline/live runtime sessions |
-| Hosted CI omitted live permanent-shell ping/DNS | Windows CI now runs both offline and `-Network` 40-command sessions | required workflow step |
+| Hosted CI omitted live permanent-shell ping/DNS | Windows CI now runs the 42-command offline and 43-command `-Network` sessions | required workflow step |
 | Cross-platform identity was printed but not enforced | a dependent job downloads both artifact sets, compares path sets, then compares every file byte-for-byte | required workflow job; G423 |
 
 ## Evidence model used by the roadmap
@@ -31,7 +31,7 @@ Status: in progress. A post-bootstrap reclaiming physical-memory handoff, bounde
 
 ### P1-M1: system physical-memory manager
 
-Delivered bounded slice: after all boot-time validation and hardware setup, the monotonic allocator transfers every unused usable firmware extent in place to a reclaiming physical-memory manager and is sealed against further allocation. The permanent executor no longer reserves a 256-page slab; it requests pages below 4 GiB on demand through a 256-slot ownership table with arbitrary release/reuse, generations, reference counts, poison-on-final-release, OOM and invalid/double/wrong-owner/backing-failure accounting. Final releases return physical pages to coalescing free extents. Isolated tests retain and classify untouched above-4-GiB extents, and both 40-command runtime profiles require 80 allocations, 80 frees, zero live physical pages, zero OOMs and zero rejected operations.
+Delivered bounded slice: after all boot-time validation and hardware setup, the monotonic allocator transfers every unused usable firmware extent in place to a reclaiming physical-memory manager and is sealed against further allocation. The permanent executor requests pages below 4 GiB on demand through 256 generation-tagged ownership slots with arbitrary release/reuse, reference counts, poison-on-final-release, duplicate-backing rejection, OOM and invalid/double/wrong-owner/backing-failure accounting. Final releases return physical pages to coalescing free extents. The 42-command offline profile requires 197 allocations/frees and the 43-command live profile requires 213; both finish with zero allocated physical pages, zero owned pages, zero OOMs and zero rejected operations.
 
 Still open: move boot-time page tables, stacks, DMA buffers, heaps and retained drivers onto the permanent manager rather than handing off only after validation; add synchronization, memory-pressure callbacks and an explicit OOM victim policy; permit ordinary allocations above 4 GiB through a direct physical-memory map; and apply low-memory restrictions only through per-device DMA masks or bounce buffers.
 
@@ -39,7 +39,7 @@ Roadmap links: G100, G101, G118–G129, G159–G167, G203, G448, G478–G480.
 
 ### P1-M2: unified permanent scheduler
 
-Delivered bounded slice: syscall 76 spawns a VFS-backed direct CPL3 child; syscall 77 implements exact waitpid, wait-any and WNOHANG. The scheduler excludes the shell-owned foreground context while servicing its runnable children, and `/bin/wait.elf` proves both blocking forms and nonblocking wait in the permanent runtime. Roadmap goals G138-G140 are closed.
+Delivered bounded slice: syscall 76 spawns a VFS-backed direct CPL3 child; syscall 77 implements exact waitpid, wait-any and WNOHANG. The scheduler excludes the shell-owned foreground context while servicing its runnable children, and `/bin/wait.elf` proves both blocking forms and nonblocking wait in the permanent runtime. Process-table scans are pointer-based so blocking waits cannot copy the 64-process array onto the syscall IST. Roadmap goals G114 and G138-G140 are closed.
 
 Still open: retire the separate bounded executor/job structure entirely. One system scheduler must own saved contexts, runnable queues, time slices, all blocking/wakeups, signal consumption, process groups, orphan adoption and reaping across the kernel.
 
@@ -47,7 +47,9 @@ Roadmap links: G113–G176, especially G132–G160.
 
 ### P1-M3: scalable process virtual memory
 
-Replace the eight-context/two-MiB-window proof bounds with dynamically allocated VM areas, flexible stacks, stack growth, `mmap`/`munmap`, heap growth, argv/envp/auxv and complete rollback/reclamation for every partial load.
+Delivered bounded slice: the permanent ABI now provides page-granular anonymous `mmap`, arbitrary page-aligned anonymous subrange `munmap`, W^X-enforced `mprotect`, `brk` growth/shrink and dynamically added/reclaimed user page tables. `/bin/vm.elf` proves the complete sequence and final reclamation.
+
+Still open: replace the eight-context and fixed userspace-window bounds with general VMA objects, flexible multi-page stacks, eligible guard-fault growth, file-backed mappings, lazy demand paging, argv/envp/auxv completeness and scalable rollback under concurrency.
 
 Roadmap links: G100–G125 and G161–G176.
 
@@ -79,13 +81,15 @@ Status: accepted and open.
 
 ### P2-U1: documented userspace ABI and SDK
 
-Publish stable syscall numbers and structures, startup code, a linker script, a Zig support library, error conventions, ABI versioning and conformance tests. Add the missing file, directory, process, memory, clock, ioctl and readiness calls needed by standalone programs.
+Delivered bounded slice: `abi/zigos-abi.json` defines ABI major version 1, page size, capability bits, syscall numbers 64-92 and errno values; the build generates matching Zig and NASM constants, userspace can query the ABI, and hostile full-width argument tests enforce narrowing and flag rules.
+
+Still open: publish startup code, linker scripts, C/Zig SDK libraries, compatibility policy/conformance binaries, ioctl and the broader file/process/clock interfaces required by independent applications.
 
 Roadmap links: G138–G165, G182–G199, G252–G296 and G494–G495.
 
 ### P2-U2: real TTY
 
-Terminal file descriptors must provide blocking input, streaming output, line discipline, echo/editing controls, foreground process groups, Ctrl-C generation, `/dev/console` and eventually pseudo-terminals. The current captured-output and kernel-shell model remains a bounded transition stage.
+The kernel shell and spawned processes now inherit numeric terminal descriptors, and userspace writes stream through descriptors 1 and 2. Still open are blocking userspace terminal input, line discipline, echo/editing controls, foreground process groups, Ctrl-C generation, `/dev/console` and pseudo-terminals. The kernel-shell model remains a bounded transition stage.
 
 Roadmap links: G143–G146, G252–G266 and G454.
 
@@ -97,7 +101,9 @@ Roadmap links: G171–G174 and G230–G235.
 
 ### P2-N1: userspace sockets
 
-Expose descriptor-backed UDP first: socket, bind, connect, send/receive, nonblocking mode, poll, route/ARP lifecycle and resolver access. TCP application data and HTTP can follow. Split the monolithic e1000e source into driver, Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS and NTP components with independently testable protocol logic.
+Delivered bounded slice: ABI syscalls provide descriptor-backed UDP socket, bind, connect, send, blocking receive, getsockname, close and poll. Packet ingress fills bounded per-socket receive queues and wakes blocked readers; process and descriptor quotas limit socket ownership. `/bin/socket.elf` proves socket/bind/connect/send/poll/close through the live e1000e path. The retained driver masks NIC MSI-X and polls DMA status so syscall frames cannot be corrupted by nested IST1 timer entry.
+
+Still open: sendto/recvfrom and explicit nonblocking mode, getpeername/options, resolver APIs, richer routing/ARP lifecycle, TCP application data/HTTP and decomposition of the monolithic e1000e protocol source.
 
 Roadmap links: G297–G339 and G341–G343.
 

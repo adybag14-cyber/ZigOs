@@ -7950,6 +7950,31 @@ pub fn prepareRuntimeMmio(device: *Device) paging.KernelIdentityPreparation {
     return paging.prepareKernelIdentityRange(device.bar0, register_window_bytes);
 }
 
+/// Boot verification uses MSI-X to prove interrupt delivery. The permanent
+/// runtime then owns the same DMA rings through bounded descriptor polling so
+/// asynchronous NIC work cannot race a CPL3 IRET frame on the shared IST.
+pub fn enterRuntimePollingMode(device: *Device) bool {
+    if (device.fixture_transport) return true;
+    if (device.bar0 == 0 or active_bar0 != device.bar0) return false;
+    disableInterrupts(device.bar0);
+    interrupts_enabled = false;
+    runtime_completion_polling_enabled = true;
+    return true;
+}
+
+pub fn runtimePollingMode() bool {
+    return runtime_completion_polling_enabled and !interrupts_enabled;
+}
+
+/// Checks the current address space without changing CR3. Private userspace
+/// roots inherit the kernel's MMIO identity mappings, so syscalls must use this
+/// predicate rather than prepareRuntimeMmio(), which intentionally switches to
+/// the kernel root for shell-side recovery.
+pub fn runtimeMmioAccessible(device: *const Device) bool {
+    return device.fixture_transport or
+        (device.bar0 != 0 and paging.isIdentityRangeMapped(device.bar0, register_window_bytes));
+}
+
 pub fn pingIpv4(device: *Device, destination_ipv4: [4]u8, receive_budget: u16) ?IcmpEchoResult {
     if (device.bar0 == 0 or receive_budget == 0) return null;
     var destination_nonzero = false;
@@ -8156,6 +8181,34 @@ pub fn receiveFrame(device: *Device) ?ReceivedFrame {
     const descriptors: [*]volatile RxDescriptor = @ptrFromInt(device.rx_ring_address);
     const baseline = device.last_rx_interrupt_count;
     if (!waitForRx(descriptors, descriptor_index, baseline, device.interrupt_target_apic_id)) return null;
+    return consumeReceivedFrame(device, descriptors, descriptor_index, baseline);
+}
+
+/// Polls one RX descriptor without waiting or enabling interrupts. This is the
+/// permanent-runtime receive primitive: an empty NIC queue returns immediately.
+pub fn tryReceiveFrame(device: *Device) ?ReceivedFrame {
+    if (device.fixture_transport or device.bar0 == 0 or device.rx_consumer >= ring_descriptor_count) return null;
+    const descriptor_index: usize = device.rx_consumer;
+    const descriptors: [*]volatile RxDescriptor = @ptrFromInt(device.rx_ring_address);
+    if ((descriptors[descriptor_index].status & 1) == 0) return null;
+
+    var completion_seen = consumeCompletion(&rx_completion_queue, &rx_ready_mask, descriptor_index);
+    if (!completion_seen and runtime_completion_polling_enabled) {
+        // Runtime progress must not depend on a second MSI-X edge after DMA has
+        // already marked the descriptor complete.
+        completePendingDescriptor(&rx_pending_mask, &rx_completion_queue, descriptor_index);
+        completion_seen = consumeCompletion(&rx_completion_queue, &rx_ready_mask, descriptor_index);
+    }
+    if (!completion_seen) return null;
+    return consumeReceivedFrame(device, descriptors, descriptor_index, device.last_rx_interrupt_count);
+}
+
+fn consumeReceivedFrame(
+    device: *Device,
+    descriptors: [*]volatile RxDescriptor,
+    descriptor_index: usize,
+    baseline: u64,
+) ?ReceivedFrame {
     zigos_memory_fence();
     const frame_length = validateRxDescriptor(descriptors, descriptor_index) orelse return null;
     const next_cursor: u16 = @intCast((descriptor_index + 1) % ring_descriptor_count);
@@ -8200,6 +8253,13 @@ pub fn releaseFrame(device: *Device, frame: ReceivedFrame) bool {
 
 pub fn pumpReceive(device: *Device) bool {
     const frame = receiveFrame(device) orelse return false;
+    const enqueued = enqueueSoftwarePacket(&device.software_rx_queue, frame);
+    const released = releaseFrame(device, frame);
+    return enqueued and released;
+}
+
+pub fn pumpReceiveNonBlocking(device: *Device) bool {
+    const frame = tryReceiveFrame(device) orelse return false;
     const enqueued = enqueueSoftwarePacket(&device.software_rx_queue, frame);
     const released = releaseFrame(device, frame);
     return enqueued and released;
@@ -35744,8 +35804,12 @@ fn programTransmitRing(bar0: usize, ring_address: usize) void {
 }
 
 fn waitForTx(descriptors: [*]volatile TxDescriptor, descriptor_index: usize, _: u64, target_apic_id: u8) bool {
-    const local_target = apic.currentId() == target_apic_id;
-    if (local_target) zigos_enable_interrupts();
+    // Boot validation deliberately waits for MSI-X completions. The retained
+    // runtime masks NIC interrupts and may call this path from an int 0x80
+    // handler whose return frame is resident on IST1; enabling interrupts there
+    // would let the APIC timer reuse IST1 and overwrite the outer syscall frame.
+    const interrupt_assisted = !runtime_completion_polling_enabled and apic.currentId() == target_apic_id;
+    if (interrupt_assisted) zigos_enable_interrupts();
     var completed = false;
     var iteration: usize = 0;
     while (iteration < maximum_poll_iterations) : (iteration += 1) {
@@ -35764,13 +35828,13 @@ fn waitForTx(descriptors: [*]volatile TxDescriptor, descriptor_index: usize, _: 
         }
         zigos_cpu_relax();
     }
-    if (local_target) zigos_disable_interrupts();
+    if (interrupt_assisted) zigos_disable_interrupts();
     return completed;
 }
 
 fn waitForRx(descriptors: [*]volatile RxDescriptor, descriptor_index: usize, _: u64, target_apic_id: u8) bool {
-    const local_target = apic.currentId() == target_apic_id;
-    if (local_target) zigos_enable_interrupts();
+    const interrupt_assisted = !runtime_completion_polling_enabled and apic.currentId() == target_apic_id;
+    if (interrupt_assisted) zigos_enable_interrupts();
     var completed = false;
     var iteration: usize = 0;
     while (iteration < maximum_poll_iterations) : (iteration += 1) {
@@ -35789,7 +35853,7 @@ fn waitForRx(descriptors: [*]volatile RxDescriptor, descriptor_index: usize, _: 
         }
         zigos_cpu_relax();
     }
-    if (local_target) zigos_disable_interrupts();
+    if (interrupt_assisted) zigos_disable_interrupts();
     return completed;
 }
 

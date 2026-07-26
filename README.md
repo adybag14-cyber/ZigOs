@@ -18,7 +18,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 44 isolated tests, source contract, live-network runtime and offline runtime. The required hosted workflow includes those gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 47 unique isolated-test declarations, the source contract, the 42-command offline runtime, the 43-command live-network runtime and the legacy two-boot persistence regression. Direct per-module runners execute 62 tests because imported process and memory tests are deliberately exercised from more than one root. The required hosted workflow includes the canonical gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -32,7 +32,10 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 - up to eight retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 256-slot ownership table;
 - private CR3 roots, strict W^X `PT_LOAD` mappings, one-page stacks and unmapped guards;
 - complete GPR and FXSAVE context preservation across syscalls and timer preemption;
-- a small pointer-validated permanent userspace syscall ABI with VFS-backed spawn, exact waitpid, wait-any and WNOHANG;
+- a versioned pointer-validated permanent userspace ABI with generated Zig/NASM constants, capability discovery, VFS-backed spawn, exact waitpid, wait-any and WNOHANG;
+- page-granular anonymous `mmap`, subrange `munmap`, W^X `mprotect` and expandable/shrinkable `brk`;
+- descriptor-backed `fstat`, directory iteration and `poll`;
+- up to eight descriptor-backed retained UDP sockets with bind, connect, send, receive, local-name lookup, readiness and blocked-reader wakeup;
 - real executable exit, sleep, preemption, fault containment, wait/reap and pipe block/wakeup;
 - a retained bounded e1000e owner with real shell ICMP echo and DNS A queries when present, plus explicit offline status when absent;
 - command parsing, bounded shell pipelines, descriptor-backed file redirection and history.
@@ -77,7 +80,7 @@ Run the bidirectional COM1 session:
 .\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 ```
 
-Each harness run boots the finished EFI image, waits for the permanent prompt and drives 40 commands. It preserves the previous navigation, mutation, redirection, parser, descriptor, device, fsck, sync and history coverage, then additionally requires:
+Each harness run boots the finished EFI image, waits for the permanent prompt and drives 42 commands offline or 43 commands with the live e1000e profile. It preserves the previous navigation, mutation, redirection, parser, descriptor, device, fsck, sync and history coverage, then additionally requires:
 
 - `run` and `exec` to enter VFS-loaded CPL3 code;
 - a real hardware-tick sleep and saved-context resume;
@@ -86,18 +89,28 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 - non-cooperative timer preemption of a background spin process;
 - a genuinely blocking shell `wait` over a sleeping CPL3 child, default forced `kill` through signal 9, one-time reap, descriptor cleanup and frame cleanup;
 - `/bin/wait.elf` spawning two VFS-backed CPL3 children and proving exact waitpid, wait-any and WNOHANG before exiting with status `0x31`;
+- `/bin/vm.elf` proving ABI discovery, anonymous mapping, W^X protection changes, unmapping and heap-break growth/shrink before exiting with status `0x52`;
+- `/bin/io.elf` proving descriptor-backed open/read/fstat/getdents/poll before exiting with status `0x53`;
+- `/bin/socket.elf` proving UDP socket/bind/connect/send/poll/getsockname/close on the live profile before exiting with status `0x54`;
 - real `10.0.2.2` ICMP and `localhost` DNS results in the network profile;
 - explicit unavailable responses in the offline profile;
 - absence of the former canned DNS and ping strings in permanent-runtime output.
 
-A representative run reports:
+Representative exact shutdown contracts are:
 
 ```text
-ZigOs persistent runtime shutdown: commands 40 failed 0 ticks 1009 idle-halts 958 service-passes 1009
-ZigOs persistent processes: live 2 created 15 reaped 13 switches 1094 signals 1 faults 1
-ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/41/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
-ZigOs post-bootstrap physical memory: total 39932 free 39932 allocated 0 low/high 39932/0 extents 5/5 peak 16 alloc/free 80/80 failed/rejected 0/0 clean yes
-ZigOs permanent userspace: page-limit 256 used 0 peak 16 contexts 0 launches/exits/faults 10/8/1 preemptions/blocking/syscalls 41/6/36 reclaimed 80 allocator alloc/release/retains 80/80/0 shared/oom/rejected 0/0/0 clean yes
+# Offline
+ZigOs persistent runtime shutdown: commands 42 failed 0
+ZigOs persistent descriptors: ... dup/inherited/cloexec 2/47/1 ... clean yes
+ZigOs post-bootstrap physical memory: ... peak 32 alloc/free 197/197 failed/rejected 0/0 clean yes
+ZigOs permanent userspace: page-limit 4096 used 0 peak 32 contexts 0 launches/exits/faults 12/10/1 ... reclaimed 197 allocator alloc/release/retains 197/197/0 shared/oom/rejected 0/0/0 clean yes
+ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes
+
+# Live e1000e
+ZigOs persistent runtime shutdown: commands 43 failed 0
+ZigOs persistent descriptors: ... dup/inherited/cloexec 2/50/1 ... clean yes
+ZigOs post-bootstrap physical memory: ... peak 32 alloc/free 213/213 failed/rejected 0/0 clean yes
+ZigOs permanent userspace: page-limit 4096 used 0 peak 32 contexts 0 launches/exits/faults 13/11/1 ... reclaimed 213 allocator alloc/release/retains 213/213/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 ```
 
@@ -185,7 +198,7 @@ These components are validated against deterministic QEMU scenarios. They are no
 
 A precise networking description is:
 
-> ZigOs retains one bounded e1000e device into the permanent runtime and can perform real shell ICMP echo and DNS A queries, while its broader UDP, NTP and TCP components remain assertion-heavy kernel mechanisms rather than a general userspace socket API or production network stack.
+> ZigOs retains one bounded e1000e device into the permanent runtime. The shell performs real ICMP echo and DNS A queries, while ABI version 1 exposes a bounded descriptor-backed UDP socket subset. The broader NTP/TCP components remain assertion-heavy kernel mechanisms rather than a production network stack.
 
 ## Legacy BIOS/i686 path
 
@@ -254,7 +267,7 @@ zig-out/
     `-- process-exec.elf
 ```
 
-`zig build test` runs 29 unique `std.testing` declarations: ten descriptor/open-description/pipe tests, five VFS tests, eight process-table tests and six shell/parser/editor tests.
+`zig build test` covers 47 unique `std.testing` declarations across descriptors/open descriptions/pipes, command parsing/editing, processes, VFS, ABI validation, page ownership and physical-memory management. The six direct module runners execute 62 tests in total because `runtime_fd.zig` imports the process tests and `runtime_page_pool.zig` imports the physical-memory tests.
 
 `zig build check` runs formatting, all isolated tests, the UEFI build and portable PE/COFF verification.
 
@@ -301,8 +314,8 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    2,855,424 bytes
-SHA-256: D21DFFE17CDCC65526C16AF201AF8CA11E69F96B15E6CB42CE80B2ABC1052B4E
+Size:    5,145,600 bytes
+SHA-256: BA260D90E17100D86E60F748D32ECA1058CADE8042E276688CBB947524058A45
 ```
 
 This identity is from the locally validated Windows build after the post-bootstrap Priority 1 physical-memory advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
@@ -336,8 +349,8 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 44 isolated tests, x86-64 UEFI build, portable PE verification and artifact upload.
-- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, both offline and live-network 40-command permanent COM1 sessions, legacy i686 build and two-boot persistence regression.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 47 unique isolated declarations, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 42-command offline and 43-command live-network permanent COM1 sessions, legacy i686 build and two-boot persistence regression.
 - **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 
 A green badge therefore represents substantially more than the former reduced single-boot profile.
@@ -395,10 +408,10 @@ src/serial.zig                    COM1 transmit and receive
 - Persistent-runtime fork, copy-on-write, flexible stack growth, environment vectors and auxiliary vectors are not implemented.
 - Shell pipeline stages still exchange bounded kernel buffers; `pipex` is the real executable pipe proof rather than a general process pipeline.
 - The writable x86-64 root filesystem is RAM-backed and does not survive reboot; `/boot` remains read-only.
-- There is no userspace socket API, IPv6 stack or production network stack. The shell `ping` and `dns` commands are bounded kernel operations on one retained e1000e device.
+- The userspace network ABI is UDP-only and bounded to eight descriptor-backed sockets with a fixed receive queue. There is no TCP listen/accept/data API, `sendto`/`recvfrom`, socket-option layer, IPv6 or production network stack.
 - Permanent userspace scheduling currently runs on the BSP rather than an SMP scheduler.
 - Hardware support remains strongly aligned with QEMU q35, QEMU NVMe/xHCI and Intel 82574L emulation.
-- There is no complete user/group permission model, ASLR, IOMMU DMA isolation, executable-signing policy or stable ABI.
+- ABI version 1 provides generated syscall numbers, capability discovery and errno conventions, but it is still experimental: there is no SDK compatibility guarantee, complete user/group permission model, ASLR, IOMMU DMA isolation or executable-signing policy.
 - ZigOs remains experimental, non-POSIX and not secure against hostile workloads.
 
 ## Design principles

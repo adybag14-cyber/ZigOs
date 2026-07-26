@@ -50,6 +50,44 @@ def runtime_wait_data() -> bytes:
         data[offset : offset + len(value)] = value
     return bytes(data)
 
+
+
+def runtime_socket_data() -> bytes:
+    data = bytearray(512)
+    fields = {
+        0: b"socket-api: start\r\n",
+        64: b"socket-api: socket/bind/connect/send/poll/close passed\r\n",
+        160: b"UDP-CPL3",
+    }
+    for offset, value in fields.items():
+        data[offset : offset + len(value)] = value
+    return bytes(data)
+
+
+def runtime_io_data() -> bytes:
+    data = bytearray(2048)
+    fields = {
+        0: b"io-api: start\r\n",
+        64: b"io-api: open/read/fstat/getdents/poll passed\r\n",
+        160: b"/proc/version\0",
+        192: b"/bin\0",
+        224: b"/dev/zero\0",
+    }
+    for offset, value in fields.items():
+        data[offset : offset + len(value)] = value
+    return bytes(data)
+
+
+def runtime_vm_data() -> bytes:
+    data = bytearray(512)
+    fields = {
+        0: b"vm-api: start\r\n",
+        64: b"vm-api: ABI/mmap/mprotect/munmap/brk passed\r\n",
+    }
+    for offset, value in fields.items():
+        data[offset : offset + len(value)] = value
+    return bytes(data)
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -73,6 +111,8 @@ def main() -> int:
 
     nasm = require_tool(args.nasm)
     python = sys.executable
+    run([python, str(scripts / "generate-abi.py"), "--repo-root", str(root)], root)
+    run([python, str(scripts / "generate-abi.py"), "--repo-root", str(root), "--check"], root)
 
     service_bin = build / "service-user.bin"
     service_elf = build / "service-user.elf"
@@ -90,6 +130,9 @@ def main() -> int:
         "pipe-reader": b"pipe reader data",
         "pipe-writer": b"PIPE-CPL",
         "wait": runtime_wait_data(),
+        "vm": runtime_vm_data(),
+        "io": runtime_io_data(),
+        "socket": runtime_socket_data(),
     }
     runtime_outputs: list[Path] = []
 

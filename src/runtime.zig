@@ -23,6 +23,9 @@ const runtime_spin_elf = @embedFile("generated/runtime_spin.elf");
 const runtime_pipe_reader_elf = @embedFile("generated/runtime_pipe_reader.elf");
 const runtime_pipe_writer_elf = @embedFile("generated/runtime_pipe_writer.elf");
 const runtime_wait_elf = @embedFile("generated/runtime_wait.elf");
+const runtime_vm_elf = @embedFile("generated/runtime_vm.elf");
+const runtime_io_elf = @embedFile("generated/runtime_io.elf");
+const runtime_socket_elf = @embedFile("generated/runtime_socket.elf");
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_wait_for_interrupt() callconv(cc) void;
@@ -154,6 +157,8 @@ const State = struct {
     pipeline_a: [maximum_pipeline_bytes]u8 = @splat(0),
     pipeline_b: [maximum_pipeline_bytes]u8 = @splat(0),
     input_buffer: [maximum_pipeline_bytes]u8 = @splat(0),
+    pseudo_buffer: [maximum_pipeline_bytes]u8 = @splat(0),
+    pseudo_busy: bool = false,
     command_count: u64 = 0,
     failed_commands: u64 = 0,
     serial_line_errors: u64 = 0,
@@ -217,6 +222,7 @@ fn initialize(configuration: Configuration) !void {
     state = undefined;
     state.config = configuration;
     state.vfs.initialize();
+    state.vfs.setPseudoReader(null, readPseudoBytes);
     state.processes.initialize(0);
     state.descriptors.initialize();
     state.environment = runtime_command.Environment.init();
@@ -225,6 +231,8 @@ fn initialize(configuration: Configuration) !void {
     state.pipeline_a = @splat(0);
     state.pipeline_b = @splat(0);
     state.input_buffer = @splat(0);
+    state.pseudo_buffer = @splat(0);
+    state.pseudo_busy = false;
     state.command_count = 0;
     state.failed_commands = 0;
     state.serial_line_errors = 0;
@@ -265,6 +273,11 @@ fn initialize(configuration: Configuration) !void {
     try state.processes.setResourceUsage(state.shell_handle, 8, 0, 0);
     try state.descriptors.bindProcess(&state.processes, state.shell_handle, true);
     try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
+    if (configuration.network_ready) {
+        const device = e1000e.activeDevice() orelse return error.NetworkStateMissing;
+        _ = e1000e.prepareRuntimeMmio(device);
+        if (!e1000e.enterRuntimePollingMode(device)) return error.NetworkPollingHandoffFailed;
+    }
 }
 
 fn initializeFilesystem() !void {
@@ -290,6 +303,9 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/pipe-reader.elf", runtime_pipe_reader_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/pipe-writer.elf", runtime_pipe_writer_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/wait.elf", runtime_wait_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/vm.elf", runtime_vm_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/io.elf", runtime_io_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/socket.elf", runtime_socket_elf, 0o555, false, 0);
 
     const pseudo_paths = [_][]const u8{
         "/proc/version",   "/proc/uptime", "/proc/meminfo", "/proc/processes",
@@ -328,7 +344,15 @@ fn serviceRuntime() void {
         _ = state.processes.wakeExpired(tick);
         serviceJobs(tick);
         state.device_service_passes +%= 1;
-        if (state.config.network_ready) state.network_service_passes +%= 1;
+        if (state.config.network_ready) {
+            state.network_service_passes +%= 1;
+            if (e1000e.activeDevice()) |device| {
+                _ = e1000e.prepareRuntimeMmio(device);
+                var pumped: u8 = 0;
+                while (pumped < 8 and e1000e.pumpReceiveNonBlocking(device)) : (pumped += 1) {}
+                _ = runtime_user.serviceNetwork();
+            }
+        }
     }
     state.last_serviced_tick = now;
 
@@ -864,7 +888,9 @@ fn commandPipeExecutables(output: *Output) void {
     const after = state.descriptors.report();
     if (after.blocked_reads - before.blocked_reads != 1 or
         after.reader_wakeups - before.reader_wakeups != 1 or
-        after.bytes_written - before.bytes_written != 8 or
+        // The writer contributes eight pipe bytes and the reader contributes
+        // the same eight bytes to its terminal descriptor.
+        after.bytes_written - before.bytes_written != 16 or
         after.bytes_read - before.bytes_read != 8 or
         after.pipes != before.pipes)
     {
@@ -1808,11 +1834,6 @@ fn commandHead(stage: *const runtime_command.Stage, input: []const u8, output: *
 }
 
 fn readPath(path: []const u8, output: *Output) bool {
-    const info = state.vfs.stat(state.cwd, path) catch |err| {
-        shellError("cat", err, output);
-        return false;
-    };
-    if (info.kind == .pseudo) return readPseudo(info.node, output);
     const fd = state.descriptors.openFile(
         &state.vfs,
         &state.processes,
@@ -1870,7 +1891,25 @@ fn writeDescriptorPath(path: []const u8, bytes: []const u8, append: bool) !void 
     try state.descriptors.close(&state.vfs, &state.processes, state.shell_handle, fd);
 }
 
-fn readPseudo(node: u16, output: *Output) bool {
+fn readPseudoBytes(_: ?*anyopaque, node: u16, offset: usize, destination: []u8) usize {
+    if (destination.len == 0 or state.pseudo_busy) return 0;
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
+    const path = state.vfs.canonicalPath(node, &path_buffer) catch return 0;
+    if (equal(path, "/dev/null")) return 0;
+    if (equal(path, "/dev/zero")) {
+        @memset(destination, 0);
+        return destination.len;
+    }
+    state.pseudo_busy = true;
+    defer state.pseudo_busy = false;
+    var output = Output.init(&state.pseudo_buffer);
+    if (!formatPseudo(node, &output) or offset >= output.length) return 0;
+    const count = @min(destination.len, output.length - offset);
+    @memcpy(destination[0..count], output.slice()[offset .. offset + count]);
+    return count;
+}
+
+fn formatPseudo(node: u16, output: *Output) bool {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
     const path = state.vfs.canonicalPath(node, &path_buffer) catch return false;
     if (equal(path, "/proc/version")) {
@@ -1894,7 +1933,7 @@ fn readPseudo(node: u16, output: *Output) bool {
     } else if (equal(path, "/dev/null")) {
         return true;
     } else if (equal(path, "/dev/zero")) {
-        for (0..64) |_| output.byte(0);
+        return true;
     } else if (equal(path, "/dev/console")) {
         output.line("COM1 serial console");
     } else if (equal(path, "/net/interfaces")) {
@@ -2147,6 +2186,22 @@ fn emit(text: []const u8) void {
     for (text) |character| {
         zigos_debug_putc(character);
         _ = serial.putByte(character);
+    }
+}
+
+fn emitHex(value: u64) void {
+    const digits = "0123456789ABCDEF";
+    var shift: u6 = 60;
+    var started = false;
+    while (true) {
+        const nibble: u4 = @truncate(value >> shift);
+        if (nibble != 0 or started or shift == 0) {
+            const index: usize = nibble;
+            emit(digits[index .. index + 1]);
+            started = true;
+        }
+        if (shift == 0) break;
+        shift -= 4;
     }
 }
 

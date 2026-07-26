@@ -190,6 +190,8 @@ try {
         'kill 9',
         'wait 9',
         'exec /bin/wait.elf',
+        'exec /bin/vm.elf',
+        'exec /bin/io.elf',
         'devices',
         'ifconfig',
         $pingCommand,
@@ -204,6 +206,10 @@ try {
         'fds',
         'shutdown'
     )
+    if ($Network) {
+        $deviceIndex = [Array]::IndexOf($commands, 'devices')
+        $commands = @($commands[0..($deviceIndex - 1)] + 'exec /bin/socket.elf' + $commands[$deviceIndex..($commands.Length - 1)])
+    }
     foreach ($command in $commands) {
         Send-SerialLine $command
         if ($command -like 'sleep *' -or $command -like 'exec *' -or $command -eq 'pipex' -or $command -like 'wait *' -or ($Network -and ($command -like 'ping *' -or $command -like 'dns *'))) { Start-Sleep -Milliseconds 600; Read-SerialAvailable }
@@ -256,33 +262,42 @@ try {
         'wait-api: start',
         'wait-api: waitpid/WNOHANG/wait-any passed',
         'exec: PID 10 state zombie status 0x31',
+        'vm-api: start',
+        'vm-api: ABI/mmap/mprotect/munmap/brk passed',
+        'exec: PID 13 state zombie status 0x52',
+        'io-api: start',
+        'io-api: open/read/fstat/getdents/poll passed',
+        'exec: PID 14 state zombie status 0x53',
         'serial COM1 online',
         'fsck ramfs: clean',
         'sync complete:',
         'fdtest: descriptors 3 open 3 pipes 0 shared-offset yes clone yes cloexec yes read-block yes write-block yes eof yes broken-pipe yes ring yes clean yes',
-        'fdtest counters: dup 2 inherited 41 cloexec 1 blocked 2/1 wakeups 2/1',
+        $(if ($Network) { 'fdtest counters: dup 2 inherited 50 cloexec 1 blocked 2/1 wakeups 2/1' } else { 'fdtest counters: dup 2 inherited 47 cloexec 1 blocked 2/1 wakeups 2/1' }),
         'FD KIND       MODE OFD      REFS FLAGS OFFSET/BUFFERED',
         '0 terminal',
         '1 terminal',
         '2 terminal',
-        'ZigOs persistent runtime shutdown: commands 40 failed 0',
+        $(if ($Network) { 'ZigOs persistent runtime shutdown: commands 43 failed 0' } else { 'ZigOs persistent runtime shutdown: commands 42 failed 0' }),
         'ZigOs persistent VFS:',
         'ZigOs persistent processes:',
         'faults 1',
-        'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/41/1 blocked 2/1 wakeups 2/1',
+        $(if ($Network) { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/50/1 blocked 2/1 wakeups 2/1' } else { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/47/1 blocked 2/1 wakeups 2/1' }),
         'broken 1 clean yes',
         'Post-bootstrap physical memory manager active:',
         'bootstrap allocator sealed',
         'ZigOs post-bootstrap physical memory: total ',
-        'peak 16 alloc/free 80/80 failed/rejected 0/0 clean yes',
-        'ZigOs permanent userspace: page-limit 256 used 0',
-        'contexts 0 launches/exits/faults 10/8/1',
-        'allocator alloc/release/retains 80/80/0 shared/oom/rejected 0/0/0 clean yes',
+        $(if ($Network) { 'peak 32 alloc/free 213/213 failed/rejected 0/0 clean yes' } else { 'peak 32 alloc/free 197/197 failed/rejected 0/0 clean yes' }),
+        'ZigOs permanent userspace: page-limit 4096 used 0',
+        $(if ($Network) { 'launches/exits/faults 13/11/1' } else { 'launches/exits/faults 12/10/1' }),
+        $(if ($Network) { 'reclaimed 213 allocator alloc/release/retains 213/213/0' } else { 'reclaimed 197 allocator alloc/release/retains 197/197/0' }),
         'ZigOs x86-64 Capstone 18 verified: goals 0x000001D1',
         'ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes'
     )
     if ($Network) {
         $required += @(
+            'socket-api: start',
+            'socket-api: socket/bind/connect/send/poll/close passed',
+            'exec: PID 15 state zombie status 0x54',
             'serial COM1 online; framebuffer no; USB keyboard no; NVMe yes; AHCI no; e1000e yes',
             'e1000e0: up mac 52:54:00:12:34:56 ipv4 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 dns 10.0.2.3',
             'reply from 10.0.2.2: bytes=16',

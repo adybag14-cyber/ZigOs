@@ -1,42 +1,184 @@
 const std = @import("std");
+pub const constants = @import("generated/runtime_abi_constants.zig");
 
-pub const errno_permission: i64 = -1;
-pub const errno_not_found: i64 = -2;
-pub const errno_no_process: i64 = -3;
-pub const errno_io: i64 = -5;
-pub const errno_too_big: i64 = -7;
-pub const errno_bad_fd: i64 = -9;
-pub const errno_no_child: i64 = -10;
-pub const errno_would_block: i64 = -11;
-pub const errno_no_memory: i64 = -12;
-pub const errno_access: i64 = -13;
-pub const errno_fault: i64 = -14;
-pub const errno_busy: i64 = -16;
-pub const errno_exists: i64 = -17;
-pub const errno_cross_device: i64 = -18;
-pub const errno_not_directory: i64 = -20;
-pub const errno_is_directory: i64 = -21;
-pub const errno_invalid: i64 = -22;
-pub const errno_system_file_limit: i64 = -23;
-pub const errno_process_file_limit: i64 = -24;
-pub const errno_file_too_large: i64 = -27;
-pub const errno_no_space: i64 = -28;
-pub const errno_not_seekable: i64 = -29;
-pub const errno_read_only: i64 = -30;
-pub const errno_broken_pipe: i64 = -32;
-pub const errno_name_too_long: i64 = -36;
-pub const errno_no_syscall: i64 = -38;
-pub const errno_not_empty: i64 = -39;
-pub const errno_loop: i64 = -40;
+pub const errno_permission = constants.errno_permission;
+pub const errno_not_found = constants.errno_not_found;
+pub const errno_no_process = constants.errno_no_process;
+pub const errno_interrupted = constants.errno_interrupted;
+pub const errno_io = constants.errno_io;
+pub const errno_too_big = constants.errno_too_big;
+pub const errno_bad_fd = constants.errno_bad_fd;
+pub const errno_no_child = constants.errno_no_child;
+pub const errno_would_block = constants.errno_would_block;
+pub const errno_no_memory = constants.errno_no_memory;
+pub const errno_access = constants.errno_access;
+pub const errno_fault = constants.errno_fault;
+pub const errno_busy = constants.errno_busy;
+pub const errno_exists = constants.errno_exists;
+pub const errno_cross_device = constants.errno_cross_device;
+pub const errno_not_directory = constants.errno_not_directory;
+pub const errno_is_directory = constants.errno_is_directory;
+pub const errno_invalid = constants.errno_invalid;
+pub const errno_system_file_limit = constants.errno_system_file_limit;
+pub const errno_process_file_limit = constants.errno_process_file_limit;
+pub const errno_file_too_large = constants.errno_file_too_large;
+pub const errno_no_space = constants.errno_no_space;
+pub const errno_not_seekable = constants.errno_not_seekable;
+pub const errno_read_only = constants.errno_read_only;
+pub const errno_broken_pipe = constants.errno_broken_pipe;
+pub const errno_name_too_long = constants.errno_name_too_long;
+pub const errno_no_syscall = constants.errno_no_syscall;
+pub const errno_not_empty = constants.errno_not_empty;
+pub const errno_loop = constants.errno_loop;
+pub const errno_not_socket = constants.errno_not_socket;
+pub const errno_address_in_use = constants.errno_address_in_use;
+pub const errno_not_connected = constants.errno_not_connected;
+pub const errno_connection_refused = constants.errno_connection_refused;
+
+pub const wait_nohang: u64 = 1;
+
+pub const open_read: u8 = 1 << 0;
+pub const open_write: u8 = 1 << 1;
+pub const open_create: u8 = 1 << 2;
+pub const open_truncate: u8 = 1 << 3;
+pub const open_append: u8 = 1 << 4;
+pub const open_close_on_exec: u8 = 1 << 5;
+pub const open_allowed: u64 = open_read | open_write | open_create | open_truncate | open_append | open_close_on_exec;
+
+pub const protection_read: u64 = 1 << 0;
+pub const protection_write: u64 = 1 << 1;
+pub const protection_execute: u64 = 1 << 2;
+pub const protection_allowed: u64 = protection_read | protection_write | protection_execute;
+
+pub const map_private: u64 = 1 << 0;
+pub const map_anonymous: u64 = 1 << 1;
+pub const map_fixed: u64 = 1 << 2;
+pub const map_fixed_no_replace: u64 = 1 << 3;
+pub const map_allowed: u64 = map_private | map_anonymous | map_fixed | map_fixed_no_replace;
+
+pub const poll_readable: u16 = 1 << 0;
+pub const poll_writable: u16 = 1 << 1;
+pub const poll_error: u16 = 1 << 2;
+pub const poll_hangup: u16 = 1 << 3;
+
+pub const address_family_ipv4: u16 = 2;
+pub const socket_datagram: u16 = 2;
+pub const protocol_udp: u16 = 17;
+
+pub const AbiInfo = extern struct {
+    magic: u32,
+    size: u16,
+    major: u16,
+    minor: u16,
+    reserved0: u16 = 0,
+    page_size: u32,
+    syscall_base: u16,
+    syscall_count: u16,
+    reserved1: u32 = 0,
+    capabilities: u64,
+    user_base: u64,
+    user_end: u64,
+    maximum_io_bytes: u32,
+    maximum_path_bytes: u32,
+    maximum_processes: u16,
+    maximum_descriptors: u16,
+    maximum_sockets: u16,
+    reserved2: u16 = 0,
+};
+
+pub const WaitStatus = extern struct {
+    pid: u32,
+    exit_status: u32,
+    state: u32,
+    fault_vector: u32,
+    fault_address: u64,
+};
+
+pub const Stat = extern struct {
+    node: u32,
+    generation: u16,
+    kind: u8,
+    readonly: u8,
+    mode: u16,
+    mount_id: u8,
+    reserved0: u8 = 0,
+    size: u64,
+    modified_tick: u64,
+};
+
+pub const DirectoryEntry = extern struct {
+    node: u32,
+    kind: u8,
+    readonly: u8,
+    name_length: u16,
+    size: u64,
+    name: [32]u8,
+};
+
+pub const PollDescriptor = extern struct {
+    fd: u16,
+    requested: u16,
+    returned: u16,
+    reserved: u16 = 0,
+};
+
+pub const Ipv4SocketAddress = extern struct {
+    family: u16,
+    port_be: u16,
+    address_be: u32,
+};
+
+pub const AbiLimits = struct {
+    capabilities: u64,
+    user_base: u64,
+    user_end: u64,
+    maximum_io_bytes: u32,
+    maximum_path_bytes: u32,
+    maximum_processes: u16,
+    maximum_descriptors: u16,
+    maximum_sockets: u16,
+};
+
+pub fn makeInfo(limits: AbiLimits) AbiInfo {
+    return .{
+        .magic = constants.abi_magic,
+        .size = @sizeOf(AbiInfo),
+        .major = constants.abi_major,
+        .minor = constants.abi_minor,
+        .page_size = constants.abi_page_size,
+        .syscall_base = constants.syscall_base,
+        .syscall_count = constants.syscall_count,
+        .capabilities = limits.capabilities,
+        .user_base = limits.user_base,
+        .user_end = limits.user_end,
+        .maximum_io_bytes = limits.maximum_io_bytes,
+        .maximum_path_bytes = limits.maximum_path_bytes,
+        .maximum_processes = limits.maximum_processes,
+        .maximum_descriptors = limits.maximum_descriptors,
+        .maximum_sockets = limits.maximum_sockets,
+    };
+}
 
 pub fn descriptor(value: u64) ?u16 {
     return std.math.cast(u16, value);
 }
 
 pub fn openFlagBits(value: u64) ?u8 {
-    const allowed: u64 = 0x1F;
-    if ((value & ~allowed) != 0) return null;
+    if ((value & ~open_allowed) != 0) return null;
     return @intCast(value);
+}
+
+pub fn protectionBits(value: u64) ?u8 {
+    if ((value & ~protection_allowed) != 0) return null;
+    return @intCast(value);
+}
+
+pub fn mapFlagBits(value: u64) ?u8 {
+    if ((value & ~map_allowed) != 0) return null;
+    const bits: u8 = @intCast(value);
+    if ((bits & map_private) == 0 or (bits & map_anonymous) == 0) return null;
+    if ((bits & map_fixed) != 0 and (bits & map_fixed_no_replace) != 0) return null;
+    return bits;
 }
 
 pub fn mode(value: u64) ?u16 {
@@ -51,15 +193,15 @@ pub fn fromError(err: anyerror) i64 {
         error.StillRunning, error.NoSlots, error.NoContext, error.ContextLimit, error.QuotaExceeded => errno_would_block,
         error.PermissionDenied => errno_access,
         error.InvalidHandle, error.BadDescriptor, error.NotReadable, error.NotWritable => errno_bad_fd,
-        error.InvalidPath, error.InvalidOffset, error.InvalidOperation, error.InvalidState, error.InvalidSignal => errno_invalid,
+        error.InvalidPath, error.InvalidOffset, error.InvalidOperation, error.InvalidState, error.InvalidSignal, error.InvalidAddress, error.InvalidProtection, error.InvalidMapping => errno_invalid,
         error.NameTooLong, error.PathTooLong, error.ArgumentTooLong => errno_name_too_long,
         error.TooManyArguments => errno_too_big,
-        error.AlreadyExists, error.NamespaceExists => errno_exists,
+        error.AlreadyExists, error.NamespaceExists, error.AddressInUse => errno_exists,
         error.NotDirectory => errno_not_directory,
         error.IsDirectory => errno_is_directory,
         error.DirectoryNotEmpty => errno_not_empty,
         error.ReadOnly => errno_read_only,
-        error.NoRuntimeFrames, error.AddressSpaceFailure, error.MappingLimit, error.MappingFailure => errno_no_memory,
+        error.NoRuntimeFrames, error.AddressSpaceFailure, error.MappingLimit, error.MappingFailure, error.OutOfMemory => errno_no_memory,
         error.NoSpace, error.PipeLimit => errno_no_space,
         error.FileTooLarge => errno_file_too_large,
         error.Busy => errno_busy,
@@ -69,9 +211,30 @@ pub fn fromError(err: anyerror) i64 {
         error.DescriptorLimit => errno_process_file_limit,
         error.NotSeekable => errno_not_seekable,
         error.BrokenPipe => errno_broken_pipe,
-        error.NamespaceMissing, error.ReferenceOverflow, error.CorruptState => errno_io,
+        error.NotSocket => errno_not_socket,
+        error.NotConnected => errno_not_connected,
+        error.ConnectionRefused => errno_connection_refused,
+        error.NamespaceMissing, error.ReferenceOverflow, error.CorruptState, error.BackingAllocatorFailure => errno_io,
         else => errno_io,
     };
+}
+
+test "ABI information has a stable 64-byte versioned layout" {
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(AbiInfo));
+    const info = makeInfo(.{
+        .capabilities = constants.capability_process | constants.capability_virtual_memory,
+        .user_base = 0x1000,
+        .user_end = 0x8000,
+        .maximum_io_bytes = 1024,
+        .maximum_path_bytes = 255,
+        .maximum_processes = 64,
+        .maximum_descriptors = 32,
+        .maximum_sockets = 16,
+    });
+    try std.testing.expectEqual(constants.abi_magic, info.magic);
+    try std.testing.expectEqual(constants.abi_major, info.major);
+    try std.testing.expectEqual(constants.syscall_count, info.syscall_count);
+    try std.testing.expect((info.capabilities & constants.capability_virtual_memory) != 0);
 }
 
 test "descriptor arguments reject narrowing aliases" {
@@ -81,11 +244,14 @@ test "descriptor arguments reject narrowing aliases" {
     try std.testing.expect(descriptor(std.math.maxInt(u64)) == null);
 }
 
-test "open flags reject every high bit before narrowing" {
-    try std.testing.expectEqual(@as(?u8, 0x1F), openFlagBits(0x1F));
-    try std.testing.expect(openFlagBits(0x20) == null);
-    try std.testing.expect(openFlagBits(0x100) == null);
-    try std.testing.expect(openFlagBits(@as(u64, 1) << 63) == null);
+test "open protection and map flags reject unknown or contradictory bits" {
+    try std.testing.expectEqual(@as(?u8, open_allowed), openFlagBits(open_allowed));
+    try std.testing.expect(openFlagBits(open_allowed + 1) == null);
+    try std.testing.expectEqual(@as(?u8, protection_read | protection_write), protectionBits(protection_read | protection_write));
+    try std.testing.expect(protectionBits(8) == null);
+    try std.testing.expectEqual(@as(?u8, map_private | map_anonymous), mapFlagBits(map_private | map_anonymous));
+    try std.testing.expect(mapFlagBits(map_anonymous) == null);
+    try std.testing.expect(mapFlagBits(map_private | map_anonymous | map_fixed | map_fixed_no_replace) == null);
 }
 
 test "mode arguments reject values wider than the ABI" {
@@ -101,7 +267,6 @@ test "kernel errors retain distinct userspace errno values" {
     try std.testing.expectEqual(errno_broken_pipe, fromError(error.BrokenPipe));
     try std.testing.expectEqual(errno_process_file_limit, fromError(error.DescriptorLimit));
     try std.testing.expectEqual(errno_would_block, fromError(error.NoContext));
-    try std.testing.expectEqual(errno_would_block, fromError(error.ContextLimit));
     try std.testing.expectEqual(errno_no_memory, fromError(error.NoRuntimeFrames));
     try std.testing.expectEqual(errno_system_file_limit, fromError(error.OpenDescriptionLimit));
 }

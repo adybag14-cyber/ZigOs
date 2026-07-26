@@ -2157,8 +2157,8 @@ Status: implementation and full local Windows validation complete; required host
 - Changed `crash` from fabricated process accounting into a genuine CPL3 page fault at CR2 `0x8000180000`.
 - Added `pipex`, proving a real executable reader block, a separate executable writer wakeup, exact `PIPE-CPL` transfer and endpoint reclamation.
 - Removed canned permanent-shell network results; retained the initialized e1000e owner for real bounded ICMP/DNS transactions, with explicit unavailable status in the no-NIC profile.
-- Expanded the canonical COM1 session to 40 commands; both live-network and offline profiles pass locally, including blocking wait and default forced kill, and the source-contract verifier rejects syscall narrowing, stale help, incomplete test-graph and CI-gate regressions.
+- Expanded the maintained canonical COM1 sessions to 42 commands offline and 43 with live networking. The added ABI/VM/I/O/UDP fixtures prove ABI query, mmap/munmap/mprotect/brk, fstat/getdents/poll and descriptor-backed UDP socket/bind/connect/send/poll/close, while the source contract rejects syscall narrowing, process-table value copies and interrupt enablement during retained NIC polling.
 - Cumulative historical x86-64 accounting is 497 goals (`0x1F1`), with 32 (`0x20`) new in Capstone 19.
-- The separate 500-goal general roadmap now has 122 complete and 378 open after reconciling bounded multi-segment ELF loading, syscall/signal/pipe tests, required live-network CI and cross-platform artifact comparison.
-- Locally verified Windows `BOOTX64.EFI`: 2,855,424 bytes, SHA-256 `D21DFFE17CDCC65526C16AF201AF8CA11E69F96B15E6CB42CE80B2ABC1052B4E`.
+- The separate 500-goal general roadmap now has 142 complete and 358 open after reconciling the bounded ABI/VM/I/O/UDP integration. Historical Capstone 19 remains 32 goals and 497 cumulative goals.
+- Locally verified Windows `BOOTX64.EFI`: 5,145,600 bytes, SHA-256 `BA260D90E17100D86E60F748D32ECA1058CADE8042E276688CBB947524058A45`.
 - Exact release contract: [`CAPSTONE-19.0.md`](CAPSTONE-19.0.md).

@@ -2,9 +2,9 @@
 
 This roadmap converts the broad runtime, process, filesystem, userland, networking, build, testing, hardware and security gaps into 500 individually trackable engineering goals. A checked item means the repository contains the claimed implementation and at least one executable test or release contract; it does not imply production readiness. Each completed goal should also state whether its evidence is source-only, isolated-unit, QEMU integration or required hosted CI. Bounded Capstone fixtures do not automatically satisfy a general-runtime goal.
 
-**Status after the post-bootstrap Priority 1 memory advance:** 122 complete, 378 open.
+**Status after the maintained ABI/VM/I/O/UDP advance:** 142 complete, 358 open.
 
-Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. The bounded Priority 1 runtime advance completes **G138, G139 and G140** through permanent CPL3 integration. The subsequent post-bootstrap memory slice seals the monotonic allocator, imports all remaining usable firmware extents into a reclaiming manager and returns permanent-runtime pages after use, but does not close a broader roadmap item because boot-time allocations, high-memory direct access, DMA policy, synchronization and OOM selection remain incomplete. Its release contract is more granular than this roadmap, so the two accounting systems remain separate.
+Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G130, G175, G294 and G340**. The subsequent correctness/CI remediation completes **G104, G399, G400, G401, G419 and G423**. The first bounded Priority 1 runtime advance completes **G138, G139 and G140**. The maintained ABI/VM/I/O/UDP slice additionally completes **G102, G114, G118, G120-G122, G162-G164, G184, G253, G296-G299, G308-G309, G311, G328 and G330** through generated ABI contracts, CPL3 integration fixtures and required 42/43-command QEMU sessions. The post-bootstrap memory manager remains a bounded handoff rather than a system-wide PMM because boot-time allocations, high-memory direct access, DMA policy, synchronization and OOM selection remain incomplete. Historical Capstone release accounting remains separate from this broader roadmap.
 
 ## Completed in Capstone 17
 
@@ -112,7 +112,7 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [x] **G099** — Allocate reusable private CR3 roots for long-lived processes.
 - [ ] **G100** — Allocate and reclaim a private privilege stack for every executable process.
 - [ ] **G101** — Allocate flexible multi-page user stacks rather than one fixed stack page.
-- [ ] **G102** — Load ELF64 executables directly from a mounted storage backend.
+- [x] **G102** — Load ELF64 executables directly from a mounted storage backend.
 - [ ] **G103** — Support arbitrary valid ELF64 program-header counts within a documented bound.
 - [x] **G104** — Map up to four validated non-overlapping PT_LOAD segments per executable, with transactional rejection of overlap and aliasing.
 - [x] **G105** — Reject overlapping or aliasing ELF64 load segments transactionally.
@@ -124,15 +124,15 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [x] **G111** — Inherit and validate current working directories for permanent-runtime spawn; the bounded Capstone fork fixture separately preserves its working directory, while general persistent fork remains G115.
 - [x] **G112** — Provide per-process numeric file-descriptor namespaces.
 - [ ] **G113** — Replace the calling process image during exec instead of creating a pseudo job.
-- [ ] **G114** — Implement a real spawn syscall that enters storage-loaded CPL3 code.
+- [x] **G114** — Implement a real spawn syscall that enters storage-loaded CPL3 code.
 - [ ] **G115** — Implement fork for persistent runtime processes.
 - [ ] **G116** — Retain copy-on-write mappings after fork beyond a bounded proof suite.
 - [ ] **G117** — Resolve copy-on-write write faults in the general page-fault path.
-- [ ] **G118** — Implement anonymous mmap with page-aligned flexible regions.
+- [x] **G118** — Implement anonymous mmap with page-aligned flexible regions.
 - [ ] **G119** — Implement file-backed mmap through VFS objects.
-- [ ] **G120** — Implement munmap with partial-region splitting.
-- [ ] **G121** — Implement mprotect with W^X and user-range enforcement.
-- [ ] **G122** — Implement brk/sbrk-compatible heap-region growth.
+- [x] **G120** — Implement munmap with partial-region splitting.
+- [x] **G121** — Implement mprotect with W^X and user-range enforcement.
+- [x] **G122** — Implement brk/sbrk-compatible heap-region growth.
 - [x] **G123** — Install unmapped guard pages around every user stack.
 - [ ] **G124** — Grow user stacks on eligible guard faults within a resource limit.
 - [ ] **G125** — Generalize demand-zero mapping to arbitrary anonymous regions.
@@ -172,9 +172,9 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [ ] **G159** — Protect the process table with SMP-safe locking.
 - [ ] **G160** — Make process state transitions safe under interrupt preemption.
 - [ ] **G161** — Route all userspace entries through one audited syscall frame format.
-- [ ] **G162** — Assign stable documented syscall numbers for the general runtime ABI.
-- [ ] **G163** — Provide centralized copy_from_user validation and fault handling.
-- [ ] **G164** — Provide centralized copy_to_user validation and fault handling.
+- [x] **G162** — Assign stable documented syscall numbers for the general runtime ABI.
+- [x] **G163** — Provide centralized copy_from_user validation and fault handling.
+- [x] **G164** — Provide centralized copy_to_user validation and fault handling.
 - [ ] **G165** — Support bounded iovec copy operations for scatter/gather syscalls.
 - [ ] **G166** — Expose per-process resource-limit get/set syscalls.
 - [ ] **G167** — Choose and terminate a process predictably under true memory exhaustion.
@@ -197,7 +197,7 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [ ] **G181** — Resolve paths across mount boundaries and mounted roots.
 - [ ] **G182** — Implement openat relative to directory descriptors.
 - [ ] **G183** — Implement fstat and stat through one metadata path.
-- [ ] **G184** — Implement directory iteration through stable directory descriptors.
+- [x] **G184** — Implement directory iteration through stable directory descriptors.
 - [ ] **G185** — Implement readlink and symbolic-link traversal limits.
 - [ ] **G186** — Implement hard-link creation and link counts.
 - [ ] **G187** — Implement atomic rename within one filesystem.
@@ -269,7 +269,7 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 ## Shell and standalone userland
 
 - [ ] **G252** — Move the persistent shell itself into a real CPL3 process.
-- [ ] **G253** — Connect shell stdin, stdout and stderr to a terminal descriptor.
+- [x] **G253** — Connect shell stdin, stdout and stderr to a terminal descriptor.
 - [ ] **G254** — Execute external storage-backed programs from command names.
 - [ ] **G255** — Search executable paths through the PATH environment variable.
 - [ ] **G256** — Pass parsed argv to external programs.
@@ -312,13 +312,13 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [ ] **G293** — Provide a Zig userspace support library wrapping syscalls.
 - [x] **G294** — Build every userspace program as a separate ELF64 artifact.
 - [ ] **G295** — Install userspace programs into the persistent filesystem image.
-- [ ] **G296** — Run a multi-program boot smoke test entirely through the shell.
+- [x] **G296** — Run a multi-program boot smoke test entirely through the shell.
 
 ## General userspace networking
 
-- [ ] **G297** — Expose socket creation to userspace.
-- [ ] **G298** — Expose socket close through normal descriptor semantics.
-- [ ] **G299** — Expose bind for local addresses and ports.
+- [x] **G297** — Expose socket creation to userspace.
+- [x] **G298** — Expose socket close through normal descriptor semantics.
+- [x] **G299** — Expose bind for local addresses and ports.
 - [ ] **G300** — Expose connect for UDP and TCP sockets.
 - [ ] **G301** — Expose listen for passive TCP sockets.
 - [ ] **G302** — Expose accept for incoming TCP connections.
@@ -327,10 +327,10 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [ ] **G305** — Expose shutdown for half-closing TCP connections.
 - [ ] **G306** — Expose getsockname and getpeername.
 - [ ] **G307** — Expose socket option get/set operations.
-- [ ] **G308** — Integrate sockets into poll/select-style readiness.
-- [ ] **G309** — Wake blocked readers when packet data arrives.
+- [x] **G308** — Integrate sockets into poll/select-style readiness.
+- [x] **G309** — Wake blocked readers when packet data arrives.
 - [ ] **G310** — Wake blocked writers when transmit capacity becomes available.
-- [ ] **G311** — Maintain long-lived UDP endpoints after boot validation.
+- [x] **G311** — Maintain long-lived UDP endpoints after boot validation.
 - [ ] **G312** — Maintain long-lived TCP control blocks after boot validation.
 - [ ] **G313** — Support arbitrary TCP application-data transmission.
 - [ ] **G314** — Support arbitrary TCP application-data receive and reassembly.
@@ -347,9 +347,9 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [ ] **G325** — Recycle connection-table slots with generation safety.
 - [ ] **G326** — Support multiple concurrent TCP connections.
 - [ ] **G327** — Support multiple concurrent UDP applications.
-- [ ] **G328** — Implement bounded per-socket receive buffers.
+- [x] **G328** — Implement bounded per-socket receive buffers.
 - [ ] **G329** — Implement bounded per-socket transmit buffers.
-- [ ] **G330** — Apply socket buffer quotas per process.
+- [x] **G330** — Apply socket buffer quotas per process.
 - [ ] **G331** — Maintain an ARP cache keyed by interface and IPv4 address.
 - [ ] **G332** — Age ARP entries with reachable, stale and expired states.
 - [ ] **G333** — Coalesce concurrent ARP resolution requests.
@@ -444,7 +444,7 @@ Capstone 19 completed **G097, G098, G099, G105, G106, G111, G123, G127, G128, G1
 - [ ] **G416** — Run process create/exit/reap stress under timer preemption.
 - [ ] **G417** — Run filesystem mutation stress across simulated power failures.
 - [ ] **G418** — Run concurrent network connections with injected packet loss.
-- [x] **G419** — Require both the network-enabled boot profile and the 40-command live-network permanent-shell profile in hosted CI.
+- [x] **G419** - Require both the network-enabled boot profile and the 43-command live-network permanent-shell profile in hosted CI.
 - [ ] **G420** — Publish an SMP-enabled QEMU profile as a required CI gate.
 - [ ] **G421** — Publish a framebuffer and USB-keyboard profile as a required CI gate.
 - [ ] **G422** — Publish NVMe and AHCI fallback profiles as required CI gates.

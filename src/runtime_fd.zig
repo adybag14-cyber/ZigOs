@@ -1,6 +1,7 @@
 const std = @import("std");
 const runtime_process = @import("runtime_process.zig");
 const runtime_vfs = @import("runtime_vfs.zig");
+const runtime_abi = @import("runtime_abi.zig");
 
 pub const maximum_descriptors_per_process: usize = 32;
 pub const maximum_open_descriptions: usize = 96;
@@ -30,6 +31,15 @@ pub const DescriptionKind = enum(u8) {
     vfs,
     pipe_read,
     pipe_write,
+    udp_socket,
+};
+
+pub const ExternalCloseFn = *const fn (context: ?*anyopaque, resource_index: u16, generation: u32) bool;
+pub const ExternalPollFn = *const fn (context: ?*anyopaque, resource_index: u16, generation: u32, requested: u16) u16;
+
+pub const ExternalResource = struct {
+    index: u16,
+    generation: u32,
 };
 
 pub const IoStatus = enum(u8) {
@@ -71,7 +81,7 @@ const OpenDescription = struct {
     writable: bool = false,
     append: bool = false,
     resource_index: u16 = invalid_resource,
-    resource_generation: u16 = 0,
+    resource_generation: u32 = 0,
     vfs_owner: u32 = 0,
     vfs_handle: u32 = 0,
 };
@@ -112,6 +122,7 @@ pub const Report = struct {
     terminal_descriptions: usize,
     pipe_read_descriptions: usize,
     pipe_write_descriptions: usize,
+    udp_socket_descriptions: usize,
     pipes: usize,
     duplicated_descriptors: u64,
     inherited_descriptors: u64,
@@ -145,6 +156,9 @@ pub const System = struct {
     eof_reads: u64 = 0,
     broken_pipe_writes: u64 = 0,
     stale_namespace_sweeps: u64 = 0,
+    external_context: ?*anyopaque = null,
+    external_close: ?ExternalCloseFn = null,
+    external_poll: ?ExternalPollFn = null,
 
     pub fn init() System {
         var self: System = undefined;
@@ -154,6 +168,17 @@ pub const System = struct {
 
     pub fn initialize(self: *System) void {
         self.* = .{};
+    }
+
+    pub fn setExternalBackend(
+        self: *System,
+        context: ?*anyopaque,
+        close_fn: ?ExternalCloseFn,
+        poll_fn: ?ExternalPollFn,
+    ) void {
+        self.external_context = context;
+        self.external_close = close_fn;
+        self.external_poll = poll_fn;
     }
 
     pub fn bindProcess(
@@ -207,7 +232,9 @@ pub const System = struct {
         const target_slot = try processSlot(target_handle);
         if (self.namespaces[target_slot].used) return Error.NamespaceExists;
         const count = descriptorCount(&self.namespaces[source_slot]);
+        const socket_count = socketDescriptionCount(self, &self.namespaces[source_slot]);
         if (count > target_process.limits.maximum_descriptors) return Error.DescriptorLimit;
+        if (socket_count > target_process.limits.maximum_sockets) return Error.QuotaExceeded;
         for (self.namespaces[source_slot].descriptors) |descriptor| {
             if (!descriptor.used) continue;
             const open_index: usize = descriptor.open_index;
@@ -219,7 +246,7 @@ pub const System = struct {
             target_handle,
             target_process.memory_pages,
             @intCast(count),
-            target_process.socket_count,
+            @intCast(socket_count),
         );
         self.namespaces[target_slot] = .{
             .used = true,
@@ -306,6 +333,52 @@ pub const System = struct {
             return err;
         };
         return @intCast(fd[0]);
+    }
+
+    pub fn createExternalDescriptor(
+        self: *System,
+        processes: *runtime_process.Table,
+        process_handle: u64,
+        kind: DescriptionKind,
+        resource: ExternalResource,
+        readable: bool,
+        writable: bool,
+        close_on_exec: bool,
+    ) Error!u16 {
+        if (kind != .udp_socket or resource.index == invalid_resource or resource.generation == 0) return Error.InvalidOperation;
+        const process = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        try self.requireDescriptorCapacity(&self.namespaces[namespace_slot], process, 1);
+        if (socketDescriptionCount(self, &self.namespaces[namespace_slot]) >= process.limits.maximum_sockets) return Error.QuotaExceeded;
+        const descriptor_slots = self.findFreeDescriptors(&self.namespaces[namespace_slot], 1) orelse return Error.DescriptorLimit;
+        const open_slots = self.findFreeOpenDescriptions(1) orelse return Error.OpenDescriptionLimit;
+        self.initializeDescription(open_slots[0], kind, readable, writable, false, resource.index, resource.generation, 0, 0);
+        self.namespaces[namespace_slot].descriptors[descriptor_slots[0]] = .{
+            .used = true,
+            .open_index = @intCast(open_slots[0]),
+            .close_on_exec = close_on_exec,
+        };
+        self.syncDescriptorCount(processes, process_handle) catch |err| {
+            self.namespaces[namespace_slot].descriptors[descriptor_slots[0]] = .{};
+            self.clearDescription(open_slots[0]);
+            return err;
+        };
+        return @intCast(descriptor_slots[0]);
+    }
+
+    pub fn externalResource(
+        self: *const System,
+        processes: *const runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+        expected_kind: DescriptionKind,
+    ) Error!ExternalResource {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        const description = self.open_descriptions[open_index];
+        if (description.kind != expected_kind or description.resource_index == invalid_resource or description.resource_generation == 0) return Error.InvalidOperation;
+        return .{ .index = description.resource_index, .generation = description.resource_generation };
     }
 
     pub fn createPipe(
@@ -471,7 +544,11 @@ pub const System = struct {
         if (!description.readable) return Error.NotReadable;
         if (output.len == 0) return .{ .status = .complete };
         switch (description.kind) {
-            .terminal => return Error.InvalidOperation,
+            .terminal => {
+                self.eof_reads +%= 1;
+                return .{ .status = .eof };
+            },
+            .udp_socket => return Error.InvalidOperation,
             .vfs => {
                 const count = try vfs.readOpen(description.vfs_owner, description.vfs_handle, output);
                 self.bytes_read +%= count;
@@ -522,6 +599,7 @@ pub const System = struct {
                 self.bytes_written +%= bytes.len;
                 return .{ .status = .complete, .count = bytes.len };
             },
+            .udp_socket => return Error.InvalidOperation,
             .vfs => {
                 const count = try vfs.writeOpen(description.vfs_owner, description.vfs_handle, bytes, tick);
                 self.bytes_written +%= count;
@@ -587,6 +665,141 @@ pub const System = struct {
         try vfs.truncateOpen(description.vfs_owner, description.vfs_handle, size, tick);
     }
 
+    pub fn descriptorKind(
+        self: *const System,
+        processes: *const runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+    ) Error!DescriptionKind {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        return self.open_descriptions[open_index].kind;
+    }
+
+    pub fn stat(
+        self: *const System,
+        vfs: *const runtime_vfs.Vfs,
+        processes: *const runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+    ) Error!runtime_abi.Stat {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        const description = self.open_descriptions[open_index];
+        return switch (description.kind) {
+            .terminal => .{
+                .node = std.math.maxInt(u32),
+                .generation = description.generation,
+                .kind = @intFromEnum(runtime_vfs.Kind.pseudo),
+                .readonly = 0,
+                .mode = 0o666,
+                .mount_id = 0,
+                .size = 0,
+                .modified_tick = 0,
+            },
+            .vfs => blk: {
+                const info = try vfs.statOpen(description.vfs_owner, description.vfs_handle);
+                break :blk .{
+                    .node = info.node,
+                    .generation = info.generation,
+                    .kind = @intFromEnum(info.kind),
+                    .readonly = @intFromBool(info.readonly),
+                    .mode = info.mode,
+                    .mount_id = info.mount_id,
+                    .size = info.size,
+                    .modified_tick = info.modified_tick,
+                };
+            },
+            .udp_socket => .{
+                .node = std.math.maxInt(u32) - @as(u32, description.resource_index),
+                .generation = @truncate(description.resource_generation),
+                .kind = @intFromEnum(runtime_vfs.Kind.pseudo),
+                .readonly = 0,
+                .mode = 0o666,
+                .mount_id = 0,
+                .size = 0,
+                .modified_tick = 0,
+            },
+            .pipe_read, .pipe_write => blk: {
+                const pipe_index = try self.resolvePipe(description);
+                break :blk .{
+                    .node = std.math.maxInt(u32) - @as(u32, @intCast(pipe_index)),
+                    .generation = @truncate(description.resource_generation),
+                    .kind = @intFromEnum(runtime_vfs.Kind.pseudo),
+                    .readonly = 0,
+                    .mode = if (description.kind == .pipe_read) 0o400 else 0o200,
+                    .mount_id = 0,
+                    .size = self.pipes[pipe_index].count,
+                    .modified_tick = 0,
+                };
+            },
+        };
+    }
+
+    pub fn getDirectoryEntries(
+        self: *System,
+        vfs: *runtime_vfs.Vfs,
+        processes: *runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+        output: []runtime_vfs.DirectoryRecord,
+    ) Error!usize {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        const description = self.open_descriptions[open_index];
+        if (description.kind != .vfs) return Error.NotDirectory;
+        return vfs.readDirectoryOpen(description.vfs_owner, description.vfs_handle, output);
+    }
+
+    pub fn poll(
+        self: *const System,
+        processes: *const runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+        requested: u16,
+    ) Error!u16 {
+        const allowed = runtime_abi.poll_readable | runtime_abi.poll_writable |
+            runtime_abi.poll_error | runtime_abi.poll_hangup;
+        if ((requested & ~allowed) != 0) return Error.InvalidOperation;
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        const description = self.open_descriptions[open_index];
+        var ready: u16 = 0;
+        switch (description.kind) {
+            .terminal => {
+                if (description.writable) ready |= runtime_abi.poll_writable;
+            },
+            .vfs => {
+                if (description.readable) ready |= runtime_abi.poll_readable;
+                if (description.writable) ready |= runtime_abi.poll_writable;
+            },
+            .udp_socket => {
+                const poll_fn = self.external_poll orelse return Error.InvalidOperation;
+                ready |= poll_fn(self.external_context, description.resource_index, description.resource_generation, requested);
+            },
+            .pipe_read => {
+                const pipe_index = try self.resolvePipe(description);
+                const pipe = self.pipes[pipe_index];
+                if (pipe.count != 0 or pipe.writers == 0) ready |= runtime_abi.poll_readable;
+                if (pipe.writers == 0) ready |= runtime_abi.poll_hangup;
+            },
+            .pipe_write => {
+                const pipe_index = try self.resolvePipe(description);
+                const pipe = self.pipes[pipe_index];
+                if (pipe.readers == 0) {
+                    ready |= runtime_abi.poll_error | runtime_abi.poll_hangup;
+                } else if (pipe.count < pipe_capacity) {
+                    ready |= runtime_abi.poll_writable;
+                }
+            },
+        }
+        return ready & requested;
+    }
+
     pub fn snapshot(
         self: *const System,
         vfs: *const runtime_vfs.Vfs,
@@ -607,6 +820,9 @@ pub const System = struct {
                     const info = try vfs.openInfo(description.vfs_owner, description.vfs_handle);
                     resource_id = (@as(u64, info.node_generation) << 32) | info.node;
                     offset_or_buffered = info.offset;
+                },
+                .udp_socket => {
+                    resource_id = (@as(u64, description.resource_generation) << 16) | description.resource_index;
                 },
                 .pipe_read, .pipe_write => {
                     const pipe_index = try self.resolvePipe(description);
@@ -639,6 +855,7 @@ pub const System = struct {
             .terminal_descriptions = 0,
             .pipe_read_descriptions = 0,
             .pipe_write_descriptions = 0,
+            .udp_socket_descriptions = 0,
             .pipes = 0,
             .duplicated_descriptors = self.duplicated_descriptors,
             .inherited_descriptors = self.inherited_descriptors,
@@ -667,6 +884,7 @@ pub const System = struct {
                 .vfs => result.vfs_descriptions += 1,
                 .pipe_read => result.pipe_read_descriptions += 1,
                 .pipe_write => result.pipe_write_descriptions += 1,
+                .udp_socket => result.udp_socket_descriptions += 1,
             }
         }
         for (self.pipes) |pipe| result.pipes += @intFromBool(pipe.used);
@@ -709,6 +927,9 @@ pub const System = struct {
                 .vfs => {
                     _ = vfs.openInfo(description.vfs_owner, description.vfs_handle) catch return false;
                 },
+                .udp_socket => {
+                    if (description.resource_index == invalid_resource or description.resource_generation == 0) return false;
+                },
                 .pipe_read, .pipe_write => {
                     const pipe_index = self.resolvePipe(description) catch return false;
                     if (description.kind == .pipe_read) expected_readers[pipe_index] +|= 1 else expected_writers[pipe_index] +|= 1;
@@ -746,7 +967,7 @@ pub const System = struct {
     fn resolvePipe(self: *const System, description: OpenDescription) Error!usize {
         if (description.resource_index >= self.pipes.len) return Error.CorruptState;
         const pipe = self.pipes[description.resource_index];
-        if (!pipe.used or pipe.generation != description.resource_generation) return Error.CorruptState;
+        if (!pipe.used or @as(u32, pipe.generation) != description.resource_generation) return Error.CorruptState;
         return description.resource_index;
     }
 
@@ -762,7 +983,7 @@ pub const System = struct {
             process_handle,
             process.memory_pages,
             @intCast(descriptorCount(&self.namespaces[slot])),
-            process.socket_count,
+            @intCast(socketDescriptionCount(self, &self.namespaces[slot])),
         );
     }
 
@@ -778,14 +999,21 @@ pub const System = struct {
         const open_index: usize = descriptor.open_index;
         const description = self.open_descriptions[open_index];
         if (!description.used or description.references == 0) return Error.CorruptState;
-        if (description.references == 1 and description.kind == .vfs) try vfs.close(description.vfs_owner, description.vfs_handle);
+        if (description.references == 1) switch (description.kind) {
+            .vfs => try vfs.close(description.vfs_owner, description.vfs_handle),
+            .udp_socket => {
+                const close_fn = self.external_close orelse return Error.InvalidOperation;
+                if (!close_fn(self.external_context, description.resource_index, description.resource_generation)) return Error.CorruptState;
+            },
+            else => {},
+        };
         self.namespaces[namespace_slot].descriptors[fd] = .{};
         self.open_descriptions[open_index].references -= 1;
         self.descriptor_closes +%= 1;
         if (self.open_descriptions[open_index].references != 0) return;
 
         switch (description.kind) {
-            .terminal, .vfs => {},
+            .terminal, .vfs, .udp_socket => {},
             .pipe_read => {
                 const pipe_index = try self.resolvePipe(description);
                 if (self.pipes[pipe_index].readers == 0) return Error.CorruptState;
@@ -820,7 +1048,7 @@ pub const System = struct {
         writable: bool,
         append: bool,
         resource_index: u16,
-        resource_generation: u16,
+        resource_generation: u32,
         vfs_owner: u32,
         vfs_handle: u32,
     ) void {
@@ -904,6 +1132,17 @@ fn processSlot(handle: u64) Error!usize {
     const slot: usize = @intCast(handle & 0xFFFF_FFFF);
     if (slot >= runtime_process.maximum_processes) return Error.InvalidHandle;
     return slot;
+}
+
+fn socketDescriptionCount(self: *const System, namespace: *const Namespace) usize {
+    var seen: [maximum_open_descriptions]bool = @splat(false);
+    var count: usize = 0;
+    for (namespace.descriptors) |descriptor| {
+        if (!descriptor.used or descriptor.open_index >= self.open_descriptions.len or seen[descriptor.open_index]) continue;
+        seen[descriptor.open_index] = true;
+        if (self.open_descriptions[descriptor.open_index].used and self.open_descriptions[descriptor.open_index].kind == .udp_socket) count += 1;
+    }
+    return count;
 }
 
 fn descriptorCount(namespace: *const Namespace) usize {

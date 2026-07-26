@@ -9,6 +9,8 @@ pub const maximum_open_files: usize = 64;
 pub const maximum_directory_entries: usize = 64;
 pub const invalid_node: u16 = 0xFFFF;
 
+pub const PseudoReadFn = *const fn (context: ?*anyopaque, node: u16, offset: usize, output: []u8) usize;
+
 pub const Kind = enum(u8) {
     file,
     directory,
@@ -56,6 +58,7 @@ pub const Stat = struct {
 };
 
 pub const DirectoryRecord = struct {
+    node: u16 = invalid_node,
     name: [maximum_name_length + 1]u8 = @splat(0),
     name_length: u8 = 0,
     kind: Kind = .file,
@@ -153,6 +156,8 @@ pub const Vfs = struct {
     open_files: [maximum_open_files]OpenFile = @splat(.{}),
     mutations: u64 = 0,
     rejected_operations: u64 = 0,
+    pseudo_context: ?*anyopaque = null,
+    pseudo_reader: ?PseudoReadFn = null,
 
     pub fn init() Vfs {
         var self: Vfs = undefined;
@@ -186,6 +191,11 @@ pub const Vfs = struct {
     pub fn root(self: *const Vfs) u16 {
         _ = self;
         return 0;
+    }
+
+    pub fn setPseudoReader(self: *Vfs, context: ?*anyopaque, reader: ?PseudoReadFn) void {
+        self.pseudo_context = context;
+        self.pseudo_reader = reader;
     }
 
     pub fn resolve(self: *const Vfs, cwd: u16, path: []const u8) Error!u16 {
@@ -234,6 +244,7 @@ pub const Vfs = struct {
             if (!node.used or index == directory or node.parent != directory) continue;
             if (result.count >= result.records.len) return Error.NoSpace;
             var record = DirectoryRecord{
+                .node = @intCast(index),
                 .kind = node.kind,
                 .size = node.size,
                 .readonly = node.readonly or self.mountReadonly(node.mount_id),
@@ -293,6 +304,10 @@ pub const Vfs = struct {
         const node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if ((node.mode & 0o444) == 0) return Error.PermissionDenied;
+        if (node.kind == .pseudo) {
+            const reader = self.pseudo_reader orelse return 0;
+            return reader(self.pseudo_context, node_index, offset, output);
+        }
         if (offset > node.size) return Error.InvalidOffset;
         const count = @min(output.len, node.size - offset);
         @memcpy(output[0..count], node.data[offset .. offset + count]);
@@ -447,10 +462,13 @@ pub const Vfs = struct {
             Error.NotFound => if (flags.create) try self.create(cwd, path, mode, tick) else return err,
             else => return err,
         };
-        if (self.nodes[node_index].kind == .directory) return Error.IsDirectory;
-        if (flags.read and (self.nodes[node_index].mode & 0o444) == 0) return Error.PermissionDenied;
-        if (flags.write) try self.requireWritableFile(node_index);
-        if (flags.truncate and flags.write) try self.truncate(cwd, path, 0, tick);
+        if (self.nodes[node_index].kind == .directory) {
+            if (flags.write or flags.create or flags.truncate or flags.append) return Error.IsDirectory;
+        } else {
+            if (flags.read and (self.nodes[node_index].mode & 0o444) == 0) return Error.PermissionDenied;
+            if (flags.write) try self.requireWritableFile(node_index);
+            if (flags.truncate and flags.write) try self.truncate(cwd, path, 0, tick);
+        }
         node_index = try self.resolve(cwd, path);
         var owner_count: usize = 0;
         for (self.open_files) |open_file| {
@@ -497,10 +515,53 @@ pub const Vfs = struct {
         var open_file = &self.open_files[index];
         if (!open_file.readable) return Error.PermissionDenied;
         const node = &self.nodes[open_file.node];
+        if (node.kind == .directory) return Error.IsDirectory;
+        if (node.kind == .pseudo) {
+            const reader = self.pseudo_reader orelse return 0;
+            const count = reader(self.pseudo_context, open_file.node, open_file.offset, output);
+            open_file.offset += count;
+            return count;
+        }
         if (open_file.offset > node.size) return Error.InvalidOffset;
         const count = @min(output.len, node.size - open_file.offset);
         @memcpy(output[0..count], node.data[open_file.offset .. open_file.offset + count]);
         open_file.offset += count;
+        return count;
+    }
+
+    pub fn statOpen(self: *const Vfs, owner_pid: u32, handle: u32) Error!Stat {
+        const index = try self.resolveOpen(owner_pid, handle);
+        return self.statNode(self.open_files[index].node);
+    }
+
+    pub fn readDirectoryOpen(
+        self: *Vfs,
+        owner_pid: u32,
+        handle: u32,
+        output: []DirectoryRecord,
+    ) Error!usize {
+        const open_index = try self.resolveOpen(owner_pid, handle);
+        var open_file = &self.open_files[open_index];
+        if (!open_file.readable) return Error.PermissionDenied;
+        const directory = open_file.node;
+        if (self.nodes[directory].kind != .directory) return Error.NotDirectory;
+        var count: usize = 0;
+        var node_index = open_file.offset;
+        while (node_index < self.nodes.len and count < output.len) : (node_index += 1) {
+            const node = &self.nodes[node_index];
+            if (!node.used or node_index == directory or node.parent != directory) continue;
+            var record = DirectoryRecord{
+                .node = @intCast(node_index),
+                .kind = node.kind,
+                .size = node.size,
+                .readonly = node.readonly or self.mountReadonly(node.mount_id),
+            };
+            record.name_length = node.name_length;
+            @memcpy(record.name[0..node.name_length], node.nameSlice());
+            output[count] = record;
+            count += 1;
+        }
+        open_file.offset = node_index;
         return count;
     }
 

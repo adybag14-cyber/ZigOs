@@ -1,6 +1,7 @@
 const std = @import("std");
 const descriptor_tables = @import("descriptor_tables.zig");
 const elf64 = @import("elf64.zig");
+const e1000e = @import("e1000e.zig");
 const interrupt_context = @import("interrupt_context.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
@@ -9,45 +10,42 @@ const runtime_fd = @import("runtime_fd.zig");
 const runtime_process = @import("runtime_process.zig");
 const runtime_page_pool = @import("runtime_page_pool.zig");
 const runtime_vfs = @import("runtime_vfs.zig");
+const serial = @import("serial.zig");
 
 const cc = std.os.uefi.cc;
 const page_bytes: usize = @intCast(memory.page_size);
 const page_limit: usize = runtime_page_pool.maximum_pages;
-const maximum_contexts: usize = 8;
-const maximum_mappings: usize = 32;
+const maximum_contexts: usize = runtime_process.maximum_processes;
+const maximum_mappings: usize = 1024;
+const maximum_page_tables: usize = 64;
 const maximum_output_bytes: usize = 4096;
 const maximum_io_bytes: usize = 1024;
+const maximum_directory_batch: usize = maximum_io_bytes / @sizeOf(runtime_abi.DirectoryEntry);
+const maximum_poll_descriptors: usize = maximum_io_bytes / @sizeOf(runtime_abi.PollDescriptor);
+const maximum_socket_slots: usize = 8;
+const stack_pages: usize = 8;
 const user_base: usize = 0x0000_0080_0000_0000;
-const user_window_bytes: usize = 2 * 1024 * 1024;
-const trampoline_virtual: usize = user_base + user_window_bytes - 3 * page_bytes;
-const stack_virtual: usize = user_base + user_window_bytes - 2 * page_bytes;
-const guard_virtual: usize = user_base + user_window_bytes - page_bytes;
+const user_window_bytes: usize = 1024 * 1024 * 1024;
+const user_end: usize = user_base + user_window_bytes;
+const trampoline_virtual: usize = user_end - page_bytes;
+const stack_top: usize = trampoline_virtual;
+const stack_virtual: usize = stack_top - stack_pages * page_bytes;
+const guard_virtual: usize = stack_virtual - page_bytes;
+const mmap_floor: usize = user_base + 64 * 1024 * 1024;
+const mmap_ceiling: usize = guard_virtual;
+const page_table_span: usize = 2 * 1024 * 1024;
 
-const syscall_exit: u64 = 64;
-const syscall_write: u64 = 65;
-const syscall_read: u64 = 66;
-const syscall_getpid: u64 = 67;
-const syscall_sleep: u64 = 68;
-const syscall_yield: u64 = 69;
-const syscall_pipe: u64 = 70;
-const syscall_close: u64 = 71;
-const syscall_dup: u64 = 72;
-const syscall_dup2: u64 = 73;
-const syscall_open: u64 = 74;
-const syscall_ticks: u64 = 75;
-const syscall_spawn: u64 = 76;
-const syscall_wait: u64 = 77;
-const syscall_fault_return: u64 = 78;
-
+const syscall = runtime_abi.constants;
 const errno_bad_fd = runtime_abi.errno_bad_fd;
 const errno_would_block = runtime_abi.errno_would_block;
 const errno_fault = runtime_abi.errno_fault;
 const errno_invalid = runtime_abi.errno_invalid;
+const errno_no_memory = runtime_abi.errno_no_memory;
 const errno_no_syscall = runtime_abi.errno_no_syscall;
-const wait_nohang: u64 = 1;
+const wait_nohang: u64 = runtime_abi.wait_nohang;
 
 const fault_trampoline = [_]u8{
-    0xB8, @truncate(syscall_fault_return), 0x00, 0x00, 0x00, // mov eax, SYS_FAULT_RETURN
+    0xB8, @truncate(syscall.syscall_fault_return), 0x00, 0x00, 0x00, // mov eax, SYS_FAULT_RETURN
     0xCD, 0x80, // int 0x80
     0x0F, 0x0B, // ud2 if the kernel incorrectly resumes it
 };
@@ -80,18 +78,33 @@ pub const Report = struct {
     allocator_clean: bool,
 };
 
-const UserWaitStatus = extern struct {
-    pid: u32,
-    exit_status: u32,
-    state: u32,
-    fault_vector: u32,
-    fault_address: u64,
+const MappingKind = enum(u8) {
+    image,
+    trampoline,
+    stack,
+    heap,
+    anonymous,
 };
 
 const Mapping = struct {
     used: bool = false,
     virtual_address: usize = 0,
     physical_address: usize = 0,
+    writable: bool = false,
+    executable: bool = false,
+    kind: MappingKind = .anonymous,
+};
+
+const PageTable = struct {
+    used: bool = false,
+    virtual_base: usize = 0,
+    physical_address: usize = 0,
+};
+
+const SocketSlot = struct {
+    used: bool = false,
+    generation: u32 = 0,
+    socket: ?e1000e.UdpSocket = null,
 };
 
 const Context = struct {
@@ -105,8 +118,15 @@ const Context = struct {
         .table_pages = 0,
     },
     table_frames: [4]usize = @splat(0),
+    page_tables: [maximum_page_tables]PageTable = @splat(.{}),
+    page_table_count: usize = 0,
     mappings: [maximum_mappings]Mapping = @splat(.{}),
     mapping_count: usize = 0,
+    image_end: usize = user_base,
+    brk_base: usize = user_base,
+    brk_current: usize = user_base,
+    brk_limit: usize = mmap_floor - page_bytes,
+    mmap_hint: usize = mmap_floor,
     frame: interrupt_context.Frame = std.mem.zeroes(interrupt_context.Frame),
     fx_state: interrupt_context.FxState align(16) = std.mem.zeroes(interrupt_context.FxState),
     output: [maximum_output_bytes]u8 = @splat(0),
@@ -134,11 +154,11 @@ var process_pointer: ?*runtime_process.Table = null;
 var descriptor_pointer: ?*runtime_fd.System = null;
 var page_pool: runtime_page_pool.Pool = .{};
 var contexts: [maximum_contexts]Context = @splat(.{});
+var socket_slots: [maximum_socket_slots]SocketSlot = @splat(.{});
 var baseline_fx: interrupt_context.FxState align(16) = std.mem.zeroes(interrupt_context.FxState);
 var current_context: ?usize = null;
 var user_active = false;
 var current_tick: u64 = 0;
-var service_cursor: usize = 0;
 var launches: u64 = 0;
 var exits: u64 = 0;
 var faults: u64 = 0;
@@ -157,12 +177,14 @@ pub fn initialize(
     vfs_pointer = vfs;
     process_pointer = processes;
     descriptor_pointer = descriptors;
-    contexts = @splat(.{});
+    @memset(std.mem.asBytes(&contexts), 0);
+    for (0..contexts.len) |index| initializeContextDefaults(&contexts[index]);
+    socket_slots = @splat(.{});
+    descriptors.setExternalBackend(null, closeExternalSocket, pollExternalSocket);
     zigos_fxsave(&baseline_fx);
     current_context = null;
     user_active = false;
     current_tick = 0;
-    service_cursor = 0;
     launches = 0;
     exits = 0;
     faults = 0;
@@ -188,7 +210,6 @@ pub fn spawn(
     registers: SpawnRegisters,
 ) !u64 {
     if (!initialized) return error.NotInitialized;
-    try requirePagePool("spawn-entry");
     const image = elf64.parse(image_bytes) orelse return error.InvalidElf;
     try validateImage(image);
     const context_index = findFreeContext() orelse return error.ContextLimit;
@@ -203,9 +224,9 @@ pub fn spawn(
         0,
         tick,
         .{
-            .maximum_pages = maximum_mappings + 4,
+            .maximum_pages = maximum_mappings + maximum_page_tables + 3,
             .maximum_descriptors = runtime_fd.maximum_descriptors_per_process,
-            .maximum_sockets = 0,
+            .maximum_sockets = maximum_socket_slots,
             .maximum_children = maximum_contexts - 1,
             .maximum_cpu_ticks = 100_000,
         },
@@ -213,20 +234,39 @@ pub fn spawn(
     errdefer rollbackProcess(parent_handle, handle);
     _ = try activeDescriptors().cloneProcess(processes, parent_handle, handle);
 
-    contexts[context_index] = .{ .used = true, .handle = handle };
+    const context = resetContext(context_index);
+    context.used = true;
+    context.handle = handle;
     errdefer releaseContext(context_index);
-    const context = &contexts[context_index];
-    for (&context.table_frames) |*frame| frame.* = allocatePage(context.handle) orelse return error.NoRuntimeFrames;
+    for (&context.table_frames) |*frame| {
+        frame.* = allocatePage(context.handle) orelse return error.NoRuntimeFrames;
+    }
     context.space = paging.createUserAddressSpaceFromFrames(context.table_frames) orelse return error.AddressSpaceFailure;
+    context.page_tables[0] = .{
+        .used = true,
+        .virtual_base = user_base,
+        .physical_address = context.table_frames[3],
+    };
+    context.page_table_count = 1;
     try loadImage(context, image, image_bytes);
+    context.brk_base = alignForward(context.image_end + page_bytes, page_bytes);
+    context.brk_current = context.brk_base;
+    if (context.brk_base >= context.brk_limit) return error.AddressSpaceFailure;
+
     const trampoline_frame = allocatePage(context.handle) orelse return error.NoRuntimeFrames;
     @memcpy(@as([*]u8, @ptrFromInt(trampoline_frame))[0..fault_trampoline.len], &fault_trampoline);
-    try mapOwned(context, trampoline_virtual, trampoline_frame, false, true);
-    const stack_frame = allocatePage(context.handle) orelse return error.NoRuntimeFrames;
-    try mapOwned(context, stack_virtual, stack_frame, true, false);
+    try mapOwned(context, trampoline_virtual, trampoline_frame, false, true, .trampoline);
+
+    var top_stack_frame: usize = 0;
+    for (0..stack_pages) |stack_index| {
+        const stack_frame = allocatePage(context.handle) orelse return error.NoRuntimeFrames;
+        const virtual = stack_virtual + stack_index * page_bytes;
+        try mapOwned(context, virtual, stack_frame, true, false, .stack);
+        if (stack_index + 1 == stack_pages) top_stack_frame = stack_frame;
+    }
     if (paging.inspectUserPageInSpace(context.space, guard_virtual) != null) return error.GuardMapped;
 
-    const stack = try buildInitialStack(stack_frame, arguments);
+    const stack = try buildInitialStack(top_stack_frame, stack_top - page_bytes, arguments);
     context.frame = std.mem.zeroes(interrupt_context.Frame);
     context.frame.rip = image.entry;
     context.frame.cs = descriptor_tables.user_code_selector;
@@ -243,8 +283,7 @@ pub fn spawn(
     copyFx(&context.fx_state, &baseline_fx);
     context.image_hash = image.file_hash;
     context.image_bytes = image_bytes.len;
-    try processes.setResourceUsage(handle, @intCast(context.mapping_count + 4), (try processes.get(handle)).descriptor_count, 0);
-    try requirePagePool("spawn-complete");
+    try syncMemoryUsage(context);
     launches +%= 1;
     return handle;
 }
@@ -268,6 +307,8 @@ pub fn dispatch(handle: u64, tick: u64) !void {
         return error.AddressSpaceActivation;
     }
     zigos_enter_user_context(&contexts[context_index].frame, &contexts[context_index].fx_state);
+    if (!paging.kernelAddressSpaceHealthy() or !paging.currentAddressSpaceSharesKernel())
+        return error.KernelAddressSpaceCorrupt;
     user_active = false;
     current_context = null;
     if (!paging.activateKernelAddressSpace()) return error.KernelAddressSpaceRestore;
@@ -280,18 +321,20 @@ pub fn dispatch(handle: u64, tick: u64) !void {
 pub fn serviceOne(tick: u64, excluded_handle: ?u64) !?u64 {
     if (!initialized or user_active) return error.InvalidDispatchState;
     var scanned: usize = 0;
-    while (scanned < contexts.len) : (scanned += 1) {
-        service_cursor = (service_cursor + 1) % contexts.len;
-        const context = &contexts[service_cursor];
-        if (!context.used or (excluded_handle != null and context.handle == excluded_handle.?)) continue;
-        const process = activeProcesses().get(context.handle) catch continue;
+    while (scanned < runtime_process.maximum_processes) : (scanned += 1) {
+        const handle = activeProcesses().scheduleNextKind(.userspace, null, excluded_handle) orelse return null;
+        const context_index = findContext(handle) orelse {
+            activeProcesses().setRunnable(handle) catch {};
+            continue;
+        };
+        const process = activeProcesses().get(handle) catch continue;
         if (process.terminal()) {
-            try finalize(context.handle);
+            try finalize(handle);
             continue;
         }
-        if (process.state != .runnable and process.state != .running) continue;
-        try dispatch(context.handle, tick);
-        return context.handle;
+        if (!contexts[context_index].used) continue;
+        try dispatch(handle, tick);
+        return handle;
     }
     return null;
 }
@@ -308,20 +351,20 @@ pub fn handleSyscall(
     syscall_count +%= 1;
 
     switch (frame.rax) {
-        syscall_exit => {
+        syscall.syscall_exit => {
             activeProcesses().exit(context.handle, @truncate(frame.rdi)) catch {};
             exits +%= 1;
             saveContext(context, frame, fx_state);
             return 1;
         },
-        syscall_write => return syscallWrite(context, frame, fx_state),
-        syscall_read => return syscallRead(context, frame, fx_state),
-        syscall_getpid => {
+        syscall.syscall_write => return syscallWrite(context, frame, fx_state),
+        syscall.syscall_read => return syscallRead(context, frame, fx_state),
+        syscall.syscall_getpid => {
             const process = activeProcesses().get(context.handle) catch return forceFault(frame, fx_state, 13, frame.rip);
             frame.rax = process.pid;
             return 0;
         },
-        syscall_sleep => {
+        syscall.syscall_sleep => {
             if (frame.rdi == 0 or frame.rdi > 100_000) {
                 frame.rax = reject(errno_invalid);
                 return 0;
@@ -336,14 +379,14 @@ pub fn handleSyscall(
             blocking_returns +%= 1;
             return 1;
         },
-        syscall_yield => {
+        syscall.syscall_yield => {
             frame.rax = 0;
             saveContext(context, frame, fx_state);
             activeProcesses().setRunnable(context.handle) catch {};
             blocking_returns +%= 1;
             return 1;
         },
-        syscall_pipe => {
+        syscall.syscall_pipe => {
             if (!validateRange(context, frame.rdi, 8, true)) {
                 frame.rax = reject(errno_fault);
                 return 0;
@@ -362,7 +405,7 @@ pub fn handleSyscall(
             frame.rax = 0;
             return 0;
         },
-        syscall_close => {
+        syscall.syscall_close => {
             const fd = runtime_abi.descriptor(frame.rdi) orelse {
                 frame.rax = reject(errno_bad_fd);
                 return 0;
@@ -374,7 +417,7 @@ pub fn handleSyscall(
             frame.rax = 0;
             return 0;
         },
-        syscall_dup => {
+        syscall.syscall_dup => {
             const source_fd = runtime_abi.descriptor(frame.rdi) orelse {
                 frame.rax = reject(errno_bad_fd);
                 return 0;
@@ -386,7 +429,7 @@ pub fn handleSyscall(
             frame.rax = fd;
             return 0;
         },
-        syscall_dup2 => {
+        syscall.syscall_dup2 => {
             const source_fd = runtime_abi.descriptor(frame.rdi) orelse {
                 frame.rax = reject(errno_bad_fd);
                 return 0;
@@ -408,14 +451,28 @@ pub fn handleSyscall(
             frame.rax = fd;
             return 0;
         },
-        syscall_open => return syscallOpen(context, frame),
-        syscall_ticks => {
+        syscall.syscall_open => return syscallOpen(context, frame),
+        syscall.syscall_ticks => {
             frame.rax = current_tick;
             return 0;
         },
-        syscall_spawn => return syscallSpawn(context, frame),
-        syscall_wait => return syscallWait(context, frame, fx_state),
-        syscall_fault_return => {
+        syscall.syscall_spawn => return syscallSpawn(context, frame),
+        syscall.syscall_wait => return syscallWait(context, frame, fx_state),
+        syscall.syscall_abi_query => return syscallAbiQuery(context, frame),
+        syscall.syscall_mmap => return syscallMmap(context, frame),
+        syscall.syscall_munmap => return syscallMunmap(context, frame),
+        syscall.syscall_mprotect => return syscallMprotect(context, frame),
+        syscall.syscall_brk => return syscallBrk(context, frame),
+        syscall.syscall_fstat => return syscallFstat(context, frame),
+        syscall.syscall_getdents => return syscallGetdents(context, frame),
+        syscall.syscall_poll => return syscallPoll(context, frame),
+        syscall.syscall_socket => return syscallSocket(context, frame),
+        syscall.syscall_bind => return syscallBind(context, frame),
+        syscall.syscall_connect => return syscallConnect(context, frame),
+        syscall.syscall_send => return syscallSend(context, frame),
+        syscall.syscall_recv => return syscallRecv(context, frame, fx_state),
+        syscall.syscall_getsockname => return syscallGetSockName(context, frame),
+        syscall.syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
             faults +%= 1;
@@ -427,6 +484,38 @@ pub fn handleSyscall(
             return 0;
         },
     }
+}
+
+pub fn validateSyscallReturn(
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+    disposition: u64,
+    syscall_number: u64,
+) u64 {
+    if (!paging.kernelAddressSpaceHealthy() or !paging.currentAddressSpaceSharesKernel()) return 1;
+    if (disposition != 0 or !isActive()) return disposition;
+    const index = current_context orelse return 1;
+    const context = &contexts[index];
+    const failure: u8, const observed: u64 = if (frame.cs != descriptor_tables.user_code_selector)
+        .{ 1, frame.cs }
+    else if (frame.ss != descriptor_tables.user_data_selector)
+        .{ 2, frame.ss }
+    else if (frame.rsp < stack_virtual or frame.rsp >= stack_top)
+        .{ 3, frame.rsp }
+    else if (paging.translateUserAddressInSpace(context.space, @intCast(frame.rip), false, true) == null)
+        .{ 4, frame.rip }
+    else if ((frame.rflags & 0x2) == 0 or (frame.rflags & ((@as(u64, 3) << 12) | (@as(u64, 1) << 14) | (@as(u64, 1) << 17))) != 0)
+        .{ 5, frame.rflags }
+    else
+        return 0;
+
+    const diagnostic = (@as(u64, failure) << 56) |
+        ((syscall_number & 0xFF) << 48) |
+        (observed & 0x0000_FFFF_FFFF_FFFF);
+    saveContext(context, frame, fx_state);
+    activeProcesses().fault(context.handle, 13, diagnostic) catch {};
+    faults +%= 1;
+    return 1;
 }
 
 pub fn handleTimer(
@@ -468,8 +557,16 @@ pub fn handleException(
 pub fn finalize(handle: u64) !void {
     const index = findContext(handle) orelse return error.NoContext;
     if (contexts[index].resources_released) return;
-    if (user_active and current_context == index) return error.ContextActive;
-    if (!paging.activateKernelAddressSpace()) return error.KernelAddressSpaceRestore;
+    if (user_active) {
+        const running_index = current_context orelse return error.InvalidDispatchState;
+        if (running_index == index) return error.ContextActive;
+        const running_root = contexts[running_index].space.pml4_address;
+        if (paging.currentCr3Address() != running_root or paging.activePml4Address() != running_root)
+            return error.ActiveAddressSpaceMismatch;
+    } else {
+        if (!paging.kernelAddressSpaceHealthy()) return error.KernelAddressSpaceCorrupt;
+        if (!paging.activateKernelAddressSpace()) return error.KernelAddressSpaceRestore;
+    }
     _ = activeDescriptors().releaseProcess(activeVfs(), activeProcesses(), handle) catch |err| switch (err) {
         error.NamespaceMissing => 0,
         else => return err,
@@ -483,7 +580,7 @@ pub fn finalize(handle: u64) !void {
 pub fn forget(handle: u64) void {
     const index = findContext(handle) orelse return;
     if (!contexts[index].resources_released) return;
-    contexts[index] = .{};
+    _ = resetContext(index);
 }
 
 pub fn takeOutput(handle: u64, destination: []u8) usize {
@@ -538,6 +635,813 @@ pub fn report() Report {
         .allocator_rejections = allocator_report.invalid_addresses + allocator_report.double_frees + allocator_report.owner_mismatches + allocator_report.reference_overflows + allocator_report.backing_failures,
         .allocator_clean = allocator_report.clean,
     };
+}
+
+fn syscallSocket(context: *Context, frame: *interrupt_context.Frame) u64 {
+    if (frame.rdi != runtime_abi.address_family_ipv4 or frame.rsi != runtime_abi.socket_datagram or
+        (frame.rdx != 0 and frame.rdx != runtime_abi.protocol_udp) or e1000e.activeDevice() == null)
+    {
+        frame.rax = reject(runtime_abi.errno_connection_refused);
+        return 0;
+    }
+    const slot_index = findFreeSocketSlot() orelse {
+        frame.rax = reject(runtime_abi.errno_system_file_limit);
+        return 0;
+    };
+    const generation = nextSocketGeneration(socket_slots[slot_index].generation);
+    socket_slots[slot_index] = .{ .used = true, .generation = generation };
+    const fd = activeDescriptors().createExternalDescriptor(
+        activeProcesses(),
+        context.handle,
+        .udp_socket,
+        .{ .index = @intCast(slot_index), .generation = generation },
+        true,
+        true,
+        true,
+    ) catch |err| {
+        socket_slots[slot_index] = .{ .generation = generation };
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = fd;
+    return 0;
+}
+
+fn syscallBind(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const address = readSocketAddress(context, frame.rsi, frame.rdx) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (slot.socket != null) {
+        frame.rax = reject(runtime_abi.errno_busy);
+        return 0;
+    }
+    const device = e1000e.activeDevice() orelse {
+        frame.rax = reject(runtime_abi.errno_connection_refused);
+        return 0;
+    };
+    const address_bytes = socketAddressBytes(&address);
+    if (!allZero(address_bytes) and !std.mem.eql(u8, address_bytes, &device.local_ipv4)) {
+        frame.rax = reject(runtime_abi.errno_access);
+        return 0;
+    }
+    const port = @byteSwap(address.port_be);
+    slot.socket = if (port == 0) e1000e.openEphemeralUdpSocket(device) else e1000e.openUdpSocket(device, port);
+    if (slot.socket == null) {
+        frame.rax = reject(runtime_abi.errno_address_in_use);
+        return 0;
+    }
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallConnect(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const address = readSocketAddress(context, frame.rsi, frame.rdx) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const port = @byteSwap(address.port_be);
+    const ipv4 = socketAddressBytes(&address).*;
+    if (port == 0 or allZero(&ipv4)) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const device = e1000e.activeDevice() orelse {
+        frame.rax = reject(runtime_abi.errno_connection_refused);
+        return 0;
+    };
+    if (slot.socket == null) slot.socket = e1000e.openEphemeralUdpSocket(device);
+    const socket = slot.socket orelse {
+        frame.rax = reject(runtime_abi.errno_no_space);
+        return 0;
+    };
+    const mac = if (std.mem.eql(u8, &ipv4, &device.local_ipv4)) device.local_mac else device.gateway_mac;
+    if (!e1000e.connectUdpSocket(device, socket, .{ .mac = mac, .ipv4 = ipv4, .port = port })) {
+        frame.rax = reject(runtime_abi.errno_connection_refused);
+        return 0;
+    }
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallSend(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const length: usize = std.math.cast(usize, frame.rdx) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (frame.r10 != 0 or length > maximum_io_bytes or !validateRange(context, frame.rsi, length, false)) {
+        frame.rax = reject(if (length > maximum_io_bytes) errno_invalid else errno_fault);
+        return 0;
+    }
+    var bytes: [maximum_io_bytes]u8 = undefined;
+    if (length != 0 and !copyFromUser(context, frame.rsi, bytes[0..length])) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const socket = slot.socket orelse {
+        frame.rax = reject(runtime_abi.errno_not_connected);
+        return 0;
+    };
+    const device = e1000e.activeDevice() orelse {
+        frame.rax = reject(runtime_abi.errno_connection_refused);
+        return 0;
+    };
+    if (!e1000e.runtimePollingMode() or !e1000e.runtimeMmioAccessible(device)) {
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    }
+    if (e1000e.sendConnectedUdpDatagram(device, socket, 64, bytes[0..length]) == null) {
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    }
+    frame.rax = length;
+    return 0;
+}
+
+fn syscallRecv(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const length: usize = std.math.cast(usize, frame.rdx) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (frame.r10 != 0 or length > maximum_io_bytes or !validateRange(context, frame.rsi, length, true)) {
+        frame.rax = reject(if (length > maximum_io_bytes) errno_invalid else errno_fault);
+        return 0;
+    }
+    const resource = activeDescriptors().externalResource(activeProcesses(), context.handle, fd, .udp_socket) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const slot = resolveSocketSlot(resource.index, resource.generation) orelse {
+        frame.rax = reject(runtime_abi.errno_not_socket);
+        return 0;
+    };
+    const socket = slot.socket orelse {
+        frame.rax = reject(runtime_abi.errno_not_connected);
+        return 0;
+    };
+    const device = e1000e.activeDevice() orelse {
+        frame.rax = reject(runtime_abi.errno_connection_refused);
+        return 0;
+    };
+    var bytes: [maximum_io_bytes]u8 = undefined;
+    const received = e1000e.receiveUdpInto(device, socket, bytes[0..length]) orelse {
+        activeProcesses().block(context.handle, .socket_read, socketWaitKey(resource.index, resource.generation)) catch |err| {
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        };
+        return blockAndRetry(context, frame, fx_state);
+    };
+    if (received.copied_length != 0 and !copyToUser(context, frame.rsi, bytes[0..received.copied_length])) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = received.copied_length;
+    return 0;
+}
+
+fn syscallGetSockName(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    if (frame.rdx < @sizeOf(runtime_abi.Ipv4SocketAddress) or
+        !validateRange(context, frame.rsi, @sizeOf(runtime_abi.Ipv4SocketAddress), true))
+    {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const socket = slot.socket orelse {
+        frame.rax = reject(runtime_abi.errno_not_connected);
+        return 0;
+    };
+    const device = e1000e.activeDevice() orelse {
+        frame.rax = reject(runtime_abi.errno_connection_refused);
+        return 0;
+    };
+    var address = runtime_abi.Ipv4SocketAddress{
+        .family = runtime_abi.address_family_ipv4,
+        .port_be = @byteSwap(socket.local_port),
+        .address_be = 0,
+    };
+    @memcpy(std.mem.asBytes(&address.address_be), &device.local_ipv4);
+    if (!copyToUser(context, frame.rsi, std.mem.asBytes(&address))) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = @sizeOf(runtime_abi.Ipv4SocketAddress);
+    return 0;
+}
+
+pub fn serviceNetwork() usize {
+    const device = e1000e.activeDevice() orelse return 0;
+    _ = e1000e.serviceUdpSockets(device, 8);
+    var wakeups: usize = 0;
+    for (socket_slots, 0..) |slot, index| {
+        if (!slot.used) continue;
+        const socket = slot.socket orelse continue;
+        if (e1000e.udpSocketReadable(device, socket)) {
+            wakeups += activeProcesses().wakeMatching(.socket_read, socketWaitKey(@intCast(index), slot.generation), true);
+        }
+    }
+    return wakeups;
+}
+
+fn readSocketAddress(context: *const Context, pointer: u64, size: u64) ?runtime_abi.Ipv4SocketAddress {
+    if (size < @sizeOf(runtime_abi.Ipv4SocketAddress) or
+        !validateRange(context, pointer, @sizeOf(runtime_abi.Ipv4SocketAddress), false)) return null;
+    var address = std.mem.zeroes(runtime_abi.Ipv4SocketAddress);
+    if (!copyFromUser(context, pointer, std.mem.asBytes(&address))) return null;
+    if (address.family != runtime_abi.address_family_ipv4) return null;
+    return address;
+}
+
+fn socketAddressBytes(address: *const runtime_abi.Ipv4SocketAddress) *const [4]u8 {
+    return @ptrCast(&address.address_be);
+}
+
+fn allZero(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte != 0) return false;
+    return true;
+}
+
+fn findFreeSocketSlot() ?usize {
+    for (socket_slots, 0..) |slot, index| if (!slot.used) return index;
+    return null;
+}
+
+fn nextSocketGeneration(current: u32) u32 {
+    var generation = current +% 1;
+    if (generation == 0) generation = 1;
+    return generation;
+}
+
+fn resolveSocketSlot(index: u16, generation: u32) ?*SocketSlot {
+    if (index >= socket_slots.len) return null;
+    const slot = &socket_slots[index];
+    if (!slot.used or slot.generation != generation) return null;
+    return slot;
+}
+
+fn socketSlotForDescriptor(handle: u64, fd: u16) !*SocketSlot {
+    const resource = try activeDescriptors().externalResource(activeProcesses(), handle, fd, .udp_socket);
+    return resolveSocketSlot(resource.index, resource.generation) orelse error.NotSocket;
+}
+
+fn closeExternalSocket(_: ?*anyopaque, index: u16, generation: u32) bool {
+    const slot = resolveSocketSlot(index, generation) orelse return false;
+    if (slot.socket) |socket| {
+        const device = e1000e.activeDevice() orelse return false;
+        _ = e1000e.closeUdpSocketDiscarding(device, socket) orelse return false;
+    }
+    slot.* = .{ .generation = generation };
+    return true;
+}
+
+fn pollExternalSocket(_: ?*anyopaque, index: u16, generation: u32, requested: u16) u16 {
+    const slot = resolveSocketSlot(index, generation) orelse return runtime_abi.poll_error | runtime_abi.poll_hangup;
+    const device = e1000e.activeDevice() orelse return runtime_abi.poll_error | runtime_abi.poll_hangup;
+    var ready: u16 = runtime_abi.poll_writable;
+    if (slot.socket) |socket| {
+        if (e1000e.udpSocketReadable(device, socket)) ready |= runtime_abi.poll_readable;
+    }
+    return ready & requested;
+}
+
+fn socketWaitKey(index: u16, generation: u32) u64 {
+    return (@as(u64, generation) << 16) | index;
+}
+
+fn syscallFstat(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    if (!validateRange(context, frame.rsi, @sizeOf(runtime_abi.Stat), true)) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const info = activeDescriptors().stat(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        fd,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (!copyToUser(context, frame.rsi, std.mem.asBytes(&info))) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallGetdents(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const byte_capacity: usize = std.math.cast(usize, frame.rdx) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (byte_capacity < @sizeOf(runtime_abi.DirectoryEntry) or byte_capacity > maximum_io_bytes or
+        !validateRange(context, frame.rsi, byte_capacity, true))
+    {
+        frame.rax = reject(if (byte_capacity > maximum_io_bytes) errno_invalid else errno_fault);
+        return 0;
+    }
+    const capacity = @min(byte_capacity / @sizeOf(runtime_abi.DirectoryEntry), maximum_directory_batch);
+    var records: [maximum_directory_batch]runtime_vfs.DirectoryRecord = @splat(.{});
+    const count = activeDescriptors().getDirectoryEntries(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        fd,
+        records[0..capacity],
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    var entries: [maximum_directory_batch]runtime_abi.DirectoryEntry = @splat(std.mem.zeroes(runtime_abi.DirectoryEntry));
+    for (records[0..count], 0..) |record, index| {
+        entries[index].node = record.node;
+        entries[index].kind = @intFromEnum(record.kind);
+        entries[index].readonly = @intFromBool(record.readonly);
+        entries[index].name_length = record.name_length;
+        entries[index].size = record.size;
+        @memcpy(entries[index].name[0..record.name_length], record.nameSlice());
+    }
+    const bytes = std.mem.asBytes(&entries)[0 .. count * @sizeOf(runtime_abi.DirectoryEntry)];
+    if (bytes.len != 0 and !copyToUser(context, frame.rsi, bytes)) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = bytes.len;
+    return 0;
+}
+
+fn syscallPoll(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const count: usize = std.math.cast(usize, frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (frame.rdx != 0 or count > maximum_poll_descriptors) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const byte_count = std.math.mul(usize, count, @sizeOf(runtime_abi.PollDescriptor)) catch {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (!validateRange(context, frame.rdi, byte_count, true)) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    var descriptors: [maximum_poll_descriptors]runtime_abi.PollDescriptor = @splat(std.mem.zeroes(runtime_abi.PollDescriptor));
+    if (byte_count != 0 and !copyFromUser(context, frame.rdi, std.mem.asBytes(&descriptors)[0..byte_count])) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    var ready_count: usize = 0;
+    for (descriptors[0..count]) |*descriptor| {
+        descriptor.returned = activeDescriptors().poll(
+            activeProcesses(),
+            context.handle,
+            descriptor.fd,
+            descriptor.requested,
+        ) catch |err| {
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        };
+        if (descriptor.returned != 0) ready_count += 1;
+    }
+    if (byte_count != 0 and !copyToUser(context, frame.rdi, std.mem.asBytes(&descriptors)[0..byte_count])) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = ready_count;
+    return 0;
+}
+
+fn syscallAbiQuery(context: *Context, frame: *interrupt_context.Frame) u64 {
+    if (frame.rdi == 0) {
+        frame.rax = @sizeOf(runtime_abi.AbiInfo);
+        return 0;
+    }
+    const destination_size: usize = std.math.cast(usize, frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (destination_size < @sizeOf(runtime_abi.AbiInfo) or
+        !validateRange(context, frame.rdi, @sizeOf(runtime_abi.AbiInfo), true))
+    {
+        frame.rax = reject(if (destination_size < @sizeOf(runtime_abi.AbiInfo)) errno_invalid else errno_fault);
+        return 0;
+    }
+    var capabilities = syscall.capability_process |
+        syscall.capability_descriptors |
+        syscall.capability_pipes |
+        syscall.capability_vfs |
+        syscall.capability_wait |
+        syscall.capability_virtual_memory |
+        syscall.capability_terminal |
+        syscall.capability_pseudo_files;
+    if (e1000e.activeDevice() != null) capabilities |= syscall.capability_udp_sockets;
+    const info = runtime_abi.makeInfo(.{
+        .capabilities = capabilities,
+        .user_base = user_base,
+        .user_end = user_end,
+        .maximum_io_bytes = maximum_io_bytes,
+        .maximum_path_bytes = runtime_vfs.maximum_path_length,
+        .maximum_processes = runtime_process.maximum_processes,
+        .maximum_descriptors = runtime_fd.maximum_descriptors_per_process,
+        .maximum_sockets = if (e1000e.activeDevice() != null) maximum_socket_slots else 0,
+    });
+    if (!copyToUser(context, frame.rdi, std.mem.asBytes(&info))) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = @sizeOf(runtime_abi.AbiInfo);
+    return 0;
+}
+
+fn syscallMmap(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const requested_length: usize = std.math.cast(usize, frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const length = alignForwardChecked(requested_length, page_bytes) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (length == 0 or length / page_bytes > maximum_mappings) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const protection = runtime_abi.protectionBits(frame.rdx) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const flags = runtime_abi.mapFlagBits(frame.r10) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if ((protection & runtime_abi.protection_read) == 0 or
+        (protection & runtime_abi.protection_write) != 0 and (protection & runtime_abi.protection_execute) != 0 or
+        frame.r9 != 0 or (frame.r8 != std.math.maxInt(u64) and frame.r8 != std.math.maxInt(u32)))
+    {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const requested_address: usize = std.math.cast(usize, frame.rdi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const fixed = (flags & (runtime_abi.map_fixed | runtime_abi.map_fixed_no_replace)) != 0;
+    const start = if (fixed)
+        requested_address
+    else
+        findMmapRange(context, length) orelse {
+            frame.rax = reject(errno_no_memory);
+            return 0;
+        };
+    const end = std.math.add(usize, start, length) catch {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if ((start & (page_bytes - 1)) != 0 or start < mmap_floor or end > mmap_ceiling or
+        !mappingRangeAvailable(context, start, end))
+    {
+        frame.rax = reject(if (fixed) runtime_abi.errno_exists else errno_no_memory);
+        return 0;
+    }
+    const writable = (protection & runtime_abi.protection_write) != 0;
+    const executable = (protection & runtime_abi.protection_execute) != 0;
+    var virtual = start;
+    while (virtual < end) : (virtual += page_bytes) {
+        const physical = allocatePage(context.handle) orelse {
+            rollbackDynamicRange(context, start, virtual, .anonymous);
+            frame.rax = reject(errno_no_memory);
+            return 0;
+        };
+        mapOwned(context, virtual, physical, writable, executable, .anonymous) catch |err| {
+            rollbackDynamicRange(context, start, virtual, .anonymous);
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        };
+    }
+    syncMemoryUsage(context) catch |err| {
+        rollbackDynamicRange(context, start, end, .anonymous);
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    context.mmap_hint = if (end < mmap_ceiling) end else mmap_floor;
+    frame.rax = start;
+    return 0;
+}
+
+fn syscallMunmap(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const start: usize = std.math.cast(usize, frame.rdi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const requested_length: usize = std.math.cast(usize, frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const length = alignForwardChecked(requested_length, page_bytes) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const end = std.math.add(usize, start, length) catch {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (length == 0 or (start & (page_bytes - 1)) != 0 or start < mmap_floor or end > mmap_ceiling or
+        !rangeHasKind(context, start, end, .anonymous))
+    {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    var virtual = start;
+    while (virtual < end) : (virtual += page_bytes) {
+        const index = findMapping(context, virtual) orelse unreachable;
+        unmapOwned(context, index) catch |err| {
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        };
+    }
+    reclaimEmptyPageTables(context, start, end);
+    syncMemoryUsage(context) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    context.mmap_hint = @min(context.mmap_hint, start);
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallMprotect(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const start: usize = std.math.cast(usize, frame.rdi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const requested_length: usize = std.math.cast(usize, frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const length = alignForwardChecked(requested_length, page_bytes) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const protection = runtime_abi.protectionBits(frame.rdx) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const end = std.math.add(usize, start, length) catch {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (length == 0 or (start & (page_bytes - 1)) != 0 or start < user_base or end > user_end or
+        (protection & runtime_abi.protection_read) == 0 or
+        (protection & runtime_abi.protection_write) != 0 and (protection & runtime_abi.protection_execute) != 0)
+    {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    var virtual = start;
+    while (virtual < end) : (virtual += page_bytes) {
+        const index = findMapping(context, virtual) orelse {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        };
+        if (context.mappings[index].kind == .trampoline) {
+            frame.rax = reject(runtime_abi.errno_access);
+            return 0;
+        }
+    }
+    const writable = (protection & runtime_abi.protection_write) != 0;
+    const executable = (protection & runtime_abi.protection_execute) != 0;
+    virtual = start;
+    while (virtual < end) : (virtual += page_bytes) {
+        const index = findMapping(context, virtual) orelse unreachable;
+        const mapping = &context.mappings[index];
+        if (!paging.protectUserPageInSpace(
+            context.space,
+            virtual,
+            mapping.physical_address,
+            writable,
+            executable,
+        )) {
+            rollbackProtection(context, start, virtual);
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        }
+    }
+    virtual = start;
+    while (virtual < end) : (virtual += page_bytes) {
+        const index = findMapping(context, virtual) orelse unreachable;
+        context.mappings[index].writable = writable;
+        context.mappings[index].executable = executable;
+    }
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallBrk(context: *Context, frame: *interrupt_context.Frame) u64 {
+    if (frame.rdi == 0) {
+        frame.rax = context.brk_current;
+        return 0;
+    }
+    const requested: usize = std.math.cast(usize, frame.rdi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (requested < context.brk_base or requested > context.brk_limit) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    if (requested > context.brk_current) {
+        const first = alignForward(context.brk_current, page_bytes);
+        const end = alignForwardChecked(requested, page_bytes) orelse {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        };
+        var virtual = first;
+        while (virtual < end) : (virtual += page_bytes) {
+            if (findMapping(context, virtual) != null) {
+                rollbackDynamicRange(context, first, virtual, .heap);
+                frame.rax = reject(errno_no_memory);
+                return 0;
+            }
+            const physical = allocatePage(context.handle) orelse {
+                rollbackDynamicRange(context, first, virtual, .heap);
+                frame.rax = reject(errno_no_memory);
+                return 0;
+            };
+            mapOwned(context, virtual, physical, true, false, .heap) catch |err| {
+                rollbackDynamicRange(context, first, virtual, .heap);
+                frame.rax = reject(runtime_abi.fromError(err));
+                return 0;
+            };
+        }
+    } else if (requested < context.brk_current) {
+        const first = alignForward(requested, page_bytes);
+        const end = alignForward(context.brk_current, page_bytes);
+        if (!rangeHasKindOrEmpty(context, first, end, .heap)) {
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        }
+        var virtual = first;
+        while (virtual < end) : (virtual += page_bytes) {
+            const index = findMapping(context, virtual) orelse continue;
+            unmapOwned(context, index) catch |err| {
+                frame.rax = reject(runtime_abi.fromError(err));
+                return 0;
+            };
+        }
+        reclaimEmptyPageTables(context, first, end);
+    }
+    context.brk_current = requested;
+    syncMemoryUsage(context) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = context.brk_current;
+    return 0;
+}
+
+fn findMmapRange(context: *const Context, length: usize) ?usize {
+    if (length == 0 or length > mmap_ceiling - mmap_floor) return null;
+    const hint = alignForward(@max(@min(context.mmap_hint, mmap_ceiling), mmap_floor), page_bytes);
+    if (scanMmapRange(context, hint, mmap_ceiling, length)) |address| return address;
+    if (hint > mmap_floor) return scanMmapRange(context, mmap_floor, hint, length);
+    return null;
+}
+
+fn scanMmapRange(context: *const Context, first: usize, limit: usize, length: usize) ?usize {
+    if (first >= limit or length > limit - first) return null;
+    const final_start = limit - length;
+    var candidate = first;
+    while (candidate <= final_start) : (candidate += page_bytes) {
+        const end = candidate + length;
+        if (mappingRangeAvailable(context, candidate, end)) return candidate;
+        if (candidate > final_start -| page_bytes) break;
+    }
+    return null;
+}
+
+fn mappingRangeAvailable(context: *const Context, start: usize, end: usize) bool {
+    var virtual = start;
+    while (virtual < end) : (virtual += page_bytes) if (findMapping(context, virtual) != null) return false;
+    return true;
+}
+
+fn rangeHasKind(context: *const Context, start: usize, end: usize, kind: MappingKind) bool {
+    var virtual = start;
+    while (virtual < end) : (virtual += page_bytes) {
+        const index = findMapping(context, virtual) orelse return false;
+        if (context.mappings[index].kind != kind) return false;
+    }
+    return true;
+}
+
+fn rangeHasKindOrEmpty(context: *const Context, start: usize, end: usize, kind: MappingKind) bool {
+    var virtual = start;
+    while (virtual < end) : (virtual += page_bytes) {
+        const index = findMapping(context, virtual) orelse continue;
+        if (context.mappings[index].kind != kind) return false;
+    }
+    return true;
+}
+
+fn rollbackDynamicRange(context: *Context, start: usize, end: usize, kind: MappingKind) void {
+    var virtual = start;
+    while (virtual < end) : (virtual += page_bytes) {
+        const index = findMapping(context, virtual) orelse continue;
+        if (context.mappings[index].kind != kind) continue;
+        unmapOwned(context, index) catch {};
+    }
+    reclaimEmptyPageTables(context, start, end);
+    syncMemoryUsage(context) catch {};
+}
+
+fn rollbackProtection(context: *Context, start: usize, end: usize) void {
+    var virtual = start;
+    while (virtual < end) : (virtual += page_bytes) {
+        const index = findMapping(context, virtual) orelse continue;
+        const mapping = &context.mappings[index];
+        _ = paging.protectUserPageInSpace(
+            context.space,
+            virtual,
+            mapping.physical_address,
+            mapping.writable,
+            mapping.executable,
+        );
+    }
+}
+
+fn reclaimEmptyPageTables(context: *Context, start: usize, end: usize) void {
+    var table_base = start & ~(page_table_span - 1);
+    const final_base = (end - 1) & ~(page_table_span - 1);
+    while (table_base <= final_base) : (table_base += page_table_span) {
+        if (tableHasMappings(context, table_base)) continue;
+        for (&context.page_tables) |*table| {
+            if (!table.used or table.virtual_base != table_base) continue;
+            if (!paging.removeUserPageTableInSpace(context.space, table.virtual_base, table.physical_address)) break;
+            releasePage(table.physical_address, context.handle);
+            if (context.table_frames[3] == table.physical_address) context.table_frames[3] = 0;
+            table.* = .{};
+            context.page_table_count -= 1;
+            break;
+        }
+    }
+}
+
+fn tableHasMappings(context: *const Context, table_base: usize) bool {
+    const table_end = table_base + page_table_span;
+    for (context.mappings) |mapping| {
+        if (mapping.used and mapping.virtual_address >= table_base and mapping.virtual_address < table_end) return true;
+    }
+    return false;
 }
 
 fn syscallSpawn(context: *Context, frame: *interrupt_context.Frame) u64 {
@@ -601,7 +1505,7 @@ fn syscallWait(
         frame.rax = reject(errno_invalid);
         return 0;
     }
-    if (!validateRange(context, frame.rdx, @sizeOf(UserWaitStatus), true)) {
+    if (!validateRange(context, frame.rdx, @sizeOf(runtime_abi.WaitStatus), true)) {
         frame.rax = reject(errno_fault);
         return 0;
     }
@@ -619,7 +1523,7 @@ fn syscallWait(
             return 0;
         };
         if (child.terminal()) {
-            const user_status = UserWaitStatus{
+            const user_status = runtime_abi.WaitStatus{
                 .pid = child.pid,
                 .exit_status = child.exit_status,
                 .state = @intFromEnum(child.state),
@@ -680,15 +1584,10 @@ fn syscallWrite(
         frame.rax = reject(errno_bad_fd);
         return 0;
     };
-    const kind = descriptorKind(context.handle, fd) orelse {
-        frame.rax = reject(errno_bad_fd);
+    const kind = activeDescriptors().descriptorKind(activeProcesses(), context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    if (kind == .terminal) {
-        appendOutput(context, bytes[0..length]);
-        frame.rax = length;
-        return 0;
-    }
     const result = activeDescriptors().write(
         activeVfs(),
         activeProcesses(),
@@ -701,6 +1600,7 @@ fn syscallWrite(
         return 0;
     };
     if (result.status == .blocked) return blockAndRetry(context, frame, fx_state);
+    if (kind == .terminal and result.count != 0) appendOutput(context, bytes[0..result.count]);
     frame.rax = result.count;
     return 0;
 }
@@ -722,14 +1622,6 @@ fn syscallRead(
         frame.rax = reject(errno_bad_fd);
         return 0;
     };
-    const kind = descriptorKind(context.handle, fd) orelse {
-        frame.rax = reject(errno_bad_fd);
-        return 0;
-    };
-    if (kind == .terminal) {
-        frame.rax = 0;
-        return 0;
-    }
     var bytes: [maximum_io_bytes]u8 = undefined;
     const result = activeDescriptors().read(
         activeVfs(),
@@ -822,18 +1714,21 @@ fn validateImage(image: elf64.Image) !void {
         const start: usize = std.math.cast(usize, segment.virtual_address) orelse return error.UnsupportedAddress;
         const size: usize = std.math.cast(usize, segment.memory_size) orelse return error.UnsupportedAddress;
         const end = std.math.add(usize, start, size) catch return error.UnsupportedAddress;
-        if (start < user_base or end > user_base + user_window_bytes) return error.UnsupportedAddress;
+        if (start < user_base or end > user_end) return error.UnsupportedAddress;
+        if (end >= mmap_floor) return error.ReservedAddress;
         if (rangesOverlap(start, end, trampoline_virtual, trampoline_virtual + page_bytes) or
-            rangesOverlap(start, end, stack_virtual, stack_virtual + page_bytes) or
+            rangesOverlap(start, end, stack_virtual, stack_top) or
             rangesOverlap(start, end, guard_virtual, guard_virtual + page_bytes)) return error.ReservedAddress;
     }
 }
 
 fn loadImage(context: *Context, image: elf64.Image, file: []const u8) !void {
+    var image_end = user_base;
     for (image.load_segments[0..image.load_count]) |segment| {
         const segment_start: usize = @intCast(segment.virtual_address);
         const segment_memory_end: usize = @intCast(segment.virtual_address + segment.memory_size);
         const segment_file_end: usize = @intCast(segment.virtual_address + segment.file_size);
+        image_end = @max(image_end, segment_memory_end);
         var page = segment_start & ~(page_bytes - 1);
         while (page < alignForward(segment_memory_end, page_bytes)) : (page += page_bytes) {
             const physical = allocatePage(context.handle) orelse return error.NoRuntimeFrames;
@@ -847,31 +1742,92 @@ fn loadImage(context: *Context, image: elf64.Image, file: []const u8) !void {
                     file[source_offset .. source_offset + copy_end - copy_start],
                 );
             }
-            try mapOwned(context, page, physical, segment.writable(), segment.executable());
+            try mapOwned(context, page, physical, segment.writable(), segment.executable(), .image);
         }
     }
+    context.image_end = image_end;
 }
 
-fn mapOwned(context: *Context, virtual: usize, physical: usize, writable: bool, executable: bool) !void {
-    if (context.mapping_count >= context.mappings.len) {
+fn mapOwned(
+    context: *Context,
+    virtual: usize,
+    physical: usize,
+    writable: bool,
+    executable: bool,
+    kind: MappingKind,
+) !void {
+    const mapping_index = findFreeMapping(context) orelse {
         releasePage(physical, context.handle);
         return error.MappingLimit;
-    }
+    };
+    ensurePageTable(context, virtual) catch |err| {
+        releasePage(physical, context.handle);
+        return err;
+    };
     if (!paging.mapUserPageInSpace(context.space, virtual, physical, writable, executable)) {
         releasePage(physical, context.handle);
         return error.MappingFailure;
     }
-    context.mappings[context.mapping_count] = .{
+    context.mappings[mapping_index] = .{
         .used = true,
         .virtual_address = virtual,
         .physical_address = physical,
+        .writable = writable,
+        .executable = executable,
+        .kind = kind,
     };
     context.mapping_count += 1;
 }
 
+fn ensurePageTable(context: *Context, virtual: usize) !void {
+    if (paging.userPageTableAddressInSpace(context.space, virtual) != null) return;
+    if (context.page_table_count >= context.page_tables.len) return error.MappingLimit;
+    const table_slot = findFreePageTable(context) orelse return error.MappingLimit;
+    const physical = allocatePage(context.handle) orelse return error.NoRuntimeFrames;
+    const virtual_base = virtual & ~(page_table_span - 1);
+    if (!paging.installUserPageTableInSpace(context.space, virtual_base, physical)) {
+        releasePage(physical, context.handle);
+        return error.MappingFailure;
+    }
+    context.page_tables[table_slot] = .{
+        .used = true,
+        .virtual_base = virtual_base,
+        .physical_address = physical,
+    };
+    context.page_table_count += 1;
+}
+
+fn findFreeMapping(context: *const Context) ?usize {
+    for (context.mappings, 0..) |mapping, index| if (!mapping.used) return index;
+    return null;
+}
+
+fn findMapping(context: *const Context, virtual: usize) ?usize {
+    for (context.mappings, 0..) |mapping, index| {
+        if (mapping.used and mapping.virtual_address == virtual) return index;
+    }
+    return null;
+}
+
+fn findFreePageTable(context: *const Context) ?usize {
+    for (context.page_tables, 0..) |table, index| if (!table.used) return index;
+    return null;
+}
+
+fn unmapOwned(context: *Context, mapping_index: usize) !void {
+    if (mapping_index >= context.mappings.len or !context.mappings[mapping_index].used) return error.InvalidMapping;
+    const mapping = context.mappings[mapping_index];
+    if (!paging.unmapUserPageInSpace(context.space, mapping.virtual_address, mapping.physical_address)) {
+        return error.MappingFailure;
+    }
+    releasePage(mapping.physical_address, context.handle);
+    context.mappings[mapping_index] = .{};
+    context.mapping_count -= 1;
+}
+
 const InitialStack = struct { rsp: u64, argc: u64, argv: u64 };
 
-fn buildInitialStack(stack_frame: usize, arguments: []const []const u8) !InitialStack {
+fn buildInitialStack(stack_frame: usize, stack_page_virtual: usize, arguments: []const []const u8) !InitialStack {
     var cursor = page_bytes;
     var addresses: [runtime_process.maximum_arguments]u64 = @splat(0);
     var index = arguments.len;
@@ -883,7 +1839,7 @@ fn buildInitialStack(stack_frame: usize, arguments: []const []const u8) !Initial
         const target = @as([*]u8, @ptrFromInt(stack_frame + cursor))[0 .. argument.len + 1];
         @memcpy(target[0..argument.len], argument);
         target[argument.len] = 0;
-        addresses[index] = stack_virtual + cursor;
+        addresses[index] = stack_page_virtual + cursor;
     }
     cursor &= ~@as(usize, 0xF);
     const vector_bytes = (arguments.len + 2) * @sizeOf(u64);
@@ -894,36 +1850,57 @@ fn buildInitialStack(stack_frame: usize, arguments: []const []const u8) !Initial
     for (addresses[0..arguments.len], 0..) |address, argument_index| words[argument_index + 1] = address;
     words[arguments.len + 1] = 0;
     return .{
-        .rsp = stack_virtual + cursor,
+        .rsp = stack_page_virtual + cursor,
         .argc = arguments.len,
-        .argv = stack_virtual + cursor + @sizeOf(u64),
+        .argv = stack_page_virtual + cursor + @sizeOf(u64),
     };
 }
 
 fn releaseMappings(index: usize) bool {
     const context = &contexts[index];
-    for (context.mappings[0..context.mapping_count]) |mapping| {
+    for (context.mappings) |mapping| {
         if (!mapping.used) continue;
         const info = paging.inspectUserPageInSpace(context.space, mapping.virtual_address) orelse return false;
         if (info.physical_address != mapping.physical_address) return false;
     }
-    for (context.mappings[0..context.mapping_count]) |mapping| {
+    for (&context.mappings) |*mapping| {
         if (!mapping.used) continue;
         if (!paging.unmapUserPageInSpace(context.space, mapping.virtual_address, mapping.physical_address)) return false;
-    }
-    if (!paging.userAddressSpaceEmpty(context.space)) return false;
-    for (context.mappings[0..context.mapping_count]) |*mapping| {
-        if (!mapping.used) continue;
         releasePage(mapping.physical_address, context.handle);
-        mapping.used = false;
+        mapping.* = .{};
     }
     context.mapping_count = 0;
+    if (!paging.userAddressSpaceEmpty(context.space)) return false;
+    for (&context.page_tables) |*table| {
+        if (!table.used) continue;
+        if (!paging.removeUserPageTableInSpace(context.space, table.virtual_base, table.physical_address)) return false;
+        releasePage(table.physical_address, context.handle);
+        if (context.table_frames[3] == table.physical_address) context.table_frames[3] = 0;
+        table.* = .{};
+    }
+    context.page_table_count = 0;
+    if (!paging.userAddressSpaceEmpty(context.space)) return false;
     for (&context.table_frames) |*frame| {
         if (frame.* != 0) releasePage(frame.*, context.handle);
         frame.* = 0;
     }
     context.space = .{ .pml4_address = 0, .pdpt_address = 0, .directory_address = 0, .table_address = 0, .table_pages = 0 };
     return true;
+}
+
+fn initializeContextDefaults(context: *Context) void {
+    context.image_end = user_base;
+    context.brk_base = user_base;
+    context.brk_current = user_base;
+    context.brk_limit = mmap_floor - page_bytes;
+    context.mmap_hint = mmap_floor;
+}
+
+fn resetContext(index: usize) *Context {
+    const context = &contexts[index];
+    @memset(std.mem.asBytes(context), 0);
+    initializeContextDefaults(context);
+    return context;
 }
 
 fn releaseContext(index: usize) void {
@@ -936,7 +1913,7 @@ fn releaseContext(index: usize) void {
             frame.* = 0;
         }
     }
-    contexts[index] = .{};
+    _ = resetContext(index);
 }
 
 fn rollbackProcess(parent_handle: u64, handle: u64) void {
@@ -945,9 +1922,14 @@ fn rollbackProcess(parent_handle: u64, handle: u64) void {
     _ = activeProcesses().wait(parent_handle, handle, true) catch null;
 }
 
-fn requirePagePool(comptime stage: []const u8) !void {
-    if (!page_pool.initialized()) return @field(anyerror, "PagePoolUninitialized-" ++ stage);
-    if (page_pool.page_count != page_limit) return @field(anyerror, "PagePoolCountCorrupted-" ++ stage);
+fn syncMemoryUsage(context: *const Context) !void {
+    const process = try activeProcesses().get(context.handle);
+    try activeProcesses().setResourceUsage(
+        context.handle,
+        @intCast(context.mapping_count + context.page_table_count + 3),
+        process.descriptor_count,
+        process.socket_count,
+    );
 }
 
 fn allocatePage(owner: u64) ?usize {
@@ -970,15 +1952,9 @@ fn findContext(handle: u64) ?usize {
     return null;
 }
 
-fn descriptorKind(handle: u64, fd: u16) ?runtime_fd.DescriptionKind {
-    const snapshot = activeDescriptors().snapshot(activeVfs(), activeProcesses(), handle) catch return null;
-    for (snapshot.entries[0..snapshot.count]) |entry| if (entry.fd == fd) return entry.kind;
-    return null;
-}
-
 fn validFrame(context: *const Context, frame: *const interrupt_context.Frame) bool {
     if (frame.cs != descriptor_tables.user_code_selector or frame.ss != descriptor_tables.user_data_selector) return false;
-    if (frame.rsp < stack_virtual or frame.rsp >= stack_virtual + page_bytes) return false;
+    if (frame.rsp < stack_virtual or frame.rsp >= stack_top) return false;
     return paging.translateUserAddressInSpace(context.space, @intCast(frame.rip), false, true) != null;
 }
 
@@ -1065,6 +2041,11 @@ fn activeDescriptors() *runtime_fd.System {
 
 fn alignForward(value: usize, alignment: usize) usize {
     return (value + alignment - 1) & ~(alignment - 1);
+}
+
+fn alignForwardChecked(value: usize, alignment: usize) ?usize {
+    const adjusted = std.math.add(usize, value, alignment - 1) catch return null;
+    return adjusted & ~(alignment - 1);
 }
 
 fn rangesOverlap(left_start: usize, left_end: usize, right_start: usize, right_end: usize) bool {

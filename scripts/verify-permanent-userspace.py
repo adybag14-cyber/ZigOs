@@ -33,7 +33,11 @@ def main() -> int:
     assets = text("scripts/build-assets.py")
     runtime_test = text("scripts/test-runtime.ps1")
     runtime_abi = text("src/runtime_abi.zig")
+    abi_spec = json.loads(text("abi/zigos-abi.json"))
+    abi_generator = text("scripts/generate-abi.py")
     memory_source = text("src/memory.zig")
+    process_source = text("src/runtime_process.zig")
+    e1000e_source = text("src/e1000e.zig")
     page_pool_source = text("src/runtime_page_pool.zig")
     vfs_source = text("src/runtime_vfs.zig")
     build_graph = text("build.zig")
@@ -84,6 +88,21 @@ def main() -> int:
     require(executor, "allocator_report.frees", "owned page-pool reclamation accounting")
     require(executor, "releasePage(physical, context.handle);", "failed owned mappings release their owned page")
     require(executor, "paging.userAddressSpaceEmpty", "teardown requires an empty private page table")
+    require(executor, "syscall.syscall_abi_query", "versioned ABI discovery syscall")
+    require(executor, "syscall.syscall_mmap", "anonymous process mappings")
+    require(executor, "syscall.syscall_munmap", "process mapping release")
+    require(executor, "syscall.syscall_mprotect", "process mapping protection transitions")
+    require(executor, "syscall.syscall_brk", "process heap-break management")
+    require(executor, "syscall.syscall_fstat", "descriptor metadata syscall")
+    require(executor, "syscall.syscall_getdents", "descriptor directory iteration syscall")
+    require(executor, "syscall.syscall_poll", "descriptor readiness syscall")
+    require(executor, "syscall.syscall_socket", "descriptor-backed IPv4 datagram sockets")
+    require(executor, "syscall.syscall_bind", "userspace UDP bind")
+    require(executor, "syscall.syscall_connect", "userspace UDP connect")
+    require(executor, "syscall.syscall_send", "userspace UDP send")
+    require(executor, "syscall.syscall_recv", "blocking userspace UDP receive")
+    require(executor, "serviceNetwork", "network ingress wakes blocked socket readers")
+    require(vfs_source, "setPseudoReader", "pseudo files use a VFS backend rather than shell path dispatch")
     require(executor, "std.math.add(u64, current_tick, frame.rdi)", "overflow-safe sleep deadlines")
     require(executor, "runtime_abi.descriptor(frame.rdi)", "descriptor registers are range-checked before narrowing")
     require(executor, "runtime_abi.openFlagBits(frame.rsi)", "open flags are validated before narrowing")
@@ -108,6 +127,23 @@ def main() -> int:
     require(executor, "initializeManager(physical_memory, page_limit, memory.four_gib, true)", "permanent userspace allocates pages on demand from physical memory")
     forbid(executor, "allocateContiguousBelow(arena_pages", "permanent userspace reserves a fixed physical slab")
 
+    forbid(process_source, "for (self.processes", "process-table scans copy the complete process array onto the syscall IST")
+    require(process_source, "const process = &self.processes[slot]", "process-table scans use indexed pointer access")
+
+    for function_name in ("waitForTx", "waitForRx"):
+        match = re.search(rf"fn {function_name}\(.*?\n\}}", e1000e_source, flags=re.DOTALL)
+        if match is None:
+            raise SystemExit(f"permanent-userspace contract missing: e1000e {function_name}")
+        body = match.group(0)
+        require(
+            body,
+            "!runtime_completion_polling_enabled and apic.currentId() == target_apic_id",
+            f"{function_name} enables interrupts only during boot-time MSI-X validation",
+        )
+        require(body, "if (interrupt_assisted) zigos_enable_interrupts();", f"{function_name} guards interrupt enablement")
+        require(body, "if (interrupt_assisted) zigos_disable_interrupts();", f"{function_name} restores boot-time interrupt state")
+        forbid(body, "const local_target", f"{function_name} reintroduced unconditional local-APIC interrupt enablement")
+
     require(memory_source, "pub const PhysicalMemoryManager", "post-bootstrap reclaiming physical-memory manager")
     require(memory_source, "initializeFromBootstrap", "explicit bootstrap-to-permanent allocator handoff")
     require(memory_source, "current_region_full_end", "low-address allocation preserves deferred high-memory pages")
@@ -120,9 +156,18 @@ def main() -> int:
     require(page_pool_source, "poison_on_free", "released permanent-runtime pages are poisoned before physical reuse")
     require(page_pool_source, 'test "manager-backed pages return to post-bootstrap physical memory"', "manager-backed page ownership integration test")
 
+    require(runtime_abi, 'pub const constants = @import("generated/runtime_abi_constants.zig")', "kernel ABI consumes generated constants")
+    require(runtime_abi, "pub const AbiInfo = extern struct", "versioned machine-readable ABI information")
     require(runtime_abi, "pub fn fromError", "stable kernel-error to userspace-errno mapping")
     require(runtime_abi, "descriptor arguments reject narrowing aliases", "hostile descriptor-width tests")
-    require(runtime_abi, "open flags reject every high bit before narrowing", "hostile open-flag tests")
+    require(runtime_abi, "open protection and map flags reject unknown or contradictory bits", "hostile ABI flag tests")
+    require(abi_generator, 'newline="\\n"', "ABI generator emits deterministic LF files")
+    require(assets, '"generate-abi.py"', "asset generation refreshes ABI constants before assembly")
+    if abi_spec.get("abi", {}).get("major") != 1 or abi_spec.get("abi", {}).get("page_size") != 4096:
+        raise SystemExit("versioned ABI specification does not declare the required major version/page size")
+    syscall_values = list(abi_spec.get("syscalls", {}).values())
+    if not syscall_values or len(syscall_values) != len(set(syscall_values)):
+        raise SystemExit("versioned ABI syscall numbers are empty or duplicated")
 
     canonical_test_sources = (
         "src/runtime_fd.zig",
@@ -137,8 +182,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 44:
-        raise SystemExit(f"canonical isolated-test declaration total must be 44, found {declared_tests}")
+    if declared_tests != 47:
+        raise SystemExit(f"canonical isolated-test declaration total must be 47, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -170,10 +215,13 @@ def main() -> int:
     require(cpu, "zigos_trace_probe_level3:", "deterministic invalid-opcode caller frame")
     require(cpu, ".runtime_return_to_kernel:", "timer return to scheduler")
     require(paging, "createUserAddressSpaceFromFrames", "recyclable private page tables")
+    require(paging, "installUserPageTableInSpace", "process address spaces grow beyond one fixed 2 MiB table")
+    require(paging, "removeUserPageTableInSpace", "dynamic user page tables are explicitly reclaimed")
+    require(paging, "userPageTableAddressInSpace", "dynamic user table lookup validates hierarchy ownership")
     require(exceptions, "runtime_user.handleException", "permanent exception routing")
     require(syscalls, "runtime_user.handleSyscall", "permanent syscall routing")
 
-    for name in ("hello", "sleep", "crash", "spin", "pipe-reader", "pipe-writer", "wait"):
+    for name in ("hello", "sleep", "crash", "spin", "pipe-reader", "pipe-writer", "wait", "vm", "io", "socket"):
         require(assets, f'"{name}"', f"generated {name} ELF fixture")
         if not (ROOT / "src" / "user" / f"runtime-{name}.asm").is_file():
             raise SystemExit(f"permanent-userspace contract missing fixture source: {name}")
@@ -191,8 +239,13 @@ def main() -> int:
         "Post-bootstrap physical memory manager active:",
         "bootstrap allocator sealed",
         "ZigOs post-bootstrap physical memory: total ",
-        "peak 16 alloc/free 80/80 failed/rejected 0/0 clean yes",
-        "ZigOs permanent userspace: page-limit 256 used 0",
+        "peak 32 alloc/free 197/197 failed/rejected 0/0 clean yes",
+        "peak 32 alloc/free 213/213 failed/rejected 0/0 clean yes",
+        "launches/exits/faults 12/10/1",
+        "launches/exits/faults 13/11/1",
+        "reclaimed 197 allocator alloc/release/retains 197/197/0",
+        "reclaimed 213 allocator alloc/release/retains 213/213/0",
+        "ZigOs permanent userspace: page-limit 4096 used 0",
         "ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes",
         "ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes",
         "ZigOs x86-64 Capstone 19 verified:",

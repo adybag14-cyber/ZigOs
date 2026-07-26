@@ -61,3 +61,13 @@ comptime {
         @compileError("FXSAVE state must remain 512 bytes");
     }
 }
+
+comptime {
+    if (@sizeOf(Frame) != 160) @compileError("x86-64 syscall frame must be 160 bytes");
+    if (@offsetOf(Frame, "rax") != 112) @compileError("Frame.rax offset must match cpu.asm");
+    if (@offsetOf(Frame, "rip") != 120) @compileError("Frame.rip offset must match cpu.asm");
+    if (@offsetOf(Frame, "cs") != 128) @compileError("Frame.cs offset must match cpu.asm");
+    if (@offsetOf(Frame, "rflags") != 136) @compileError("Frame.rflags offset must match cpu.asm");
+    if (@offsetOf(Frame, "rsp") != 144) @compileError("Frame.rsp offset must match cpu.asm");
+    if (@offsetOf(Frame, "ss") != 152) @compileError("Frame.ss offset must match cpu.asm");
+}

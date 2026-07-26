@@ -14,7 +14,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 2. **C19-02** — Independently verify each generated ELF64 identity, header, two `PT_LOAD` entries, permissions, offsets and exact image size.
 3. **C19-03** — Install the verified executables as ordinary `/bin/*.elf` files in the permanent VFS and as release artifacts.
 4. **C19-04** — Make `run` and `exec` read executable bytes from the VFS and enter the parsed ELF64 entry point instead of creating a timed pseudo-job.
-5. **C19-05** — Reserve a bounded 256-page physical arena for permanent executable contexts below 4 GiB.
+5. **C19-05** - Provide a bounded below-4-GiB ownership arena for permanent executable contexts; the maintained implementation uses 256 generation-tagged ownership slots backed on demand by the post-bootstrap physical-memory manager.
 6. **C19-06** - Recycle owned arena pages with zero-on-allocation, poison-on-release and exact allocation/reclamation accounting.
 7. **C19-07** — Allocate a reusable private PML4, PDPT, directory and page table for every retained executable context.
 8. **C19-08** — Map executable `PT_LOAD` pages read-only/executable and writable data pages writable/non-executable under W^X.
@@ -90,16 +90,33 @@ The retained executor uses a small ZigOs-specific `int 0x80` ABI:
 | 76 | spawn a VFS-backed direct child |
 | 77 | waitpid, wait-any (`pid = 0`) and WNOHANG (`flags = 1`) |
 | 78 | kernel-installed fault-trampoline return |
+| 79 | ABI version/capability query |
+| 80 | anonymous mmap |
+| 81 | munmap |
+| 82 | mprotect |
+| 83 | brk |
+| 84 | fstat |
+| 85 | getdents |
+| 86 | poll |
+| 87 | UDP socket |
+| 88 | bind |
+| 89 | connect |
+| 90 | send |
+| 91 | recv |
+| 92 | getsockname |
 
 This is not a POSIX or Linux syscall ABI. Calls are bounded, pointer-validated and routed into the existing permanent VFS, descriptor and process-table implementations.
 
-### Post-release Priority 1 process slice
+### Maintained post-release ABI, VM, I/O and UDP slice
 
-This slice adds a seventh deterministic runtime executable and a 40th canonical COM1 command without changing the historical 32-goal release count.
+This maintained extension adds four deterministic integration programs beyond the original six fixtures and expands the canonical COM1 contract to 42 commands offline or 43 commands with a live NIC. It does not change the historical 32-goal Capstone 19 release count.
 
-`/bin/wait.elf` is a genuine CPL3 parent integration program. It spawns `/bin/sleep.elf`, proves wait-any with WNOHANG returns zero while the child is live, blocks in exact waitpid and receives status `7`, then spawns `/bin/hello.elf`, blocks in wait-any and receives status `0x2A`. It prints `wait-api: waitpid/WNOHANG/wait-any passed` and exits with status `0x31`.
+- `/bin/wait.elf` spawns `/bin/sleep.elf` and `/bin/hello.elf`, proving exact waitpid, wait-any and WNOHANG before exiting `0x31`.
+- `/bin/vm.elf` queries ABI version 1, exercises page-granular anonymous mmap, W^X mprotect, munmap and brk growth/shrink, then exits `0x52`.
+- `/bin/io.elf` proves descriptor-backed open/read/fstat/getdents/poll and exits `0x53`.
+- `/bin/socket.elf` proves descriptor-backed UDP socket creation, ephemeral bind, local-name lookup, connect, send, readiness polling and normal close, then exits `0x54`.
 
-This maintained extension closes general-roadmap goals G138-G140 for the bounded permanent runtime. It does not add to the historical 32-goal Capstone 19 release count and does not claim a system-wide physical-memory manager or fully unified scheduler.
+The ABI is generated from `abi/zigos-abi.json` into Zig and NASM constants. The source contract verifies unique syscall numbers, ABI major version 1, page size 4096, full-width argument validation and stable kernel-error-to-userspace-errno mappings. These additions close the bounded roadmap goals documented in `ROADMAP-500.md`; they do not claim POSIX compatibility, disk-backed `/bin`, TCP, a dynamic linker or a system-wide SMP scheduler.
 
 ## Real command behavior
 
@@ -145,7 +162,7 @@ localhost A 127.0.0.1 ttl 10800 aliases 0 ...
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 ```
 
-The driver remains interrupt-first. After the strict boot-time MSI-X proofs have completed, descriptor DMA status may recover a completed runtime TX/RX operation when a later MSI-X edge is lost; boot validation itself still requires the real interrupt path.
+Boot validation remains interrupt-first and still requires the real e1000e MSI-X path. Before entering the retained runtime, the driver masks NIC MSI-X and switches to explicit descriptor polling. Runtime TX/RX waits never enable interrupts inside an `int 0x80` handler, because the syscall and LAPIC timer gates share IST1; this prevents a nested timer interrupt from overwriting the outer userspace return frame.
 
 Without the e1000e device, the same commands report the actual offline state:
 
@@ -162,15 +179,21 @@ The canonical harness scopes its forbidden-fixture scan to output after `ZigOs p
 
 ## Complete runtime result
 
-The canonical COM1 harness sends 40 commands and requires zero failures. One representative run reported:
+The canonical COM1 harness sends 42 commands offline and 43 commands with a live e1000e device. Both profiles require zero failures and exact zero-leak shutdown:
 
 ```text
-ZigOs persistent runtime shutdown: commands 40 failed 0 ticks 1009 idle-halts 958 service-passes 1009
-ZigOs persistent processes: live 2 created 15 reaped 13 switches 1094 signals 1 faults 1
-ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/41/1 blocked 2/1 wakeups 2/1 eof 4 broken 1 clean yes
-ZigOs post-bootstrap physical memory: total 39932 free 39932 allocated 0 low/high 39932/0 extents 5/5 peak 16 alloc/free 80/80 failed/rejected 0/0 clean yes
-ZigOs permanent userspace: page-limit 256 used 0 peak 16 contexts 0 launches/exits/faults 10/8/1 preemptions/blocking/syscalls 41/6/36 reclaimed 80 allocator alloc/release/retains 80/80/0 shared/oom/rejected 0/0/0 clean yes
-ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
+# Offline
+commands 42 failed 0
+post-bootstrap PMM peak 32 alloc/free 197/197, allocated 0, clean yes
+userspace launches/exits/faults 12/10/1, reclaimed 197, allocator 197/197/0, clean yes
+network device no, failures 0, clean yes
+
+# Live e1000e
+commands 43 failed 0
+socket-api: socket/bind/connect/send/poll/close passed; PID 15 status 0x54
+post-bootstrap PMM peak 32 alloc/free 213/213, allocated 0, clean yes
+userspace launches/exits/faults 13/11/1, reclaimed 213, allocator 213/213/0, clean yes
+network device yes, ping 1, dns 1, failures 0, clean yes
 ```
 
 Tick, switch and preemption totals may vary with host scheduling. Process states, exit/fault results, descriptor deltas, payload bytes and final cleanup are exact.
@@ -186,7 +209,7 @@ Capstone 19 does **not** claim:
 - persistent-runtime `fork`, copy-on-write or general demand paging;
 - a general terminal input syscall or controlling-terminal/job-control model;
 - shell pipelines whose stages are separate executable processes; `pipex` is the bounded executable pipe proof;
-- a retained userspace socket API or production network stack; `ping` and `dns` are bounded kernel-shell operations on one retained e1000e device;
+- TCP, IPv6 or a production network stack; the retained userspace socket API is limited to bounded UDP socket/bind/connect/send/recv/getsockname/poll operations on one e1000e device;
 - more than eight simultaneous executable contexts, 32 mappings per context or 4,096 captured output bytes;
 - SMP scheduling of permanent userspace contexts; the current release gate uses one BSP runtime scheduler;
 - POSIX compatibility, hostile-workload isolation or production security.

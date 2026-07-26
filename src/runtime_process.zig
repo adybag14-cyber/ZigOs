@@ -235,6 +235,19 @@ pub const Table = struct {
     }
 
     pub fn scheduleNext(self: *Table, current_handle: ?u64) ?u64 {
+        return self.scheduleNextEligible(current_handle, null, null);
+    }
+
+    pub fn scheduleNextKind(self: *Table, kind: Kind, current_handle: ?u64, excluded_handle: ?u64) ?u64 {
+        return self.scheduleNextEligible(current_handle, kind, excluded_handle);
+    }
+
+    fn scheduleNextEligible(
+        self: *Table,
+        current_handle: ?u64,
+        required_kind: ?Kind,
+        excluded_handle: ?u64,
+    ) ?u64 {
         if (current_handle) |handle| {
             if (self.resolve(handle)) |slot| {
                 if (self.processes[slot].state == .running) self.processes[slot].state = .runnable;
@@ -245,6 +258,8 @@ pub const Table = struct {
             self.scheduler_cursor = (self.scheduler_cursor + 1) % self.processes.len;
             var process = &self.processes[self.scheduler_cursor];
             if (!process.used or process.state != .runnable) continue;
+            if (required_kind) |kind| if (process.kind != kind) continue;
+            if (excluded_handle != null and process.handle == excluded_handle.?) continue;
             process.state = .running;
             process.remaining_slice = @max(@as(u8, 1), process.time_slice);
             process.context_switches +%= 1;
@@ -253,8 +268,12 @@ pub const Table = struct {
         }
         if (current_handle) |handle| {
             if (self.resolve(handle)) |slot| {
-                if (self.processes[slot].used and self.processes[slot].state == .runnable) {
-                    self.processes[slot].state = .running;
+                const process = &self.processes[slot];
+                if (process.used and process.state == .runnable and
+                    (required_kind == null or process.kind == required_kind.?) and
+                    (excluded_handle == null or process.handle != excluded_handle.?))
+                {
+                    process.state = .running;
                     return handle;
                 }
             } else |_| {}
@@ -385,7 +404,8 @@ pub const Table = struct {
     pub fn sendGroupSignal(self: *Table, sender_handle: u64, process_group: u32, signal: u8) Error!usize {
         var targets: [maximum_processes]u64 = @splat(0);
         var count: usize = 0;
-        for (self.processes) |process| {
+        for (0..self.processes.len) |slot| {
+            const process = &self.processes[slot];
             if (!process.used or process.process_group != process_group or process.terminal()) continue;
             targets[count] = process.handle;
             count += 1;
@@ -425,7 +445,8 @@ pub const Table = struct {
     pub fn wait(self: *Table, parent_handle: u64, target_handle: ?u64, nonblocking: bool) Error!?Status {
         const parent_slot = try self.resolve(parent_handle);
         var candidate: ?usize = null;
-        for (self.processes, 0..) |process, slot| {
+        for (0..self.processes.len) |slot| {
+            const process = &self.processes[slot];
             if (!process.used or process.parent_slot != parent_slot) continue;
             if (target_handle) |target| if (process.handle != target) continue;
             if (process.terminal()) {
@@ -435,7 +456,8 @@ pub const Table = struct {
         }
         if (candidate) |slot| return @as(?Status, try self.reapSlot(parent_slot, slot));
         var has_child = false;
-        for (self.processes) |process| {
+        for (0..self.processes.len) |slot| {
+            const process = &self.processes[slot];
             if (!process.used or process.parent_slot != parent_slot) continue;
             if (target_handle) |target| if (process.handle != target) continue;
             has_child = true;
@@ -483,9 +505,10 @@ pub const Table = struct {
 
     pub fn snapshot(self: *const Table) Snapshot {
         var result = Snapshot{};
-        for (self.processes) |process| {
+        for (0..self.processes.len) |slot| {
+            const process = &self.processes[slot];
             if (!process.used) continue;
-            result.processes[result.count] = process;
+            result.processes[result.count] = process.*;
             result.count += 1;
         }
         sortByPid(result.processes[0..result.count]);
@@ -509,7 +532,8 @@ pub const Table = struct {
             .total_faults = self.total_faults,
             .slot_reuses = self.slot_reuses,
         };
-        for (self.processes) |process| {
+        for (0..self.processes.len) |slot| {
+            const process = &self.processes[slot];
             if (!process.used) continue;
             result.live += 1;
             switch (process.state) {
@@ -591,7 +615,10 @@ pub const Table = struct {
     }
 
     fn findPid(self: *const Table, pid: u32) ?usize {
-        for (self.processes, 0..) |process, slot| if (process.used and process.pid == pid) return slot;
+        for (0..self.processes.len) |slot| {
+            const process = &self.processes[slot];
+            if (process.used and process.pid == pid) return slot;
+        }
         return null;
     }
 

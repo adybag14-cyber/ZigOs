@@ -2,7 +2,7 @@ const std = @import("std");
 const memory = @import("memory.zig");
 
 pub const page_bytes: usize = 4096;
-pub const maximum_pages: usize = 256;
+pub const maximum_pages: usize = 4096;
 pub const poison_byte: u8 = 0xA5;
 
 pub const Error = error{
@@ -114,24 +114,45 @@ pub const Pool = struct {
             self.owner_mismatches +|= 1;
             return null;
         }
-        var free_index: ?usize = null;
+        var first_free: ?usize = null;
         for (self.entries[0..self.page_count], 0..) |entry, index| {
-            if (entry.state == .free) {
-                free_index = index;
-                break;
-            }
+            if (entry.state == .free and first_free == null) first_free = index;
         }
-        const index = free_index orelse {
+        const available_index = first_free orelse {
             self.out_of_memory +|= 1;
             return null;
         };
-        const address = if (self.manager) |manager|
-            manager.allocateBelow(self.limit_exclusive) orelse {
+
+        var index = available_index;
+        const address = if (self.manager) |manager| blk: {
+            const physical = manager.allocateBelow(self.limit_exclusive) orelse {
                 self.out_of_memory +|= 1;
                 return null;
+            };
+            // Never zero a page that the ownership table still considers live.
+            // If the backing allocator exposes such an address, consuming its
+            // allocation repairs the backing free set while preserving the
+            // original live owner; the new allocation fails transactionally.
+            for (self.entries[0..self.page_count]) |entry| {
+                if (entry.state != .free and entry.address == physical) {
+                    self.backing_failures +|= 1;
+                    return null;
+                }
             }
-        else
-            self.base + index * page_bytes;
+            // A released manager page may be returned in a different order from
+            // metadata slots. Prefer the entry that already remembers this exact
+            // address, then erase any stale duplicate memories.
+            for (self.entries[0..self.page_count], 0..) |entry, candidate| {
+                if (entry.state == .free and entry.address == physical) {
+                    index = candidate;
+                    break;
+                }
+            }
+            for (self.entries[0..self.page_count], 0..) |*entry, candidate| {
+                if (candidate != index and entry.state == .free and entry.address == physical) entry.address = 0;
+            }
+            break :blk physical;
+        } else self.base + index * page_bytes;
 
         const entry = &self.entries[index];
         entry.state = .exclusive;
@@ -184,6 +205,12 @@ pub const Pool = struct {
         entry.state = .free;
         entry.owner = 0;
         entry.references = 0;
+        if (self.manager != null) {
+            // Keep exactly one tombstone for generation-preserving reuse.
+            for (self.entries[0..self.page_count]) |*other| {
+                if (other != entry and other.state == .free and other.address == address) other.address = 0;
+            }
+        }
         self.active -= 1;
         self.releases +|= 1;
         self.frees +|= 1;
@@ -324,4 +351,56 @@ test "manager-backed pages return to post-bootstrap physical memory" {
     try std.testing.expectEqual(@as(u64, 3), manager_report.allocations);
     try std.testing.expectEqual(@as(u64, 3), manager_report.frees);
     try std.testing.expect(manager_report.clean);
+}
+
+test "manager-backed metadata follows recycled physical addresses" {
+    const extents = [_]memory.PhysicalExtent{.{ .base = 0x70_0000, .end = 0x70_5000 }};
+    var manager = memory.PhysicalMemoryManager.initForTesting(&extents).?;
+    var pool = Pool{};
+    try pool.initializeManager(&manager, 4, memory.four_gib, false);
+
+    const a = pool.allocate(1).?;
+    const b = pool.allocate(2).?;
+    const c = pool.allocate(3).?;
+    try std.testing.expectEqual(ReleaseResult.freed, try pool.release(c, 3));
+    try std.testing.expectEqual(ReleaseResult.freed, try pool.release(a, 1));
+
+    // The physical manager returns the lower free address first even though a
+    // different metadata slot was released first.
+    const recycled_a = pool.allocate(4).?;
+    const recycled_c = pool.allocate(5).?;
+    try std.testing.expectEqual(a, recycled_a);
+    try std.testing.expectEqual(c, recycled_c);
+
+    var remembered_a: usize = 0;
+    var remembered_c: usize = 0;
+    for (pool.entries[0..pool.page_count]) |entry| {
+        remembered_a += @intFromBool(entry.address == a);
+        remembered_c += @intFromBool(entry.address == c);
+    }
+    try std.testing.expectEqual(@as(usize, 1), remembered_a);
+    try std.testing.expectEqual(@as(usize, 1), remembered_c);
+
+    try std.testing.expectEqual(ReleaseResult.freed, try pool.release(b, 2));
+    try std.testing.expectEqual(ReleaseResult.freed, try pool.release(recycled_a, 4));
+    try std.testing.expectEqual(ReleaseResult.freed, try pool.release(recycled_c, 5));
+    try std.testing.expect(pool.report().clean);
+    try std.testing.expect(manager.report().clean);
+}
+
+test "manager-backed pool rejects a backing duplicate before zeroing" {
+    const extents = [_]memory.PhysicalExtent{.{ .base = 0x80_0000, .end = 0x80_3000 }};
+    var manager = memory.PhysicalMemoryManager.initForTesting(&extents).?;
+    var pool = Pool{};
+    try pool.initializeManager(&manager, 3, memory.four_gib, false);
+
+    const live = pool.allocate(11).?;
+    // Simulate a corrupted backing free set while ownership metadata remains live.
+    try manager.free(live);
+    try std.testing.expect(pool.allocate(22) == null);
+    const entry = try pool.inspect(live);
+    try std.testing.expectEqual(State.exclusive, entry.state);
+    try std.testing.expectEqual(@as(u64, 11), entry.owner);
+    try std.testing.expectEqual(@as(u64, 1), pool.report().backing_failures);
+    try std.testing.expectEqual(ReleaseResult.freed, try pool.release(live, 11));
 }
