@@ -105,6 +105,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = .Debug,
             }),
         });
+        tests.step.dependOn(&assets.step);
         const run_tests = b.addRunArtifact(tests);
         unit_step.dependOn(&run_tests.step);
     }
