@@ -1355,7 +1355,7 @@ if (-not $output.Contains("NVMe protective MBR verified: type 0xEE, first LBA 1,
 if (-not [regex]::IsMatch($output, "NVMe GPT header verified: revision 1\.0, current LBA 1, backup LBA $($nvmeMetadata.last_lba), usable $($nvmeMetadata.first_usable_lba)-$($nvmeMetadata.last_usable_lba), header CRC 0x00000000$($nvmeMetadata.primary_header_crc)")) {
     throw 'The checksum-valid primary GPT header marker was not observed.'
 }
-if (-not $output.Contains("NVMe GPT partition array verified: 128 entries x 128 bytes at LBA 2, sectors $($nvmeMetadata.entry_array_sectors), populated 1, CRC 0x00000000$($nvmeMetadata.partition_array_crc)")) {
+if (-not $output.Contains("NVMe GPT partition array verified: 128 entries x 128 bytes at LBA 2, sectors $($nvmeMetadata.entry_array_sectors), populated 2, CRC 0x00000000$($nvmeMetadata.partition_array_crc)")) {
     throw 'The checksum-valid GPT partition-entry-array marker was not observed.'
 }
 if (-not $output.Contains("NVMe backup GPT verified: current LBA $($nvmeMetadata.last_lba), primary LBA 1, entries LBA $($nvmeMetadata.backup_entry_lba), header CRC 0x00000000$($nvmeMetadata.backup_header_crc), array CRC 0x00000000$($nvmeMetadata.partition_array_crc)")) {
@@ -1363,6 +1363,12 @@ if (-not $output.Contains("NVMe backup GPT verified: current LBA $($nvmeMetadata
 }
 if (-not $output.Contains("NVMe EFI System Partition: index 0, LBA $($nvmeMetadata.partition_first_lba) + $($nvmeMetadata.partition_sectors) sectors, name `"ZigOs NVMe FAT`"")) {
     throw 'The NVMe EFI System Partition discovery marker was not observed.'
+}
+if (-not $output.Contains("NVMe ZigOs Data Partition: index 1, LBA $($nvmeMetadata.data_partition_first_lba) + $($nvmeMetadata.data_partition_sectors) sectors, name `"ZigOs Data`"")) {
+    throw 'The NVMe ZigOs data partition discovery marker was not observed.'
+}
+if (-not $output.Contains("NVMe retained for permanent runtime: polling I/O, data LBA $($nvmeMetadata.data_partition_first_lba) + $($nvmeMetadata.data_partition_sectors) sectors")) {
+    throw 'The NVMe permanent-runtime polling handoff marker was not observed.'
 }
 if (-not $output.Contains("NVMe FAT volume verified: FAT16, label `"ZIGOSNVME`", filesystem `"FAT16`", $($nvmeMetadata.partition_sectors) sectors, first FAT LBA $($nvmeMetadata.first_fat_lba), root LBA $($nvmeMetadata.root_directory_lba)")) {
     throw 'The FAT16 volume inside the NVMe GPT partition was not observed.'

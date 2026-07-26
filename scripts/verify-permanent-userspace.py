@@ -42,6 +42,13 @@ def main() -> int:
     vfs_source = text("src/runtime_vfs.zig")
     tty_source = text("src/runtime_tty.zig")
     fd_source = text("src/runtime_fd.zig")
+    persist_source = text("src/runtime_persist.zig")
+    nvme_source = text("src/nvme.zig")
+    gpt_source = text("src/gpt.zig")
+    nvme_image_builder = text("scripts/create-nvme-test-image.py")
+    qemu_test = text("scripts/test-qemu.ps1")
+    persistence_test = text("scripts/test-x86_64-persistence.py")
+    workflow = text(".github/workflows/build.yml")
     build_graph = text("build.zig")
     workflow = text(".github/workflows/build.yml")
     asset_builder = text("scripts/build-assets.py")
@@ -93,6 +100,36 @@ def main() -> int:
     require(tty_source, "process.process_group == self.foreground_process_group", "background process groups cannot read the terminal")
     require(tty_source, "0x08, 0x7F", "canonical erase accepts Backspace and DEL")
     require(tty_source, "sendGroupSignal(self.controller_handle, self.foreground_process_group, 2)", "Ctrl-C targets the foreground process group")
+    require(nvme_image_builder, "ZIGOS_DATA_PARTITION_GUID", "deterministic GPT image contains a dedicated ZigOs data partition")
+    require(nvme_image_builder, "data_partition_first_lba", "data partition geometry is exported to test metadata")
+    require(gpt_source, "isZigOsDataPartition", "kernel GPT parser identifies the dedicated persistence partition")
+    require(nvme_source, "pub fn writeBlock", "retained NVMe supports data writes")
+    require(nvme_source, "pub fn flush", "retained NVMe supports volatile-cache flushes")
+    require(nvme_source, "nvm_force_unit_access", "journal commit headers can request force-unit-access")
+    require(nvme_source, "pub fn enterRuntimePollingMode", "NVMe interrupts are explicitly handed off to bounded runtime polling")
+    require(runtime, "initializePersistentStorage", "permanent runtime mounts the retained data partition")
+    require(runtime, "runtime_persist.BlockDevice", "persistence is layered over a generic block interface")
+    require(runtime, "state.persistence.sync(&state.vfs)", "sync commits the persistent VFS subtree")
+    require(runtime, "state.persistence.check()", "fsck validates the committed journal generation")
+    require(runtime, "ZigOs persistent storage:", "shutdown reports persistent generation and device accounting")
+    require(runtime, "persistence_clean", "release gate requires a valid committed journal")
+    require(persist_source, "const commit_marker", "journal headers carry an explicit commit marker")
+    require(persist_source, "const slot: u8 = if (self.active_slot == 0) 1 else 0", "sync alternates between A/B generations")
+    require(persist_source, "if (!device.flush())", "payload and header writes are ordered by device flushes")
+    require(persist_source, "device.write(slot, self.sector[0..block_size], true)", "the generation header is committed with FUA")
+    require(persist_source, "gpt.crc32(self.payload", "journal payloads are checksummed")
+    require(persist_source, "if (second_valid.?.generation > first_valid.?.generation)", "mount selects the newest fully valid generation")
+    require(persist_source, 'test "mount falls back to the previous valid generation"', "corrupt newest generation recovery test")
+    require(persist_source, 'test "relative path validation rejects traversal but permits dotted names"', "restored paths reject component traversal")
+    require(persist_source, "path_scratch", "journal path construction cannot alias the traversal queue")
+    require(qemu_test, "NVMe ZigOs Data Partition", "hosted boot gate verifies data-partition discovery")
+    require(qemu_test, "NVMe retained for permanent runtime", "hosted boot gate verifies the polling handoff")
+    require(persistence_test, "Persistent x86-64 NVMe two-boot session passed.", "dedicated persistence gate spans two independent boots")
+    require(persistence_test, "header_a.generation != 1", "host gate requires slot A generation one")
+    require(persistence_test, "survived-generation-one", "boot two must read data written by boot one")
+    require(persistence_test, "parse_header", "host gate validates on-disk A/B header CRCs")
+    require(persistence_test, "after_second_hash == after_first_hash", "host gate requires a second physical disk mutation")
+    require(workflow, "test-x86_64-persistence.py", "Windows CI runs the two-boot persistence gate")
 
     require(executor, "paging.activateAddressSpace", "private CR3 activation")
     require(executor, "zigos_enter_user_context", "complete context entry")
@@ -197,13 +234,14 @@ def main() -> int:
         "src/runtime_abi.zig",
         "src/runtime_page_pool.zig",
         "src/memory.zig",
+        "src/runtime_persist.zig",
     )
     declared_tests = sum(
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 50:
-        raise SystemExit(f"canonical isolated-test declaration total must be 50, found {declared_tests}")
+    if declared_tests != 53:
+        raise SystemExit(f"canonical isolated-test declaration total must be 53, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -213,6 +251,7 @@ def main() -> int:
         '"src/runtime_vfs.zig"',
         '"src/runtime_abi.zig"',
         '"src/runtime_page_pool.zig"',
+        '"src/runtime_persist.zig"',
     ):
         require(build_graph, source_path, f"isolated test graph includes {source_path}")
 
@@ -268,6 +307,11 @@ def main() -> int:
         "reclaimed 229 allocator alloc/release/retains 229/229/0",
         "tty-api: blocking read/poll/line discipline passed",
         "ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes",
+        "sync complete: ramfs mutations ",
+        "fsck ramfs/persist: clean",
+        "ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 payload/header/flush 1/1/2 NVMe read/write/flush ",
+        " errors 0/0 clean yes",
+        "persistent-storage yes canned-results no explicit-shutdown yes",
         "ZigOs permanent userspace: page-limit 4096 used 0",
         "ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes",
         "ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes",
@@ -287,7 +331,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent userspace contract: real ELF execution, blocking TTY input, faults, cleanup, live networking, and honest offline status")
+    print("Verified permanent runtime contract: real ELF/TTY/network execution, retained NVMe writes, crash-safe A/B persistence, and complete cleanup")
     return 0
 
 

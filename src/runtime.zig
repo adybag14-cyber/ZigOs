@@ -5,9 +5,11 @@ const elf64 = @import("elf64.zig");
 const e1000e = @import("e1000e.zig");
 const interrupt_context = @import("interrupt_context.zig");
 const memory = @import("memory.zig");
+const nvme = @import("nvme.zig");
 const runtime_command = @import("runtime_command.zig");
 const runtime_fd = @import("runtime_fd.zig");
 const runtime_process = @import("runtime_process.zig");
+const runtime_persist = @import("runtime_persist.zig");
 const runtime_tty = @import("runtime_tty.zig");
 const runtime_user = @import("runtime_user.zig");
 const runtime_vfs = @import("runtime_vfs.zig");
@@ -39,6 +41,9 @@ pub const Configuration = struct {
     network_ready: bool,
     usb_keyboard_ready: bool,
     nvme_ready: bool,
+    nvme_controller: ?*nvme.Controller,
+    nvme_data_first_lba: u64,
+    nvme_data_sector_count: u64,
     ahci_ready: bool,
     framebuffer_ready: bool,
 };
@@ -152,6 +157,7 @@ const State = struct {
     processes: runtime_process.Table = undefined,
     descriptors: runtime_fd.System = undefined,
     tty: runtime_tty.Tty = .{},
+    persistence: runtime_persist.Store = .{},
     environment: runtime_command.Environment = undefined,
     editor: runtime_command.LineEditor = .{},
     cwd: u16 = 0,
@@ -228,6 +234,7 @@ fn initialize(configuration: Configuration) !void {
     state.vfs.setPseudoReader(null, readPseudoBytes);
     state.processes.initialize(0);
     state.descriptors.initialize();
+    state.persistence.initialize();
     state.environment = runtime_command.Environment.init();
     state.editor = .{};
     state.jobs = @splat(.{});
@@ -258,6 +265,7 @@ fn initialize(configuration: Configuration) !void {
     @atomicStore(u64, &runtime_interrupt_count, 0, .monotonic);
 
     try initializeFilesystem();
+    try initializePersistentStorage();
     state.cwd = try state.vfs.resolve(0, "/home/root");
     const init_handle = state.processes.initHandle();
     try state.processes.block(init_handle, .device_io, 1);
@@ -286,11 +294,41 @@ fn initialize(configuration: Configuration) !void {
     }
 }
 
+fn initializePersistentStorage() !void {
+    const controller = state.config.nvme_controller orelse return;
+    if (state.config.nvme_data_first_lba == 0 or state.config.nvme_data_sector_count == 0) return error.PersistentPartitionMissing;
+    const device = runtime_persist.BlockDevice{
+        .context = controller,
+        .block_size = controller.logical_block_size,
+        .first_lba = state.config.nvme_data_first_lba,
+        .sector_count = state.config.nvme_data_sector_count,
+        .read_fn = persistentReadBlock,
+        .write_fn = persistentWriteBlock,
+        .flush_fn = persistentFlush,
+    };
+    try state.persistence.mount(&state.vfs, device, currentTick());
+}
+
+fn persistentReadBlock(context: ?*anyopaque, lba: u64, output: []u8) bool {
+    const controller: *nvme.Controller = @ptrCast(@alignCast(context.?));
+    return nvme.readBlock(controller, lba, output);
+}
+
+fn persistentWriteBlock(context: ?*anyopaque, lba: u64, input: []const u8, force_unit_access: bool) bool {
+    const controller: *nvme.Controller = @ptrCast(@alignCast(context.?));
+    return nvme.writeBlock(controller, lba, input, force_unit_access);
+}
+
+fn persistentFlush(context: ?*anyopaque) bool {
+    const controller: *nvme.Controller = @ptrCast(@alignCast(context.?));
+    return nvme.flush(controller);
+}
+
 fn initializeFilesystem() !void {
     const directories = [_][]const u8{
-        "/bin", "/boot",    "/dev",     "/etc",     "/home", "/home/root",
-        "/mnt", "/net",     "/proc",    "/tmp",     "/usr",  "/usr/bin",
-        "/var", "/var/log", "/var/run", "/var/tmp",
+        "/bin",     "/boot", "/dev",     "/etc",     "/home",    "/home/root",
+        "/mnt",     "/net",  "/persist", "/proc",    "/tmp",     "/usr",
+        "/usr/bin", "/var",  "/var/log", "/var/run", "/var/tmp",
     };
     for (directories) |path| _ = try state.vfs.mkdir(0, path, if (std.mem.startsWith(u8, path, "/tmp") or std.mem.startsWith(u8, path, "/var/tmp")) 0o777 else 0o755, 0);
 
@@ -1826,15 +1864,36 @@ fn commandHistory(output: *Output) void {
 
 fn commandSync(output: *Output) void {
     state.filesystem_syncs +%= 1;
+    state.persistence.sync(&state.vfs) catch |err| return shellError("sync", err, output);
+    const report = state.persistence.report();
     output.write("sync complete: ramfs mutations ");
     output.decimal(state.vfs.report().mutations);
-    output.write("; persistent block flushes 0 (boot FAT remains read-only)\r\n");
+    output.write("; persistent generation ");
+    output.decimal(report.generation);
+    output.write(" slot ");
+    output.decimal(report.active_slot);
+    output.write(" records ");
+    output.decimal(report.record_count);
+    output.write(" payload ");
+    output.decimal(report.payload_bytes);
+    output.write(" bytes, writes/headers/flushes ");
+    output.decimal(report.payload_writes);
+    output.write("/");
+    output.decimal(report.header_writes);
+    output.write("/");
+    output.decimal(report.flushes);
+    output.write("\r\n");
 }
 
 fn commandFsck(output: *Output) void {
     state.filesystem_checks +%= 1;
-    output.write("fsck ramfs: ");
-    output.line(if (state.vfs.validate()) "clean" else "corrupt");
+    const ramfs_clean = state.vfs.validate();
+    const persist_clean = blk: {
+        state.persistence.check() catch break :blk false;
+        break :blk true;
+    };
+    output.write("fsck ramfs/persist: ");
+    output.line(if (ramfs_clean and persist_clean) "clean" else "corrupt");
 }
 
 fn commandHash(stage: *const runtime_command.Stage, input: []const u8, output: *Output) void {
@@ -2062,6 +2121,7 @@ fn finishRuntime() noreturn {
     const process_report = state.processes.report();
     const descriptor_report = state.descriptors.report();
     const tty_report = state.tty.report();
+    const persistence_report = state.persistence.report();
     const userspace_report = runtime_user.report();
     const physical_report = state.config.physical_memory.report();
     const physical_rejections = physical_report.invalid_frees + physical_report.double_frees + physical_report.metadata_failures;
@@ -2082,6 +2142,12 @@ fn finishRuntime() noreturn {
         tty_report.edited_bytes == 0 and tty_report.eof_events == 0 and tty_report.submitted_lines >= 1 and
         tty_report.bytes_submitted == tty_report.bytes_read and tty_report.blocked_reads >= 1 and
         tty_report.reader_wakeups >= 1 and tty_report.overflow_events == 0;
+    const nvme_controller = state.config.nvme_controller;
+    const persistence_clean = persistence_report.mounted and persistence_report.generation >= 1 and
+        persistence_report.syncs >= 1 and persistence_report.checks >= 1 and persistence_report.io_failures == 0 and
+        persistence_report.corrupt_headers == 0 and nvme_controller != null and
+        nvme_controller.?.write_commands == persistence_report.payload_writes + persistence_report.header_writes and
+        nvme_controller.?.flush_commands == persistence_report.flushes;
     const descriptor_clean = state.descriptors.validate(&state.vfs, &state.processes) and
         descriptor_report.namespaces == 1 and descriptor_report.descriptors == 3 and
         descriptor_report.open_descriptions == 3 and descriptor_report.terminal_descriptions == 3 and
@@ -2188,6 +2254,47 @@ fn finishRuntime() noreturn {
     emit(" clean ");
     emit(if (tty_clean) "yes" else "no");
     emit("\r\n");
+    emit("ZigOs persistent storage: mounted ");
+    emit(if (persistence_report.mounted) "yes" else "no");
+    emit(" generation/slot ");
+    emitDecimal(persistence_report.generation);
+    emit("/");
+    emitDecimal(persistence_report.active_slot);
+    emit(" records/payload ");
+    emitDecimal(persistence_report.record_count);
+    emit("/");
+    emitDecimal(persistence_report.payload_bytes);
+    emit(" mounts/syncs/checks/recoveries ");
+    emitDecimal(persistence_report.mounts);
+    emit("/");
+    emitDecimal(persistence_report.syncs);
+    emit("/");
+    emitDecimal(persistence_report.checks);
+    emit("/");
+    emitDecimal(persistence_report.recoveries);
+    emit(" payload/header/flush ");
+    emitDecimal(persistence_report.payload_writes);
+    emit("/");
+    emitDecimal(persistence_report.header_writes);
+    emit("/");
+    emitDecimal(persistence_report.flushes);
+    emit(" NVMe read/write/flush ");
+    if (nvme_controller) |controller| {
+        emitDecimal(controller.read_commands);
+        emit("/");
+        emitDecimal(controller.write_commands);
+        emit("/");
+        emitDecimal(controller.flush_commands);
+    } else {
+        emit("0/0/0");
+    }
+    emit(" errors ");
+    emitDecimal(persistence_report.io_failures);
+    emit("/");
+    emitDecimal(persistence_report.corrupt_headers);
+    emit(" clean ");
+    emit(if (persistence_clean) "yes" else "no");
+    emit("\r\n");
     emit("ZigOs post-bootstrap physical memory: total ");
     emitDecimal(physical_report.total_pages);
     emit(" free ");
@@ -2265,7 +2372,7 @@ fn finishRuntime() noreturn {
     emit("\r\n");
     emit("ZigOs x86-64 persistent runtime verified: loop permanent shell yes navigation yes files yes descriptors yes processes yes userspace-exec yes network-state yes live-network ");
     emit(if (state.config.network_ready) "yes" else "no");
-    emit(" canned-results no explicit-shutdown yes\r\n");
+    emit(" persistent-storage yes canned-results no explicit-shutdown yes\r\n");
     if (state.fd_contract_passed and descriptor_clean) {
         emit("ZigOs x86-64 Capstone 18 verified: goals 0x000001D1 new-goals 0x00000020 fd-namespaces yes open-descriptions yes shared-offsets yes duplication yes inheritance yes cloexec yes blocking-pipes yes shell-io yes cleanup yes\r\n");
     } else {
@@ -2275,7 +2382,7 @@ fn finishRuntime() noreturn {
         emit(if (descriptor_clean) "yes" else "no");
         emit("\r\n");
     }
-    if (state.fd_contract_passed and descriptor_clean and tty_clean and userspace_clean and network_clean) {
+    if (state.fd_contract_passed and descriptor_clean and tty_clean and persistence_clean and userspace_clean and network_clean) {
         emit("ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes\r\n");
     } else {
         emit("ZigOs x86-64 Capstone 19 incomplete: fd-contract ");
@@ -2284,6 +2391,8 @@ fn finishRuntime() noreturn {
         emit(if (descriptor_clean) "yes" else "no");
         emit(" tty-clean ");
         emit(if (tty_clean) "yes" else "no");
+        emit(" persistence-clean ");
+        emit(if (persistence_clean) "yes" else "no");
         emit(" userspace-clean ");
         emit(if (userspace_clean) "yes" else "no");
         emit(" network-clean ");

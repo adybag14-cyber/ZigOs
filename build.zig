@@ -106,6 +106,7 @@ pub fn build(b: *std.Build) void {
         "src/runtime_vfs.zig",
         "src/runtime_abi.zig",
         "src/runtime_page_pool.zig",
+        "src/runtime_persist.zig",
     }) |source_path| {
         const tests = b.addTest(.{
             .root_module = b.createModule(.{

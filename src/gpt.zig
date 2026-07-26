@@ -13,6 +13,13 @@ pub const efi_system_partition_guid = [16]u8{
     0xC9, 0x3E, 0xC9, 0x3B,
 };
 
+pub const zigos_data_partition_guid = [16]u8{
+    0x5A, 0x49, 0x47, 0x4F,
+    0x53, 0x44, 0x41, 0x54,
+    0x41, 0x50, 0x41, 0x52,
+    0x54, 0x30, 0x30, 0x31,
+};
+
 pub const Header = struct {
     revision: u32,
     header_size: u32,
@@ -44,6 +51,10 @@ pub const PartitionEntry = struct {
 
     pub fn isEfiSystemPartition(self: PartitionEntry) bool {
         return std.mem.eql(u8, &self.type_guid, &efi_system_partition_guid);
+    }
+
+    pub fn isZigOsDataPartition(self: PartitionEntry) bool {
+        return std.mem.eql(u8, &self.type_guid, &zigos_data_partition_guid);
     }
 
     pub fn sectorCount(self: PartitionEntry) ?u64 {
@@ -204,4 +215,21 @@ fn read32(bytes: []const u8, offset: usize) u32 {
 
 fn read64(bytes: []const u8, offset: usize) u64 {
     return @as(u64, read32(bytes, offset)) | (@as(u64, read32(bytes, offset + 4)) << 32);
+}
+
+test "ZigOs data partition GUID is distinct and recognized" {
+    var entry: PartitionEntry = .{
+        .index = 1,
+        .type_guid = zigos_data_partition_guid,
+        .unique_guid = @splat(0xA5),
+        .first_lba = 4096,
+        .last_lba = 8191,
+        .attributes = 0,
+        .name = @splat(0),
+    };
+    @memcpy(entry.name[0..10], "ZigOs Data");
+    try std.testing.expect(entry.isZigOsDataPartition());
+    try std.testing.expect(!entry.isEfiSystemPartition());
+    try std.testing.expectEqual(@as(u64, 4096), entry.sectorCount().?);
+    try std.testing.expectEqualStrings("ZigOs Data", entry.nameSlice());
 }

@@ -23,6 +23,7 @@ pub const MountKind = enum(u8) {
     procfs,
     devfs,
     netfs,
+    zigos_persist,
 };
 
 pub const Error = error{

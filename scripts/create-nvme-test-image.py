@@ -9,7 +9,9 @@ import struct
 from pathlib import Path
 
 EFI_SYSTEM_PARTITION_GUID = bytes.fromhex("28732ac11ff8d211ba4b00a0c93ec93b")
-PARTITION_GUID = bytes.fromhex("443322116655887799aabbccddeef001")
+ZIGOS_DATA_PARTITION_GUID = bytes.fromhex("5a49474f534441544150415254303031")
+EFI_PARTITION_GUID = bytes.fromhex("443322116655887799aabbccddeef001")
+DATA_PARTITION_GUID = bytes.fromhex("887766554433221100ffeeddccbbaa99")
 DISK_GUID = bytes.fromhex("78563412bc9af0de1122334455667788")
 MARKER = b"ZIGOS-NVME-LBA0!"
 FNV_OFFSET = 0xCBF29CE484222325
@@ -86,12 +88,16 @@ def make_gpt_header(
 def layout_for(block_size: int) -> dict[str, int]:
     if block_size == 512:
         total_bytes = 16 * 1024 * 1024
-        partition_first_lba = 2048
+        efi_partition_first_lba = 2048
+        efi_partition_sectors = 16_384
+        data_partition_alignment = 2048
         sectors_per_fat = 120
         root_entry_count = 512
     elif block_size == 4096:
         total_bytes = 64 * 1024 * 1024
-        partition_first_lba = 256
+        efi_partition_first_lba = 256
+        efi_partition_sectors = 8_192
+        data_partition_alignment = 256
         sectors_per_fat = 8
         root_entry_count = 512
     else:
@@ -103,14 +109,18 @@ def layout_for(block_size: int) -> dict[str, int]:
     first_usable_lba = 2 + entry_array_sectors
     backup_entry_lba = total_lbas - 1 - entry_array_sectors
     last_usable_lba = backup_entry_lba - 1
-    partition_last_lba = last_usable_lba
-    partition_sectors = partition_last_lba - partition_first_lba + 1
+    efi_partition_last_lba = efi_partition_first_lba + efi_partition_sectors - 1
+    data_partition_first_lba = math.ceil((efi_partition_last_lba + 1) / data_partition_alignment) * data_partition_alignment
+    data_partition_last_lba = last_usable_lba
+    data_partition_sectors = data_partition_last_lba - data_partition_first_lba + 1
+    if efi_partition_last_lba >= data_partition_first_lba or data_partition_sectors < 16:
+        raise ValueError("the deterministic GPT split left no usable data partition")
     root_directory_sectors = math.ceil(root_entry_count * 32 / block_size)
     metadata_sectors = 1 + 2 * sectors_per_fat + root_directory_sectors
-    first_fat_lba = partition_first_lba + 1
-    root_directory_lba = partition_first_lba + 1 + 2 * sectors_per_fat
-    first_data_lba = partition_first_lba + metadata_sectors
-    cluster_count = partition_sectors - metadata_sectors
+    first_fat_lba = efi_partition_first_lba + 1
+    root_directory_lba = efi_partition_first_lba + 1 + 2 * sectors_per_fat
+    first_data_lba = efi_partition_first_lba + metadata_sectors
+    cluster_count = efi_partition_sectors - metadata_sectors
     if not (4085 <= cluster_count < 65525):
         raise ValueError(f"layout does not classify as FAT16: {cluster_count} clusters")
 
@@ -124,9 +134,16 @@ def layout_for(block_size: int) -> dict[str, int]:
         "backup_entry_lba": backup_entry_lba,
         "first_usable_lba": first_usable_lba,
         "last_usable_lba": last_usable_lba,
-        "partition_first_lba": partition_first_lba,
-        "partition_last_lba": partition_last_lba,
-        "partition_sectors": partition_sectors,
+        "efi_partition_first_lba": efi_partition_first_lba,
+        "efi_partition_last_lba": efi_partition_last_lba,
+        "efi_partition_sectors": efi_partition_sectors,
+        "data_partition_first_lba": data_partition_first_lba,
+        "data_partition_last_lba": data_partition_last_lba,
+        "data_partition_sectors": data_partition_sectors,
+        # Transitional aliases retained for existing boot assertions.
+        "partition_first_lba": efi_partition_first_lba,
+        "partition_last_lba": efi_partition_last_lba,
+        "partition_sectors": efi_partition_sectors,
         "sectors_per_fat": sectors_per_fat,
         "root_entry_count": root_entry_count,
         "root_directory_sectors": root_directory_sectors,
@@ -152,11 +169,19 @@ def build_image(output: Path, efi_image: Path, block_size: int) -> dict[str, int
 
     partition_entries = bytearray(128 * 128)
     partition_entries[0:16] = EFI_SYSTEM_PARTITION_GUID
-    partition_entries[16:32] = PARTITION_GUID
-    le64(partition_entries, 32, layout["partition_first_lba"])
-    le64(partition_entries, 40, layout["partition_last_lba"])
+    partition_entries[16:32] = EFI_PARTITION_GUID
+    le64(partition_entries, 32, layout["efi_partition_first_lba"])
+    le64(partition_entries, 40, layout["efi_partition_last_lba"])
     name = "ZigOs NVMe FAT".encode("utf-16le")
     partition_entries[56 : 56 + len(name)] = name
+
+    data_offset = 128
+    partition_entries[data_offset : data_offset + 16] = ZIGOS_DATA_PARTITION_GUID
+    partition_entries[data_offset + 16 : data_offset + 32] = DATA_PARTITION_GUID
+    le64(partition_entries, data_offset + 32, layout["data_partition_first_lba"])
+    le64(partition_entries, data_offset + 40, layout["data_partition_last_lba"])
+    data_name = "ZigOs Data".encode("utf-16le")
+    partition_entries[data_offset + 56 : data_offset + 56 + len(data_name)] = data_name
     partition_array_crc = binascii.crc32(partition_entries) & 0xFFFFFFFF
 
     primary_header = make_gpt_header(
@@ -240,7 +265,7 @@ def build_image(output: Path, efi_image: Path, block_size: int) -> dict[str, int
         write_lba(layout["primary_entry_lba"], partition_entries)
         write_lba(layout["backup_entry_lba"], partition_entries)
         write_lba(layout["last_lba"], backup_header)
-        write_lba(layout["partition_first_lba"], boot_sector)
+        write_lba(layout["efi_partition_first_lba"], boot_sector)
         write_lba(layout["first_fat_lba"], fat)
         write_lba(layout["first_fat_lba"] + layout["sectors_per_fat"], fat)
         write_lba(layout["root_directory_lba"], root_directory)

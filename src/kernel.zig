@@ -46,6 +46,10 @@ const TimerSetup = struct {
 
 var normalized_memory_layout: memory.Layout = undefined;
 var physical_memory_manager: memory.PhysicalMemoryManager = undefined;
+var retained_nvme_controller: nvme.Controller = undefined;
+var retained_nvme_controller_ready: bool = false;
+var retained_nvme_data_partition: gpt.PartitionEntry = undefined;
+var retained_nvme_data_partition_ready: bool = false;
 var kernel_heap: heap.Heap = undefined;
 var kernel_heap_ready: bool = false;
 
@@ -271,6 +275,9 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
         .network_ready = network_ready,
         .usb_keyboard_ready = usb_keyboard_ready,
         .nvme_ready = nvme_storage_ready,
+        .nvme_controller = if (retained_nvme_controller_ready) &retained_nvme_controller else null,
+        .nvme_data_first_lba = if (retained_nvme_data_partition_ready) retained_nvme_data_partition.first_lba else 0,
+        .nvme_data_sector_count = if (retained_nvme_data_partition_ready) retained_nvme_data_partition.sectorCount().? else 0,
         .ahci_ready = ahci_storage_ready,
         .framebuffer_ready = graphical_console != null,
     });
@@ -13490,6 +13497,7 @@ fn inspectNvme(
     var global_entry_index: u32 = 0;
     var populated_entries: u32 = 0;
     var efi_partition: ?gpt.PartitionEntry = null;
+    var data_partition: ?gpt.PartitionEntry = null;
     var sector_index: u64 = 0;
     while (sector_index < entry_array_sectors) : (sector_index += 1) {
         const entry_block = nvme.readOneBlock(
@@ -13518,6 +13526,7 @@ fn inspectNvme(
                 }
                 populated_entries += 1;
                 if (efi_partition == null and entry.isEfiSystemPartition()) efi_partition = entry;
+                if (data_partition == null and entry.isZigOsDataPartition()) data_partition = entry;
             }
         }
         remaining_bytes -= bytes_this_sector;
@@ -13628,6 +13637,22 @@ fn inspectNvme(
     debugWrite(efi.nameSlice());
     debugWrite("\"\r\n");
 
+    const persistent = data_partition orelse nvmeFailure("GPT did not contain the ZigOs data partition");
+    const persistent_sector_count = persistent.sectorCount() orelse
+        nvmeFailure("ZigOs data partition LBA range overflowed");
+    if (persistent_sector_count < 16 or persistent.first_lba <= efi.last_lba) {
+        nvmeFailure("ZigOs data partition was too small or overlapped the EFI partition");
+    }
+    debugWrite("NVMe ZigOs Data Partition: index ");
+    debugWriteU64Decimal(persistent.index);
+    debugWrite(", LBA ");
+    debugWriteU64Decimal(persistent.first_lba);
+    debugWrite(" + ");
+    debugWriteU64Decimal(persistent_sector_count);
+    debugWrite(" sectors, name \"");
+    debugWrite(persistent.nameSlice());
+    debugWrite("\"\r\n");
+
     const volume_block = nvme.readOneBlock(&controller, allocator, efi.first_lba) orelse
         nvmeFailure("EFI System Partition boot-sector read failed");
     const volume = fat.parseBootSector(nvme.readBuffer(volume_block), efi.first_lba) orelse
@@ -13653,6 +13678,17 @@ fn inspectNvme(
     debugWriteU64Decimal(volume.root_directory_lba);
     debugWrite("\r\n");
     walkNvmeFatBootPath(&controller, allocator, volume);
+    if (!nvme.enterRuntimePollingMode(&controller))
+        nvmeFailure("NVMe runtime polling handoff failed");
+    retained_nvme_controller = controller;
+    retained_nvme_controller_ready = true;
+    retained_nvme_data_partition = persistent;
+    retained_nvme_data_partition_ready = true;
+    debugWrite("NVMe retained for permanent runtime: polling I/O, data LBA ");
+    debugWriteU64Decimal(persistent.first_lba);
+    debugWrite(" + ");
+    debugWriteU64Decimal(persistent_sector_count);
+    debugWrite(" sectors\r\n");
     return true;
 }
 
@@ -13884,6 +13920,8 @@ fn nvmeFailureStageName(stage: nvme.FailureStage) []const u8 {
         .create_io_queues => "create-io-queues",
         .msix => "msix",
         .io_read => "io-read",
+        .io_write => "io-write",
+        .io_flush => "io-flush",
     };
 }
 

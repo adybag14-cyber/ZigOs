@@ -207,8 +207,8 @@ try {
         'netstat',
         'routes',
         'arp',
-        'fsck',
         'sync',
+        'fsck',
         'history',
         'fdtest',
         'fds',
@@ -288,8 +288,8 @@ try {
         'tty-api: blocking read/poll/line discipline passed',
         'exec: PID 15 state zombie status 0x55',
         'serial COM1 online',
-        'fsck ramfs: clean',
-        'sync complete:',
+        'fsck ramfs/persist: clean',
+        'sync complete: ramfs mutations ',
         'fdtest: descriptors 3 open 3 pipes 0 shared-offset yes clone yes cloexec yes read-block yes write-block yes eof yes broken-pipe yes ring yes clean yes',
         $(if ($Network) { 'fdtest counters: dup 2 inherited 53 cloexec 1 blocked 3/1 wakeups 3/1' } else { 'fdtest counters: dup 2 inherited 50 cloexec 1 blocked 3/1 wakeups 3/1' }),
         'FD KIND       MODE OFD      REFS FLAGS OFFSET/BUFFERED',
@@ -302,6 +302,8 @@ try {
         'faults 1',
         $(if ($Network) { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/53/1 blocked 3/1 wakeups 3/1' } else { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/50/1 blocked 3/1 wakeups 3/1' }),
         'ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes',
+        'ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 payload/header/flush 1/1/2 NVMe read/write/flush ',
+        ' errors 0/0 clean yes',
         'broken 1 clean yes',
         'Post-bootstrap physical memory manager active:',
         'bootstrap allocator sealed',
@@ -327,7 +329,7 @@ try {
             '10.0.2.2 at ',
             'dev e1000e0 retained-from-live-ARP',
             'ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes',
-            'network-state yes live-network yes canned-results no explicit-shutdown yes'
+            'network-state yes live-network yes persistent-storage yes canned-results no explicit-shutdown yes'
         )
     } else {
         $required += @(
@@ -339,7 +341,7 @@ try {
             'routes: unavailable: e1000e was not initialized for this boot',
             'arp: unavailable: e1000e was not initialized for this boot',
             'ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes',
-            'network-state yes live-network no canned-results no explicit-shutdown yes'
+            'network-state yes live-network no persistent-storage yes canned-results no explicit-shutdown yes'
         )
     }
     foreach ($marker in $required) {

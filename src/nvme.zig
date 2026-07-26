@@ -33,7 +33,10 @@ const admin_create_io_submission_queue: u8 = 0x01;
 const admin_delete_io_completion_queue: u8 = 0x04;
 const admin_create_io_completion_queue: u8 = 0x05;
 const admin_identify: u8 = 0x06;
+const nvm_flush: u8 = 0x00;
+const nvm_write: u8 = 0x01;
 const nvm_read: u8 = 0x02;
+const nvm_force_unit_access: u32 = 1 << 30;
 
 const identify_namespace: u32 = 0x00;
 const identify_controller: u32 = 0x01;
@@ -66,6 +69,8 @@ pub const FailureStage = enum(u8) {
     create_io_queues,
     msix,
     io_read,
+    io_write,
+    io_flush,
 };
 
 pub var last_failure_stage: FailureStage = .none;
@@ -170,6 +175,10 @@ pub const Controller = struct {
     identify_controller_address: usize,
     namespace_list_address: usize,
     identify_namespace_address: usize,
+    io_buffer_address: usize,
+    read_commands: u64,
+    write_commands: u64,
+    flush_commands: u64,
     msix_enabled: bool,
     msix_capability_offset: u8,
     msix_table_address: usize,
@@ -347,6 +356,10 @@ pub fn initialize(
         .identify_controller_address = allocator.allocateBelow(memory.four_gib) orelse return null,
         .namespace_list_address = allocator.allocateBelow(memory.four_gib) orelse return null,
         .identify_namespace_address = allocator.allocateBelow(memory.four_gib) orelse return null,
+        .io_buffer_address = allocator.allocateBelow(memory.four_gib) orelse return null,
+        .read_commands = 0,
+        .write_commands = 0,
+        .flush_commands = 0,
         .msix_enabled = false,
         .msix_capability_offset = 0,
         .msix_table_address = 0,
@@ -359,6 +372,7 @@ pub fn initialize(
     zeroPage(controller.identify_controller_address);
     zeroPage(controller.namespace_list_address);
     zeroPage(controller.identify_namespace_address);
+    zeroPage(controller.io_buffer_address);
 
     last_failure_stage = .identify_controller;
     if (!identifyController(&controller)) return null;
@@ -377,17 +391,12 @@ pub fn initialize(
 }
 
 pub fn readOneBlock(controller: *Controller, allocator: *memory.FrameAllocator, lba: u64) ?ReadResult {
+    _ = allocator;
     last_failure_stage = .io_read;
-    if (controller.logical_block_size < 512 or controller.logical_block_size > memory.page_size) return null;
-    if (lba >= controller.namespace_size_lbas) return null;
+    if (!validTransfer(controller, lba)) return null;
 
-    const buffer_address = allocator.allocateBelow(memory.four_gib) orelse return null;
-    zeroPage(buffer_address);
-    var command = emptySubmission(nvm_read, controller.namespace_id);
-    command.prp1 = buffer_address;
-    command.command_dword10 = @truncate(lba);
-    command.command_dword11 = @truncate(lba >> 32);
-    command.command_dword12 = 0;
+    zeroPage(controller.io_buffer_address);
+    const command = nvmTransferCommand(nvm_read, controller, lba, false);
     _ = submit(
         controller.reference,
         controller.bar,
@@ -397,14 +406,15 @@ pub fn readOneBlock(controller: *Controller, allocator: *memory.FrameAllocator, 
         command,
     ) orelse return null;
     zigos_memory_fence();
+    controller.read_commands +%= 1;
 
     const byte_count = controller.logical_block_size;
-    const bytes: [*]volatile u8 = @ptrFromInt(buffer_address);
+    const bytes: [*]volatile u8 = @ptrFromInt(controller.io_buffer_address);
     var result = ReadResult{
         .namespace_id = controller.namespace_id,
         .lba = lba,
         .byte_count = byte_count,
-        .buffer_address = buffer_address,
+        .buffer_address = controller.io_buffer_address,
         .first_bytes = undefined,
         .mbr_signature = 0,
         .fnv1a64 = 0xCBF2_9CE4_8422_2325,
@@ -416,10 +426,96 @@ pub fn readOneBlock(controller: *Controller, allocator: *memory.FrameAllocator, 
         result.fnv1a64 ^= bytes[index];
         result.fnv1a64 *%= 0x0000_0100_0000_01B3;
     }
-    result.mbr_signature = @as(u16, bytes[510]) |
-        (@as(u16, bytes[511]) << 8);
+    if (byte_count >= 512) {
+        result.mbr_signature = @as(u16, bytes[510]) |
+            (@as(u16, bytes[511]) << 8);
+    }
     last_failure_stage = .none;
     return result;
+}
+
+pub fn readBlock(controller: *Controller, lba: u64, output: []u8) bool {
+    last_failure_stage = .io_read;
+    if (!validTransfer(controller, lba) or output.len != controller.logical_block_size) return false;
+    zeroPage(controller.io_buffer_address);
+    const command = nvmTransferCommand(nvm_read, controller, lba, false);
+    _ = submit(
+        controller.reference,
+        controller.bar,
+        controller.doorbell_stride,
+        &controller.next_command_id,
+        &controller.io_queue,
+        command,
+    ) orelse return false;
+    zigos_memory_fence();
+    const source: [*]const volatile u8 = @ptrFromInt(controller.io_buffer_address);
+    for (output, 0..) |*destination, index| destination.* = source[index];
+    controller.read_commands +%= 1;
+    last_failure_stage = .none;
+    return true;
+}
+
+pub fn writeBlock(controller: *Controller, lba: u64, input: []const u8, force_unit_access: bool) bool {
+    last_failure_stage = .io_write;
+    if (!validTransfer(controller, lba) or input.len != controller.logical_block_size) return false;
+    const destination: [*]volatile u8 = @ptrFromInt(controller.io_buffer_address);
+    for (input, 0..) |byte, index| destination[index] = byte;
+    var command = nvmTransferCommand(nvm_write, controller, lba, force_unit_access);
+    command.prp1 = controller.io_buffer_address;
+    _ = submit(
+        controller.reference,
+        controller.bar,
+        controller.doorbell_stride,
+        &controller.next_command_id,
+        &controller.io_queue,
+        command,
+    ) orelse return false;
+    zigos_memory_fence();
+    controller.write_commands +%= 1;
+    last_failure_stage = .none;
+    return true;
+}
+
+pub fn flush(controller: *Controller) bool {
+    last_failure_stage = .io_flush;
+    const command = emptySubmission(nvm_flush, controller.namespace_id);
+    _ = submit(
+        controller.reference,
+        controller.bar,
+        controller.doorbell_stride,
+        &controller.next_command_id,
+        &controller.io_queue,
+        command,
+    ) orelse return false;
+    controller.flush_commands +%= 1;
+    last_failure_stage = .none;
+    return true;
+}
+
+pub fn enterRuntimePollingMode(controller: *Controller) bool {
+    io_interrupts_enabled = false;
+    if (!controller.msix_enabled) return true;
+    const entry: *volatile MsixTableEntry = @ptrFromInt(controller.msix_table_address);
+    entry.vector_control |= msix_vector_mask;
+    zigos_memory_fence();
+    last_msix_vector_control = entry.vector_control;
+    return (entry.vector_control & msix_vector_mask) != 0;
+}
+
+fn validTransfer(controller: *const Controller, lba: u64) bool {
+    return controller.logical_block_size >= 512 and
+        controller.logical_block_size <= memory.page_size and
+        lba < controller.namespace_size_lbas and
+        controller.io_buffer_address != 0;
+}
+
+fn nvmTransferCommand(opcode: u8, controller: *const Controller, lba: u64, force_unit_access: bool) Submission {
+    var command = emptySubmission(opcode, controller.namespace_id);
+    command.prp1 = controller.io_buffer_address;
+    command.command_dword10 = @truncate(lba);
+    command.command_dword11 = @truncate(lba >> 32);
+    command.command_dword12 = if (force_unit_access) nvm_force_unit_access else 0;
+    return command;
 }
 
 pub fn readBuffer(result: ReadResult) []const u8 {
@@ -904,6 +1000,19 @@ fn write32(base: usize, offset: usize, value: anytype) void {
 fn write64(base: usize, offset: usize, value: anytype) void {
     const register: *volatile u64 = @ptrFromInt(base + offset);
     register.* = @intCast(value);
+}
+
+test "single-block NVM commands encode LBA namespace PRP and FUA" {
+    var controller: Controller = undefined;
+    controller.namespace_id = 7;
+    controller.io_buffer_address = 0x0020_0000;
+    const command = nvmTransferCommand(nvm_write, &controller, 0x1122_3344_5566_7788, true);
+    try std.testing.expectEqual(nvm_write, command.opcode);
+    try std.testing.expectEqual(@as(u32, 7), command.namespace_id);
+    try std.testing.expectEqual(@as(u64, 0x0020_0000), command.prp1);
+    try std.testing.expectEqual(@as(u32, 0x5566_7788), command.command_dword10);
+    try std.testing.expectEqual(@as(u32, 0x1122_3344), command.command_dword11);
+    try std.testing.expectEqual(nvm_force_unit_access, command.command_dword12);
 }
 
 comptime {
