@@ -8,7 +8,7 @@ Status: closed by the correctness/CI remediation.
 
 | Finding | Resolution | Evidence |
 | --- | --- | --- |
-| The advertised isolated-test total was not actually executed | `build.zig` now runs nine canonical host-test roots spanning descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence and ELF loading: 59 unique declarations in total | canonical `zig build test` and `zig build check` |
+| The advertised isolated-test total was not actually executed | `build.zig` now runs nine canonical host-test roots spanning descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence and ELF loading: 60 unique declarations in total | canonical `zig build test` and `zig build check` |
 | Syscall descriptor and flag registers were narrowed before validation | `runtime_abi.zig` range-checks full-width descriptor, open-flag and mode arguments before conversion | hostile tests cover 65536, `u64` maximum and high flag bits; source-contract verifier forbids the old truncation forms |
 | Descriptor/VFS errors collapsed to bad-FD | one kernel-error-to-userspace-errno mapping now preserves not-found, access, read-only, directory, broken-pipe and resource-limit distinctions | isolated errno mapping tests plus full UEFI build |
 | Default `kill PID` sent signal 15 without a delivery/default-action path | the kernel shell now defaults explicitly to forced signal 9; other signals remain opt-in and the absence of general userspace delivery is still documented | 44/45-command COM1 sessions prove PID 9 becomes zombie and is reaped |
@@ -91,7 +91,7 @@ Roadmap links: G138â€“G165, G182â€“G199, G252â€“G296 and G494â�
 
 ### P2-U2: real TTY
 
-Delivered bounded slice: terminal descriptors provide blocking userspace input, canonical line buffering, echo, Backspace editing, poll readiness, foreground process-group routing, targeted scheduler wakeups and Ctrl-C default action. `/bin/tty.elf` proves an edited COM1 line blocks and wakes in CPL3. The normal profile now launches a directly linked Zig `/bin/sh.elf` as PID 2; its prompt, `pwd`, `cd`, `ls`, `cat`, PID reporting, external spawn/wait and shutdown all execute in CPL3. Still open are termios/ioctl controls, `/dev/console` as a general openable device, pseudo-terminals and sessions beyond the single console.
+Delivered bounded slice: terminal descriptors provide blocking userspace input, canonical line buffering, echo, Backspace editing, poll readiness, foreground process-group routing, targeted scheduler wakeups and Ctrl-C default action. `/bin/tty.elf` proves an edited COM1 line blocks and wakes in CPL3. The normal profile now attaches a directly linked Zig `/bin/init.elf` to PID 1; that CPL3 init launches `/bin/sh.elf` as PID 2, while the shell prompt, `pwd`, `cd`, `ls`, `cat`, PID reporting, external spawn/wait and staged shutdown all execute in CPL3. Still open are termios/ioctl controls, `/dev/console` as a general openable device, pseudo-terminals and sessions beyond the single console.
 
 Roadmap links: G143â€“G146, G252â€“G266 and G454.
 
@@ -111,9 +111,9 @@ Roadmap links: G297â€“G339 and G341â€“G343.
 
 ### P2-B1: normal boot profile
 
-Delivered bounded slice: `-Dnormal-boot=true` branches after retained hardware/storage discovery and before the kernel heap, cooperative/preemptive scheduler demonstrations and Capstone 15/16 software proof workloads. It mounts the runtime VFS and persistent NVMe subtree, keeps PID 1 blocked as init, launches the Zig userspace shell as PID 2, copies, commits and executes a persistent Zig ELF in addition to assembly and RAM-seeded children, then exercises userspace filesystem mutation and requires exact 82/82 physical-page reclamation and zero descriptors/contexts at shutdown. The default diagnostic profile remains available and continues to run the exhaustive release workload.
+Delivered bounded slice: `-Dnormal-boot=true` branches after retained hardware/storage discovery and before the kernel heap, cooperative/preemptive scheduler demonstrations and Capstone 15/16 software proof workloads. It mounts the runtime VFS and persistent NVMe subtree, promotes the reserved PID 1 record to a directly linked Zig `/bin/init.elf`, and attaches a private CPL3 address space to that existing handle. PID 1 launches `/bin/sh.elf` through public `spawnv`, establishes PID 2 as the foreground process group, waits for and reaps the shell, then requests final shutdown. The session also copies, commits and executes a persistent Zig ELF, exercises userspace filesystem mutation, and requires exact 97/97 physical-page reclamation with zero descriptors/contexts at shutdown. The default diagnostic profile remains available and continues to run the exhaustive release workload.
 
-Still open: split the large hardware discovery routines into minimal initialisation and optional validation phases so normal boot can also skip assertion-heavy NIC/NVMe protocol proofs, and promote a disk-installed userspace root/PID 1 rather than the current kernel-created init record and boot-seeded RAM VFS.
+Still open: split the large hardware discovery routines into minimal initialisation and optional validation phases so normal boot can also skip assertion-heavy NIC/NVMe protocol proofs, and promote a disk-installed userspace root and init image rather than the current boot-seeded RAM VFS copy of `/bin/init.elf`.
 
 Roadmap links: G252, G295â€“G296, G424â€“G426 and G489.
 

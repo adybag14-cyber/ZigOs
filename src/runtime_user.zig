@@ -175,9 +175,11 @@ var syscall_count: u64 = 0;
 
 pub const ShutdownFn = *const fn (context: ?*anyopaque, process_handle: u64) bool;
 pub const SyncFn = *const fn (context: ?*anyopaque) i64;
+pub const ChildSpawnFn = *const fn (parent_handle: u64, child_handle: u64) bool;
 var system_context: ?*anyopaque = null;
 var shutdown_fn: ?ShutdownFn = null;
 var sync_fn: ?SyncFn = null;
+var child_spawn_fn: ?ChildSpawnFn = null;
 var normal_boot_capability: bool = false;
 var persistent_storage_capability: bool = false;
 
@@ -193,6 +195,10 @@ pub fn setSystemBackend(
     sync_fn = sync_callback;
     normal_boot_capability = normal_boot;
     persistent_storage_capability = persistent_storage;
+}
+
+pub fn setChildSpawnCallback(callback: ?ChildSpawnFn) void {
+    child_spawn_fn = callback;
 }
 
 pub fn initialize(
@@ -223,6 +229,7 @@ pub fn initialize(
     system_context = null;
     shutdown_fn = null;
     sync_fn = null;
+    child_spawn_fn = null;
     normal_boot_capability = false;
     persistent_storage_capability = false;
     try page_pool.initializeManager(physical_memory, page_limit, memory.four_gib, true);
@@ -292,6 +299,57 @@ pub fn spawnWithEnvironment(
     errdefer rollbackProcess(parent_handle, handle);
     _ = try activeDescriptors().cloneProcess(processes, parent_handle, handle);
 
+    try installContext(
+        context_index,
+        handle,
+        arguments,
+        environment,
+        image,
+        image_bytes,
+        registers,
+    );
+    launches +%= 1;
+    return handle;
+}
+
+pub fn attachExisting(
+    handle: u64,
+    arguments: []const []const u8,
+    environment: []const []const u8,
+    image_bytes: []const u8,
+    registers: SpawnRegisters,
+) !void {
+    if (!initialized) return error.NotInitialized;
+    if (arguments.len == 0 or arguments.len > syscall.maximum_arguments) return error.TooManyArguments;
+    if (environment.len > syscall.maximum_environment) return error.TooManyArguments;
+    if (findContext(handle) != null) return error.ContextAlreadyExists;
+    const process = try activeProcesses().get(handle);
+    if (process.kind != .userspace or process.terminal()) return error.InvalidProcessState;
+    const image = elf64.parse(image_bytes) orelse return error.InvalidElf;
+    try validateImage(image);
+    const context_index = findFreeContext() orelse return error.ContextLimit;
+    try installContext(
+        context_index,
+        handle,
+        arguments,
+        environment,
+        image,
+        image_bytes,
+        registers,
+    );
+    launches +%= 1;
+}
+
+fn installContext(
+    context_index: usize,
+    handle: u64,
+    arguments: []const []const u8,
+    environment: []const []const u8,
+    image: elf64.Image,
+    image_bytes: []const u8,
+    registers: SpawnRegisters,
+) !void {
+    const processes = activeProcesses();
     const context = resetContext(context_index);
     context.used = true;
     context.handle = handle;
@@ -353,8 +411,6 @@ pub fn spawnWithEnvironment(
     context.image_hash = image.file_hash;
     context.image_bytes = image_bytes.len;
     try syncMemoryUsage(context);
-    launches +%= 1;
-    return handle;
 }
 
 pub fn dispatch(handle: u64, tick: u64) !void {
@@ -897,7 +953,7 @@ fn syscallShutdown(
         frame.rax = reject(runtime_abi.errno_permission);
         return 0;
     };
-    if (process.pid != 2 or !normal_boot_capability or !callback(system_context, context.handle)) {
+    if ((process.pid != 1 and process.pid != 2) or !normal_boot_capability or !callback(system_context, context.handle)) {
         frame.rax = reject(runtime_abi.errno_permission);
         return 0;
     }
@@ -1832,6 +1888,11 @@ fn syscallSpawn(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
+    if (!notifyChildSpawn(context.handle, handle)) {
+        discardSpawnedChild(context.handle, handle);
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    }
     const child = activeProcesses().get(handle) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -1966,12 +2027,29 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
+    if (!notifyChildSpawn(context.handle, handle)) {
+        discardSpawnedChild(context.handle, handle);
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    }
     const child = activeProcesses().get(handle) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
     frame.rax = child.pid;
     return 0;
+}
+
+fn notifyChildSpawn(parent_handle: u64, child_handle: u64) bool {
+    const callback = child_spawn_fn orelse return true;
+    return callback(parent_handle, child_handle);
+}
+
+fn discardSpawnedChild(parent_handle: u64, child_handle: u64) void {
+    activeProcesses().exit(child_handle, 0x7F00_0003) catch {};
+    finalize(child_handle) catch {};
+    _ = activeProcesses().wait(parent_handle, child_handle, true) catch null;
+    forget(child_handle);
 }
 
 fn validEnvironmentString(value: []const u8) bool {

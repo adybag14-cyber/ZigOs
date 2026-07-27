@@ -18,14 +18,14 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 59 unique isolated-test declarations, the source contract, the 44-command offline runtime, the 45-command live-network runtime, the x86-64 NVMe two-boot persistence proof and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 60 unique isolated-test declarations, the source contract, the 44-command offline runtime, the 45-command live-network runtime, the x86-64 NVMe two-boot persistence proof and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
 The x86-64 kernel remains alive after validation unless an explicit `shutdown` command is entered. Its permanent runtime provides:
 
 - a dedicated 100 Hz LAPIC timer and interrupt-enabled HLT idle loop;
-- PID 1 init and either the diagnostic kernel shell or a real Zig userspace PID 2 shell;
+- a permanent PID 1 record; in normal boot it runs the directly linked Zig `/bin/init.elf`, launches the interactive Zig PID 2 shell, waits for it and reaps it before final shutdown;
 - a bounded writable VFS and six mounted namespaces;
 - a generation-safe 64-slot process table;
 - process-local numeric descriptors, shared open-file descriptions and bounded blocking pipes;
@@ -33,8 +33,8 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 - private CR3 roots, strict W^X `PT_LOAD` mappings, eight-page stacks and unmapped guards;
 - complete GPR and FXSAVE context preservation across syscalls and timer preemption;
 - a pointer-validated ABI 1.4 with generated Zig/NASM constants, capability discovery, bounded `spawnv`, System V-style argv/envp/auxv startup, persistent `sync`, descriptor `lseek`, pathname mutation, exact waitpid, wait-any and WNOHANG;
-- a freestanding Zig SDK with generated ABI structures, a SysV AMD64 startup shim, typed file/process/VM/poll/UDP/filesystem wrappers, environment/auxiliary helpers and independently verified `/bin/sdk.elf` and `/bin/fs.elf` conformance programs;
-- an explicit `-Dnormal-boot=true` profile that skips the software proof suite and launches a directly linked Zig `/bin/sh.elf` as the interactive CPL3 PID 2 shell;
+- a freestanding Zig SDK with generated ABI structures, a SysV AMD64 startup shim, typed file/process/VM/poll/UDP/filesystem wrappers, environment/auxiliary helpers, a directly linked `/bin/init.elf`, and independently verified `/bin/sdk.elf` and `/bin/fs.elf` conformance programs;
+- an explicit `-Dnormal-boot=true` profile that skips the software proof suite, attaches `/bin/init.elf` to the reserved PID 1 handle, and lets that CPL3 init launch and supervise `/bin/sh.elf` as PID 2;
 - page-granular anonymous `mmap`, subrange `munmap`, W^X `mprotect` and expandable/shrinkable `brk`;
 - descriptor-backed `fstat`, directory iteration and `poll`;
 - up to eight descriptor-backed retained UDP sockets with bind, connect, send, receive, local-name lookup, readiness and blocked-reader wakeup;
@@ -94,6 +94,7 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 - `/bin/vm.elf` proving ABI discovery, anonymous mapping, W^X protection changes, unmapping and heap-break growth/shrink before exiting with status `0x52`;
 - `/bin/io.elf` proving descriptor-backed open/read/fstat/getdents/poll before exiting with status `0x53`;
 - `/bin/socket.elf` proving UDP socket/bind/connect/send/poll/getsockname/close on the live profile before exiting with status `0x54`;
+- `/bin/init.elf` running as CPL3 PID 1, launching `/bin/sh.elf` through `spawnv`, waiting for PID 2, reaping it and issuing final shutdown;
 - the normal userspace shell copying `/bin/sdk.elf` to `/persist/persist-sdk.elf`, committing it through syscall 97, resolving `persist-sdk` through `PATH=/bin:/persist` and receiving status `0x56`;
 - the two-boot NVMe gate restoring and executing `/persist/persist-sdk.elf` before committing the alternate journal generation;
 - `/bin/fs.elf` proving userspace `mkdir`, write, `lseek`, rename, chmod, unlink, rmdir and sync, then reboot-verifying mode/content/offset and committing cleanup from CPL3;
@@ -122,8 +123,8 @@ ZigOs permanent userspace: page-limit 4096 used 0 peak 32 contexts 0 launches/ex
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 
 # Normal userspace-shell profile
-ZigOs normal userspace shutdown: shell PID 2 status 0
-ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 82/82 clean yes
+ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes
+ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 97/97 clean yes
 ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes cleanup yes
 ```
 
@@ -279,12 +280,13 @@ zig-out/
     |-- process-user.elf
     |-- process-exec.elf
     |-- sdk.elf
+    |-- init.elf
     |-- sh.elf
     |-- fs.elf
     `-- runtime-*.elf
 ```
 
-`zig build test` covers 59 unique `std.testing` declarations across the nine canonical host-test roots, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence and ELF loading. Imported tests may execute from more than one root, but the source contract counts each declaration once.
+`zig build test` covers 60 unique `std.testing` declarations across the nine canonical host-test roots, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence and ELF loading. Imported tests may execute from more than one root, but the source contract counts each declaration once.
 
 `zig build check` runs formatting, all isolated tests, the UEFI build and portable PE/COFF verification.
 
@@ -331,11 +333,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    6,860,288 bytes
-SHA-256: 5749293B9C287451F002912846ACF4D6F8FA0AE9EE78E655283CE85C1C8B0143
+Size:    6,868,480 bytes
+SHA-256: 385DAFDB5AA2E5AD2EC8278CDC825C00811DAFD322EF087E0B30FA5BB5A0A681
 ```
 
-This identity is from the locally validated Windows diagnostic build after the ABI 1.4 userspace-filesystem advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic build after the userspace PID 1 supervision advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
@@ -359,7 +361,7 @@ Persistent post-boot runtime:
 # Required live-network permanent-shell profile
 .\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 
-# Normal profile: real Zig userspace PID 2 shell
+# Normal profile: real Zig userspace PID 1 supervising the PID 2 shell
 python .\scripts\test-normal-boot.py --boot-timeout 240
 ```
 
@@ -369,7 +371,7 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 59 unique isolated declarations, directly linked Zig SDK verification, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 60 unique isolated declarations, directly linked Zig SDK/init/shell verification, x86-64 UEFI build, portable PE verification and artifact upload.
 - **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 44-command offline and 45-command live-network permanent COM1 sessions, the x86-64 NVMe two-boot proof, and the legacy i686 build/two-boot regression.
 - **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 

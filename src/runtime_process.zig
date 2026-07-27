@@ -177,6 +177,37 @@ pub const Table = struct {
         return self.init_handle;
     }
 
+    pub fn configureInitUserspace(
+        self: *Table,
+        name: []const u8,
+        arguments: []const []const u8,
+        cwd_node: u16,
+    ) Error!void {
+        if (name.len == 0 or name.len > maximum_name_length) return Error.NameTooLong;
+        if (arguments.len == 0 or arguments.len > maximum_arguments) return Error.TooManyArguments;
+        const slot = try self.resolve(self.init_handle);
+        var process = &self.processes[slot];
+        if (process.pid != 1 or process.parent_slot != invalid_slot or process.child_count != 0 or
+            process.memory_pages != 0 or process.descriptor_count > process.limits.maximum_descriptors)
+            return Error.InvalidState;
+        for (arguments) |argument| if (argument.len == 0 or argument.len > maximum_argument_length) return Error.ArgumentTooLong;
+        process.kind = .userspace;
+        process.state = .runnable;
+        process.wait_reason = .none;
+        process.name = @splat(0);
+        process.name_length = @intCast(name.len);
+        @memcpy(process.name[0..name.len], name);
+        process.arguments = @splat(.{});
+        process.argument_count = @intCast(arguments.len);
+        for (arguments, 0..) |argument, index| {
+            process.arguments[index].length = @intCast(argument.len);
+            @memcpy(process.arguments[index].bytes[0..argument.len], argument);
+        }
+        process.cwd_node = cwd_node;
+        process.remaining_slice = process.time_slice;
+        process.context_switches = 0;
+    }
+
     pub fn spawn(
         self: *Table,
         parent_handle: ?u64,
@@ -681,6 +712,19 @@ test "slot iteration does not require a full process-table snapshot" {
         if (@sizeOf(Process) * maximum_processes < 16 * 1024)
             @compileError("process-table stack regression guard no longer exercises a large table");
     }
+}
+
+test "reserved PID 1 can become a schedulable userspace init" {
+    var table = Table.init(0);
+    const init_handle = table.initHandle();
+    try table.configureInitUserspace("init.elf", &.{"init.elf"}, 7);
+    const process = try table.get(init_handle);
+    try std.testing.expectEqual(@as(u32, 1), process.pid);
+    try std.testing.expectEqual(Kind.userspace, process.kind);
+    try std.testing.expectEqual(State.runnable, process.state);
+    try std.testing.expectEqualStrings("init.elf", process.nameSlice());
+    try std.testing.expectEqualStrings("init.elf", process.arguments[0].slice());
+    try std.testing.expectEqual(@as(u16, 7), process.cwd_node);
 }
 
 test "process generations reject stale handles after reap and reuse" {

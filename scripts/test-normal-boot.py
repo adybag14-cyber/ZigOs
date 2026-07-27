@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot the normal x86-64 profile and prove the interactive PID 2 Zig shell."""
+"""Boot the normal x86-64 profile and prove userspace PID 1 supervision of the interactive PID 2 Zig shell."""
 
 from __future__ import annotations
 
@@ -202,7 +202,8 @@ def main() -> int:
             if client is None:
                 raise RuntimeError("normal boot serial connection failed")
 
-            wait_for(client, process, serial, b"ZigOs userspace shell PID 2", 0, args.boot_timeout)
+            wait_for(client, process, serial, b"ZigOs userspace init PID 1", 0, args.boot_timeout)
+            wait_for(client, process, serial, b"ZigOs userspace shell PID 2", 0, 20)
             wait_for(client, process, serial, PROMPT_HOME, 0, 20)
             send(client, process, serial, "help", b"shutdown             exit PID 2 and stop ZigOs")
             send(client, process, serial, "pwd", b"\r\n/home/root\r\n")
@@ -232,7 +233,9 @@ def main() -> int:
 
             required = (
                 "Normal boot selected: skipping kernel heap, scheduler, Capstone 15 and Capstone 16 proof workloads",
-                "ZigOs normal boot profile: init PID 1; userspace shell PID 2; diagnostic software suite skipped",
+                "ZigOs normal boot profile: userspace init PID 1 supervises userspace shell PID 2; diagnostic software suite skipped",
+                "ZigOs userspace init PID 1",
+                "userspace init launched shell PID 2",
                 "ZigOs userspace shell PID 2",
                 "hello from VFS-loaded CPL3 ELF64",
                 "process 3 exited 42",
@@ -246,8 +249,9 @@ def main() -> int:
                 "fs-api: recovery/mode/seek/cleanup passed",
                 "process 6 exited 89",
                 "userspace shell requested shutdown",
-                "ZigOs normal userspace shutdown: shell PID 2 status 0",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 82/82 clean yes",
+                "userspace init reaped shell PID 2 status 0",
+                "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 97/97 clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes cleanup yes",
             )
             forbidden = (
@@ -257,6 +261,7 @@ def main() -> int:
                 "ZigOs x86-64 Capstone 15 verified:",
                 "ZigOs x86-64 Capstone 16 verified:",
                 "init PID 1; serial shell PID 2",
+                "ZigOs normal boot profile: init PID 1; userspace shell PID 2",
             )
             for marker in required:
                 if marker not in text:
