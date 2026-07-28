@@ -42,9 +42,9 @@ def runtime_wait_data() -> bytes:
     data = bytearray(280)
     fields = {
         0: b"wait-api: start\r\n",
-        32: b"wait-api: waitpid/WNOHANG/wait-any passed\r\n",
+        32: b"wait-api: concurrent wait-any ordering passed\r\n",
         128: b"/bin/sleep.elf",
-        160: b"/bin/hello.elf",
+        160: b"/bin/wait-short.elf",
     }
     for offset, value in fields.items():
         data[offset : offset + len(value)] = value
@@ -138,6 +138,7 @@ def main() -> int:
     runtime_program_data = {
         "hello": b"hello from VFS-loaded CPL3 ELF64\r\n",
         "sleep": b"sleep: before\r\n" + bytes(17) + b"sleep: after\r\n",
+        "wait-short": b"wait-any short child",
         "crash": b"crash: real page fault follows\r\n",
         "spin": b"runtime spin loop",
         "pipe-reader": b"pipe reader data",

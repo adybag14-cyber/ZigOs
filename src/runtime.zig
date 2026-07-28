@@ -22,6 +22,7 @@ const process_elf = @embedFile("generated/process_user.elf");
 const process_exec_elf = @embedFile("generated/process_exec.elf");
 const runtime_hello_elf = @embedFile("generated/runtime_hello.elf");
 const runtime_sleep_elf = @embedFile("generated/runtime_sleep.elf");
+const runtime_wait_short_elf = @embedFile("generated/runtime_wait_short.elf");
 const runtime_crash_elf = @embedFile("generated/runtime_crash.elf");
 const runtime_spin_elf = @embedFile("generated/runtime_spin.elf");
 const runtime_pipe_reader_elf = @embedFile("generated/runtime_pipe_reader.elf");
@@ -380,6 +381,7 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/boot/process-exec.elf", process_exec_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/hello.elf", runtime_hello_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/sleep.elf", runtime_sleep_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/wait-short.elf", runtime_wait_short_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/crash.elf", runtime_crash_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/spin.elf", runtime_spin_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/pipe-reader.elf", runtime_pipe_reader_elf, 0o555, false, 0);

@@ -2278,7 +2278,8 @@ fn syscallWait(
         frame.rax = 0;
         return 0;
     }
-    _ = activeProcesses().wait(context.handle, target_handle, false) catch |err| {
+    const blocking_target: ?u64 = if (target_pid == 0) null else target_handle;
+    _ = activeProcesses().wait(context.handle, blocking_target, false) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };

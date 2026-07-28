@@ -56,6 +56,8 @@ def main() -> int:
     sdk_startup = text("sdk/zig/syscall.asm")
     sdk_conformance = text("sdk/zig/conformance.zig")
     socket_conformance = text("src/user/runtime-socket.asm")
+    wait_conformance = text("src/user/runtime-wait.asm")
+    wait_short_conformance = text("src/user/runtime-wait-short.asm")
     sdk_init = text("sdk/zig/init.zig")
     fs_conformance = text("sdk/zig/fs_conformance.zig")
     dns_source = text("sdk/zig/dns.zig")
@@ -166,6 +168,14 @@ def main() -> int:
     require(executor, "syscallShutdown", "normal-profile PID 1 and PID 2 use the privileged staged shutdown syscall")
     require(executor, "setChildSpawnCallback", "executor reports init-spawned children to the runtime supervisor")
     require(executor, "attachExisting", "executor can attach an ELF context to the reserved PID 1 handle")
+    require(executor, "const blocking_target: ?u64 = if (target_pid == 0) null else target_handle;", "blocking wait-any preserves an unconstrained child target")
+    require(executor, "activeProcesses().wait(context.handle, blocking_target, false)", "blocking wait uses the PID-sensitive target")
+    forbid(executor, "activeProcesses().wait(context.handle, target_handle, false)", "wait-any collapses to the first live child")
+    require(wait_conformance, "Both children are live when wait-any blocks", "CPL3 wait-any regression overlaps long and short children")
+    require(wait_conformance, "cmp eax, r13d", "wait-any must return the short child's PID")
+    require(wait_conformance, "mov esi, WNOHANG", "fixture proves the long child remains live after wait-any")
+    require(wait_conformance, "cmp eax, r12d", "fixture later waits for the long child explicitly")
+    require(wait_short_conformance, "mov edi, 1", "short wait child exits after one scheduler tick")
     require(executor, "syscallGetcwd", "userspace shell can query its process working directory")
     require(executor, "syscallChdir", "userspace shell can change its process working directory")
     require(sdk_source, "pub fn shutdown", "SDK wraps normal-profile shutdown")
@@ -473,8 +483,8 @@ def main() -> int:
         "Post-bootstrap physical memory manager active:",
         "bootstrap allocator sealed",
         "ZigOs post-bootstrap physical memory: total ",
-        "peak 32 alloc/free 231/231 failed/rejected 0/0 clean yes",
-        "peak 32 alloc/free 262/262 failed/rejected 0/0 clean yes",
+        "peak 48 alloc/free 231/231 failed/rejected 0/0 clean yes",
+        "peak 48 alloc/free 262/262 failed/rejected 0/0 clean yes",
         "launches/exits/faults 14/12/1",
         "launches/exits/faults 16/14/1",
         "reclaimed 231 allocator alloc/release/retains 231/231/0",

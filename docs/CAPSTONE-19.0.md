@@ -111,7 +111,7 @@ This is not a POSIX or Linux syscall ABI. Calls are bounded, pointer-validated a
 
 This maintained extension adds four deterministic integration programs beyond the original six fixtures and expands the canonical COM1 contract to 42 commands offline or 43 commands with a live NIC. It does not change the historical 32-goal Capstone 19 release count.
 
-- `/bin/wait.elf` spawns `/bin/sleep.elf` and `/bin/hello.elf`, proving exact waitpid, wait-any and WNOHANG before exiting `0x31`.
+- `/bin/wait.elf` spawns `/bin/sleep.elf` and `/bin/wait-short.elf`, overlapping a three-tick child and one-tick child to prove completion-ordered wait-any, exact waitpid and WNOHANG before exiting `0x31`.
 - `/bin/vm.elf` queries ABI version 1, exercises page-granular anonymous mmap, W^X mprotect, munmap and brk growth/shrink, then exits `0x52`.
 - `/bin/io.elf` proves descriptor-backed open/read/fstat/getdents/poll and exits `0x53`.
 - `/bin/socket.elf` proves descriptor-backed UDP socket creation, ephemeral bind, local-name lookup, connect, send, readiness polling and normal close, then exits `0x54`.

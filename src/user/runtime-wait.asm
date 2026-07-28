@@ -5,13 +5,13 @@ ORG 0x0000008000000000
 %define START_MESSAGE   (DATA_BASE + 0)
 %define PASS_MESSAGE    (DATA_BASE + 32)
 %define SLEEP_PATH      (DATA_BASE + 128)
-%define HELLO_PATH      (DATA_BASE + 160)
+%define SHORT_PATH      (DATA_BASE + 160)
 %define WAIT_STATUS     (DATA_BASE + 256)
 
 %define START_LENGTH    17
-%define PASS_LENGTH     43
+%define PASS_LENGTH     47
 %define SLEEP_PATH_LEN  14
-%define HELLO_PATH_LEN  14
+%define SHORT_PATH_LEN  19
 
 %define SYS_EXIT        64
 %define SYS_WRITE       65
@@ -29,43 +29,25 @@ _start:
     test rax, rax
     js .fail_write_start
 
+    ; Long child A sleeps for three ticks.
     mov eax, SYS_SPAWN
     mov rdi, SLEEP_PATH
     mov esi, SLEEP_PATH_LEN
     int 0x80
     test rax, rax
-    js .fail_spawn_sleep
+    js .fail_spawn_long
     mov r12d, eax
 
-    ; No child is terminal yet, so wait-any with WNOHANG must return zero.
-    mov eax, SYS_WAIT
-    xor edi, edi
-    mov esi, WNOHANG
-    mov rdx, rbx
-    int 0x80
-    test rax, rax
-    jnz .fail_wnohang
-
-    ; Exact waitpid blocks until sleep.elf exits with status 7.
-    mov eax, SYS_WAIT
-    mov edi, r12d
-    xor esi, esi
-    mov rdx, rbx
-    int 0x80
-    cmp eax, r12d
-    jne .fail_waitpid_return
-    cmp dword [rbx + 4], 7
-    jne .fail_waitpid_status
-
+    ; Short child B sleeps for one tick. Both children are live when wait-any blocks.
     mov eax, SYS_SPAWN
-    mov rdi, HELLO_PATH
-    mov esi, HELLO_PATH_LEN
+    mov rdi, SHORT_PATH
+    mov esi, SHORT_PATH_LEN
     int 0x80
     test rax, rax
-    js .fail_spawn_hello
+    js .fail_spawn_short
     mov r13d, eax
 
-    ; Target PID zero selects any direct child and blocks until hello.elf exits.
+    ; PID zero must remain an any-child wait and wake when short child B exits first.
     mov eax, SYS_WAIT
     xor edi, edi
     xor esi, esi
@@ -73,8 +55,32 @@ _start:
     int 0x80
     cmp eax, r13d
     jne .fail_waitany_return
+    cmp dword [rbx], r13d
+    jne .fail_waitany_status
     cmp dword [rbx + 4], 0x2A
     jne .fail_waitany_status
+
+    ; Long child A must still be live: exact WNOHANG returns zero without reaping it.
+    mov eax, SYS_WAIT
+    mov edi, r12d
+    mov esi, WNOHANG
+    mov rdx, rbx
+    int 0x80
+    test rax, rax
+    jnz .fail_long_not_running
+
+    ; Exact waitpid then blocks until long child A exits with status 7.
+    mov eax, SYS_WAIT
+    mov edi, r12d
+    xor esi, esi
+    mov rdx, rbx
+    int 0x80
+    cmp eax, r12d
+    jne .fail_waitpid_return
+    cmp dword [rbx], r12d
+    jne .fail_waitpid_status
+    cmp dword [rbx + 4], 7
+    jne .fail_waitpid_status
 
     mov eax, SYS_WRITE
     mov edi, 1
@@ -91,25 +97,25 @@ _start:
 .fail_write_start:
     mov edi, 0xE0
     jmp .exit_failure
-.fail_spawn_sleep:
+.fail_spawn_long:
     mov edi, 0xE1
     jmp .exit_failure
-.fail_wnohang:
+.fail_spawn_short:
     mov edi, 0xE2
     jmp .exit_failure
-.fail_waitpid_return:
+.fail_waitany_return:
     mov edi, 0xE3
     jmp .exit_failure
-.fail_waitpid_status:
+.fail_waitany_status:
     mov edi, 0xE4
     jmp .exit_failure
-.fail_spawn_hello:
+.fail_long_not_running:
     mov edi, 0xE5
     jmp .exit_failure
-.fail_waitany_return:
+.fail_waitpid_return:
     mov edi, 0xE6
     jmp .exit_failure
-.fail_waitany_status:
+.fail_waitpid_status:
     mov edi, 0xE7
     jmp .exit_failure
 .fail_write_pass:

@@ -90,7 +90,7 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 - a real CPL3 reader block and separate CPL3 writer wakeup;
 - non-cooperative timer preemption of a background spin process;
 - a genuinely blocking shell `wait` over a sleeping CPL3 child, default forced `kill` through signal 9, one-time reap, descriptor cleanup and frame cleanup;
-- `/bin/wait.elf` spawning two VFS-backed CPL3 children and proving exact waitpid, wait-any and WNOHANG before exiting with status `0x31`;
+- `/bin/wait.elf` spawning two VFS-backed CPL3 children and overlapping a three-tick child and one-tick child to prove completion-ordered wait-any, exact waitpid and WNOHANG before exiting with status `0x31`;
 - `/bin/vm.elf` proving ABI discovery, anonymous mapping, W^X protection changes, unmapping and heap-break growth/shrink before exiting with status `0x52`;
 - `/bin/io.elf` proving descriptor-backed open/read/fstat/getdents/poll before exiting with status `0x53`;
 - `/bin/socket.elf` proving socket-level and per-call nonblocking `EWOULDBLOCK`, unconnected DNS `sendto`, blocking scheduler-woken `recvfrom` with source metadata, `getpeername`, connected send, poll and close before exiting with status `0x54`;
@@ -111,16 +111,16 @@ Representative exact shutdown contracts are:
 ZigOs persistent runtime shutdown: commands 44 failed 0
 ZigOs persistent descriptors: ... dup/inherited/cloexec 2/53/1 ... clean yes
 ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
-ZigOs post-bootstrap physical memory: ... peak 32 alloc/free 231/231 failed/rejected 0/0 clean yes
-ZigOs permanent userspace: page-limit 4096 used 0 peak 32 contexts 0 launches/exits/faults 14/12/1 ... reclaimed 231 allocator alloc/release/retains 231/231/0 shared/oom/rejected 0/0/0 clean yes
+ZigOs post-bootstrap physical memory: ... peak 48 alloc/free 231/231 failed/rejected 0/0 clean yes
+ZigOs permanent userspace: page-limit 4096 used 0 peak 48 contexts 0 launches/exits/faults 14/12/1 ... reclaimed 231 allocator alloc/release/retains 231/231/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes
 
 # Live e1000e
 ZigOs persistent runtime shutdown: commands 46 failed 0
 ZigOs persistent descriptors: ... dup/inherited/cloexec 2/59/1 ... clean yes
 ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
-ZigOs post-bootstrap physical memory: ... peak 32 alloc/free 262/262 failed/rejected 0/0 clean yes
-ZigOs permanent userspace: page-limit 4096 used 0 peak 32 contexts 0 launches/exits/faults 16/14/1 ... reclaimed 262 allocator alloc/release/retains 262/262/0 shared/oom/rejected 0/0/0 clean yes
+ZigOs post-bootstrap physical memory: ... peak 48 alloc/free 262/262 failed/rejected 0/0 clean yes
+ZigOs permanent userspace: page-limit 4096 used 0 peak 48 contexts 0 launches/exits/faults 16/14/1 ... reclaimed 262 allocator alloc/release/retains 262/262/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 
 # Normal userspace-shell profile
@@ -335,11 +335,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    6,878,208 bytes
-SHA-256: 5E0919705FDD1D07EAA7DFC875CF051085876BE228A99C8AB2B54BB95EF65596
+Size:    6,890,496 bytes
+SHA-256: B808C25075EEBC3110C1C8A5702ABFDC4B3273FBAD88789B5A33122E9CA00497
 ```
 
-This identity is from the locally validated Windows diagnostic build after the userspace DNS resolver advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic build after the blocking wait-any ordering correction. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
