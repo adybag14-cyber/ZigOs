@@ -331,7 +331,7 @@ def main() -> int:
                 ("shutdown", "ZigOs persistent storage: mounted yes generation/slot 1/0"),
             ],
             required_markers=[
-                "fs-api: init/mkdir/write/seek/rename/chmod/open-unlink/rmdir/sync passed",
+                "fs-api: init/mkdir/write/seek/replace-rename/chmod/open-unlink/rmdir/sync passed",
                 "exec: PID 3 state zombie status 0x58",
                 "ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 5/",
                 "errors 0/0 clean yes",

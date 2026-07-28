@@ -400,15 +400,22 @@ pub const Vfs = struct {
         const source = try self.resolve(cwd, old_path);
         if (source == 0) return Error.Busy;
         const destination = try self.parentAndName(cwd, new_path);
-        if (self.findChild(destination.parent, destination.name) != null) return Error.AlreadyExists;
         if (self.nodes[source].mount_id != self.nodes[destination.parent].mount_id) return Error.CrossMount;
-        if (self.nodes[source].readonly or self.mountReadonly(self.nodes[source].mount_id)) return Error.ReadOnly;
+        if (self.nodes[source].readonly or self.mountReadonly(self.nodes[source].mount_id) or self.nodes[destination.parent].readonly)
+            return Error.ReadOnly;
         if (self.nodes[source].kind == .directory and self.isDescendant(destination.parent, source)) return Error.Cycle;
-        self.nodes[source].parent = destination.parent;
-        self.nodes[source].name = @splat(0);
-        self.nodes[source].name_length = @intCast(destination.name.len);
-        @memcpy(self.nodes[source].name[0..destination.name.len], destination.name);
-        self.nodes[source].modified_tick = tick;
+
+        if (self.findChild(destination.parent, destination.name)) |target| {
+            if (target == source) {
+                self.renameNode(source, destination.parent, destination.name, tick);
+                self.mutations +%= 1;
+                return;
+            }
+            try self.validateRenameReplacement(source, target);
+            self.detachOrReclaimNode(target);
+        }
+
+        self.renameNode(source, destination.parent, destination.name, tick);
         self.mutations +%= 1;
     }
 
@@ -899,6 +906,28 @@ pub const Vfs = struct {
         if (node_index == 0 or node_index >= self.nodes.len or !self.nodes[node_index].used or !self.nodes[node_index].linked) return Error.NotFound;
         if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
         for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == node_index) return Error.Busy;
+        self.detachOrReclaimNode(node_index);
+        self.mutations +%= 1;
+    }
+
+    fn validateRenameReplacement(self: *const Vfs, source: u16, target: u16) Error!void {
+        const source_node = &self.nodes[source];
+        const target_node = &self.nodes[target];
+        if (target_node.readonly or self.mountReadonly(target_node.mount_id)) return Error.ReadOnly;
+        for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == target) return Error.Busy;
+        if (source_node.kind == .pseudo or target_node.kind == .pseudo) return Error.UnsupportedOperation;
+        if (source_node.kind == .directory and target_node.kind != .directory) return Error.NotDirectory;
+        if (source_node.kind != .directory and target_node.kind == .directory) return Error.IsDirectory;
+        if (target_node.kind == .directory) {
+            for (0..self.nodes.len) |index| {
+                const node = &self.nodes[index];
+                if (node.used and node.linked and index != target and node.parent == target) return Error.DirectoryNotEmpty;
+            }
+            if (self.hasOpenReferences(target)) return Error.Busy;
+        }
+    }
+
+    fn detachOrReclaimNode(self: *Vfs, node_index: u16) void {
         if (self.hasOpenReferences(node_index)) {
             var node = &self.nodes[node_index];
             node.linked = false;
@@ -908,7 +937,15 @@ pub const Vfs = struct {
         } else {
             self.reclaimNode(node_index);
         }
-        self.mutations +%= 1;
+    }
+
+    fn renameNode(self: *Vfs, node_index: u16, parent: u16, name: []const u8, tick: u64) void {
+        var node = &self.nodes[node_index];
+        node.parent = parent;
+        node.name = @splat(0);
+        node.name_length = @intCast(name.len);
+        @memcpy(node.name[0..name.len], name);
+        node.modified_tick = tick;
     }
 
     fn removeNode(self: *Vfs, node_index: u16) Error!void {
@@ -1123,6 +1160,41 @@ test "VFS directory mutation rejects cycles and nonempty removal" {
     try fs.rename(0, "/a/b", "/b", 4);
     try fs.rmdir(0, "/a");
     try std.testing.expectEqual(@as(u16, 1), (try fs.stat(0, "/b")).generation);
+}
+
+test "VFS replacement rename preserves open destination handles" {
+    var fs = Vfs.init();
+    _ = try fs.mkdir(0, "/tmp", 0o777, 1);
+    const baseline_nodes = fs.report().nodes_used;
+    const source = try fs.putFile(0, "/tmp/source", "replacement", 0o644, false, 2);
+    const target = try fs.putFile(0, "/tmp/target", "retained", 0o600, false, 3);
+    const retained = try fs.open(7, 0, "/tmp/target", .{ .read = true }, 0, 4);
+
+    try fs.rename(0, "/tmp/source", "/tmp/target", 5);
+    try std.testing.expectError(Error.NotFound, fs.stat(0, "/tmp/source"));
+    const visible = try fs.stat(0, "/tmp/target");
+    try std.testing.expectEqual(source, visible.node);
+    try std.testing.expectEqual(@as(u16, 0o644), visible.mode);
+    try std.testing.expectEqual(baseline_nodes + 2, fs.report().nodes_used);
+
+    var current_bytes: [16]u8 = undefined;
+    const current_count = try fs.read(0, "/tmp/target", 0, &current_bytes);
+    try std.testing.expectEqualStrings("replacement", current_bytes[0..current_count]);
+    var retained_bytes: [16]u8 = undefined;
+    const retained_count = try fs.readOpen(7, retained, &retained_bytes);
+    try std.testing.expectEqualStrings("retained", retained_bytes[0..retained_count]);
+    try std.testing.expectEqual(target, (try fs.statOpen(7, retained)).node);
+    try std.testing.expect(fs.validate());
+
+    try fs.close(7, retained);
+    try std.testing.expectEqual(baseline_nodes + 1, fs.report().nodes_used);
+    try std.testing.expectError(Error.InvalidHandle, fs.statOpen(7, retained));
+
+    _ = try fs.mkdir(0, "/tmp/directory", 0o755, 6);
+    _ = try fs.putFile(0, "/tmp/file", "file", 0o644, false, 7);
+    try std.testing.expectError(Error.IsDirectory, fs.rename(0, "/tmp/file", "/tmp/directory", 8));
+    try std.testing.expectError(Error.NotDirectory, fs.rename(0, "/tmp/directory", "/tmp/target", 9));
+    try std.testing.expect(fs.validate());
 }
 
 test "VFS generation handles reject stale and foreign owners" {

@@ -6,6 +6,7 @@ const renamed_path = "/persist/abi14/renamed.txt";
 const temporary_directory = "/persist/abi14/remove";
 const temporary_path = "/persist/abi14/remove/gone.txt";
 const payload = "alpha-beta-gamma\n";
+const replaced_payload = "retained-destination";
 
 pub export fn zigos_main(
     argc: usize,
@@ -29,7 +30,31 @@ fn initialize() zigos.Error!u32 {
     var sample: [4]u8 = undefined;
     if (try zigos.read(fd, &sample) != sample.len or !equal(&sample, "beta")) return error.InvalidArgument;
     try zigos.close(fd);
+
+    const retained = try zigos.open(renamed_path, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o640);
+    try zigos.writeAll(retained, replaced_payload);
+    if (try zigos.lseek(retained, 0, .start) != 0) return error.InvalidArgument;
+    var retained_before: zigos.Stat = undefined;
+    try zigos.fstat(retained, &retained_before);
+
     try zigos.rename(source_path, renamed_path);
+    var missing_source: zigos.Stat = undefined;
+    if (zigos.stat(source_path, &missing_source)) |_| return error.InvalidArgument else |err| {
+        if (err != error.NotFound) return err;
+    }
+    var visible_after: zigos.Stat = undefined;
+    try zigos.stat(renamed_path, &visible_after);
+    if (visible_after.node == retained_before.node and visible_after.generation == retained_before.generation)
+        return error.InvalidArgument;
+    const visible = try zigos.open(renamed_path, .{ .read = true }, 0);
+    var visible_payload: [payload.len]u8 = undefined;
+    if (try zigos.read(visible, &visible_payload) != visible_payload.len or !equal(&visible_payload, payload))
+        return error.InvalidArgument;
+    try zigos.close(visible);
+    var retained_payload: [replaced_payload.len]u8 = undefined;
+    if (try zigos.read(retained, &retained_payload) != retained_payload.len or !equal(&retained_payload, replaced_payload))
+        return error.InvalidArgument;
+    try zigos.close(retained);
     try zigos.chmod(renamed_path, 0o600);
     try zigos.mkdir(temporary_directory, 0o755);
     const temporary = try zigos.open(temporary_path, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o600);
@@ -48,7 +73,7 @@ fn initialize() zigos.Error!u32 {
     try zigos.unlink(temporary_path);
     try zigos.rmdir(temporary_directory);
     try zigos.sync();
-    try zigos.writeAll(1, "fs-api: init/mkdir/write/seek/rename/chmod/open-unlink/rmdir/sync passed\r\n");
+    try zigos.writeAll(1, "fs-api: init/mkdir/write/seek/replace-rename/chmod/open-unlink/rmdir/sync passed\r\n");
     return 0x58;
 }
 

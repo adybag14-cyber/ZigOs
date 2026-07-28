@@ -215,6 +215,7 @@ def main() -> int:
             send(client, process, serial, "mkdir /persist/shell-state", PROMPT_ROOT)
             send(client, process, serial, "write /persist/shell-state/message.txt alpha", PROMPT_ROOT)
             send(client, process, serial, "append /persist/shell-state/message.txt beta", PROMPT_ROOT)
+            send(client, process, serial, "write /persist/shell-state/renamed.txt stale-destination", PROMPT_ROOT)
             send(client, process, serial, "mv /persist/shell-state/message.txt /persist/shell-state/renamed.txt", PROMPT_ROOT)
             send(client, process, serial, "chmod 600 /persist/shell-state/renamed.txt", PROMPT_ROOT)
             send(client, process, serial, "cat /persist/shell-state/renamed.txt", b"beta")
@@ -244,7 +245,7 @@ def main() -> int:
                 "zig-sdk: envp/auxv passed",
                 "zig-sdk: startup/argv/abi/files/vm/errno passed",
                 "process 4 exited 86",
-                "fs-api: init/mkdir/write/seek/rename/chmod/open-unlink/rmdir/sync passed",
+                "fs-api: init/mkdir/write/seek/replace-rename/chmod/open-unlink/rmdir/sync passed",
                 "process 5 exited 88",
                 "fs-api: recovery/mode/seek/cleanup passed",
                 "process 6 exited 89",

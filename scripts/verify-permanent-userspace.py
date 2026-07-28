@@ -277,16 +277,20 @@ def main() -> int:
     require(runtime_test, "exec /bin/dns.elf", "required live COM1 session executes the userspace resolver")
     require(runtime_test, "dns-sdk: userspace resolver localhost -> 127.0.0.1 passed", "required live COM1 session verifies the resolver result")
     require(runtime, '"/bin/fs.elf"', "filesystem ABI fixture is installed into the runtime VFS")
-    require(fs_conformance, "init/mkdir/write/seek/rename/chmod/open-unlink/rmdir/sync passed", "fixture exercises ABI 1.4 mutation plus deferred open-file unlink")
+    require(fs_conformance, "init/mkdir/write/seek/replace-rename/chmod/open-unlink/rmdir/sync passed", "fixture exercises replacement rename and deferred open-file unlink")
     require(vfs_source, "linked: bool = false", "VFS separates namespace attachment from retained node lifetime")
     require(vfs_source, "fn unlinkNode", "unlink has a dedicated detach-or-reclaim path")
+    require(vfs_source, "fn validateRenameReplacement", "replacement rename validates kind, mount and destination constraints before mutation")
+    require(vfs_source, "fn detachOrReclaimNode", "unlink and replacement rename share destination lifetime handling")
     require(vfs_source, "fn maybeReclaimUnlinked", "last open handle reclaims detached nodes")
+    require(vfs_source, 'test "VFS replacement rename preserves open destination handles"', "replacement rename is isolated-tested with an open old destination")
     require(vfs_source, 'test "VFS unlink detaches names and reclaims after the final open handle"', "deferred unlink is isolated-tested across independent handles")
     require(fd_source, 'test "directory openat and deferred unlink survive descriptor aliases"', "descriptor test combines directory-relative openat with shared-description lifetime")
     require(fd_source, "pub fn statFromVfs", "path stat and descriptor fstat share one descriptor-layer VFS-to-ABI metadata conversion")
     require(fs_conformance, "recovery/mode/seek/cleanup passed", "fixture verifies rebooted data and cleans it through userspace")
     require(normal_boot_test, "mkdir /persist/shell-state", "normal shell exercises userspace mkdir")
-    require(normal_boot_test, "chmod 600 /persist/shell-state/renamed.txt", "normal shell exercises write/append/rename/chmod")
+    require(normal_boot_test, "write /persist/shell-state/renamed.txt stale-destination", "normal shell creates an existing rename destination")
+    require(normal_boot_test, "chmod 600 /persist/shell-state/renamed.txt", "normal shell exercises replacement rename and chmod")
     require(persistence_test, "exec /bin/fs.elf init", "boot one commits mutations from a CPL3 fixture")
     require(persistence_test, "exec /bin/fs.elf verify", "boot two verifies and removes the restored objects in CPL3")
     require(elf_source, 'test "parser accepts a pure BSS writable load segment"', "ELF loader accepts standard pure-BSS RW segments")
@@ -471,8 +475,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 69:
-        raise SystemExit(f"canonical isolated-test declaration total must be 69, found {declared_tests}")
+    if declared_tests != 70:
+        raise SystemExit(f"canonical isolated-test declaration total must be 70, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
