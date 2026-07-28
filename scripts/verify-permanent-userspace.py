@@ -280,6 +280,16 @@ def main() -> int:
     require(fs_conformance, "init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/open-unlink/rmdir/sync passed", "fixture exercises replacement rename and deferred open-file unlink")
     require(vfs_source, "const Dentry = struct", "VFS separates directory-entry names from node identity")
     require(vfs_source, "dentries: [maximum_dentries]Dentry", "VFS owns a bounded dentry namespace table")
+    require(vfs_source, "const DentryCacheEntry = struct", "VFS separates cached lookup entries from authoritative dentries")
+    require(vfs_source, "references: u16 = 0", "dentry cache entries retain explicit reference counts")
+    require(vfs_source, "dentry_cache: [maximum_dentry_cache_entries]DentryCacheEntry", "VFS owns a bounded dentry lookup cache")
+    require(vfs_source, "fn acquireDentry", "path traversal pins cache entries during use")
+    require(vfs_source, "fn releaseDentryReference", "path traversal releases cache references on every exit path")
+    require(vfs_source, "fn invalidateCachedDentry", "namespace mutation invalidates matching cached dentries")
+    require(vfs_source, "fn cacheInsertionSlot", "cache insertion selects an unreferenced LRU slot")
+    require(vfs_source, "if (cache_entry.references != 0) continue", "referenced cache entries cannot be evicted")
+    require(vfs_source, "return .{ .dentry = dentry_index }", "cache exhaustion falls back to authoritative lookup")
+    require(vfs_source, 'test "VFS dentry cache references protect pinned entries and invalidate mutations"', "isolated test proves reference pinning, LRU eviction and mutation invalidation")
     require(vfs_source, "link_count: u16 = 0", "VFS nodes retain explicit namespace link counts")
     require(vfs_source, "fn entryForPath", "namespace mutations resolve final dentries independently of node lookup")
     require(vfs_source, "fn detachOrReclaimEntry", "unlink and replacement rename release one dentry before inode reclamation")
@@ -287,6 +297,13 @@ def main() -> int:
     require(vfs_source, "pub fn link", "VFS creates same-mount hard-link dentries")
     require(vfs_source, "const node_index = try self.resolveNoFollow(cwd, old_path);", "hard-link creation does not follow a final symbolic-link source")
     require(runtime, "output.decimal(info.link_count)", "diagnostic shell stat exposes namespace link counts")
+    require(runtime, "fs_report.dentry_cache_references == 0", "normal and diagnostic release gates require zero live cache references")
+    require(runtime, "fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases", "release gates require balanced cache reference accounting")
+    require(runtime, "fs_report.dentry_cache_hits > 0", "release gates require real cache hits")
+    require(runtime, "cache entries/refs", "diagnostic shutdown reports cache occupancy and references")
+    require(runtime, "acquire/release", "diagnostic shutdown reports cache reference accounting")
+    require(runtime_test, "cache entries/refs ", "required permanent-runtime sessions expose dentry-cache resource state")
+    require(runtime_test, " acquire/release ", "required permanent-runtime sessions expose balanced cache references")
     require(vfs_source, 'test "VFS hard links share node identity data and deferred lifetime"', "hard-link identity, nlink and final-close lifetime are isolated-tested")
     require(vfs_source, "pub const maximum_symlink_depth: usize = 8", "VFS publishes a bounded symbolic-link traversal limit")
     require(vfs_source, "pub fn resolveNoFollow", "VFS exposes final-component no-follow lookup for namespace mutation")
@@ -507,8 +524,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 72:
-        raise SystemExit(f"canonical isolated-test declaration total must be 72, found {declared_tests}")
+    if declared_tests != 73:
+        raise SystemExit(f"canonical isolated-test declaration total must be 73, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',

@@ -2298,8 +2298,11 @@ fn finishNormalRuntime() noreturn {
     else
         diskless_recovery and persistence_report.mounts == 0 and persistence_report.syncs == 0 and
             persistence_report.io_failures == 0 and persistence_report.corrupt_headers == 0;
+    const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
+        fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases and fs_report.dentry_cache_hits > 0 and
+        fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0;
     const clean = init_process.pid == 1 and init_process.state == .zombie and init_process.exit_status == 0 and
-        state.shell_exit_requested and state.init_reaped_shell and state.vfs.validate() and fs_report.mounts >= 5 and
+        state.shell_exit_requested and state.init_reaped_shell and vfs_clean and fs_report.mounts >= 5 and
         process_report.live == 1 and process_report.zombies == 1 and process_report.total_reaped >= 1 and
         descriptor_report.namespaces == 0 and descriptor_report.descriptors == 0 and descriptor_report.open_descriptions == 0 and
         tty_report.foreground_process_group == 2 and tty_report.buffered_bytes == 0 and tty_report.edited_bytes == 0 and
@@ -2408,6 +2411,9 @@ fn finishDiagnosticRuntime() noreturn {
         persistence_report.corrupt_headers == 0 and nvme_controller != null and
         nvme_controller.?.write_commands == persistence_report.payload_writes + persistence_report.header_writes and
         nvme_controller.?.flush_commands == persistence_report.flushes;
+    const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
+        fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases and fs_report.dentry_cache_hits > 0 and
+        fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0;
     const descriptor_clean = state.descriptors.validate(&state.vfs, &state.processes) and
         descriptor_report.namespaces == 1 and descriptor_report.descriptors == 3 and
         descriptor_report.open_descriptions == 3 and descriptor_report.terminal_descriptions == 3 and
@@ -2436,6 +2442,8 @@ fn finishDiagnosticRuntime() noreturn {
     emit("\r\n");
     emit("ZigOs persistent VFS: nodes ");
     emitDecimal(fs_report.nodes_used);
+    emit(" dentries ");
+    emitDecimal(fs_report.dentries_used);
     emit(" files ");
     emitDecimal(fs_report.files);
     emit(" directories ");
@@ -2446,8 +2454,28 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(fs_report.mounts);
     emit(" bytes ");
     emitDecimal(fs_report.bytes_used);
+    emit(" cache entries/refs ");
+    emitDecimal(fs_report.dentry_cache_entries);
+    emit("/");
+    emitDecimal(fs_report.dentry_cache_references);
+    emit(" hit/miss ");
+    emitDecimal(fs_report.dentry_cache_hits);
+    emit("/");
+    emitDecimal(fs_report.dentry_cache_misses);
+    emit(" insert/evict ");
+    emitDecimal(fs_report.dentry_cache_insertions);
+    emit("/");
+    emitDecimal(fs_report.dentry_cache_evictions);
+    emit(" invalidate/reject ");
+    emitDecimal(fs_report.dentry_cache_invalidations);
+    emit("/");
+    emitDecimal(fs_report.dentry_cache_rejections);
+    emit(" acquire/release ");
+    emitDecimal(fs_report.dentry_cache_acquires);
+    emit("/");
+    emitDecimal(fs_report.dentry_cache_releases);
     emit(" clean ");
-    emit(if (state.vfs.validate()) "yes" else "no");
+    emit(if (vfs_clean) "yes" else "no");
     emit("\r\n");
     emit("ZigOs persistent processes: live ");
     emitDecimal(process_report.live);
@@ -2654,7 +2682,7 @@ fn finishDiagnosticRuntime() noreturn {
         emit(if (descriptor_clean) "yes" else "no");
         emit("\r\n");
     }
-    if (state.fd_contract_passed and descriptor_clean and tty_clean and persistence_clean and userspace_clean and network_clean) {
+    if (state.fd_contract_passed and descriptor_clean and tty_clean and persistence_clean and vfs_clean and userspace_clean and network_clean) {
         emit("ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes\r\n");
     } else {
         emit("ZigOs x86-64 Capstone 19 incomplete: fd-contract ");
@@ -2665,6 +2693,8 @@ fn finishDiagnosticRuntime() noreturn {
         emit(if (tty_clean) "yes" else "no");
         emit(" persistence-clean ");
         emit(if (persistence_clean) "yes" else "no");
+        emit(" vfs-clean ");
+        emit(if (vfs_clean) "yes" else "no");
         emit(" userspace-clean ");
         emit(if (userspace_clean) "yes" else "no");
         emit(" network-clean ");

@@ -141,7 +141,7 @@ pub const Store = struct {
         self.mounts +%= 1;
     }
 
-    pub fn sync(self: *Store, vfs: *const runtime_vfs.Vfs) Error!void {
+    pub fn sync(self: *Store, vfs: *runtime_vfs.Vfs) Error!void {
         const device = self.device orelse return Error.NotConfigured;
         if (!self.mounted) return Error.NotConfigured;
         const snapshot = try self.serialize(vfs);
@@ -244,7 +244,7 @@ pub const Store = struct {
         hard_link = 4,
     };
 
-    fn serialize(self: *Store, vfs: *const runtime_vfs.Vfs) Error!Snapshot {
+    fn serialize(self: *Store, vfs: *runtime_vfs.Vfs) Error!Snapshot {
         @memset(&self.payload, 0);
         @memset(&self.path_queue, @splat(0));
         @memset(&self.path_lengths, 0);

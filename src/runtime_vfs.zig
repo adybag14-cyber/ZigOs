@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const maximum_nodes: usize = 96;
 pub const maximum_dentries: usize = maximum_nodes * 2;
+pub const maximum_dentry_cache_entries: usize = 16;
 pub const maximum_name_length: usize = 31;
 pub const maximum_path_length: usize = 255;
 pub const maximum_symlink_depth: usize = 8;
@@ -12,6 +13,7 @@ pub const maximum_open_files: usize = 64;
 pub const maximum_directory_entries: usize = 64;
 pub const invalid_node: u16 = 0xFFFF;
 pub const invalid_dentry: u16 = 0xFFFF;
+pub const invalid_cache_entry: u16 = 0xFFFF;
 
 pub const PseudoReadFn = *const fn (context: ?*anyopaque, node: u16, offset: usize, output: []u8) Error!usize;
 pub const PseudoWriteFn = *const fn (context: ?*anyopaque, node: u16, offset: usize, input: []const u8) Error!usize;
@@ -133,6 +135,29 @@ const Dentry = struct {
     }
 };
 
+const DentryCacheEntry = struct {
+    used: bool = false,
+    stale: bool = false,
+    generation: u16 = 0,
+    parent: u16 = invalid_node,
+    dentry: u16 = invalid_dentry,
+    dentry_generation: u16 = 0,
+    references: u16 = 0,
+    last_used: u64 = 0,
+    name: [maximum_name_length + 1]u8 = @splat(0),
+    name_length: u8 = 0,
+
+    fn nameSlice(self: *const DentryCacheEntry) []const u8 {
+        return self.name[0..self.name_length];
+    }
+};
+
+const DentryReference = struct {
+    cache_entry: u16 = invalid_cache_entry,
+    cache_generation: u16 = 0,
+    dentry: u16,
+};
+
 pub const Mount = struct {
     used: bool = false,
     id: u8 = 0,
@@ -179,6 +204,7 @@ pub const OpenInfo = struct {
 
 pub const Report = struct {
     nodes_used: usize,
+    dentries_used: usize,
     files: usize,
     directories: usize,
     pseudo_files: usize,
@@ -187,15 +213,35 @@ pub const Report = struct {
     bytes_used: usize,
     mutations: u64,
     rejected_operations: u64,
+    dentry_cache_entries: usize,
+    dentry_cache_references: usize,
+    dentry_cache_hits: u64,
+    dentry_cache_misses: u64,
+    dentry_cache_insertions: u64,
+    dentry_cache_evictions: u64,
+    dentry_cache_invalidations: u64,
+    dentry_cache_rejections: u64,
+    dentry_cache_acquires: u64,
+    dentry_cache_releases: u64,
 };
 
 pub const Vfs = struct {
     nodes: [maximum_nodes]Node = @splat(.{}),
     dentries: [maximum_dentries]Dentry = @splat(.{}),
+    dentry_cache: [maximum_dentry_cache_entries]DentryCacheEntry = @splat(.{}),
     mounts: [maximum_mounts]Mount = @splat(.{}),
     open_files: [maximum_open_files]OpenFile = @splat(.{}),
     mutations: u64 = 0,
     rejected_operations: u64 = 0,
+    dentry_cache_clock: u64 = 0,
+    dentry_cache_hits: u64 = 0,
+    dentry_cache_misses: u64 = 0,
+    dentry_cache_insertions: u64 = 0,
+    dentry_cache_evictions: u64 = 0,
+    dentry_cache_invalidations: u64 = 0,
+    dentry_cache_rejections: u64 = 0,
+    dentry_cache_acquires: u64 = 0,
+    dentry_cache_releases: u64 = 0,
 
     pub fn init() Vfs {
         var self: Vfs = undefined;
@@ -229,15 +275,15 @@ pub const Vfs = struct {
         return 0;
     }
 
-    pub fn resolve(self: *const Vfs, cwd: u16, path: []const u8) Error!u16 {
+    pub fn resolve(self: *Vfs, cwd: u16, path: []const u8) Error!u16 {
         return self.resolveInternal(cwd, path, true, 0);
     }
 
-    pub fn resolveNoFollow(self: *const Vfs, cwd: u16, path: []const u8) Error!u16 {
+    pub fn resolveNoFollow(self: *Vfs, cwd: u16, path: []const u8) Error!u16 {
         return self.resolveInternal(cwd, path, false, 0);
     }
 
-    pub fn stat(self: *const Vfs, cwd: u16, path: []const u8) Error!Stat {
+    pub fn stat(self: *Vfs, cwd: u16, path: []const u8) Error!Stat {
         return self.statNode(try self.resolve(cwd, path));
     }
 
@@ -262,7 +308,7 @@ pub const Vfs = struct {
         return self.canonicalDentry(node_index) orelse Error.NotFound;
     }
 
-    pub fn list(self: *const Vfs, cwd: u16, path: []const u8) Error!DirectoryList {
+    pub fn list(self: *Vfs, cwd: u16, path: []const u8) Error!DirectoryList {
         const directory = try self.resolve(cwd, path);
         if (self.nodes[directory].kind != .directory) return Error.NotDirectory;
         var result = DirectoryList{};
@@ -324,7 +370,7 @@ pub const Vfs = struct {
         return node_index;
     }
 
-    pub fn readlink(self: *const Vfs, cwd: u16, path: []const u8, output: []u8) Error!usize {
+    pub fn readlink(self: *Vfs, cwd: u16, path: []const u8, output: []u8) Error!usize {
         const node_index = try self.resolveNoFollow(cwd, path);
         const target = try self.symlinkTargetNode(node_index);
         const count = @min(output.len, target.len);
@@ -385,7 +431,7 @@ pub const Vfs = struct {
         return node_index;
     }
 
-    pub fn read(self: *const Vfs, cwd: u16, path: []const u8, offset: usize, output: []u8) Error!usize {
+    pub fn read(self: *Vfs, cwd: u16, path: []const u8, offset: usize, output: []u8) Error!usize {
         const node_index = try self.resolve(cwd, path);
         const node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
@@ -397,7 +443,7 @@ pub const Vfs = struct {
         return count;
     }
 
-    pub fn readOnlyView(self: *const Vfs, cwd: u16, path: []const u8) Error![]const u8 {
+    pub fn readOnlyView(self: *Vfs, cwd: u16, path: []const u8) Error![]const u8 {
         const node_index = try self.resolve(cwd, path);
         const node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
@@ -828,6 +874,12 @@ pub const Vfs = struct {
                 if (current != 0) return false;
             }
         }
+        for (self.dentry_cache) |cache_entry| {
+            if (!cache_entry.used) continue;
+            if (cache_entry.generation == 0 or cache_entry.name_length == 0 or cache_entry.name_length > maximum_name_length or cache_entry.references == 0 and cache_entry.stale) return false;
+            if (cache_entry.stale) continue;
+            if (!self.cacheEntryValid(&cache_entry)) return false;
+        }
         for (self.mounts, 0..) |mount_entry, index| {
             if (!mount_entry.used) continue;
             if (mount_entry.id != index + 1 or mount_entry.node >= self.nodes.len or !self.nodes[mount_entry.node].used or self.nodes[mount_entry.node].link_count == 0) return false;
@@ -843,6 +895,7 @@ pub const Vfs = struct {
     pub fn report(self: *const Vfs) Report {
         var result = Report{
             .nodes_used = 0,
+            .dentries_used = 0,
             .files = 0,
             .directories = 0,
             .pseudo_files = 0,
@@ -851,6 +904,16 @@ pub const Vfs = struct {
             .bytes_used = 0,
             .mutations = self.mutations,
             .rejected_operations = self.rejected_operations,
+            .dentry_cache_entries = 0,
+            .dentry_cache_references = 0,
+            .dentry_cache_hits = self.dentry_cache_hits,
+            .dentry_cache_misses = self.dentry_cache_misses,
+            .dentry_cache_insertions = self.dentry_cache_insertions,
+            .dentry_cache_evictions = self.dentry_cache_evictions,
+            .dentry_cache_invalidations = self.dentry_cache_invalidations,
+            .dentry_cache_rejections = self.dentry_cache_rejections,
+            .dentry_cache_acquires = self.dentry_cache_acquires,
+            .dentry_cache_releases = self.dentry_cache_releases,
         };
         for (0..self.nodes.len) |node_index| {
             const node = &self.nodes[node_index];
@@ -863,12 +926,17 @@ pub const Vfs = struct {
                 .pseudo => result.pseudo_files += 1,
             }
         }
+        for (self.dentries) |entry| result.dentries_used += @intFromBool(entry.used);
+        for (self.dentry_cache) |cache_entry| {
+            result.dentry_cache_entries += @intFromBool(cache_entry.used);
+            result.dentry_cache_references += cache_entry.references;
+        }
         for (self.mounts) |mount_entry| result.mounts += @intFromBool(mount_entry.used);
         for (self.open_files) |open_file| result.open_files += @intFromBool(open_file.used);
         return result;
     }
 
-    fn resolveInternal(self: *const Vfs, cwd: u16, path: []const u8, follow_final: bool, depth: usize) Error!u16 {
+    fn resolveInternal(self: *Vfs, cwd: u16, path: []const u8, follow_final: bool, depth: usize) Error!u16 {
         if (path.len == 0) return self.validateDirectory(cwd);
         if (path.len > maximum_path_length) return Error.PathTooLong;
         var current: u16 = if (path[0] == '/') 0 else try self.validateDirectory(cwd);
@@ -886,8 +954,9 @@ pub const Vfs = struct {
                 continue;
             }
             if (self.nodes[current].kind != .directory) return Error.NotDirectory;
-            const entry_index = self.findDentry(current, component) orelse return Error.NotFound;
-            const entry = &self.dentries[entry_index];
+            const reference = self.acquireDentry(current, component) orelse return Error.NotFound;
+            defer self.releaseDentryReference(reference);
+            const entry = &self.dentries[reference.dentry];
             const child = entry.node;
             const has_suffix = position < path.len;
             if (self.nodes[child].kind == .symlink and (follow_final or has_suffix)) {
@@ -907,7 +976,79 @@ pub const Vfs = struct {
         return node_index;
     }
 
-    fn findDentry(self: *const Vfs, parent: u16, name: []const u8) ?u16 {
+    fn findDentry(self: *Vfs, parent: u16, name: []const u8) ?u16 {
+        const reference = self.acquireDentry(parent, name) orelse return null;
+        defer self.releaseDentryReference(reference);
+        return reference.dentry;
+    }
+
+    fn acquireDentry(self: *Vfs, parent: u16, name: []const u8) ?DentryReference {
+        self.dentry_cache_clock +%= 1;
+        if (self.dentry_cache_clock == 0) self.dentry_cache_clock = 1;
+        for (&self.dentry_cache, 0..) |*cache_entry, cache_index| {
+            if (!cache_entry.used or cache_entry.stale or cache_entry.parent != parent or cache_entry.name_length != name.len) continue;
+            if (!std.ascii.eqlIgnoreCase(cache_entry.nameSlice(), name)) continue;
+            if (!self.cacheEntryValid(cache_entry)) {
+                self.invalidateCacheSlot(cache_index);
+                continue;
+            }
+            if (cache_entry.references == std.math.maxInt(u16)) {
+                self.dentry_cache_rejections +%= 1;
+                return .{ .dentry = cache_entry.dentry };
+            }
+            cache_entry.references += 1;
+            cache_entry.last_used = self.dentry_cache_clock;
+            self.dentry_cache_hits +%= 1;
+            self.dentry_cache_acquires +%= 1;
+            return .{
+                .cache_entry = @intCast(cache_index),
+                .cache_generation = cache_entry.generation,
+                .dentry = cache_entry.dentry,
+            };
+        }
+
+        self.dentry_cache_misses +%= 1;
+        const dentry_index = self.findDentryUncached(parent, name) orelse return null;
+        const cache_index = self.cacheInsertionSlot() orelse {
+            self.dentry_cache_rejections +%= 1;
+            return .{ .dentry = dentry_index };
+        };
+        const prior_generation = self.dentry_cache[cache_index].generation;
+        if (self.dentry_cache[cache_index].used) self.dentry_cache_evictions +%= 1;
+        const generation = nextGeneration(prior_generation);
+        const dentry = &self.dentries[dentry_index];
+        self.dentry_cache[cache_index] = .{
+            .used = true,
+            .generation = generation,
+            .parent = parent,
+            .dentry = dentry_index,
+            .dentry_generation = dentry.generation,
+            .references = 1,
+            .last_used = self.dentry_cache_clock,
+            .name_length = @intCast(name.len),
+        };
+        @memcpy(self.dentry_cache[cache_index].name[0..name.len], name);
+        self.dentry_cache_insertions +%= 1;
+        self.dentry_cache_acquires +%= 1;
+        return .{
+            .cache_entry = @intCast(cache_index),
+            .cache_generation = generation,
+            .dentry = dentry_index,
+        };
+    }
+
+    fn releaseDentryReference(self: *Vfs, reference: DentryReference) void {
+        if (reference.cache_entry == invalid_cache_entry) return;
+        const cache_index: usize = reference.cache_entry;
+        if (cache_index >= self.dentry_cache.len) return;
+        var cache_entry = &self.dentry_cache[cache_index];
+        if (!cache_entry.used or cache_entry.generation != reference.cache_generation or cache_entry.references == 0) return;
+        cache_entry.references -= 1;
+        self.dentry_cache_releases +%= 1;
+        if (cache_entry.stale and cache_entry.references == 0) self.clearCacheSlot(cache_index);
+    }
+
+    fn findDentryUncached(self: *const Vfs, parent: u16, name: []const u8) ?u16 {
         for (self.dentries, 0..) |entry, index| {
             if (!entry.used or entry.parent != parent or entry.name_length != name.len) continue;
             if (std.ascii.eqlIgnoreCase(entry.nameSlice(), name)) return @intCast(index);
@@ -915,12 +1056,60 @@ pub const Vfs = struct {
         return null;
     }
 
-    fn findChild(self: *const Vfs, parent: u16, name: []const u8) ?u16 {
+    fn cacheEntryValid(self: *const Vfs, cache_entry: *const DentryCacheEntry) bool {
+        if (cache_entry.dentry >= self.dentries.len) return false;
+        const dentry = &self.dentries[cache_entry.dentry];
+        return dentry.used and dentry.generation == cache_entry.dentry_generation and dentry.parent == cache_entry.parent and
+            dentry.name_length == cache_entry.name_length and std.ascii.eqlIgnoreCase(dentry.nameSlice(), cache_entry.nameSlice());
+    }
+
+    fn cacheInsertionSlot(self: *const Vfs) ?usize {
+        var oldest_index: ?usize = null;
+        var oldest_tick: u64 = std.math.maxInt(u64);
+        for (self.dentry_cache, 0..) |cache_entry, index| {
+            if (!cache_entry.used) return index;
+            if (cache_entry.references != 0) continue;
+            if (cache_entry.last_used < oldest_tick) {
+                oldest_tick = cache_entry.last_used;
+                oldest_index = index;
+            }
+        }
+        return oldest_index;
+    }
+
+    fn invalidateCachedDentry(self: *Vfs, dentry_index: u16) void {
+        for (&self.dentry_cache, 0..) |*cache_entry, cache_index| {
+            if (!cache_entry.used or cache_entry.dentry != dentry_index) continue;
+            self.dentry_cache_invalidations +%= 1;
+            if (cache_entry.references == 0) {
+                self.clearCacheSlot(cache_index);
+            } else {
+                cache_entry.stale = true;
+            }
+        }
+    }
+
+    fn invalidateCacheSlot(self: *Vfs, cache_index: usize) void {
+        if (!self.dentry_cache[cache_index].used) return;
+        self.dentry_cache_invalidations +%= 1;
+        if (self.dentry_cache[cache_index].references == 0) {
+            self.clearCacheSlot(cache_index);
+        } else {
+            self.dentry_cache[cache_index].stale = true;
+        }
+    }
+
+    fn clearCacheSlot(self: *Vfs, cache_index: usize) void {
+        const generation = self.dentry_cache[cache_index].generation;
+        self.dentry_cache[cache_index] = .{ .generation = generation };
+    }
+
+    fn findChild(self: *Vfs, parent: u16, name: []const u8) ?u16 {
         const entry_index = self.findDentry(parent, name) orelse return null;
         return self.dentries[entry_index].node;
     }
 
-    fn entryForPath(self: *const Vfs, cwd: u16, path: []const u8) Error!u16 {
+    fn entryForPath(self: *Vfs, cwd: u16, path: []const u8) Error!u16 {
         const parent_name = try self.parentAndName(cwd, path);
         return self.findDentry(parent_name.parent, parent_name.name) orelse Error.NotFound;
     }
@@ -949,7 +1138,7 @@ pub const Vfs = struct {
         name: []const u8,
     };
 
-    fn parentAndName(self: *const Vfs, cwd: u16, path: []const u8) Error!ParentName {
+    fn parentAndName(self: *Vfs, cwd: u16, path: []const u8) Error!ParentName {
         if (path.len == 0 or path.len > maximum_path_length) return if (path.len == 0) Error.InvalidPath else Error.PathTooLong;
         var end = path.len;
         while (end > 1 and path[end - 1] == '/') end -= 1;
@@ -1076,6 +1265,7 @@ pub const Vfs = struct {
     }
 
     fn renameEntry(self: *Vfs, entry_index: u16, parent: u16, name: []const u8, tick: u64) void {
+        self.invalidateCachedDentry(entry_index);
         var entry = &self.dentries[entry_index];
         entry.parent = parent;
         entry.name = @splat(0);
@@ -1095,6 +1285,7 @@ pub const Vfs = struct {
     }
 
     fn releaseDentry(self: *Vfs, entry_index: u16) void {
+        self.invalidateCachedDentry(entry_index);
         const generation = self.dentries[entry_index].generation;
         self.dentries[entry_index] = .{ .generation = generation };
     }
@@ -1301,6 +1492,47 @@ test "VFS directory mutation rejects cycles and nonempty removal" {
     try fs.rename(0, "/a/b", "/b", 4);
     try fs.rmdir(0, "/a");
     try std.testing.expectEqual(@as(u16, 1), (try fs.stat(0, "/b")).generation);
+}
+
+test "VFS dentry cache references protect pinned entries and invalidate mutations" {
+    var fs = Vfs.init();
+    const cache_dir = try fs.mkdir(0, "/cache", 0o755, 1);
+    var names: [maximum_dentry_cache_entries + 6][4]u8 = undefined;
+    for (&names, 0..) |*name, index| {
+        name.* = .{ 'f', @intCast('0' + (index / 10)), @intCast('0' + (index % 10)), 0 };
+        _ = try fs.putFile(cache_dir, name[0..3], "x", 0o644, false, @intCast(index + 2));
+    }
+
+    _ = try fs.resolve(cache_dir, names[0][0..3]);
+    const pinned = fs.acquireDentry(cache_dir, names[0][0..3]).?;
+    try std.testing.expect(pinned.cache_entry != invalid_cache_entry);
+    try std.testing.expectEqual(@as(usize, 1), fs.report().dentry_cache_references);
+    const pinned_slot: usize = pinned.cache_entry;
+    const pinned_generation = pinned.cache_generation;
+
+    for (names[1..]) |name| _ = try fs.resolve(cache_dir, name[0..3]);
+    try std.testing.expect(fs.dentry_cache[pinned_slot].used);
+    try std.testing.expectEqual(pinned_generation, fs.dentry_cache[pinned_slot].generation);
+    try std.testing.expectEqual(@as(u16, 1), fs.dentry_cache[pinned_slot].references);
+    try std.testing.expect(fs.report().dentry_cache_evictions > 0);
+
+    try fs.rename(cache_dir, names[0][0..3], "renamed", 100);
+    try std.testing.expect(fs.dentry_cache[pinned_slot].stale);
+    try std.testing.expectError(Error.NotFound, fs.resolve(cache_dir, names[0][0..3]));
+    _ = try fs.resolve(cache_dir, "renamed");
+    _ = try fs.resolve(cache_dir, "renamed");
+    const before_release = fs.report();
+    try std.testing.expectEqual(@as(usize, 1), before_release.dentry_cache_references);
+    try std.testing.expect(before_release.dentry_cache_hits > 0);
+    try std.testing.expect(before_release.dentry_cache_misses > 0);
+    try std.testing.expect(before_release.dentry_cache_invalidations > 0);
+
+    fs.releaseDentryReference(pinned);
+    const after_release = fs.report();
+    try std.testing.expectEqual(@as(usize, 0), after_release.dentry_cache_references);
+    try std.testing.expect(!fs.dentry_cache[pinned_slot].used);
+    try std.testing.expectEqual(fs.dentry_cache_acquires, fs.dentry_cache_releases);
+    try std.testing.expect(fs.validate());
 }
 
 test "VFS hard links share node identity data and deferred lifetime" {
