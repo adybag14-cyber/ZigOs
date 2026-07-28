@@ -608,6 +608,7 @@ pub fn handleSyscall(
         syscall.syscall_fsync => return syscallFsync(context, frame, fx_state),
         syscall.syscall_symlink => return syscallSymlink(context, frame),
         syscall.syscall_readlink => return syscallReadlink(context, frame),
+        syscall.syscall_link => return syscallLink(context, frame),
         syscall.syscall_shutdown => return syscallShutdown(context, frame, fx_state),
         syscall.syscall_getcwd => return syscallGetcwd(context, frame),
         syscall.syscall_chdir => return syscallChdir(context, frame),
@@ -2562,6 +2563,34 @@ fn syscallSymlink(context: *Context, frame: *interrupt_context.Frame) u64 {
         process.cwd_node,
         target_buffer[0..target_length],
         path_buffer[0..path_length],
+        current_tick,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallLink(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var old_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    var new_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const old_length = copyUserString(context, frame.rdi, &old_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const new_length = copyUserString(context, frame.rsi, &new_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    _ = activeVfs().link(
+        process.cwd_node,
+        old_buffer[0..old_length],
+        new_buffer[0..new_length],
         current_tick,
     ) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));

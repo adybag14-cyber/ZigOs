@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const maximum_nodes: usize = 96;
+pub const maximum_dentries: usize = maximum_nodes * 2;
 pub const maximum_name_length: usize = 31;
 pub const maximum_path_length: usize = 255;
 pub const maximum_symlink_depth: usize = 8;
@@ -10,6 +11,7 @@ pub const maximum_mounts: usize = 8;
 pub const maximum_open_files: usize = 64;
 pub const maximum_directory_entries: usize = 64;
 pub const invalid_node: u16 = 0xFFFF;
+pub const invalid_dentry: u16 = 0xFFFF;
 
 pub const PseudoReadFn = *const fn (context: ?*anyopaque, node: u16, offset: usize, output: []u8) Error!usize;
 pub const PseudoWriteFn = *const fn (context: ?*anyopaque, node: u16, offset: usize, input: []const u8) Error!usize;
@@ -80,11 +82,13 @@ pub const Stat = struct {
     mode: u16,
     readonly: bool,
     mount_id: u8,
+    link_count: u16,
     modified_tick: u64,
 };
 
 pub const DirectoryRecord = struct {
     node: u16 = invalid_node,
+    entry: u16 = invalid_dentry,
     name: [maximum_name_length + 1]u8 = @splat(0),
     name_length: u8 = 0,
     kind: Kind = .file,
@@ -103,12 +107,9 @@ pub const DirectoryList = struct {
 
 const Node = struct {
     used: bool = false,
-    linked: bool = false,
     generation: u16 = 0,
     kind: Kind = .file,
-    parent: u16 = invalid_node,
-    name: [maximum_name_length + 1]u8 = @splat(0),
-    name_length: u8 = 0,
+    link_count: u16 = 0,
     size: usize = 0,
     data: [maximum_file_size]u8 = @splat(0),
     mode: u16 = 0o644,
@@ -117,8 +118,17 @@ const Node = struct {
     modified_tick: u64 = 0,
     pseudo_operations: ?*const PseudoOperations = null,
     pseudo_context: ?*anyopaque = null,
+};
 
-    fn nameSlice(self: *const Node) []const u8 {
+const Dentry = struct {
+    used: bool = false,
+    generation: u16 = 0,
+    parent: u16 = invalid_node,
+    node: u16 = invalid_node,
+    name: [maximum_name_length + 1]u8 = @splat(0),
+    name_length: u8 = 0,
+
+    fn nameSlice(self: *const Dentry) []const u8 {
         return self.name[0..self.name_length];
     }
 };
@@ -181,6 +191,7 @@ pub const Report = struct {
 
 pub const Vfs = struct {
     nodes: [maximum_nodes]Node = @splat(.{}),
+    dentries: [maximum_dentries]Dentry = @splat(.{}),
     mounts: [maximum_mounts]Mount = @splat(.{}),
     open_files: [maximum_open_files]OpenFile = @splat(.{}),
     mutations: u64 = 0,
@@ -196,12 +207,9 @@ pub const Vfs = struct {
         self.* = .{};
         self.nodes[0] = .{
             .used = true,
-            .linked = true,
             .generation = 1,
             .kind = .directory,
-            .parent = 0,
-            .name = @splat(0),
-            .name_length = 0,
+            .link_count = 1,
             .mode = 0o755,
             .mount_id = 1,
         };
@@ -244,26 +252,33 @@ pub const Vfs = struct {
             .mode = node.mode,
             .readonly = self.nodeReadonly(node_index),
             .mount_id = node.mount_id,
+            .link_count = node.link_count,
             .modified_tick = node.modified_tick,
         };
+    }
+
+    pub fn canonicalEntryNode(self: *const Vfs, node_index: u16) Error!u16 {
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].link_count == 0) return Error.NotFound;
+        return self.canonicalDentry(node_index) orelse Error.NotFound;
     }
 
     pub fn list(self: *const Vfs, cwd: u16, path: []const u8) Error!DirectoryList {
         const directory = try self.resolve(cwd, path);
         if (self.nodes[directory].kind != .directory) return Error.NotDirectory;
         var result = DirectoryList{};
-        for (0..self.nodes.len) |index| {
-            const node = &self.nodes[index];
-            if (!node.used or !node.linked or index == directory or node.parent != directory) continue;
+        for (self.dentries, 0..) |entry, entry_index| {
+            if (!entry.used or entry.parent != directory) continue;
             if (result.count >= result.records.len) return Error.NoSpace;
+            const node = &self.nodes[entry.node];
             var record = DirectoryRecord{
-                .node = @intCast(index),
+                .node = entry.node,
+                .entry = @intCast(entry_index),
                 .kind = node.kind,
                 .size = node.size,
-                .readonly = self.nodeReadonly(@intCast(index)),
+                .readonly = self.nodeReadonly(entry.node),
             };
-            record.name_length = node.name_length;
-            @memcpy(record.name[0..node.name_length], node.nameSlice());
+            record.name_length = entry.name_length;
+            @memcpy(record.name[0..entry.name_length], entry.nameSlice());
             result.records[result.count] = record;
             result.count += 1;
         }
@@ -279,6 +294,24 @@ pub const Vfs = struct {
     pub fn create(self: *Vfs, cwd: u16, path: []const u8, mode: u16, tick: u64) Error!u16 {
         const parent_name = try self.parentAndName(cwd, path);
         return self.createNode(parent_name.parent, parent_name.name, .file, mode, false, tick);
+    }
+
+    pub fn link(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, tick: u64) Error!u16 {
+        const node_index = try self.resolveNoFollow(cwd, old_path);
+        const node = &self.nodes[node_index];
+        if (node.kind == .directory) return Error.IsDirectory;
+        if (node.kind != .file) return Error.UnsupportedOperation;
+        const destination = try self.parentAndName(cwd, new_path);
+        if (node.mount_id != self.nodes[destination.parent].mount_id) return Error.CrossMount;
+        if (node.readonly or self.mountReadonly(node.mount_id) or self.nodes[destination.parent].readonly) return Error.ReadOnly;
+        if (self.findDentry(destination.parent, destination.name) != null) return Error.AlreadyExists;
+        if (node.link_count == std.math.maxInt(u16)) return Error.NoSpace;
+        const entry_index = self.freeDentry() orelse return Error.NoSpace;
+        self.initializeDentry(entry_index, destination.parent, node_index, destination.name);
+        self.nodes[node_index].link_count += 1;
+        self.nodes[node_index].modified_tick = tick;
+        self.mutations +%= 1;
+        return node_index;
     }
 
     pub fn symlink(self: *Vfs, cwd: u16, target: []const u8, path: []const u8, tick: u64) Error!u16 {
@@ -300,7 +333,7 @@ pub const Vfs = struct {
     }
 
     pub fn symlinkTargetNode(self: *const Vfs, node_index: u16) Error![]const u8 {
-        if (node_index >= self.nodes.len or !self.nodes[node_index].used or !self.nodes[node_index].linked) return Error.NotFound;
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].link_count == 0) return Error.NotFound;
         const node = &self.nodes[node_index];
         if (node.kind != .symlink) return Error.NotSymlink;
         return node.data[0..node.size];
@@ -400,41 +433,36 @@ pub const Vfs = struct {
     }
 
     pub fn unlink(self: *Vfs, cwd: u16, path: []const u8) Error!void {
-        const node_index = try self.resolveNoFollow(cwd, path);
+        const entry_index = try self.entryForPath(cwd, path);
+        const node_index = self.dentries[entry_index].node;
         if (self.nodes[node_index].kind == .directory) return Error.IsDirectory;
-        try self.unlinkNode(node_index);
+        try self.unlinkEntry(entry_index);
     }
 
     pub fn rmdir(self: *Vfs, cwd: u16, path: []const u8) Error!void {
-        const node_index = try self.resolveNoFollow(cwd, path);
+        const entry_index = try self.entryForPath(cwd, path);
+        const node_index = self.dentries[entry_index].node;
         if (node_index == 0 or self.nodes[node_index].kind != .directory) return Error.NotDirectory;
-        for (0..self.nodes.len) |index| {
-            const node = &self.nodes[index];
-            if (node.used and node.linked and index != node_index and node.parent == node_index) return Error.DirectoryNotEmpty;
-        }
-        try self.removeNode(node_index);
+        if (self.hasChildren(node_index)) return Error.DirectoryNotEmpty;
+        try self.removeEntry(entry_index);
     }
 
     pub fn rename(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, tick: u64) Error!void {
-        const source = try self.resolveNoFollow(cwd, old_path);
-        if (source == 0) return Error.Busy;
+        const source_entry = try self.entryForPath(cwd, old_path);
+        const source = self.dentries[source_entry].node;
         const destination = try self.parentAndName(cwd, new_path);
         if (self.nodes[source].mount_id != self.nodes[destination.parent].mount_id) return Error.CrossMount;
         if (self.nodes[source].readonly or self.mountReadonly(self.nodes[source].mount_id) or self.nodes[destination.parent].readonly)
             return Error.ReadOnly;
         if (self.nodes[source].kind == .directory and self.isDescendant(destination.parent, source)) return Error.Cycle;
 
-        if (self.findChild(destination.parent, destination.name)) |target| {
-            if (target == source) {
-                self.renameNode(source, destination.parent, destination.name, tick);
-                self.mutations +%= 1;
-                return;
-            }
-            try self.validateRenameReplacement(source, target);
-            self.detachOrReclaimNode(target);
+        if (self.findDentry(destination.parent, destination.name)) |target_entry| {
+            if (target_entry == source_entry or self.dentries[target_entry].node == source) return;
+            try self.validateRenameReplacement(source, self.dentries[target_entry].node);
+            self.detachOrReclaimEntry(target_entry);
         }
 
-        self.renameNode(source, destination.parent, destination.name, tick);
+        self.renameEntry(source_entry, destination.parent, destination.name, tick);
         self.mutations +%= 1;
     }
 
@@ -448,7 +476,7 @@ pub const Vfs = struct {
 
     pub fn canonicalPath(self: *const Vfs, node_index: u16, output: []u8) Error![]const u8 {
         if (output.len < 2) return Error.PathTooLong;
-        if (node_index >= self.nodes.len or !self.nodes[node_index].used or !self.nodes[node_index].linked) return Error.NotFound;
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].link_count == 0) return Error.NotFound;
         if (node_index == 0) {
             output[0] = '/';
             return output[0..1];
@@ -458,15 +486,16 @@ pub const Vfs = struct {
         var current = node_index;
         while (current != 0) {
             if (count >= chain.len) return Error.Cycle;
-            chain[count] = current;
+            const entry_index = self.canonicalDentry(current) orelse return Error.NotFound;
+            chain[count] = entry_index;
             count += 1;
-            current = self.nodes[current].parent;
+            current = self.dentries[entry_index].parent;
         }
         var used: usize = 0;
         var index = count;
         while (index != 0) {
             index -= 1;
-            const name = self.nodes[chain[index]].nameSlice();
+            const name = self.dentries[chain[index]].nameSlice();
             if (used + 1 + name.len > output.len) return Error.PathTooLong;
             output[used] = '/';
             used += 1;
@@ -508,7 +537,7 @@ pub const Vfs = struct {
         for (self.open_files) |open_file| {
             if (open_file.used and self.nodes[open_file.node].mount_id == mount_id) return Error.Busy;
         }
-        const parent_mount = self.nodes[self.nodes[node_index].parent].mount_id;
+        const parent_mount = self.nodes[try self.directoryParent(node_index)].mount_id;
         self.assignMountRecursive(node_index, parent_mount, false);
         self.mounts[mount_index] = .{};
         self.mutations +%= 1;
@@ -629,22 +658,24 @@ pub const Vfs = struct {
         const directory = open_file.node;
         if (self.nodes[directory].kind != .directory) return Error.NotDirectory;
         var count: usize = 0;
-        var node_index = open_file.offset;
-        while (node_index < self.nodes.len and count < output.len) : (node_index += 1) {
-            const node = &self.nodes[node_index];
-            if (!node.used or node_index == directory or node.parent != directory) continue;
+        var entry_index = open_file.offset;
+        while (entry_index < self.dentries.len and count < output.len) : (entry_index += 1) {
+            const entry = &self.dentries[entry_index];
+            if (!entry.used or entry.parent != directory) continue;
+            const node = &self.nodes[entry.node];
             var record = DirectoryRecord{
-                .node = @intCast(node_index),
+                .node = entry.node,
+                .entry = @intCast(entry_index),
                 .kind = node.kind,
                 .size = node.size,
-                .readonly = self.nodeReadonly(@intCast(node_index)),
+                .readonly = self.nodeReadonly(entry.node),
             };
-            record.name_length = node.name_length;
-            @memcpy(record.name[0..node.name_length], node.nameSlice());
+            record.name_length = entry.name_length;
+            @memcpy(record.name[0..entry.name_length], entry.nameSlice());
             output[count] = record;
             count += 1;
         }
-        open_file.offset = node_index;
+        open_file.offset = entry_index;
         return count;
     }
 
@@ -758,34 +789,48 @@ pub const Vfs = struct {
     }
 
     pub fn validate(self: *const Vfs) bool {
-        if (!self.nodes[0].used or !self.nodes[0].linked or self.nodes[0].kind != .directory or self.nodes[0].parent != 0) return false;
+        if (!self.nodes[0].used or self.nodes[0].generation == 0 or self.nodes[0].kind != .directory or self.nodes[0].link_count != 1) return false;
+        var counted_links: [maximum_nodes]u16 = @splat(0);
+        counted_links[0] = 1;
+        for (self.dentries, 0..) |entry, entry_index| {
+            if (!entry.used) continue;
+            if (entry.generation == 0 or entry.name_length == 0 or entry.name_length > maximum_name_length) return false;
+            if (entry.parent >= self.nodes.len or !self.nodes[entry.parent].used or self.nodes[entry.parent].kind != .directory or self.nodes[entry.parent].link_count == 0) return false;
+            if (entry.node == 0 or entry.node >= self.nodes.len or !self.nodes[entry.node].used) return false;
+            counted_links[entry.node] = std.math.add(u16, counted_links[entry.node], 1) catch return false;
+            for (entry_index + 1..self.dentries.len) |other_index| {
+                const other = &self.dentries[other_index];
+                if (!other.used or other.parent != entry.parent or other.name_length != entry.name_length) continue;
+                if (std.ascii.eqlIgnoreCase(other.nameSlice(), entry.nameSlice())) return false;
+            }
+        }
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
-            if (!node.used) continue;
-            if (node.generation == 0 or node.name_length > maximum_name_length or node.size > maximum_file_size) return false;
+            if (!node.used) {
+                if (counted_links[index] != 0) return false;
+                continue;
+            }
+            if (node.generation == 0 or node.size > maximum_file_size or node.link_count != counted_links[index]) return false;
             if (node.kind == .pseudo and node.pseudo_operations == null) return false;
             if (node.kind == .symlink and (node.size == 0 or node.size > maximum_symlink_target_length)) return false;
-            if (index != 0) {
-                if (!node.linked) {
-                    if (node.kind == .directory or node.parent != invalid_node or node.name_length != 0 or !self.hasOpenReferences(@intCast(index))) return false;
-                    for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == index) return false;
-                    continue;
-                }
-                if (node.parent >= self.nodes.len or !self.nodes[node.parent].used or !self.nodes[node.parent].linked or self.nodes[node.parent].kind != .directory) return false;
+            if (index != 0 and node.link_count == 0) {
+                if (node.kind == .directory or !self.hasOpenReferences(@intCast(index))) return false;
+                for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == index) return false;
+                continue;
+            }
+            if (node.kind == .directory and index != 0) {
+                if (node.link_count != 1) return false;
                 var current: u16 = @intCast(index);
                 var depth: usize = 0;
-                while (current != 0 and depth < self.nodes.len) : (depth += 1) current = self.nodes[current].parent;
+                while (current != 0 and depth < self.nodes.len) : (depth += 1) {
+                    current = self.directoryParent(current) catch return false;
+                }
                 if (current != 0) return false;
-            }
-            for (index + 1..self.nodes.len) |other_index| {
-                const other = &self.nodes[other_index];
-                if (!other.used or !node.linked or !other.linked or other.parent != node.parent or other.name_length != node.name_length) continue;
-                if (std.ascii.eqlIgnoreCase(other.nameSlice(), node.nameSlice())) return false;
             }
         }
         for (self.mounts, 0..) |mount_entry, index| {
             if (!mount_entry.used) continue;
-            if (mount_entry.id != index + 1 or mount_entry.node >= self.nodes.len or !self.nodes[mount_entry.node].used) return false;
+            if (mount_entry.id != index + 1 or mount_entry.node >= self.nodes.len or !self.nodes[mount_entry.node].used or self.nodes[mount_entry.node].link_count == 0) return false;
         }
         for (self.open_files) |open_file| {
             if (!open_file.used) continue;
@@ -837,16 +882,18 @@ pub const Vfs = struct {
             if (std.mem.eql(u8, component, ".")) continue;
             if (component.len > maximum_name_length) return Error.NameTooLong;
             if (std.mem.eql(u8, component, "..")) {
-                current = self.nodes[current].parent;
+                current = try self.directoryParent(current);
                 continue;
             }
             if (self.nodes[current].kind != .directory) return Error.NotDirectory;
-            const child = self.findChild(current, component) orelse return Error.NotFound;
+            const entry_index = self.findDentry(current, component) orelse return Error.NotFound;
+            const entry = &self.dentries[entry_index];
+            const child = entry.node;
             const has_suffix = position < path.len;
             if (self.nodes[child].kind == .symlink and (follow_final or has_suffix)) {
                 if (depth >= maximum_symlink_depth) return Error.Cycle;
                 const target = self.nodes[child].data[0..self.nodes[child].size];
-                current = try self.resolveInternal(self.nodes[child].parent, target, true, depth + 1);
+                current = try self.resolveInternal(entry.parent, target, true, depth + 1);
             } else {
                 current = child;
             }
@@ -855,18 +902,46 @@ pub const Vfs = struct {
     }
 
     fn validateDirectory(self: *const Vfs, node_index: u16) Error!u16 {
-        if (node_index >= self.nodes.len or !self.nodes[node_index].used or !self.nodes[node_index].linked) return Error.NotFound;
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].link_count == 0) return Error.NotFound;
         if (self.nodes[node_index].kind != .directory) return Error.NotDirectory;
         return node_index;
     }
 
-    fn findChild(self: *const Vfs, parent: u16, name: []const u8) ?u16 {
-        for (0..self.nodes.len) |index| {
-            const node = &self.nodes[index];
-            if (!node.used or !node.linked or node.parent != parent or node.name_length != name.len) continue;
-            if (std.ascii.eqlIgnoreCase(node.nameSlice(), name)) return @intCast(index);
+    fn findDentry(self: *const Vfs, parent: u16, name: []const u8) ?u16 {
+        for (self.dentries, 0..) |entry, index| {
+            if (!entry.used or entry.parent != parent or entry.name_length != name.len) continue;
+            if (std.ascii.eqlIgnoreCase(entry.nameSlice(), name)) return @intCast(index);
         }
         return null;
+    }
+
+    fn findChild(self: *const Vfs, parent: u16, name: []const u8) ?u16 {
+        const entry_index = self.findDentry(parent, name) orelse return null;
+        return self.dentries[entry_index].node;
+    }
+
+    fn entryForPath(self: *const Vfs, cwd: u16, path: []const u8) Error!u16 {
+        const parent_name = try self.parentAndName(cwd, path);
+        return self.findDentry(parent_name.parent, parent_name.name) orelse Error.NotFound;
+    }
+
+    fn canonicalDentry(self: *const Vfs, node_index: u16) ?u16 {
+        for (self.dentries, 0..) |entry, index| {
+            if (entry.used and entry.node == node_index) return @intCast(index);
+        }
+        return null;
+    }
+
+    fn directoryParent(self: *const Vfs, node_index: u16) Error!u16 {
+        if (node_index == 0) return 0;
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].kind != .directory or self.nodes[node_index].link_count == 0) return Error.NotDirectory;
+        const entry_index = self.canonicalDentry(node_index) orelse return Error.NotFound;
+        return self.dentries[entry_index].parent;
+    }
+
+    fn hasChildren(self: *const Vfs, node_index: u16) bool {
+        for (self.dentries) |entry| if (entry.used and entry.parent == node_index) return true;
+        return false;
     }
 
     const ParentName = struct {
@@ -892,27 +967,43 @@ pub const Vfs = struct {
 
     fn createNode(self: *Vfs, parent: u16, name: []const u8, kind: Kind, mode: u16, readonly: bool, tick: u64) Error!u16 {
         _ = try self.validateDirectory(parent);
-        if (self.findChild(parent, name) != null) return Error.AlreadyExists;
+        if (self.findDentry(parent, name) != null) return Error.AlreadyExists;
         if (self.nodes[parent].readonly or self.mountReadonly(self.nodes[parent].mount_id)) return Error.ReadOnly;
-        var index: usize = 1;
-        while (index < self.nodes.len and self.nodes[index].used) : (index += 1) {}
-        if (index >= self.nodes.len) return Error.NoSpace;
-        const generation = nextGeneration(self.nodes[index].generation);
-        self.nodes[index] = .{
+        var node_index: usize = 1;
+        while (node_index < self.nodes.len and self.nodes[node_index].used) : (node_index += 1) {}
+        if (node_index >= self.nodes.len) return Error.NoSpace;
+        const entry_index = self.freeDentry() orelse return Error.NoSpace;
+        const node_generation = nextGeneration(self.nodes[node_index].generation);
+        self.nodes[node_index] = .{
             .used = true,
-            .linked = true,
-            .generation = generation,
+            .generation = node_generation,
             .kind = kind,
-            .parent = parent,
-            .name_length = @intCast(name.len),
+            .link_count = 1,
             .mode = mode & 0o777,
             .readonly = readonly,
             .mount_id = self.nodes[parent].mount_id,
             .modified_tick = tick,
         };
-        @memcpy(self.nodes[index].name[0..name.len], name);
+        self.initializeDentry(entry_index, parent, @intCast(node_index), name);
         self.mutations +%= 1;
-        return @intCast(index);
+        return @intCast(node_index);
+    }
+
+    fn freeDentry(self: *const Vfs) ?usize {
+        for (self.dentries, 0..) |entry, index| if (!entry.used) return index;
+        return null;
+    }
+
+    fn initializeDentry(self: *Vfs, entry_index: usize, parent: u16, node_index: u16, name: []const u8) void {
+        const generation = nextGeneration(self.dentries[entry_index].generation);
+        self.dentries[entry_index] = .{
+            .used = true,
+            .generation = generation,
+            .parent = parent,
+            .node = node_index,
+            .name_length = @intCast(name.len),
+        };
+        @memcpy(self.dentries[entry_index].name[0..name.len], name);
     }
 
     fn readPseudo(self: *const Vfs, node_index: u16, offset: usize, output: []u8) Error!usize {
@@ -953,11 +1044,12 @@ pub const Vfs = struct {
         if ((node.mode & 0o222) == 0) return Error.PermissionDenied;
     }
 
-    fn unlinkNode(self: *Vfs, node_index: u16) Error!void {
-        if (node_index == 0 or node_index >= self.nodes.len or !self.nodes[node_index].used or !self.nodes[node_index].linked) return Error.NotFound;
+    fn unlinkEntry(self: *Vfs, entry_index: u16) Error!void {
+        if (entry_index >= self.dentries.len or !self.dentries[entry_index].used) return Error.NotFound;
+        const node_index = self.dentries[entry_index].node;
         if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
         for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == node_index) return Error.Busy;
-        self.detachOrReclaimNode(node_index);
+        self.detachOrReclaimEntry(entry_index);
         self.mutations +%= 1;
     }
 
@@ -970,42 +1062,41 @@ pub const Vfs = struct {
         if (source_node.kind == .directory and target_node.kind != .directory) return Error.NotDirectory;
         if (source_node.kind != .directory and target_node.kind == .directory) return Error.IsDirectory;
         if (target_node.kind == .directory) {
-            for (0..self.nodes.len) |index| {
-                const node = &self.nodes[index];
-                if (node.used and node.linked and index != target and node.parent == target) return Error.DirectoryNotEmpty;
-            }
+            if (self.hasChildren(target)) return Error.DirectoryNotEmpty;
             if (self.hasOpenReferences(target)) return Error.Busy;
         }
     }
 
-    fn detachOrReclaimNode(self: *Vfs, node_index: u16) void {
-        if (self.hasOpenReferences(node_index)) {
-            var node = &self.nodes[node_index];
-            node.linked = false;
-            node.parent = invalid_node;
-            node.name = @splat(0);
-            node.name_length = 0;
-        } else {
-            self.reclaimNode(node_index);
-        }
+    fn detachOrReclaimEntry(self: *Vfs, entry_index: u16) void {
+        const node_index = self.dentries[entry_index].node;
+        self.releaseDentry(entry_index);
+        std.debug.assert(self.nodes[node_index].link_count != 0);
+        self.nodes[node_index].link_count -= 1;
+        if (self.nodes[node_index].link_count == 0 and !self.hasOpenReferences(node_index)) self.reclaimNode(node_index);
     }
 
-    fn renameNode(self: *Vfs, node_index: u16, parent: u16, name: []const u8, tick: u64) void {
-        var node = &self.nodes[node_index];
-        node.parent = parent;
-        node.name = @splat(0);
-        node.name_length = @intCast(name.len);
-        @memcpy(node.name[0..name.len], name);
-        node.modified_tick = tick;
+    fn renameEntry(self: *Vfs, entry_index: u16, parent: u16, name: []const u8, tick: u64) void {
+        var entry = &self.dentries[entry_index];
+        entry.parent = parent;
+        entry.name = @splat(0);
+        entry.name_length = @intCast(name.len);
+        @memcpy(entry.name[0..name.len], name);
+        self.nodes[entry.node].modified_tick = tick;
     }
 
-    fn removeNode(self: *Vfs, node_index: u16) Error!void {
-        if (node_index == 0 or node_index >= self.nodes.len or !self.nodes[node_index].used or !self.nodes[node_index].linked) return Error.NotFound;
+    fn removeEntry(self: *Vfs, entry_index: u16) Error!void {
+        if (entry_index >= self.dentries.len or !self.dentries[entry_index].used) return Error.NotFound;
+        const node_index = self.dentries[entry_index].node;
         if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
         for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == node_index) return Error.Busy;
         if (self.hasOpenReferences(node_index)) return Error.Busy;
-        self.reclaimNode(node_index);
+        self.detachOrReclaimEntry(entry_index);
         self.mutations +%= 1;
+    }
+
+    fn releaseDentry(self: *Vfs, entry_index: u16) void {
+        const generation = self.dentries[entry_index].generation;
+        self.dentries[entry_index] = .{ .generation = generation };
     }
 
     fn hasOpenReferences(self: *const Vfs, node_index: u16) bool {
@@ -1016,7 +1107,7 @@ pub const Vfs = struct {
     }
 
     fn maybeReclaimUnlinked(self: *Vfs, node_index: u16) void {
-        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].linked) return;
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].link_count != 0) return;
         if (!self.hasOpenReferences(node_index)) self.reclaimNode(node_index);
     }
 
@@ -1043,9 +1134,8 @@ pub const Vfs = struct {
     fn assignMountRecursive(self: *Vfs, node_index: u16, mount_id: u8, readonly: bool) void {
         self.nodes[node_index].mount_id = mount_id;
         if (readonly and self.nodes[node_index].kind != .pseudo) self.nodes[node_index].readonly = true;
-        for (0..self.nodes.len) |index| {
-            const node = &self.nodes[index];
-            if (node.used and node.linked and index != node_index and node.parent == node_index) self.assignMountRecursive(@intCast(index), mount_id, readonly);
+        for (self.dentries) |entry| {
+            if (entry.used and entry.parent == node_index) self.assignMountRecursive(entry.node, mount_id, readonly);
         }
     }
 
@@ -1055,7 +1145,7 @@ pub const Vfs = struct {
         while (traversed < self.nodes.len) : (traversed += 1) {
             if (current == ancestor) return true;
             if (current == 0) return false;
-            current = self.nodes[current].parent;
+            current = self.directoryParent(current) catch return true;
         }
         return true;
     }
@@ -1211,6 +1301,56 @@ test "VFS directory mutation rejects cycles and nonempty removal" {
     try fs.rename(0, "/a/b", "/b", 4);
     try fs.rmdir(0, "/a");
     try std.testing.expectEqual(@as(u16, 1), (try fs.stat(0, "/b")).generation);
+}
+
+test "VFS hard links share node identity data and deferred lifetime" {
+    var fs = Vfs.init();
+    const first_dir = try fs.mkdir(0, "/first", 0o755, 1);
+    const second_dir = try fs.mkdir(0, "/second", 0o755, 2);
+    const baseline_nodes = fs.report().nodes_used;
+    const node = try fs.putFile(first_dir, "original", "alpha", 0o644, false, 3);
+    try std.testing.expectEqual(node, try fs.link(0, "/first/original", "/first/alias", 4));
+    try std.testing.expectEqual(node, try fs.link(0, "/first/alias", "/second/shared", 5));
+
+    const original = try fs.stat(0, "/first/original");
+    const alias = try fs.stat(0, "/first/alias");
+    const shared = try fs.stat(0, "/second/shared");
+    try std.testing.expectEqual(original.node, alias.node);
+    try std.testing.expectEqual(original.node, shared.node);
+    try std.testing.expectEqual(original.generation, alias.generation);
+    try std.testing.expectEqual(@as(u16, 3), original.link_count);
+    try std.testing.expectEqual(baseline_nodes + 1, fs.report().nodes_used);
+
+    try std.testing.expectEqual(@as(usize, 5), try fs.append(0, "/first/alias", "-beta", 6));
+    try std.testing.expectEqualStrings("alpha-beta", try fs.readOnlyView(0, "/second/shared"));
+    const first_listing = try fs.list(0, "/first");
+    try std.testing.expectEqual(@as(usize, 2), first_listing.count);
+    try std.testing.expectEqual(first_listing.records[0].node, first_listing.records[1].node);
+
+    const retained = try fs.open(7, 0, "/second/shared", .{ .read = true }, 0, 7);
+    try fs.unlink(0, "/first/original");
+    try std.testing.expectEqual(@as(u16, 2), (try fs.stat(0, "/first/alias")).link_count);
+    try fs.unlink(0, "/first/alias");
+    try std.testing.expectEqual(@as(u16, 1), (try fs.stat(0, "/second/shared")).link_count);
+    try fs.unlink(0, "/second/shared");
+    try std.testing.expectError(Error.NotFound, fs.stat(0, "/second/shared"));
+    try std.testing.expectEqual(baseline_nodes + 1, fs.report().nodes_used);
+    var bytes: [16]u8 = undefined;
+    const count = try fs.readOpen(7, retained, &bytes);
+    try std.testing.expectEqualStrings("alpha-beta", bytes[0..count]);
+    try std.testing.expectEqual(@as(u16, 0), (try fs.statOpen(7, retained)).link_count);
+    try fs.close(7, retained);
+    try std.testing.expectEqual(baseline_nodes, fs.report().nodes_used);
+
+    _ = try fs.mkdir(0, "/mount", 0o755, 8);
+    _ = try fs.mount(0, "/mount", .boot_fat, false, "other");
+    _ = try fs.putFile(0, "/first/new", "x", 0o644, false, 9);
+    try std.testing.expectError(Error.CrossMount, fs.link(0, "/first/new", "/mount/new", 10));
+    try std.testing.expectError(Error.IsDirectory, fs.link(0, "/first", "/first/directory-link", 11));
+    _ = try fs.symlink(0, "/first/new", "/first/symbolic", 12);
+    try std.testing.expectError(Error.UnsupportedOperation, fs.link(0, "/first/symbolic", "/first/symbolic-hard", 13));
+    try std.testing.expect(fs.validate());
+    _ = second_dir;
 }
 
 test "VFS symbolic links follow relative and absolute targets with bounded loops" {

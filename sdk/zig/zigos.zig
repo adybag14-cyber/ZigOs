@@ -396,6 +396,10 @@ pub fn readlink(path: [*:0]const u8, output: []u8) Error!usize {
     return @intCast(try result(zigos_syscall6(abi.syscall_readlink, ptrValue(path), ptrValue(output.ptr), output.len, 0, 0, 0)));
 }
 
+pub fn link(old_path: [*:0]const u8, new_path: [*:0]const u8) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_link, ptrValue(old_path), ptrValue(new_path), 0, 0, 0, 0));
+}
+
 pub fn sync() Error!void {
     _ = try result(zigos_syscall6(abi.syscall_sync, 0, 0, 0, 0, 0, 0));
 }

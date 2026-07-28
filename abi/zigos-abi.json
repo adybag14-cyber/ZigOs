@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 7,
+    "minor": 8,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -69,7 +69,8 @@
     "openat": 110,
     "fsync": 111,
     "symlink": 112,
-    "readlink": 113
+    "readlink": 113,
+    "link": 114
   },
   "errno": {
     "permission": -1,

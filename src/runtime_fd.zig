@@ -19,6 +19,7 @@ pub fn statFromVfs(info: runtime_vfs.Stat) runtime_abi.Stat {
         .readonly = @intFromBool(info.readonly),
         .mode = info.mode,
         .mount_id = info.mount_id,
+        .link_count = @intCast(@min(info.link_count, std.math.maxInt(u8))),
         .size = info.size,
         .modified_tick = info.modified_tick,
     };
@@ -761,6 +762,7 @@ pub const System = struct {
                     .readonly = 0,
                     .mode = 0o666,
                     .mount_id = 0,
+                    .link_count = 1,
                     .size = 0,
                     .modified_tick = 0,
                 };
@@ -773,6 +775,7 @@ pub const System = struct {
                 .readonly = 0,
                 .mode = 0o666,
                 .mount_id = 0,
+                .link_count = 1,
                 .size = 0,
                 .modified_tick = 0,
             },
@@ -785,6 +788,7 @@ pub const System = struct {
                     .readonly = 0,
                     .mode = if (description.kind == .pipe_read) 0o400 else 0o200,
                     .mount_id = 0,
+                    .link_count = 1,
                     .size = self.pipes[pipe_index].count,
                     .modified_tick = 0,
                 };

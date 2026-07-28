@@ -104,7 +104,7 @@ pub const Stat = extern struct {
     readonly: u8,
     mode: u16,
     mount_id: u8,
-    reserved0: u8 = 0,
+    link_count: u8,
     size: u64,
     modified_tick: u64,
 };

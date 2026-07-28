@@ -297,8 +297,8 @@ try {
         'exec: PID 16 state zombie status 0x56',
         'c-sdk: start',
         'c-sdk: argc/argv passed',
-        'c-sdk: ABI 1.7 discovery passed',
-        'c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink passed',
+        'c-sdk: ABI 1.8 discovery passed',
+        'c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink passed',
         'exec: PID 17 state zombie status 0x57',
         'serial COM1 online',
         'fsck ramfs/persist: clean',
@@ -322,10 +322,10 @@ try {
         'Post-bootstrap physical memory manager active:',
         'bootstrap allocator sealed',
         'ZigOs post-bootstrap physical memory: total ',
-        $(if ($Network) { 'peak 48 alloc/free 277/277 failed/rejected 0/0 clean yes' } else { 'peak 48 alloc/free 246/246 failed/rejected 0/0 clean yes' }),
+        $(if ($Network) { 'peak 48 alloc/free 278/278 failed/rejected 0/0 clean yes' } else { 'peak 48 alloc/free 247/247 failed/rejected 0/0 clean yes' }),
         'ZigOs permanent userspace: page-limit 4096 used 0',
         $(if ($Network) { 'launches/exits/faults 17/15/1' } else { 'launches/exits/faults 15/13/1' }),
-        $(if ($Network) { 'reclaimed 277 stale-contexts-swept 0 allocator alloc/release/retains 277/277/0' } else { 'reclaimed 246 stale-contexts-swept 0 allocator alloc/release/retains 246/246/0' }),
+        $(if ($Network) { 'reclaimed 278 stale-contexts-swept 0 allocator alloc/release/retains 278/278/0' } else { 'reclaimed 247 stale-contexts-swept 0 allocator alloc/release/retains 247/247/0' }),
         'ZigOs x86-64 Capstone 18 verified: goals 0x000001D1',
         'ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes'
     )

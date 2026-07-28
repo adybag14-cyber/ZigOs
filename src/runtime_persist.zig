@@ -237,6 +237,13 @@ pub const Store = struct {
         record_count: u32,
     };
 
+    const RecordKind = enum(u8) {
+        directory = 1,
+        file = 2,
+        symlink = 3,
+        hard_link = 4,
+    };
+
     fn serialize(self: *Store, vfs: *const runtime_vfs.Vfs) Error!Snapshot {
         @memset(&self.payload, 0);
         @memset(&self.path_queue, @splat(0));
@@ -267,12 +274,20 @@ pub const Store = struct {
                 if (record.kind == .directory or record.kind == .pseudo) continue;
                 const child = try self.buildChildPath(parent, record.nameSlice());
                 const stat = vfs.statNode(record.node) catch return Error.InvalidRecord;
-                const data = switch (record.kind) {
-                    .file => vfs.readOnlyView(0, child) catch return Error.InvalidRecord,
-                    .symlink => vfs.symlinkTargetNode(record.node) catch return Error.InvalidRecord,
-                    .directory, .pseudo => unreachable,
-                };
-                used = try appendRecord(&self.payload, used, child[persist_prefix.len..], record.kind, stat.mode, data);
+                if (record.kind == .file and record.entry != (vfs.canonicalEntryNode(record.node) catch return Error.InvalidRecord)) {
+                    var canonical_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
+                    const canonical = vfs.canonicalPath(record.node, &canonical_buffer) catch return Error.InvalidRecord;
+                    if (!std.mem.startsWith(u8, canonical, persist_prefix)) return Error.InvalidRecord;
+                    used = try appendRecord(&self.payload, used, child[persist_prefix.len..], .hard_link, stat.mode, canonical[persist_prefix.len..]);
+                } else {
+                    const data = switch (record.kind) {
+                        .file => vfs.readOnlyView(0, child) catch return Error.InvalidRecord,
+                        .symlink => vfs.symlinkTargetNode(record.node) catch return Error.InvalidRecord,
+                        .directory, .pseudo => unreachable,
+                    };
+                    const kind: RecordKind = if (record.kind == .file) .file else .symlink;
+                    used = try appendRecord(&self.payload, used, child[persist_prefix.len..], kind, stat.mode, data);
+                }
                 records +%= 1;
             }
         }
@@ -295,14 +310,21 @@ pub const Store = struct {
         if (candidate.payload_length < 4) return Error.Corrupt;
         const count = read32(&self.payload, 0);
         if (count != candidate.record_count) return Error.Corrupt;
+        try self.restorePass(vfs, candidate, tick, false);
+        try self.restorePass(vfs, candidate, tick, true);
+    }
+
+    fn restorePass(self: *Store, vfs: *runtime_vfs.Vfs, candidate: Candidate, tick: u64, hard_links_only: bool) Error!void {
+        const count = read32(&self.payload, 0);
         var offset: usize = 4;
         var record_index: u32 = 0;
         while (record_index < count) : (record_index += 1) {
             if (offset + 8 > candidate.payload_length) return Error.Corrupt;
-            const kind: runtime_vfs.Kind = switch (self.payload[offset]) {
+            const kind: RecordKind = switch (self.payload[offset]) {
                 1 => .directory,
                 2 => .file,
                 3 => .symlink,
+                4 => .hard_link,
                 else => return Error.Corrupt,
             };
             const path_length: usize = self.payload[offset + 1];
@@ -314,21 +336,32 @@ pub const Store = struct {
             offset += path_length;
             if (!validRelativePath(relative)) return Error.Corrupt;
             if (offset + data_length > candidate.payload_length) return Error.Corrupt;
-            const path = try self.absolutePath(relative);
-            switch (kind) {
-                .directory => {
-                    if (data_length != 0) return Error.Corrupt;
-                    _ = vfs.ensureDirectory(0, path, mode, tick) catch return Error.InvalidRecord;
-                },
-                .file => {
-                    if (data_length > runtime_vfs.maximum_file_size) return Error.Corrupt;
-                    _ = vfs.putFile(0, path, self.payload[offset .. offset + data_length], mode, false, tick) catch return Error.InvalidRecord;
-                },
-                .symlink => {
-                    if (data_length == 0 or data_length > runtime_vfs.maximum_symlink_target_length) return Error.Corrupt;
-                    _ = vfs.symlink(0, self.payload[offset .. offset + data_length], path, tick) catch return Error.InvalidRecord;
-                },
-                .pseudo => return Error.Corrupt,
+            const data = self.payload[offset .. offset + data_length];
+            if (kind == .hard_link) {
+                if (data_length == 0 or data_length > runtime_vfs.maximum_path_length or !validRelativePath(data)) return Error.Corrupt;
+                if (hard_links_only) {
+                    var target_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
+                    const target = try absolutePathInto(data, &target_buffer);
+                    const path = try self.absolutePath(relative);
+                    _ = vfs.link(0, target, path, tick) catch return Error.InvalidRecord;
+                }
+            } else if (!hard_links_only) {
+                const path = try self.absolutePath(relative);
+                switch (kind) {
+                    .directory => {
+                        if (data_length != 0) return Error.Corrupt;
+                        _ = vfs.ensureDirectory(0, path, mode, tick) catch return Error.InvalidRecord;
+                    },
+                    .file => {
+                        if (data_length > runtime_vfs.maximum_file_size) return Error.Corrupt;
+                        _ = vfs.putFile(0, path, data, mode, false, tick) catch return Error.InvalidRecord;
+                    },
+                    .symlink => {
+                        if (data_length == 0 or data_length > runtime_vfs.maximum_symlink_target_length) return Error.Corrupt;
+                        _ = vfs.symlink(0, data, path, tick) catch return Error.InvalidRecord;
+                    },
+                    .hard_link => unreachable,
+                }
             }
             offset += data_length;
         }
@@ -337,6 +370,15 @@ pub const Store = struct {
 
     fn absolutePath(self: *Store, relative: []const u8) Error![]const u8 {
         const output = &self.path_scratch;
+        const required = persist_prefix.len + relative.len;
+        if (required > runtime_vfs.maximum_path_length) return Error.NoSpace;
+        @memset(output, 0);
+        @memcpy(output[0..persist_prefix.len], persist_prefix);
+        @memcpy(output[persist_prefix.len..required], relative);
+        return output[0..required];
+    }
+
+    fn absolutePathInto(relative: []const u8, output: *[runtime_vfs.maximum_path_length + 1]u8) Error![]const u8 {
         const required = persist_prefix.len + relative.len;
         if (required > runtime_vfs.maximum_path_length) return Error.NoSpace;
         @memset(output, 0);
@@ -456,20 +498,14 @@ fn appendRecord(
     payload: []u8,
     initial_offset: usize,
     relative_path: []const u8,
-    kind: runtime_vfs.Kind,
+    kind: Store.RecordKind,
     mode: u16,
     data: []const u8,
 ) Error!usize {
     if (relative_path.len == 0 or relative_path.len > 255 or data.len > runtime_vfs.maximum_file_size) return Error.InvalidRecord;
     const required = 8 + relative_path.len + data.len;
     if (initial_offset > payload.len or required > payload.len - initial_offset) return Error.NoSpace;
-    const kind_byte: u8 = switch (kind) {
-        .directory => 1,
-        .file => 2,
-        .symlink => 3,
-        .pseudo => return Error.InvalidRecord,
-    };
-    payload[initial_offset] = kind_byte;
+    payload[initial_offset] = @intFromEnum(kind);
     payload[initial_offset + 1] = @intCast(relative_path.len);
     write16(payload, initial_offset + 2, mode);
     write32(payload, initial_offset + 4, @intCast(data.len));
@@ -584,7 +620,8 @@ test "alternating snapshots restore a persistent VFS subtree" {
     try first_store.mount(first_vfs, disk.device(), 1);
     _ = try first_vfs.ensureDirectory(0, "/persist/config", 0o755, 2);
     _ = try first_vfs.putFile(0, "/persist/config/name.txt", "zigos\n", 0o640, false, 3);
-    _ = try first_vfs.symlink(0, "config/name.txt", "/persist/name-link", 4);
+    _ = try first_vfs.link(0, "/persist/config/name.txt", "/persist/name-hard", 4);
+    _ = try first_vfs.symlink(0, "config/name.txt", "/persist/name-link", 5);
     try first_store.sync(first_vfs);
     try std.testing.expectEqual(@as(u64, 1), first_store.report().generation);
     try first_store.check();
@@ -595,6 +632,9 @@ test "alternating snapshots restore a persistent VFS subtree" {
     var second_store: Store = .{};
     try second_store.mount(second_vfs, disk.device(), 10);
     try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/config/name.txt"));
+    try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/name-hard"));
+    try std.testing.expectEqual((try second_vfs.stat(0, "/persist/config/name.txt")).node, (try second_vfs.stat(0, "/persist/name-hard")).node);
+    try std.testing.expectEqual(@as(u16, 2), (try second_vfs.stat(0, "/persist/name-hard")).link_count);
     try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/name-link"));
     var link_target: [runtime_vfs.maximum_path_length]u8 = undefined;
     const link_length = try second_vfs.readlink(0, "/persist/name-link", &link_target);

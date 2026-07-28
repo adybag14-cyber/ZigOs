@@ -8,6 +8,7 @@ const temporary_path = "/persist/abi14/remove/gone.txt";
 const payload = "alpha-beta-gamma\n";
 const replaced_payload = "retained-destination";
 const link_path = "/persist/abi14/current";
+const hard_link_path = "/persist/abi14/hard-current";
 const link_target = "renamed.txt";
 const loop_a_path = "/persist/abi14/loop-a";
 const loop_b_path = "/persist/abi14/loop-b";
@@ -60,6 +61,13 @@ fn initialize() zigos.Error!u32 {
         return error.InvalidArgument;
     try zigos.close(retained);
     try zigos.chmod(renamed_path, 0o600);
+    try zigos.link(renamed_path, hard_link_path);
+    var target_stat: zigos.Stat = undefined;
+    var hard_stat: zigos.Stat = undefined;
+    try zigos.stat(renamed_path, &target_stat);
+    try zigos.stat(hard_link_path, &hard_stat);
+    if (target_stat.node != hard_stat.node or target_stat.generation != hard_stat.generation or
+        target_stat.link_count != 2 or hard_stat.link_count != 2) return error.InvalidArgument;
     try zigos.symlink(link_target, link_path);
     var stored_target: [32]u8 = undefined;
     const stored_target_length = try zigos.readlink(link_path, &stored_target);
@@ -93,7 +101,7 @@ fn initialize() zigos.Error!u32 {
     try zigos.unlink(temporary_path);
     try zigos.rmdir(temporary_directory);
     try zigos.sync();
-    try zigos.writeAll(1, "fs-api: init/mkdir/write/seek/replace-rename/chmod/symlink/readlink/open-unlink/rmdir/sync passed\r\n");
+    try zigos.writeAll(1, "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/open-unlink/rmdir/sync passed\r\n");
     return 0x58;
 }
 
@@ -106,6 +114,17 @@ fn verify() zigos.Error!u32 {
     var sample: [4]u8 = undefined;
     if (try zigos.read(fd, &sample) != sample.len or !equal(&sample, "beta")) return error.InvalidArgument;
     try zigos.close(fd);
+    var target_stat: zigos.Stat = undefined;
+    var hard_stat: zigos.Stat = undefined;
+    try zigos.stat(renamed_path, &target_stat);
+    try zigos.stat(hard_link_path, &hard_stat);
+    if (target_stat.node != hard_stat.node or target_stat.generation != hard_stat.generation or
+        target_stat.link_count != 2 or hard_stat.link_count != 2) return error.InvalidArgument;
+    const hard_fd = try zigos.open(hard_link_path, .{ .read = true }, 0);
+    var hard_payload: [payload.len]u8 = undefined;
+    if (try zigos.read(hard_fd, &hard_payload) != hard_payload.len or !equal(&hard_payload, payload))
+        return error.InvalidArgument;
+    try zigos.close(hard_fd);
     var stored_target: [32]u8 = undefined;
     const stored_target_length = try zigos.readlink(link_path, &stored_target);
     if (!equal(stored_target[0..stored_target_length], link_target)) return error.InvalidArgument;
@@ -115,10 +134,11 @@ fn verify() zigos.Error!u32 {
         return error.InvalidArgument;
     try zigos.close(linked);
     try zigos.unlink(link_path);
+    try zigos.unlink(hard_link_path);
     try zigos.unlink(renamed_path);
     try zigos.rmdir(root_path);
     try zigos.sync();
-    try zigos.writeAll(1, "fs-api: recovery/mode/seek/symlink/cleanup passed\r\n");
+    try zigos.writeAll(1, "fs-api: recovery/mode/seek/hard-link/symlink/cleanup passed\r\n");
     return 0x59;
 }
 

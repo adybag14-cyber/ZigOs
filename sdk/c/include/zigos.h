@@ -7,10 +7,10 @@
 
 #define ZIGOS_ABI_MAGIC UINT32_C(0x4942415A)
 #define ZIGOS_ABI_MAJOR UINT16_C(1)
-#define ZIGOS_ABI_MINOR UINT16_C(7)
+#define ZIGOS_ABI_MINOR UINT16_C(8)
 #define ZIGOS_PAGE_SIZE UINT32_C(4096)
 #define ZIGOS_SYSCALL_BASE UINT16_C(64)
-#define ZIGOS_SYSCALL_COUNT UINT16_C(50)
+#define ZIGOS_SYSCALL_COUNT UINT16_C(51)
 
 #define ZIGOS_AUX_NULL UINT64_C(0)
 #define ZIGOS_AUX_PAGESZ UINT64_C(6)
@@ -94,6 +94,7 @@
 #define ZIGOS_SYS_FSYNC UINT64_C(111)
 #define ZIGOS_SYS_SYMLINK UINT64_C(112)
 #define ZIGOS_SYS_READLINK UINT64_C(113)
+#define ZIGOS_SYS_LINK UINT64_C(114)
 
 #define ZIGOS_ERRNO_PERMISSION INT64_C(-1)
 #define ZIGOS_ERRNO_NOT_FOUND INT64_C(-2)
@@ -151,7 +152,7 @@ typedef struct zigos_abi_info {
 
 typedef struct zigos_stat {
     uint32_t node; uint16_t generation; uint8_t kind; uint8_t readonly;
-    uint16_t mode; uint8_t mount_id; uint8_t reserved0; uint64_t size; uint64_t modified_tick;
+    uint16_t mode; uint8_t mount_id; uint8_t link_count; uint64_t size; uint64_t modified_tick;
 } zigos_stat;
 
 typedef struct zigos_poll_descriptor {
@@ -180,6 +181,7 @@ int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);
 int64_t zigos_fsync(uint16_t fd);
 int64_t zigos_symlink(const char *target, const char *path);
 int64_t zigos_readlink(const char *path, void *bytes, size_t length);
+int64_t zigos_link(const char *old_path, const char *new_path);
 int64_t zigos_abi_query(zigos_abi_info *info);
 uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, const zigos_auxv_entry *auxv);
 #ifdef __cplusplus

@@ -846,6 +846,8 @@ fn commandStat(stage: *const runtime_command.Stage, output: *Output) void {
     output.octal(info.mode);
     output.write(" mount ");
     output.decimal(info.mount_id);
+    output.write(" links ");
+    output.decimal(info.link_count);
     output.write(" readonly ");
     output.line(if (info.readonly) "yes" else "no");
 }

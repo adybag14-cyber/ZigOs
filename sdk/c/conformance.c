@@ -71,7 +71,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.7 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.8 discovery passed\r\n")) {
         return 0xC4;
     }
 
@@ -158,13 +158,38 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xD0, "symlink loop/cleanup");
     }
 
-    int64_t host_fd = zigos_openat(ZIGOS_AT_CWD, "/etc/hostname", ZIGOS_OPEN_READ, 0);
-    if (host_fd < 0 || zigos_fsync((uint16_t)host_fd) != 0 || zigos_close((uint16_t)host_fd) != 0) {
-        return fail(0xD1, "descriptor fsync");
+    static const char hard_source[] = "/tmp/c-sdk-hard-source";
+    static const char hard_alias[] = "/tmp/c-sdk-hard-alias";
+    (void)remove_path(hard_source);
+    (void)remove_path(hard_alias);
+    int64_t hard_fd = zigos_open(hard_source, ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE | ZIGOS_OPEN_CREATE | ZIGOS_OPEN_TRUNCATE, 0644);
+    static const char hard_payload[] = "hard-link-data";
+    if (hard_fd < 0 || zigos_write((uint16_t)hard_fd, hard_payload, sizeof(hard_payload) - 1) != (int64_t)(sizeof(hard_payload) - 1) ||
+        zigos_close((uint16_t)hard_fd) != 0 || zigos_link(hard_source, hard_alias) != 0) {
+        return fail(0xD1, "hard link create");
+    }
+    zigos_stat hard_source_info = {0};
+    zigos_stat hard_alias_info = {0};
+    if (zigos_stat_path(hard_source, &hard_source_info) != 0 || zigos_stat_path(hard_alias, &hard_alias_info) != 0 ||
+        hard_source_info.node != hard_alias_info.node || hard_source_info.generation != hard_alias_info.generation ||
+        hard_source_info.link_count != 2 || hard_alias_info.link_count != 2 || remove_path(hard_source) != 0 ||
+        zigos_stat_path(hard_alias, &hard_alias_info) != 0 || hard_alias_info.link_count != 1) {
+        return fail(0xD2, "hard link identity/count");
+    }
+    hard_fd = zigos_open(hard_alias, ZIGOS_OPEN_READ, 0);
+    char hard_contents[sizeof(hard_payload)] = {0};
+    if (hard_fd < 0 || zigos_read((uint16_t)hard_fd, hard_contents, sizeof(hard_payload) - 1) != (int64_t)(sizeof(hard_payload) - 1) ||
+        !text_equal(hard_contents, hard_payload) || zigos_close((uint16_t)hard_fd) != 0 || remove_path(hard_alias) != 0) {
+        return fail(0xD3, "hard link shared data/cleanup");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink passed\r\n")) {
-        return 0xD2;
+    int64_t host_fd = zigos_openat(ZIGOS_AT_CWD, "/etc/hostname", ZIGOS_OPEN_READ, 0);
+    if (host_fd < 0 || zigos_fsync((uint16_t)host_fd) != 0 || zigos_close((uint16_t)host_fd) != 0) {
+        return fail(0xD4, "descriptor fsync");
+    }
+
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink passed\r\n")) {
+        return 0xD5;
     }
     return 0x57;
 }

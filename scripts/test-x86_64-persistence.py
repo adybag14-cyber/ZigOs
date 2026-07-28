@@ -331,9 +331,9 @@ def main() -> int:
                 ("shutdown", "ZigOs persistent storage: mounted yes generation/slot 1/0"),
             ],
             required_markers=[
-                "fs-api: init/mkdir/write/seek/replace-rename/chmod/symlink/readlink/open-unlink/rmdir/sync passed",
+                "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/open-unlink/rmdir/sync passed",
                 "exec: PID 3 state zombie status 0x58",
-                "ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 6/",
+                "ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 7/",
                 "errors 0/0 clean yes",
                 "persistent-storage yes canned-results no explicit-shutdown yes",
             ],
@@ -343,7 +343,7 @@ def main() -> int:
             raise RuntimeError("boot 1 did not modify the NVMe image")
         header_a = parse_header(image, data_first_lba, 0)
         header_b = parse_header(image, data_first_lba, 1)
-        if header_a is None or header_a.generation != 1 or header_a.record_count != 6 or header_b is not None:
+        if header_a is None or header_a.generation != 1 or header_a.record_count != 7 or header_b is not None:
             raise RuntimeError(f"unexpected generation-1 headers: A={header_a}, B={header_b}")
 
         second_text = run_boot(
@@ -368,7 +368,7 @@ def main() -> int:
                 "survived-generation-two",
                 "zig-sdk: envp/auxv passed",
                 "exec: PID 3 state zombie status 0x56",
-                "fs-api: recovery/mode/seek/symlink/cleanup passed",
+                "fs-api: recovery/mode/seek/hard-link/symlink/cleanup passed",
                 "exec: PID 4 state zombie status 0x59",
                 "ZigOs persistent storage: mounted yes generation/slot 2/1 records/payload 3/",
                 "errors 0/0 clean yes",
@@ -384,7 +384,7 @@ def main() -> int:
             raise RuntimeError(f"both A/B headers were not committed: A={header_a}, B={header_b}")
         if (header_a.generation, header_b.generation) != (1, 2):
             raise RuntimeError(f"unexpected A/B generations: A={header_a}, B={header_b}")
-        if header_a.record_count != 6 or header_b.record_count != 3:
+        if header_a.record_count != 7 or header_b.record_count != 3:
             raise RuntimeError(f"unexpected A/B record counts: A={header_a}, B={header_b}")
 
         summary = {
