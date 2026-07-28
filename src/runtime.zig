@@ -732,6 +732,7 @@ fn commandLs(stage: *const runtime_command.Stage, output: *Output) void {
             .directory => 'd',
             .file => '-',
             .pseudo => 'p',
+            .symlink => 'l',
         });
         output.write(if (record.readonly) "r-- " else "rw- ");
         output.decimal(record.size);

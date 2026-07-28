@@ -388,6 +388,14 @@ pub fn chmod(path: [*:0]const u8, mode: u16) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_chmod, ptrValue(path), mode, 0, 0, 0, 0));
 }
 
+pub fn symlink(target: [*:0]const u8, path: [*:0]const u8) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_symlink, ptrValue(target), ptrValue(path), 0, 0, 0, 0));
+}
+
+pub fn readlink(path: [*:0]const u8, output: []u8) Error!usize {
+    return @intCast(try result(zigos_syscall6(abi.syscall_readlink, ptrValue(path), ptrValue(output.ptr), output.len, 0, 0, 0)));
+}
+
 pub fn sync() Error!void {
     _ = try result(zigos_syscall6(abi.syscall_sync, 0, 0, 0, 0, 0, 0));
 }

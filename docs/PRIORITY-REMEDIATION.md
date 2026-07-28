@@ -6,7 +6,7 @@ This document records the current disposition of the post-Capstone architecture 
 
 The maintained x86-64 release line now requires:
 
-- 70 unique isolated Zig test declarations;
+- 71 unique isolated Zig test declarations;
 - generated ABI constants checked for staleness;
 - independent Zig and C userspace ELF verification;
 - a 45-command offline permanent-runtime COM1 session;
@@ -127,6 +127,7 @@ What it still is not:
 
 The bounded VFS now also provides real directory-descriptor-relative `openat`, one shared `stat`/`fstat` metadata conversion, and POSIX-style unlink lifetime for ordinary open files: the pathname disappears immediately, existing open descriptions remain usable, and the node is reclaimed after the final close. Detached files are absent from persistence snapshots because serialization walks only the visible namespace.
 Replacement rename is now supported for an existing same-mount file. All kind, mount, cycle, read-only and destination constraints are validated before mutation; the source then becomes the visible destination in one namespace operation. If the old destination is open, its descriptors retain the replaced object until final close, while persistence records only the new visible file.
+Symbolic links are represented as distinct VFS nodes. Normal path lookup follows relative and absolute targets with an eight-link maximum, while `unlink`, `rmdir`, rename-source lookup and `readlink` do not follow the final component. Link records and target text survive the A/B journal and are revalidated by a second CPL3 boot.
 
 Still open:
 
@@ -144,7 +145,7 @@ Still open:
 
 **Verdict: substantially addressed; stable external platform remains open.**
 
-Delivered through ABI 1.6:
+Delivered through ABI 1.7:
 
 - `abi/zigos-abi.json` remains the source of truth;
 - generated matching kernel Zig, NASM, public Zig and C constants/layouts;
@@ -152,11 +153,12 @@ Delivered through ABI 1.6:
 - capability discovery and SysV AMD64 argc/argv/envp/auxv startup;
 - Zig wrappers for process, VM, file, directory, poll and UDP APIs;
 - ABI 1.6 `ioctl`, path `stat`, `openat` and descriptor `fsync`;
+- ABI 1.7 `symlink` and `readlink` with an eight-link traversal bound;
 - a generated `sdk/c/include/zigos.h` and freestanding C wrapper library;
 - independently linked Zig and C conformance ELFs;
 - userspace DNS codec/resolver, init and shell.
 
-The booted C fixture proves generated layout compatibility, ABI discovery, `/dev/null`, `/dev/zero`, `/dev/console`, TTY ioctl flags, path stat, directory-descriptor and absolute `openat` semantics, and `fsync` from a non-Zig application.
+The booted C fixture proves generated layout compatibility, ABI discovery, `/dev/null`, `/dev/zero`, `/dev/console`, TTY ioctl flags, path stat, directory-descriptor and absolute `openat` semantics, `fsync`, symbolic-link creation, `readlink`, traversal and loop rejection from a non-Zig application.
 
 Still open:
 
@@ -164,7 +166,7 @@ Still open:
 - packaged/versioned SDK distribution;
 - dynamic linking and `ET_DYN`;
 - broader clocks and complete signal APIs;
-- links and symbolic links;
+- hard links and link counts;
 - file-backed mappings and broader filesystem synchronization calls.
 
 ### P2-U2: real TTY

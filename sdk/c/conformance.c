@@ -35,6 +35,10 @@ static int emit(const char *text) {
     return zigos_write(1, text, length) == (int64_t)length;
 }
 
+static int64_t remove_path(const char *path) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_UNLINK, (uint64_t)(uintptr_t)path, 0, 0, 0, 0, 0);
+}
+
 static uint32_t fail(uint32_t status, const char *message) {
     (void)emit("c-sdk: failure: ");
     (void)emit(message);
@@ -67,7 +71,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.6 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.7 discovery passed\r\n")) {
         return 0xC4;
     }
 
@@ -129,13 +133,38 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xCD, "directory-relative/absolute openat");
     }
 
-    int64_t host_fd = zigos_openat(ZIGOS_AT_CWD, "/etc/hostname", ZIGOS_OPEN_READ, 0);
-    if (host_fd < 0 || zigos_fsync((uint16_t)host_fd) != 0 || zigos_close((uint16_t)host_fd) != 0) {
-        return fail(0xCE, "descriptor fsync");
+    static const char link_path[] = "/tmp/c-sdk-hostname";
+    static const char link_target[] = "/etc/hostname";
+    static const char loop_a[] = "/tmp/c-sdk-loop-a";
+    static const char loop_b[] = "/tmp/c-sdk-loop-b";
+    (void)remove_path(link_path);
+    (void)remove_path(loop_a);
+    (void)remove_path(loop_b);
+    char read_target[32] = {0};
+    if (zigos_symlink(link_target, link_path) != 0) {
+        return fail(0xCE, "create symlink");
+    }
+    const int64_t target_length = zigos_readlink(link_path, read_target, sizeof(read_target) - 1);
+    int64_t link_fd = zigos_open(link_path, ZIGOS_OPEN_READ, 0);
+    char link_contents[32];
+    const int64_t link_length = link_fd < 0 ? link_fd : zigos_read((uint16_t)link_fd, link_contents, sizeof(link_contents));
+    if (target_length != (int64_t)(sizeof(link_target) - 1) || !text_equal(read_target, link_target) ||
+        link_fd < 0 || link_length <= 0 || zigos_close((uint16_t)link_fd) != 0) {
+        return fail(0xCF, "symlink/readlink traversal");
+    }
+    if (zigos_symlink("c-sdk-loop-b", loop_a) != 0 || zigos_symlink("c-sdk-loop-a", loop_b) != 0 ||
+        zigos_open(loop_a, ZIGOS_OPEN_READ, 0) != ZIGOS_ERRNO_LOOP ||
+        remove_path(loop_a) != 0 || remove_path(loop_b) != 0 || remove_path(link_path) != 0) {
+        return fail(0xD0, "symlink loop/cleanup");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync passed\r\n")) {
-        return 0xCF;
+    int64_t host_fd = zigos_openat(ZIGOS_AT_CWD, "/etc/hostname", ZIGOS_OPEN_READ, 0);
+    if (host_fd < 0 || zigos_fsync((uint16_t)host_fd) != 0 || zigos_close((uint16_t)host_fd) != 0) {
+        return fail(0xD1, "descriptor fsync");
+    }
+
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink passed\r\n")) {
+        return 0xD2;
     }
     return 0x57;
 }

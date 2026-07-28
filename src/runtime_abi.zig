@@ -223,7 +223,7 @@ pub fn fromError(err: anyerror) i64 {
         error.StillRunning, error.NoSlots, error.NoContext, error.ContextLimit, error.QuotaExceeded => errno_would_block,
         error.PermissionDenied => errno_access,
         error.InvalidHandle, error.BadDescriptor, error.NotReadable, error.NotWritable => errno_bad_fd,
-        error.InvalidPath, error.InvalidOffset, error.InvalidOperation, error.InvalidState, error.InvalidSignal, error.InvalidAddress, error.InvalidProtection, error.InvalidMapping => errno_invalid,
+        error.InvalidPath, error.InvalidOffset, error.InvalidOperation, error.InvalidState, error.InvalidSignal, error.InvalidAddress, error.InvalidProtection, error.InvalidMapping, error.NotSymlink => errno_invalid,
         error.NameTooLong, error.PathTooLong, error.ArgumentTooLong => errno_name_too_long,
         error.TooManyArguments => errno_too_big,
         error.AlreadyExists, error.NamespaceExists, error.AddressInUse => errno_exists,

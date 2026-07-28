@@ -606,6 +606,8 @@ pub fn handleSyscall(
         syscall.syscall_stat => return syscallStat(context, frame),
         syscall.syscall_openat => return syscallOpenAt(context, frame),
         syscall.syscall_fsync => return syscallFsync(context, frame, fx_state),
+        syscall.syscall_symlink => return syscallSymlink(context, frame),
+        syscall.syscall_readlink => return syscallReadlink(context, frame),
         syscall.syscall_shutdown => return syscallShutdown(context, frame, fx_state),
         syscall.syscall_getcwd => return syscallGetcwd(context, frame),
         syscall.syscall_chdir => return syscallChdir(context, frame),
@@ -2538,6 +2540,65 @@ fn syscallOpenAt(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     };
     frame.rax = fd;
+    return 0;
+}
+
+fn syscallSymlink(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var target_buffer: [runtime_vfs.maximum_symlink_target_length + 1]u8 = @splat(0);
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const target_length = copyUserString(context, frame.rdi, &target_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const path_length = copyUserString(context, frame.rsi, &path_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    _ = activeVfs().symlink(
+        process.cwd_node,
+        target_buffer[0..target_length],
+        path_buffer[0..path_length],
+        current_tick,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallReadlink(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const length: usize = std.math.cast(usize, frame.rdx) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (length > maximum_io_bytes or !validateRange(context, frame.rsi, length, true)) {
+        frame.rax = reject(if (length > maximum_io_bytes) errno_invalid else errno_fault);
+        return 0;
+    }
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    var output: [maximum_io_bytes]u8 = undefined;
+    const count = activeVfs().readlink(process.cwd_node, path_buffer[0..path_length], output[0..length]) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (!copyToUser(context, frame.rsi, output[0..count])) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = count;
     return 0;
 }
 

@@ -3,6 +3,8 @@ const std = @import("std");
 pub const maximum_nodes: usize = 96;
 pub const maximum_name_length: usize = 31;
 pub const maximum_path_length: usize = 255;
+pub const maximum_symlink_depth: usize = 8;
+pub const maximum_symlink_target_length: usize = maximum_path_length;
 pub const maximum_file_size: usize = 32 * 1024;
 pub const maximum_mounts: usize = 8;
 pub const maximum_open_files: usize = 64;
@@ -34,6 +36,7 @@ pub const Kind = enum(u8) {
     file,
     directory,
     pseudo,
+    symlink,
 };
 
 pub const MountKind = enum(u8) {
@@ -66,6 +69,7 @@ pub const Error = error{
     Cycle,
     UnsupportedOperation,
     NotSeekable,
+    NotSymlink,
 };
 
 pub const Stat = struct {
@@ -218,21 +222,11 @@ pub const Vfs = struct {
     }
 
     pub fn resolve(self: *const Vfs, cwd: u16, path: []const u8) Error!u16 {
-        if (path.len == 0) return self.validateDirectory(cwd);
-        if (path.len > maximum_path_length) return Error.PathTooLong;
-        var current: u16 = if (path[0] == '/') 0 else try self.validateDirectory(cwd);
-        var iterator = std.mem.splitScalar(u8, path, '/');
-        while (iterator.next()) |component| {
-            if (component.len == 0 or std.mem.eql(u8, component, ".")) continue;
-            if (component.len > maximum_name_length) return Error.NameTooLong;
-            if (std.mem.eql(u8, component, "..")) {
-                current = self.nodes[current].parent;
-                continue;
-            }
-            if (self.nodes[current].kind != .directory) return Error.NotDirectory;
-            current = self.findChild(current, component) orelse return Error.NotFound;
-        }
-        return current;
+        return self.resolveInternal(cwd, path, true, 0);
+    }
+
+    pub fn resolveNoFollow(self: *const Vfs, cwd: u16, path: []const u8) Error!u16 {
+        return self.resolveInternal(cwd, path, false, 0);
     }
 
     pub fn stat(self: *const Vfs, cwd: u16, path: []const u8) Error!Stat {
@@ -285,6 +279,31 @@ pub const Vfs = struct {
     pub fn create(self: *Vfs, cwd: u16, path: []const u8, mode: u16, tick: u64) Error!u16 {
         const parent_name = try self.parentAndName(cwd, path);
         return self.createNode(parent_name.parent, parent_name.name, .file, mode, false, tick);
+    }
+
+    pub fn symlink(self: *Vfs, cwd: u16, target: []const u8, path: []const u8, tick: u64) Error!u16 {
+        if (target.len == 0 or std.mem.indexOfScalar(u8, target, 0) != null) return Error.InvalidPath;
+        if (target.len > maximum_symlink_target_length) return Error.PathTooLong;
+        const parent_name = try self.parentAndName(cwd, path);
+        const node_index = try self.createNode(parent_name.parent, parent_name.name, .symlink, 0o777, false, tick);
+        @memcpy(self.nodes[node_index].data[0..target.len], target);
+        self.nodes[node_index].size = target.len;
+        return node_index;
+    }
+
+    pub fn readlink(self: *const Vfs, cwd: u16, path: []const u8, output: []u8) Error!usize {
+        const node_index = try self.resolveNoFollow(cwd, path);
+        const target = try self.symlinkTargetNode(node_index);
+        const count = @min(output.len, target.len);
+        @memcpy(output[0..count], target[0..count]);
+        return count;
+    }
+
+    pub fn symlinkTargetNode(self: *const Vfs, node_index: u16) Error![]const u8 {
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or !self.nodes[node_index].linked) return Error.NotFound;
+        const node = &self.nodes[node_index];
+        if (node.kind != .symlink) return Error.NotSymlink;
+        return node.data[0..node.size];
     }
 
     pub fn createPseudo(self: *Vfs, cwd: u16, path: []const u8, mode: u16, tick: u64) Error!u16 {
@@ -381,13 +400,13 @@ pub const Vfs = struct {
     }
 
     pub fn unlink(self: *Vfs, cwd: u16, path: []const u8) Error!void {
-        const node_index = try self.resolve(cwd, path);
+        const node_index = try self.resolveNoFollow(cwd, path);
         if (self.nodes[node_index].kind == .directory) return Error.IsDirectory;
         try self.unlinkNode(node_index);
     }
 
     pub fn rmdir(self: *Vfs, cwd: u16, path: []const u8) Error!void {
-        const node_index = try self.resolve(cwd, path);
+        const node_index = try self.resolveNoFollow(cwd, path);
         if (node_index == 0 or self.nodes[node_index].kind != .directory) return Error.NotDirectory;
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
@@ -397,7 +416,7 @@ pub const Vfs = struct {
     }
 
     pub fn rename(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, tick: u64) Error!void {
-        const source = try self.resolve(cwd, old_path);
+        const source = try self.resolveNoFollow(cwd, old_path);
         if (source == 0) return Error.Busy;
         const destination = try self.parentAndName(cwd, new_path);
         if (self.nodes[source].mount_id != self.nodes[destination.parent].mount_id) return Error.CrossMount;
@@ -745,6 +764,7 @@ pub const Vfs = struct {
             if (!node.used) continue;
             if (node.generation == 0 or node.name_length > maximum_name_length or node.size > maximum_file_size) return false;
             if (node.kind == .pseudo and node.pseudo_operations == null) return false;
+            if (node.kind == .symlink and (node.size == 0 or node.size > maximum_symlink_target_length)) return false;
             if (index != 0) {
                 if (!node.linked) {
                     if (node.kind == .directory or node.parent != invalid_node or node.name_length != 0 or !self.hasOpenReferences(@intCast(index))) return false;
@@ -793,7 +813,7 @@ pub const Vfs = struct {
             result.nodes_used += 1;
             result.bytes_used += node.size;
             switch (node.kind) {
-                .file => result.files += 1,
+                .file, .symlink => result.files += 1,
                 .directory => result.directories += 1,
                 .pseudo => result.pseudo_files += 1,
             }
@@ -801,6 +821,37 @@ pub const Vfs = struct {
         for (self.mounts) |mount_entry| result.mounts += @intFromBool(mount_entry.used);
         for (self.open_files) |open_file| result.open_files += @intFromBool(open_file.used);
         return result;
+    }
+
+    fn resolveInternal(self: *const Vfs, cwd: u16, path: []const u8, follow_final: bool, depth: usize) Error!u16 {
+        if (path.len == 0) return self.validateDirectory(cwd);
+        if (path.len > maximum_path_length) return Error.PathTooLong;
+        var current: u16 = if (path[0] == '/') 0 else try self.validateDirectory(cwd);
+        var position: usize = 0;
+        while (position < path.len) {
+            while (position < path.len and path[position] == '/') position += 1;
+            if (position >= path.len) break;
+            const start = position;
+            while (position < path.len and path[position] != '/') position += 1;
+            const component = path[start..position];
+            if (std.mem.eql(u8, component, ".")) continue;
+            if (component.len > maximum_name_length) return Error.NameTooLong;
+            if (std.mem.eql(u8, component, "..")) {
+                current = self.nodes[current].parent;
+                continue;
+            }
+            if (self.nodes[current].kind != .directory) return Error.NotDirectory;
+            const child = self.findChild(current, component) orelse return Error.NotFound;
+            const has_suffix = position < path.len;
+            if (self.nodes[child].kind == .symlink and (follow_final or has_suffix)) {
+                if (depth >= maximum_symlink_depth) return Error.Cycle;
+                const target = self.nodes[child].data[0..self.nodes[child].size];
+                current = try self.resolveInternal(self.nodes[child].parent, target, true, depth + 1);
+            } else {
+                current = child;
+            }
+        }
+        return current;
     }
 
     fn validateDirectory(self: *const Vfs, node_index: u16) Error!u16 {
@@ -898,7 +949,7 @@ pub const Vfs = struct {
         if (node_index >= self.nodes.len or !self.nodes[node_index].used) return Error.NotFound;
         const node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
-        if (node.kind == .pseudo or node.readonly or self.mountReadonly(node.mount_id)) return Error.ReadOnly;
+        if (node.kind == .pseudo or node.kind == .symlink or node.readonly or self.mountReadonly(node.mount_id)) return Error.ReadOnly;
         if ((node.mode & 0o222) == 0) return Error.PermissionDenied;
     }
 
@@ -1160,6 +1211,37 @@ test "VFS directory mutation rejects cycles and nonempty removal" {
     try fs.rename(0, "/a/b", "/b", 4);
     try fs.rmdir(0, "/a");
     try std.testing.expectEqual(@as(u16, 1), (try fs.stat(0, "/b")).generation);
+}
+
+test "VFS symbolic links follow relative and absolute targets with bounded loops" {
+    var fs = Vfs.init();
+    const root_dir = try fs.mkdir(0, "/links", 0o755, 1);
+    const nested = try fs.mkdir(root_dir, "nested", 0o755, 2);
+    _ = try fs.putFile(nested, "target", "payload", 0o644, false, 3);
+    const relative_link = try fs.symlink(root_dir, "nested/target", "relative", 4);
+    _ = try fs.symlink(root_dir, "/links/nested/target", "absolute", 5);
+    _ = try fs.symlink(root_dir, "../links/nested", "directory", 6);
+
+    var target_buffer: [maximum_path_length]u8 = undefined;
+    const target_length = try fs.readlink(root_dir, "relative", &target_buffer);
+    try std.testing.expectEqualStrings("nested/target", target_buffer[0..target_length]);
+    try std.testing.expectEqual(relative_link, try fs.resolveNoFollow(root_dir, "relative"));
+    try std.testing.expectEqualStrings("payload", try fs.readOnlyView(root_dir, "relative"));
+    try std.testing.expectEqualStrings("payload", try fs.readOnlyView(root_dir, "absolute"));
+    try std.testing.expectEqualStrings("payload", try fs.readOnlyView(root_dir, "directory/target"));
+    try std.testing.expectError(Error.NotSymlink, fs.readlink(root_dir, "nested/target", &target_buffer));
+
+    _ = try fs.symlink(root_dir, "loop-b", "loop-a", 7);
+    _ = try fs.symlink(root_dir, "loop-a", "loop-b", 8);
+    try std.testing.expectError(Error.Cycle, fs.resolve(root_dir, "loop-a"));
+    try std.testing.expectError(Error.Cycle, fs.resolve(root_dir, "loop-a/child"));
+
+    try fs.unlink(root_dir, "relative");
+    try std.testing.expectError(Error.NotFound, fs.resolveNoFollow(root_dir, "relative"));
+    try std.testing.expectEqualStrings("payload", try fs.readOnlyView(root_dir, "nested/target"));
+    try fs.rename(root_dir, "absolute", "renamed", 9);
+    try std.testing.expectEqualStrings("payload", try fs.readOnlyView(root_dir, "renamed"));
+    try std.testing.expect(fs.validate());
 }
 
 test "VFS replacement rename preserves open destination handles" {

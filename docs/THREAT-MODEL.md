@@ -4,7 +4,7 @@
 
 This document describes the security boundary of the current bounded x86-64 ZigOs runtime. It is a development threat model, not a claim that ZigOs is secure against hostile workloads.
 
-The model covers the post-UEFI kernel, retained CPL3 processes, the bounded RAM VFS, the `/persist` A/B journal, COM1/TTY input, the retained e1000e and NVMe paths, and the generated ABI 1.6 SDK interfaces. The legacy i686 environment is outside this document.
+The model covers the post-UEFI kernel, retained CPL3 processes, the bounded RAM VFS, the `/persist` A/B journal, COM1/TTY input, the retained e1000e and NVMe paths, and the generated ABI 1.7 SDK interfaces. The legacy i686 environment is outside this document.
 
 ## Assets to protect
 

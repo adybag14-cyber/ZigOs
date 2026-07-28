@@ -52,6 +52,14 @@ int64_t zigos_fsync(uint16_t fd) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_FSYNC, fd, 0, 0, 0, 0, 0);
 }
 
+int64_t zigos_symlink(const char *target, const char *path) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_SYMLINK, pointer_value(target), pointer_value(path), 0, 0, 0, 0);
+}
+
+int64_t zigos_readlink(const char *path, void *bytes, size_t length) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_READLINK, pointer_value(path), pointer_value(bytes), length, 0, 0, 0);
+}
+
 int64_t zigos_abi_query(zigos_abi_info *info) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_ABI_QUERY, pointer_value(info), sizeof(*info), 0, 0, 0, 0);
 }

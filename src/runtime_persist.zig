@@ -266,9 +266,13 @@ pub const Store = struct {
             for (list.records[0..list.count]) |record| {
                 if (record.kind == .directory or record.kind == .pseudo) continue;
                 const child = try self.buildChildPath(parent, record.nameSlice());
-                const stat = vfs.stat(0, child) catch return Error.InvalidRecord;
-                const data = vfs.readOnlyView(0, child) catch return Error.InvalidRecord;
-                used = try appendRecord(&self.payload, used, child[persist_prefix.len..], .file, stat.mode, data);
+                const stat = vfs.statNode(record.node) catch return Error.InvalidRecord;
+                const data = switch (record.kind) {
+                    .file => vfs.readOnlyView(0, child) catch return Error.InvalidRecord,
+                    .symlink => vfs.symlinkTargetNode(record.node) catch return Error.InvalidRecord,
+                    .directory, .pseudo => unreachable,
+                };
+                used = try appendRecord(&self.payload, used, child[persist_prefix.len..], record.kind, stat.mode, data);
                 records +%= 1;
             }
         }
@@ -298,6 +302,7 @@ pub const Store = struct {
             const kind: runtime_vfs.Kind = switch (self.payload[offset]) {
                 1 => .directory,
                 2 => .file,
+                3 => .symlink,
                 else => return Error.Corrupt,
             };
             const path_length: usize = self.payload[offset + 1];
@@ -318,6 +323,10 @@ pub const Store = struct {
                 .file => {
                     if (data_length > runtime_vfs.maximum_file_size) return Error.Corrupt;
                     _ = vfs.putFile(0, path, self.payload[offset .. offset + data_length], mode, false, tick) catch return Error.InvalidRecord;
+                },
+                .symlink => {
+                    if (data_length == 0 or data_length > runtime_vfs.maximum_symlink_target_length) return Error.Corrupt;
+                    _ = vfs.symlink(0, self.payload[offset .. offset + data_length], path, tick) catch return Error.InvalidRecord;
                 },
                 .pseudo => return Error.Corrupt,
             }
@@ -457,6 +466,7 @@ fn appendRecord(
     const kind_byte: u8 = switch (kind) {
         .directory => 1,
         .file => 2,
+        .symlink => 3,
         .pseudo => return Error.InvalidRecord,
     };
     payload[initial_offset] = kind_byte;
@@ -574,6 +584,7 @@ test "alternating snapshots restore a persistent VFS subtree" {
     try first_store.mount(first_vfs, disk.device(), 1);
     _ = try first_vfs.ensureDirectory(0, "/persist/config", 0o755, 2);
     _ = try first_vfs.putFile(0, "/persist/config/name.txt", "zigos\n", 0o640, false, 3);
+    _ = try first_vfs.symlink(0, "config/name.txt", "/persist/name-link", 4);
     try first_store.sync(first_vfs);
     try std.testing.expectEqual(@as(u64, 1), first_store.report().generation);
     try first_store.check();
@@ -584,6 +595,10 @@ test "alternating snapshots restore a persistent VFS subtree" {
     var second_store: Store = .{};
     try second_store.mount(second_vfs, disk.device(), 10);
     try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/config/name.txt"));
+    try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/name-link"));
+    var link_target: [runtime_vfs.maximum_path_length]u8 = undefined;
+    const link_length = try second_vfs.readlink(0, "/persist/name-link", &link_target);
+    try std.testing.expectEqualStrings("config/name.txt", link_target[0..link_length]);
     try std.testing.expectEqual(@as(u64, 1), second_store.report().generation);
 
     _ = try second_vfs.putFile(0, "/persist/config/name.txt", "second\n", 0o600, false, 11);
