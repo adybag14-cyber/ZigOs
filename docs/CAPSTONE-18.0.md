@@ -144,7 +144,7 @@ Capstone release accounting and the general 500-goal roadmap are intentionally s
 - Four broad roadmap items are now complete: **G112, G191, G192 and G194**.
 - The 500-goal roadmap therefore moves from 96/404 to **100 complete and 400 open**.
 
-G175 remains open because pipes do not yet block and resume retained arbitrary CPL3 executable contexts. G193 remains open because the current bounded single-CPU model is not a general SMP-safe multiwriter atomic-append contract.
+At the Capstone 18 milestone, G175 remained open because pipes did not yet block and resume retained arbitrary CPL3 executable contexts, and G193 remained open because the bounded single-CPU model was not a general multiwriter atomic-append contract. G175 was subsequently closed by Capstone 19; G193 was later closed by the per-inode ticket-lock tranche with four concurrent host writers and zero-outstanding-ticket release gates.
 
 ## Deliberate limitations
 

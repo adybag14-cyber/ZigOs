@@ -2300,7 +2300,8 @@ fn finishNormalRuntime() noreturn {
             persistence_report.io_failures == 0 and persistence_report.corrupt_headers == 0;
     const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
         fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases and fs_report.dentry_cache_hits > 0 and
-        fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0;
+        fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0 and
+        fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0;
     const clean = init_process.pid == 1 and init_process.state == .zombie and init_process.exit_status == 0 and
         state.shell_exit_requested and state.init_reaped_shell and vfs_clean and fs_report.mounts >= 5 and
         process_report.live == 1 and process_report.zombies == 1 and process_report.total_reaped >= 1 and
@@ -2413,7 +2414,8 @@ fn finishDiagnosticRuntime() noreturn {
         nvme_controller.?.flush_commands == persistence_report.flushes;
     const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
         fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases and fs_report.dentry_cache_hits > 0 and
-        fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0;
+        fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0 and
+        fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0;
     const descriptor_clean = state.descriptors.validate(&state.vfs, &state.processes) and
         descriptor_report.namespaces == 1 and descriptor_report.descriptors == 3 and
         descriptor_report.open_descriptions == 3 and descriptor_report.terminal_descriptions == 3 and
@@ -2474,6 +2476,10 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(fs_report.dentry_cache_acquires);
     emit("/");
     emitDecimal(fs_report.dentry_cache_releases);
+    emit(" data-lock tickets/outstanding ");
+    emitDecimal(fs_report.data_lock_tickets);
+    emit("/");
+    emitDecimal(fs_report.data_lock_outstanding);
     emit(" clean ");
     emit(if (vfs_clean) "yes" else "no");
     emit("\r\n");

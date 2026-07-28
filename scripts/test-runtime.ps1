@@ -315,6 +315,7 @@ try {
         'cache entries/refs ',
         ' hit/miss ',
         ' acquire/release ',
+        ' data-lock tickets/outstanding ',
         'ZigOs persistent processes:',
         'faults 1',
         $(if ($Network) { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/62/1 blocked 3/1 wakeups 3/1' } else { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 2/56/1 blocked 3/1 wakeups 3/1' }),

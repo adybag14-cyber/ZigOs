@@ -1,8 +1,5 @@
 const std = @import("std");
 
-const cc = std.os.uefi.cc;
-extern fn zigos_cpu_relax() callconv(cc) void;
-
 pub const TicketLock = struct {
     next_ticket: u32,
     serving_ticket: u32,
@@ -17,7 +14,7 @@ pub const TicketLock = struct {
     pub fn acquire(self: *TicketLock) u32 {
         const ticket = @atomicRmw(u32, &self.next_ticket, .Add, 1, .acq_rel);
         while (@atomicLoad(u32, &self.serving_ticket, .acquire) != ticket) {
-            zigos_cpu_relax();
+            std.atomic.spinLoopHint();
         }
         return ticket;
     }
@@ -58,7 +55,7 @@ pub const Barrier = struct {
             return generation +% 1;
         }
         while (@atomicLoad(u32, &self.generation, .acquire) == generation) {
-            zigos_cpu_relax();
+            std.atomic.spinLoopHint();
         }
         return @atomicLoad(u32, &self.generation, .acquire);
     }

@@ -18,7 +18,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 74 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe two-boot persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 75 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe two-boot persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -110,18 +110,20 @@ Representative exact shutdown contracts are:
 ```text
 # Offline
 ZigOs persistent runtime shutdown: commands 45 failed 0
+ZigOs persistent VFS: ... data-lock tickets/outstanding 30/0 ... clean yes
 ZigOs persistent descriptors: ... dup/inherited/cloexec 2/56/1 ... clean yes
 ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
-ZigOs post-bootstrap physical memory: ... peak 48 alloc/free 246/246 failed/rejected 0/0 clean yes
-ZigOs permanent userspace: page-limit 4096 used 0 peak 48 contexts 0 launches/exits/faults 15/13/1 ... reclaimed 246 stale-contexts-swept 0 allocator alloc/release/retains 246/246/0 shared/oom/rejected 0/0/0 clean yes
+ZigOs post-bootstrap physical memory: ... peak 48 alloc/free 247/247 failed/rejected 0/0 clean yes
+ZigOs permanent userspace: page-limit 4096 used 0 peak 48 contexts 0 launches/exits/faults 15/13/1 ... reclaimed 247 stale-contexts-swept 0 allocator alloc/release/retains 247/247/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes
 
 # Live e1000e
 ZigOs persistent runtime shutdown: commands 47 failed 0
+ZigOs persistent VFS: ... data-lock tickets/outstanding 30/0 ... clean yes
 ZigOs persistent descriptors: ... dup/inherited/cloexec 2/62/1 ... clean yes
 ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
-ZigOs post-bootstrap physical memory: ... peak 48 alloc/free 277/277 failed/rejected 0/0 clean yes
-ZigOs permanent userspace: page-limit 4096 used 0 peak 48 contexts 0 launches/exits/faults 17/15/1 ... reclaimed 277 stale-contexts-swept 0 allocator alloc/release/retains 277/277/0 shared/oom/rejected 0/0/0 clean yes
+ZigOs post-bootstrap physical memory: ... peak 48 alloc/free 278/278 failed/rejected 0/0 clean yes
+ZigOs permanent userspace: page-limit 4096 used 0 peak 48 contexts 0 launches/exits/faults 17/15/1 ... reclaimed 278 stale-contexts-swept 0 allocator alloc/release/retains 278/278/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 
 # Normal userspace-shell profile
@@ -157,7 +159,7 @@ The x86-64 runtime VFS currently provides:
 - directory-descriptor-relative `openat` and one shared VFS-to-ABI metadata conversion for `stat`/`fstat`;
 - stat and chmod metadata;
 - generation-safe VFS open handles used behind shared open-file descriptions;
-- descriptor-backed read, write, append, seek and truncate operations;
+- descriptor-backed read, write, seek and truncate operations, with per-inode ticket-locked append transactions across independent writers;
 - descriptor quotas and structural integrity validation.
 
 Mounted namespaces:
@@ -182,7 +184,7 @@ The permanent descriptor layer provides:
 - deterministic lowest-free allocation;
 - shared offsets and reference counts across `dup`, `dup2` and cloned namespaces;
 - process-local close-on-exec flags and exact close-on-exec cleanup;
-- regular-file read, write, append, seek and truncate operations;
+- regular-file read, write, seek and truncate operations, with append serialized from EOF selection through data, size and final offset updates;
 - 32 bounded 1,024-byte circular pipes;
 - reader blocking on empty pipes and writer blocking on full pipes;
 - targeted scheduler wakeups, final-writer EOF and final-reader broken-pipe behavior;
@@ -302,7 +304,7 @@ zig-out/
     `-- runtime-*.elf
 ```
 
-`zig build test` executes ten canonical host-test roots covering 74 unique `std.testing` declarations across eleven source files, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence, ELF loading and the DNS codec. Imported tests may execute from more than one root, but the source contract counts each declaration once.
+`zig build test` executes ten canonical host-test roots covering 75 unique `std.testing` declarations across eleven source files, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence, ELF loading and the DNS codec. Imported tests may execute from more than one root, but the source contract counts each declaration once.
 
 `zig build check` runs formatting, all isolated tests, the UEFI build and portable PE/COFF verification.
 
@@ -349,11 +351,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    6,924,800 bytes
-SHA-256: B4723A6F3008E2E4E40CAE51FE136E24420AB41D85E594D2104BF34EFB486B1C
+Size:    6,927,872 bytes
+SHA-256: 25CA32AABD29CBE07ED61B9ABBCC1F97F170A62D706B56BED7168A6DFDDF2AF9
 ```
 
-This identity is from the locally validated Windows diagnostic ABI 1.8 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, and persistent bounded symbolic-link traversal, hard-link identity and reference-counted dentry-cache cleanup. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic ABI 1.8 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots and per-inode ticket-locked atomic append. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
@@ -390,7 +392,7 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 74 unique isolated declarations, directly linked Zig/C SDK, init, shell and DNS verification, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 75 unique isolated declarations, directly linked Zig/C SDK, init, shell and DNS verification, x86-64 UEFI build, portable PE verification and artifact upload.
 - **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 45-command offline and 47-command live-network permanent COM1 sessions, the x86-64 NVMe two-boot proof, persistent and diskless normal boots, and the legacy i686 build/two-boot regression.
 - **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 
@@ -456,7 +458,7 @@ src/serial.zig                    COM1 transmit and receive
 - The userspace network ABI is UDP-only, with eight descriptor bookkeeping slots but four active e1000e hardware endpoints and fixed receive queues. It supports connected and unconnected datagrams, source-address receive, peer inspection, poll and socket-level/per-call nonblocking receive, but there is no TCP listen/accept/data API, general socket-option layer, IPv6 or production network stack.
 - Permanent userspace scheduling currently runs on the BSP rather than an SMP scheduler.
 - Hardware support remains strongly aligned with QEMU q35, QEMU NVMe/xHCI and Intel 82574L emulation.
-- ABI version 1.6 provides generated Zig/NASM/C syscall interfaces, bounded startup/spawn vectors, capability discovery and errno conventions, but it is still experimental: there is no formal compatibility guarantee, complete user/group permission model, ASLR, IOMMU DMA isolation or executable-signing policy.
+- ABI version 1.8 provides generated Zig/NASM/C syscall interfaces, bounded startup/spawn vectors, capability discovery and errno conventions, but it is still experimental: there is no formal compatibility guarantee, complete user/group permission model, ASLR, IOMMU DMA isolation or executable-signing policy.
 - ZigOs remains experimental, non-POSIX and not secure against hostile workloads.
 
 ## Design principles

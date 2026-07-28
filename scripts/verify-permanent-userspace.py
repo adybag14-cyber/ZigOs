@@ -42,6 +42,7 @@ def main() -> int:
     e1000e_source = text("src/e1000e.zig")
     page_pool_source = text("src/runtime_page_pool.zig")
     vfs_source = text("src/runtime_vfs.zig")
+    synchronization_source = text("src/synchronization.zig")
     tty_source = text("src/runtime_tty.zig")
     fd_source = text("src/runtime_fd.zig")
     persist_source = text("src/runtime_persist.zig")
@@ -290,6 +291,16 @@ def main() -> int:
     require(vfs_source, "if (cache_entry.references != 0) continue", "referenced cache entries cannot be evicted")
     require(vfs_source, "return .{ .dentry = dentry_index }", "cache exhaustion falls back to authoritative lookup")
     require(vfs_source, 'test "VFS dentry cache references protect pinned entries and invalidate mutations"', "isolated test proves reference pinning, LRU eviction and mutation invalidation")
+    require(synchronization_source, "std.atomic.spinLoopHint()", "ticket locks use a portable processor-relax hint in kernel and host tests")
+    forbid(synchronization_source, "zigos_cpu_relax", "ticket locks retained a host-incompatible assembly-only relax dependency")
+    require(vfs_source, 'const synchronization = @import("synchronization.zig");', "VFS reuses the shared ticket-lock primitive")
+    require(vfs_source, "data_lock: synchronization.TicketLock", "each inode owns a data-mutation serialization lock")
+    require(vfs_source, "fn appendNode", "append has a dedicated serialized EOF-to-write transaction")
+    require(vfs_source, "const offset = node.size;", "append selects EOF while holding the inode data lock")
+    require(vfs_source, "const written = try self.writeNodeLocked", "append copies data and updates size inside the same critical section")
+    require(vfs_source, "open_file.offset = offset + written;", "descriptor append updates its final offset before releasing the inode data lock")
+    require(vfs_source, 'test "VFS append writes are atomic across independent concurrent writers"', "four host threads prove append records are neither overlapped nor lost")
+    require(vfs_source, "std.Thread.spawn", "append atomicity is tested with actual concurrent host writers")
     require(vfs_source, "parent_id: u8 = 0", "mount entries retain explicit parent-mount identity")
     require(vfs_source, "mountpoint_node: u16 = invalid_node", "mount entries retain covered mountpoint nodes")
     require(vfs_source, "root_node: u16 = invalid_node", "mount entries own separate mounted root nodes")
@@ -313,10 +324,14 @@ def main() -> int:
     require(runtime, "fs_report.dentry_cache_references == 0", "normal and diagnostic release gates require zero live cache references")
     require(runtime, "fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases", "release gates require balanced cache reference accounting")
     require(runtime, "fs_report.dentry_cache_hits > 0", "release gates require real cache hits")
+    require(runtime, "fs_report.data_lock_tickets > 0", "release gates require exercised inode data locks")
+    require(runtime, "fs_report.data_lock_outstanding == 0", "release gates require every inode data-lock ticket to drain")
     require(runtime, "cache entries/refs", "diagnostic shutdown reports cache occupancy and references")
     require(runtime, "acquire/release", "diagnostic shutdown reports cache reference accounting")
+    require(runtime, "data-lock tickets/outstanding", "diagnostic shutdown reports inode data-lock accounting")
     require(runtime_test, "cache entries/refs ", "required permanent-runtime sessions expose dentry-cache resource state")
     require(runtime_test, " acquire/release ", "required permanent-runtime sessions expose balanced cache references")
+    require(runtime_test, " data-lock tickets/outstanding ", "required permanent-runtime sessions expose drained inode data locks")
     require(vfs_source, 'test "VFS hard links share node identity data and deferred lifetime"', "hard-link identity, nlink and final-close lifetime are isolated-tested")
     require(vfs_source, "pub const maximum_symlink_depth: usize = 8", "VFS publishes a bounded symbolic-link traversal limit")
     require(vfs_source, "pub fn resolveNoFollow", "VFS exposes final-component no-follow lookup for namespace mutation")
@@ -537,8 +552,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 74:
-        raise SystemExit(f"canonical isolated-test declaration total must be 74, found {declared_tests}")
+    if declared_tests != 75:
+        raise SystemExit(f"canonical isolated-test declaration total must be 75, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -609,6 +624,7 @@ def main() -> int:
         "c-sdk: ABI 1.8 discovery passed",
         "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink passed",
         "ZigOs shutdown drain:",
+        " data-lock tickets/outstanding ",
         "exec: PID 16 state zombie status 0x56",
         "ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes",
         "sync complete: ramfs mutations ",
@@ -635,7 +651,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.8 Zig/C SDKs, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.8 Zig/C SDKs, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

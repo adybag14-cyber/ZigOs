@@ -2141,7 +2141,7 @@ Status: released after successful portable Linux and Windows integration CI.
 - The descriptor shutdown report requires one namespace, three terminal descriptors/open descriptions, zero VFS descriptions, zero pipe endpoints and complete structural validation before the release marker is emitted.
 - Cumulative historical x86-64 accounting is 465 goals (`0x1D1`), with 32 (`0x20`) new in Capstone 18.
 - The separate 500-goal general-OS roadmap now has 100 complete and 400 open; G112, G191, G192 and G194 are newly closed.
-- G175 and G193 remain open because permanent arbitrary CPL3 executable contexts and a general SMP-safe multiwriter append contract are not implemented.
+- At Capstone 18, G175 and G193 remained open because permanent arbitrary CPL3 executable contexts and a general SMP-safe multiwriter append contract were not implemented. G175 was subsequently closed by Capstone 19; G193 was later closed by the per-inode ticket-lock tranche with a four-thread multiwriter proof and zero-outstanding-ticket release gates.
 - Locally verified reference `BOOTX64.EFI`: 2,716,672 bytes, SHA-256 `4C7D5F0FC945F6F53306363C47418E3C63C60979CAA6E06C0B41C101E9382FA1`.
 - Exact release contract: [`CAPSTONE-18.0.md`](CAPSTONE-18.0.md).
 

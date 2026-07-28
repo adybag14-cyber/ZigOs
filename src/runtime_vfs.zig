@@ -1,4 +1,5 @@
 const std = @import("std");
+const synchronization = @import("synchronization.zig");
 
 pub const maximum_nodes: usize = 96;
 pub const maximum_dentries: usize = maximum_nodes * 2;
@@ -118,6 +119,7 @@ const Node = struct {
     readonly: bool = false,
     mount_id: u8 = 0,
     modified_tick: u64 = 0,
+    data_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
     pseudo_operations: ?*const PseudoOperations = null,
     pseudo_context: ?*anyopaque = null,
 };
@@ -225,6 +227,8 @@ pub const Report = struct {
     dentry_cache_rejections: u64,
     dentry_cache_acquires: u64,
     dentry_cache_releases: u64,
+    data_lock_tickets: u64,
+    data_lock_outstanding: u64,
 };
 
 pub const Vfs = struct {
@@ -426,6 +430,8 @@ pub const Vfs = struct {
         var node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if (node.readonly or self.mountReadonly(node.mount_id)) return Error.ReadOnly;
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
         @memset(&node.data, 0);
         @memcpy(node.data[0..bytes.len], bytes);
         node.size = bytes.len;
@@ -468,19 +474,17 @@ pub const Vfs = struct {
     pub fn append(self: *Vfs, cwd: u16, path: []const u8, bytes: []const u8, tick: u64) Error!usize {
         const node_index = try self.resolve(cwd, path);
         if (self.nodes[node_index].kind == .pseudo) return self.writePseudo(node_index, 0, bytes);
-        return self.writeNode(node_index, self.nodes[node_index].size, bytes, false, tick);
+        return (try self.appendNode(node_index, bytes, tick)).written;
     }
 
     pub fn truncate(self: *Vfs, cwd: u16, path: []const u8, size: usize, tick: u64) Error!void {
         if (size > maximum_file_size) return Error.FileTooLarge;
         const node_index = try self.resolve(cwd, path);
-        var node = &self.nodes[node_index];
         try self.requireWritableFile(node_index);
-        if (size < node.size) @memset(node.data[size..node.size], 0);
-        if (size > node.size) @memset(node.data[node.size..size], 0);
-        node.size = size;
-        node.modified_tick = tick;
-        self.mutations +%= 1;
+        var node = &self.nodes[node_index];
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
+        self.truncateNodeLocked(node_index, size, tick);
     }
 
     pub fn unlink(self: *Vfs, cwd: u16, path: []const u8) Error!void {
@@ -757,7 +761,16 @@ pub const Vfs = struct {
             open_file.offset += written;
             return written;
         }
-        if (open_file.append) open_file.offset = self.nodes[open_file.node].size;
+        if (open_file.append) {
+            try self.requireWritableFile(open_file.node);
+            var node = &self.nodes[open_file.node];
+            _ = node.data_lock.acquire();
+            defer node.data_lock.release();
+            const offset = node.size;
+            const written = try self.writeNodeLocked(open_file.node, offset, bytes, false, tick);
+            open_file.offset = offset + written;
+            return written;
+        }
         const written = try self.writeNode(open_file.node, open_file.offset, bytes, false, tick);
         open_file.offset += written;
         return written;
@@ -850,11 +863,9 @@ pub const Vfs = struct {
         if (!self.open_files[index].writable) return Error.PermissionDenied;
         try self.requireWritableFile(node_index);
         var node = &self.nodes[node_index];
-        if (size < node.size) @memset(node.data[size..node.size], 0);
-        if (size > node.size) @memset(node.data[node.size..size], 0);
-        node.size = size;
-        node.modified_tick = tick;
-        self.mutations +%= 1;
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
+        self.truncateNodeLocked(node_index, size, tick);
     }
 
     pub fn validate(self: *const Vfs) bool {
@@ -880,6 +891,7 @@ pub const Vfs = struct {
         }
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
+            if (node.data_lock.next() != node.data_lock.serving()) return false;
             if (!node.used) {
                 if (counted_links[index] != 0) return false;
                 continue;
@@ -967,9 +979,15 @@ pub const Vfs = struct {
             .dentry_cache_rejections = self.dentry_cache_rejections,
             .dentry_cache_acquires = self.dentry_cache_acquires,
             .dentry_cache_releases = self.dentry_cache_releases,
+            .data_lock_tickets = 0,
+            .data_lock_outstanding = 0,
         };
         for (0..self.nodes.len) |node_index| {
             const node = &self.nodes[node_index];
+            const next_ticket = node.data_lock.next();
+            const serving_ticket = node.data_lock.serving();
+            result.data_lock_tickets += next_ticket;
+            result.data_lock_outstanding += next_ticket -% serving_ticket;
             if (!node.used) continue;
             result.nodes_used += 1;
             result.bytes_used += node.size;
@@ -1267,8 +1285,30 @@ pub const Vfs = struct {
         return write_fn(node.pseudo_context, node_index, offset, bytes);
     }
 
+    const AppendResult = struct {
+        written: usize,
+        end_offset: usize,
+    };
+
     fn writeNode(self: *Vfs, node_index: u16, offset: usize, bytes: []const u8, truncate_first: bool, tick: u64) Error!usize {
         try self.requireWritableFile(node_index);
+        var node = &self.nodes[node_index];
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
+        return self.writeNodeLocked(node_index, offset, bytes, truncate_first, tick);
+    }
+
+    fn appendNode(self: *Vfs, node_index: u16, bytes: []const u8, tick: u64) Error!AppendResult {
+        try self.requireWritableFile(node_index);
+        var node = &self.nodes[node_index];
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
+        const offset = node.size;
+        const written = try self.writeNodeLocked(node_index, offset, bytes, false, tick);
+        return .{ .written = written, .end_offset = offset + written };
+    }
+
+    fn writeNodeLocked(self: *Vfs, node_index: u16, offset: usize, bytes: []const u8, truncate_first: bool, tick: u64) Error!usize {
         if (offset > maximum_file_size or bytes.len > maximum_file_size - offset) return Error.FileTooLarge;
         var node = &self.nodes[node_index];
         if (truncate_first) {
@@ -1281,6 +1321,15 @@ pub const Vfs = struct {
         node.modified_tick = tick;
         self.mutations +%= 1;
         return bytes.len;
+    }
+
+    fn truncateNodeLocked(self: *Vfs, node_index: u16, size: usize, tick: u64) void {
+        var node = &self.nodes[node_index];
+        if (size < node.size) @memset(node.data[size..node.size], 0);
+        if (size > node.size) @memset(node.data[node.size..size], 0);
+        node.size = size;
+        node.modified_tick = tick;
+        self.mutations +%= 1;
     }
 
     fn requireWritableFile(self: *const Vfs, node_index: u16) Error!void {
@@ -1572,6 +1621,77 @@ test "VFS resolves absolute relative dot and parent paths" {
     try std.testing.expectEqual(user, try fs.resolve(home, "user"));
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings("/home/user", try fs.canonicalPath(user, &buffer));
+}
+
+const ConcurrentAppendWorker = struct {
+    fs: *Vfs,
+    owner_pid: u32,
+    handle: u32,
+    worker_id: u8,
+
+    fn run(worker: ConcurrentAppendWorker) void {
+        var iteration: u8 = 0;
+        while (iteration < 32) : (iteration += 1) {
+            const record = [4]u8{ worker.worker_id, iteration, 0xA5, 0x5A };
+            const written = worker.fs.writeOpen(worker.owner_pid, worker.handle, &record, iteration) catch
+                @panic("concurrent append write failed");
+            if (written != record.len) @panic("concurrent append write was partial");
+        }
+    }
+};
+
+test "VFS append writes are atomic across independent concurrent writers" {
+    var fs = Vfs.init();
+    _ = try fs.mkdir(0, "/tmp", 0o777, 1);
+    const workers: usize = 4;
+    var handles: [workers]u32 = undefined;
+    var threads: [workers]std.Thread = undefined;
+
+    for (0..workers) |worker_index| {
+        const owner_pid: u32 = @intCast(worker_index + 1);
+        handles[worker_index] = try fs.open(
+            owner_pid,
+            0,
+            "/tmp/atomic-append",
+            .{ .write = true, .create = worker_index == 0, .truncate = worker_index == 0, .append = true },
+            0o644,
+            2,
+        );
+    }
+    const before = fs.report().data_lock_tickets;
+    for (0..workers) |worker_index| {
+        threads[worker_index] = try std.Thread.spawn(.{}, ConcurrentAppendWorker.run, .{ConcurrentAppendWorker{
+            .fs = &fs,
+            .owner_pid = @intCast(worker_index + 1),
+            .handle = handles[worker_index],
+            .worker_id = @intCast(worker_index),
+        }});
+    }
+    for (&threads) |*thread| thread.join();
+
+    const expected_records = workers * 32;
+    const expected_bytes = expected_records * 4;
+    const info = try fs.stat(0, "/tmp/atomic-append");
+    try std.testing.expectEqual(expected_bytes, info.size);
+    var contents: [expected_bytes]u8 = undefined;
+    try std.testing.expectEqual(expected_bytes, try fs.read(0, "/tmp/atomic-append", 0, &contents));
+    var seen: [workers][32]bool = @splat(@splat(false));
+    var offset: usize = 0;
+    while (offset < contents.len) : (offset += 4) {
+        const worker_id = contents[offset];
+        const iteration = contents[offset + 1];
+        try std.testing.expect(worker_id < workers and iteration < 32);
+        try std.testing.expectEqual(@as(u8, 0xA5), contents[offset + 2]);
+        try std.testing.expectEqual(@as(u8, 0x5A), contents[offset + 3]);
+        try std.testing.expect(!seen[worker_id][iteration]);
+        seen[worker_id][iteration] = true;
+    }
+    for (seen) |worker_records| for (worker_records) |present| try std.testing.expect(present);
+    const after = fs.report();
+    try std.testing.expectEqual(@as(u64, expected_records), after.data_lock_tickets - before);
+    try std.testing.expectEqual(@as(u64, 0), after.data_lock_outstanding);
+    for (0..workers) |worker_index| try fs.close(@intCast(worker_index + 1), handles[worker_index]);
+    try std.testing.expect(fs.validate());
 }
 
 test "VFS file create write append truncate and read" {

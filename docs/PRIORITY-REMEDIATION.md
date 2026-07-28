@@ -6,7 +6,7 @@ This document records the current disposition of the post-Capstone architecture 
 
 The maintained x86-64 release line now requires:
 
-- 74 unique isolated Zig test declarations;
+- 75 unique isolated Zig test declarations;
 - generated ABI constants checked for staleness;
 - independent Zig and C userspace ELF verification;
 - a 45-command offline permanent-runtime COM1 session;
@@ -47,7 +47,7 @@ Delivered bounded slice:
 - permanent userspace shutdown with zero outstanding owned pages;
 - 4,096 ownership slots and allocation support preserving low and high firmware extents.
 
-The current permanent-runtime integration proves exact 246/246 offline and 277/277 live-network physical allocations/frees after the ABI 1.6 C fixture was added.
+The current permanent-runtime integration proves exact 247/247 offline and 278/278 live-network physical allocations/frees with the ABI 1.8 Zig/C and filesystem fixtures.
 
 Still open:
 
@@ -131,6 +131,7 @@ Symbolic links are represented as distinct VFS nodes. Normal path lookup follows
 Directory-entry names are now stored separately from node data and metadata in a bounded dentry table. Ordinary files can have multiple same-mount dentries; stat reports their shared node/generation and link count, unlink removes one name, and zero-link nodes remain alive only while descriptors reference them. The journal writes canonical file data once and restores alias records in a second pass.
 A separate bounded dentry lookup cache now stores generation-validated parent/name mappings. Traversal acquires and releases references, referenced entries are not eligible for LRU eviction, namespace mutations invalidate matching entries, and a full pinned cache falls back to authoritative lookup. Normal and diagnostic shutdown require zero cache references and balanced acquire/release accounting.
 Mounts now form an explicit bounded tree. Every non-root mount records its parent mount, covered mountpoint and distinct mounted root; lookup and directory capabilities cross mountpoints, `..` escapes mounted roots through the parent namespace, canonical paths cross nested roots, and unmount requires child mounts and open descriptors to be released first. The kernel still has no public mount/unmount ABI and does not yet track process working directories as unmount references.
+Each inode now owns a portable ticket lock for data and size mutation. Ordinary writes, truncation and append share that lock; append holds it across EOF selection, data copy, file-size update and the calling open description's final offset. A four-thread host test verifies 128 fixed-size records appear exactly once without overlap or loss, while normal and diagnostic shutdown require nonzero lock activity and zero outstanding tickets.
 
 Still open:
 
@@ -139,7 +140,7 @@ Still open:
 - block-device registry and multiple devices/namespaces;
 - AHCI-backed permanent storage;
 - scalable free-space allocation and large files;
-- concurrent mutation and richer crash injection;
+- concurrency remains incomplete outside per-inode data writes; richer crash injection remains open;
 - package installation independent of a boot-seeded executable.
 
 ## Priority 2 — userspace, devices and networking
