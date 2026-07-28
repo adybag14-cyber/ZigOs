@@ -1,132 +1,291 @@
 # Priority remediation plan after Capstone 19
 
-This document records the disposition of the post-Capstone audit. It distinguishes defects fixed in the current release line from architectural work that is now explicitly accepted but remains open. A source implementation, an isolated test, a QEMU integration proof and a required hosted-CI gate are separate evidence levels.
+This document records the current disposition of the post-Capstone architecture audit. It distinguishes bounded work that is implemented and boot-tested from general operating-system facilities that remain open. Source implementation, isolated testing, QEMU integration and required hosted CI are separate evidence levels.
 
-## Priority 0 â€” release correctness
+## Current evidence baseline
 
-Status: closed by the correctness/CI remediation.
+The maintained x86-64 release line now requires:
 
-| Finding | Resolution | Evidence |
-| --- | --- | --- |
-| The advertised isolated-test total was not actually executed | `build.zig` now runs ten canonical host-test roots spanning descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence, ELF loading and the userspace DNS codec: 63 unique declarations in total | canonical `zig build test` and `zig build check` |
-| Syscall descriptor and flag registers were narrowed before validation | `runtime_abi.zig` range-checks full-width descriptor, open-flag and mode arguments before conversion | hostile tests cover 65536, `u64` maximum and high flag bits; source-contract verifier forbids the old truncation forms |
-| Descriptor/VFS errors collapsed to bad-FD | one kernel-error-to-userspace-errno mapping now preserves not-found, access, read-only, directory, broken-pipe and resource-limit distinctions | isolated errno mapping tests plus full UEFI build |
-| Default `kill PID` sent signal 15 without a delivery/default-action path | the kernel shell now defaults explicitly to forced signal 9; other signals remain opt-in and the absence of general userspace delivery is still documented | 44/46-command COM1 sessions prove PID 9 becomes zombie and is reaped |
-| `wait PID` was a status query | the shell validates direct parentage, blocks itself through the process table, services the runtime until the target is terminal, then reaps once | 44/46-command COM1 sessions wait over a sleeping CPL3 PID before the next command is accepted |
-| Built-in network help contradicted retained ping/DNS | help now describes retained e1000e packet I/O and explicit offline unavailability | source-contract check plus offline/live runtime sessions |
-| Hosted CI omitted live permanent-shell ping/DNS | Windows CI now runs the 44-command offline and 46-command `-Network` sessions | required workflow step |
-| Cross-platform identity was printed but not enforced | a dependent job downloads both artifact sets, compares path sets, then compares every file byte-for-byte | required workflow job; G423 |
+- 67 unique isolated Zig test declarations;
+- generated ABI constants checked for staleness;
+- independent Zig and C userspace ELF verification;
+- a 45-command offline permanent-runtime COM1 session;
+- a 47-command live-network permanent-runtime COM1 session;
+- a two-boot NVMe persistence proof;
+- a persistent normal userspace PID 1/PID 2 profile;
+- a USB-booted diskless normal RAM-root recovery profile;
+- byte-identical Linux and Windows release artifacts.
 
-## Evidence model used by the roadmap
+A bounded fixture must not be used to claim a general kernel facility.
 
-- **Source implemented** means code exists but may not yet control the permanent runtime.
-- **Isolated tested** means a deterministic `std.testing` or host-side contract executes it.
-- **QEMU integrated** means the permanent or hardware runtime exercises it in a booted system.
-- **Hosted required** means failure blocks the GitHub Actions workflow.
-- **Bounded fixture only** must not be used to claim a general kernel facility.
+## Priority 0 — release correctness
 
-## Priority 1 â€” memory and process architecture
+**Status: closed for the current release contract.**
 
-Status: in progress. A post-bootstrap reclaiming physical-memory handoff, bounded permanent-runtime ownership layer and userspace spawn/wait slice are integrated and required by QEMU tests; the system-wide milestones remain open.
+The release contract now enforces full-width syscall argument validation, stable errno mapping, real blocking wait, completion-ordered wait-any, one retained CPL3 scheduler path, live network integration, exact allocator cleanup, generated ABI interfaces and byte-for-byte cross-platform artifact identity.
+
+The later ABI 1.6/device pass also closes several documentation and lifecycle discrepancies:
+
+- delayed terminal children are drained and reaped before diagnostic shutdown accounting;
+- the hardware socket capability reports four active e1000e UDP endpoints rather than eight descriptor bookkeeping slots;
+- `/dev/null`, `/dev/zero` and `/dev/console` have real per-node semantics;
+- normal boot can recover without NVMe or SATA instead of hard-failing while using a RAM-backed root.
+
+## Priority 1A — memory and process architecture
 
 ### P1-M1: system physical-memory manager
 
-Delivered bounded slice: after all boot-time validation and hardware setup, the monotonic allocator transfers every unused usable firmware extent in place to a reclaiming physical-memory manager and is sealed against further allocation. The permanent executor requests pages below 4 GiB on demand through 256 generation-tagged ownership slots with arbitrary release/reuse, reference counts, poison-on-final-release, duplicate-backing rejection, OOM and invalid/double/wrong-owner/backing-failure accounting. Final releases return physical pages to coalescing free extents. The 44-command offline profile requires 231 allocations/frees and the 46-command live profile requires 262; both finish with zero allocated physical pages, zero owned pages, zero OOMs and zero rejected operations.
+**Verdict: partially addressed; system-wide work remains open.**
 
-Still open: move boot-time page tables, stacks, DMA buffers, heaps and retained drivers onto the permanent manager rather than handing off only after validation; add synchronization, memory-pressure callbacks and an explicit OOM victim policy; permit ordinary allocations above 4 GiB through a direct physical-memory map; and apply low-memory restrictions only through per-device DMA masks or bounce buffers.
+Delivered bounded slice:
 
-Roadmap links: G100, G101, G118â€“G129, G159â€“G167, G203, G448, G478â€“G480.
+- unused firmware memory is transferred from the sealed bootstrap allocator to a reclaiming physical-memory manager;
+- arbitrary page allocation and release, immediate reuse and extent coalescing;
+- ownership, generation and reference tracking;
+- invalid, duplicate, double and wrong-owner release detection;
+- final-release poisoning and exact allocation accounting;
+- permanent userspace shutdown with zero outstanding owned pages;
+- 4,096 ownership slots and allocation support preserving low and high firmware extents.
 
-### P1-M2: unified permanent scheduler
+The current permanent-runtime integration proves exact 246/246 offline and 277/277 live-network physical allocations/frees after the ABI 1.6 C fixture was added.
 
-Delivered bounded slice: syscall 76 spawns a VFS-backed direct CPL3 child; syscall 77 implements exact waitpid, wait-any and WNOHANG. Every retained CPL3 context is now selected through the same `serviceOne` round-robin path. Foreground commands transfer the TTY process group, block the kernel shell through the process table and wait while the common scheduler runs the child; the shell no longer calls `runtime_user.dispatch` directly and the scheduler has no foreground-exclusion argument. The separate 24-entry `Job` array is removed: `jobs`, kill and wait derive state from the 64-slot process table. `pipex` gates its writer as a normal blocked process and lets the shared scheduler drive the reader into a real pipe wait before waking the writer. `/bin/wait.elf` overlaps a three-tick child and one-tick child to prove completion-ordered wait-any, exact waitpid and WNOHANG, and process-table scans remain pointer-based so blocking waits cannot copy the array onto the syscall IST.
+Still open:
 
-Still open: merge saved architecture contexts and process metadata into a single scheduler-owned task object, move the diagnostic kernel shell itself out of the special kernel-command path, add SMP-safe locking and per-CPU runnable queues, and complete general signal consumption/default actions across all process states.
+- boot page tables, boot stacks, retained driver allocations and DMA buffers are not generally owned by the permanent manager;
+- ordinary runtime allocations remain constrained below 4 GiB;
+- no direct physical-memory map supports normal high-memory access;
+- no per-device DMA mask or bounce-buffer policy;
+- no SMP locking;
+- no memory-pressure callbacks or explicit OOM victim policy.
 
-Roadmap links: G113â€“G176, especially G132â€“G160.
+**Disposition:** executor memory reclamation is addressed. System-wide physical-memory management is not.
+
+### P1-M2: unified scheduler and task ownership
+
+**Verdict: substantially addressed for BSP CPL3 execution; scalable task architecture remains open.**
+
+Delivered bounded slice:
+
+- the separate pseudo-job array is gone;
+- foreground, background, pipe and fixture CPL3 execution all enter through `runtime_user.serviceOne`;
+- userspace spawn/wait use the 64-slot process table;
+- wait-any, exact waitpid and WNOHANG are tested with overlapping children;
+- foreground shell execution blocks through normal process state rather than directly dispatching a selected context;
+- diagnostic shutdown performs bounded quiescence, finalizes terminal contexts and reaps terminal children before enforcing zero leaks.
+
+Still open:
+
+- process metadata remains in `runtime_process.Table` while saved CPU contexts remain in `runtime_user.contexts`;
+- scheduling is BSP-only and depends on the permanent service loop;
+- no SMP-safe or per-CPU runnable queues;
+- no complete userspace signal-frame/handler/return mechanism;
+- the diagnostic kernel shell remains a special kernel execution path.
+
+**Disposition:** normal CPL3 execution has one scheduler path, but ZigOs does not yet have one scalable kernel task subsystem.
 
 ### P1-M3: scalable process virtual memory
 
-Delivered bounded slice: the permanent ABI now provides page-granular anonymous `mmap`, arbitrary page-aligned anonymous subrange `munmap`, W^X-enforced `mprotect`, `brk` growth/shrink and dynamically added/reclaimed user page tables. `/bin/vm.elf` proves the complete sequence and final reclamation.
+**Verdict: partially addressed.**
 
-Still open: replace the fixed userspace-window bounds with general VMA objects, eligible guard-fault stack growth, file-backed mappings, lazy demand paging and scalable rollback under concurrency. The current eight-page stack and bounded argv/envp/auxv contract are fixed-size rather than fully POSIX-general.
+Delivered bounded slice:
 
-Roadmap links: G100â€“G125 and G161â€“G176.
+- anonymous `mmap`;
+- page-aligned partial `munmap`;
+- W^X-enforced `mprotect`;
+- `brk` growth and shrink;
+- dynamically created and reclaimed page tables;
+- a booted `/bin/vm.elf` conformance sequence.
 
-## Priority 1 â€” persistent storage and VFS
+Still open:
 
-Status: accepted and open.
+- fixed userspace window and 1,024 mapping records per context;
+- fixed eight-page stacks;
+- eager allocation;
+- no file-backed or shared mappings;
+- no demand paging, copy-on-write or guard-fault stack growth;
+- no concurrent VMA tree or scalable rollback.
 
-The retained kernel architecture should converge on a permanent service layer equivalent to:
+**Disposition:** a credible bounded VM API exists. A general process virtual-memory manager does not.
 
-```zig
-const KernelServices = struct {
-    physical_memory: *PhysicalMemoryManager,
-    scheduler: *Scheduler,
-    devices: *DeviceRegistry,
-    block_devices: *BlockRegistry,
-    network_interfaces: *NetworkRegistry,
-    consoles: *ConsoleRegistry,
-    vfs: *Vfs,
-};
-```
+## Priority 1B — persistent storage and VFS
 
-Delivered bounded slice: the primary NVMe controller and namespace survive boot in polling mode; a dedicated GPT data partition is mounted at `/persist`; an A/B checksummed journal commits payload-before-header with flush/FUA ordering; files, directories and linked ELF64 programs are serialised through the VFS. ABI 1.4 lets CPL3 seek, create directories, unlink files, remove empty directories, rename within a mount and change mode bits. `/bin/fs.elf` commits a renamed 0600 file in generation 1, then after reboot verifies its content/mode/offset and commits userspace cleanup in generation 2. The normal userspace shell exposes the same mutation path alongside persistent ELF installation. Controller and journal errors propagate into kernel/userspace `sync`, `fsck` and the shutdown invariant.
+**Verdict: real bounded persistence; general disk filesystem remains open.**
 
-Still open: a general block-device registry, multiple devices/namespaces, a filesystem-driver operation table, scalable allocation/free-space metadata, package installation independent of copying a boot-seeded artifact, a disk-backed root, larger files, concurrent mutation and broader crash/fault injection.
+Delivered bounded slice:
 
-Roadmap links: G102, G177â€“G251 and G295.
+- retained primary NVMe controller and dedicated GPT data partition mounted at `/persist`;
+- alternating A/B generations with CRC validation;
+- payload-before-header ordering, flush and FUA commit behaviour;
+- newest-valid-generation recovery and fallback from a corrupt newest slot;
+- persistent files, directories, modes and offsets;
+- userspace mutation and two-boot integration testing;
+- persistent ELF installation and execution after reboot.
 
-## Priority 2 â€” userspace environment, devices and networking
+What it still is not:
 
-Status: accepted and open.
+`/persist` remains a serialized bounded RAM-VFS subtree. Normal VFS operations do not directly manipulate scalable on-disk inode, extent or free-space structures. `/` remains RAM-backed and `/bin` is initially embedded in the EFI image.
 
-### P2-U1: documented userspace ABI and SDK
+Still open:
 
-Delivered bounded slice: `abi/zigos-abi.json` defines ABI version 1.5, page size, capability bits, syscall numbers 64-107, errno values, seek origins, message flags, bounded spawn-vector limits and auxiliary keys; the build generates matching kernel Zig, NASM and public SDK Zig constants/structures. `sdk/zig` publishes a W^X linker script, a SysV AMD64 startup/syscall bridge and typed wrappers for descriptors, files, process/wait, VM, poll and UDP. `spawnv` copies and validates argv/envp, while the kernel creates a 16-byte-aligned argc/argv/envp/auxv stack. A directly linked Zig ELF verifies these startup vectors plus ABI discovery, pseudo-file I/O, memory protection and errno mapping in both required runtime profiles. ABI 1.4 introduced the kernel-CR3-bridged `sync` wrapper plus typed `lseek`, `mkdir`, `unlink`, `rmdir`, `rename` and `chmod` wrappers. ABI 1.5 adds typed `sendto`, `recvfrom`, `getpeername` and per-socket nonblocking controls plus bounded `MSG_DONTWAIT` validation. The independent filesystem conformance ELF exercises every new call across a real reboot without mapping controller MMIO into user address spaces. `sdk/zig/dns.zig` adds a bounded DNS A query/response codec with malformed-name, transaction and compression-pointer tests; `/bin/dns.elf` proves the resolver from an arbitrary CPL3 Zig process against QEMU's real `localhost` response.
+- disk-backed root;
+- filesystem backend/operation interface for several filesystem implementations;
+- block-device registry and multiple devices/namespaces;
+- AHCI-backed permanent storage;
+- scalable free-space allocation and large files;
+- concurrent mutation and richer crash injection;
+- package installation independent of a boot-seeded executable.
 
-Still open: a generated C header/library, ioctl, broader clocks/signals, stat-by-path/openat/link/symlink/fsync interfaces, independent package/version distribution and a formal within-major compatibility suite.
+## Priority 2 — userspace, devices and networking
 
-Roadmap links: G138â€“G165, G182â€“G199, G252â€“G296 and G494â€“G495.
+### P2-U1: documented ABI and SDK
+
+**Verdict: substantially addressed; stable external platform remains open.**
+
+Delivered through ABI 1.6:
+
+- `abi/zigos-abi.json` remains the source of truth;
+- generated matching kernel Zig, NASM, public Zig and C constants/layouts;
+- syscall numbers 64–111 and typed errno values;
+- capability discovery and SysV AMD64 argc/argv/envp/auxv startup;
+- Zig wrappers for process, VM, file, directory, poll and UDP APIs;
+- ABI 1.6 `ioctl`, path `stat`, `openat` and descriptor `fsync`;
+- a generated `sdk/c/include/zigos.h` and freestanding C wrapper library;
+- independently linked Zig and C conformance ELFs;
+- userspace DNS codec/resolver, init and shell.
+
+The booted C fixture proves generated layout compatibility, ABI discovery, `/dev/null`, `/dev/zero`, `/dev/console`, TTY ioctl flags, path stat, openat and fsync from a non-Zig application.
+
+Still open:
+
+- formal within-major compatibility policy and compatibility test corpus;
+- packaged/versioned SDK distribution;
+- dynamic linking and `ET_DYN`;
+- broader clocks and complete signal APIs;
+- links and symbolic links;
+- file-backed mappings and broader filesystem synchronization calls.
 
 ### P2-U2: real TTY
 
-Delivered bounded slice: terminal descriptors provide blocking userspace input, canonical line buffering, echo, Backspace editing, poll readiness, foreground process-group routing, targeted scheduler wakeups and Ctrl-C default action. `/bin/tty.elf` proves an edited COM1 line blocks and wakes in CPL3. The normal profile now attaches a directly linked Zig `/bin/init.elf` to PID 1; that CPL3 init launches `/bin/sh.elf` as PID 2, while the shell prompt, `pwd`, `cd`, `ls`, `cat`, PID reporting, external spawn/wait and staged shutdown all execute in CPL3. Still open are termios/ioctl controls, `/dev/console` as a general openable device, pseudo-terminals and sessions beyond the single console.
+**Verdict: substantially addressed for one console session.**
 
-Roadmap links: G143â€“G146, G252â€“G266 and G454.
+Delivered bounded slice:
 
-### P2-U3: real pseudo-files and device objects
+- blocking CPL3 reads, canonical line buffering and poll;
+- echo, Backspace/DEL, Ctrl-U, Ctrl-D EOF and Ctrl-C foreground-group termination;
+- foreground session/group checks and reader wake-up;
+- `/dev/console` opens as the actual TTY stream;
+- ABI 1.6 ioctl get/set flags for echo, canonical input and signal processing;
+- userspace init PID 1 and shell PID 2 in normal boot.
 
-Introduce VFS operation tables for read/write/ioctl/poll/close and back `/dev`, `/proc` and `/net` with live registered objects. Shell-only `readPseudo()` conveniences do not satisfy this milestone.
+Still open:
 
-Roadmap links: G171â€“G174 and G230â€“G235.
+- a complete termios-compatible structure and ioctl surface;
+- pseudo-terminals;
+- several login sessions;
+- complete Unix job control;
+- richer streaming/output semantics.
+
+### P2-U3: pseudo-files and device objects
+
+**Verdict: bounded milestone delivered; general device registry remains open.**
+
+Delivered:
+
+- each pseudo/device node carries a `PseudoOperations` table for read, write, poll, ioctl and close plus optional stream identity;
+- `/dev/null` is readable EOF and writable discard;
+- `/dev/zero` returns zero bytes and accepts writes;
+- `/dev/console` routes to the actual retained TTY;
+- `/proc/*` and `/net/*` are separately registered read-only generated nodes;
+- VFS and descriptor tests verify operation dispatch, readonly-devfs exceptions, close lifecycle and console ioctl state.
+
+Still open:
+
+- a system-wide device registry with discovery, naming and hotplug lifecycle;
+- richer independently registered `/proc`, `/dev` and `/net` kernel objects;
+- device-specific structured ioctl families;
+- block, character and network backend interfaces shared by several drivers.
 
 ### P2-N1: userspace sockets
 
-Delivered bounded slice: ABI syscalls provide descriptor-backed UDP socket, bind, connect, connected send/receive, unconnected `sendto`, source-reporting `recvfrom`, getsockname/getpeername, close and poll. Packet ingress fills bounded per-socket receive queues and wakes blocked readers; empty receives return `EWOULDBLOCK` under either persistent socket-level nonblocking mode or bounded per-call `MSG_DONTWAIT`. Process and descriptor quotas limit socket ownership. `/bin/socket.elf` sends a raw `localhost` DNS query to QEMU's retained resolver, blocks through the common scheduler until the real reply arrives, verifies source `10.0.2.3:53`, then checks its connected gateway peer. The retained driver masks NIC MSI-X and polls DMA status so syscall frames cannot be corrupted by nested IST1 timer entry.
+**Verdict: substantially addressed for bounded IPv4 UDP.**
 
-Still open: concurrent resolver transactions, DHCP-derived resolver configuration/search domains, general socket options, writable readiness/backpressure, richer routing/ARP lifecycle, TCP application data/HTTP and decomposition of the monolithic e1000e protocol source.
+Delivered:
 
-Roadmap links: G297â€“G339 and G341â€“G343.
+- descriptor-backed UDP socket, bind, connect, send, receive, sendto, recvfrom, getsockname, getpeername, nonblocking mode, poll and close;
+- blocked-reader wake-up from live network ingress;
+- a userspace DNS resolver fixture using the retained e1000e path;
+- ABI discovery now reports a maximum of four simultaneously usable hardware UDP endpoints, matching `udp_endpoint_capacity = 4`, while eight descriptor bookkeeping slots remain available internally.
 
-### P2-B1: normal boot profile
+Still open:
 
-Delivered bounded slice: `-Dnormal-boot=true` branches after retained hardware/storage discovery and before the kernel heap, cooperative/preemptive scheduler demonstrations and Capstone 15/16 software proof workloads. It mounts the runtime VFS and persistent NVMe subtree, promotes the reserved PID 1 record to a directly linked Zig `/bin/init.elf`, and attaches a private CPL3 address space to that existing handle. PID 1 launches `/bin/sh.elf` through public `spawnv`, establishes PID 2 as the foreground process group, waits for and reaps the shell, then requests final shutdown. The session also copies, commits and executes a persistent Zig ELF, exercises userspace filesystem mutation, and requires exact 97/97 physical-page reclamation with zero descriptors/contexts at shutdown. The default diagnostic profile remains available and continues to run the exhaustive release workload.
+- TCP application data and listen/accept;
+- IPv6;
+- general socket options;
+- multiple interfaces and complete routing;
+- resolver concurrency;
+- writable backpressure;
+- production-grade ARP/DHCP lifecycle;
+- decomposition of the large e1000e driver/protocol source.
 
-Still open: split the large hardware discovery routines into minimal initialisation and optional validation phases so normal boot can also skip assertion-heavy NIC/NVMe protocol proofs, and promote a disk-installed userspace root and init image rather than the current boot-seeded RAM VFS copy of `/bin/init.elf`.
+### P2-B1: normal boot
 
-Roadmap links: G252, G295â€“G296, G424â€“G426 and G489.
+**Verdict: substantially addressed, including diskless recovery.**
 
-## Priority 3 â€” security and hardware robustness
+Delivered:
 
-Status: accepted and open.
+- `-Dnormal-boot=true` skips the kernel heap and large software proof workloads;
+- retained hardware discovery, runtime VFS, userspace PID 1 and userspace PID 2 shell;
+- persistent file mutation, ELF installation and execution with NVMe present;
+- exact cleanup and reclamation;
+- when no usable NVMe or SATA device exists, normal boot continues with embedded assets and a RAM-backed root;
+- a required USB-booted QEMU gate verifies the diskless session, RAM file mutation, C SDK execution, explicit unsupported persistence sync and `storage diskless-ram-root cleanup yes`.
 
-Security work includes credentials and permissions, syscall capability checks, SMEP/SMAP, kernel W^X, ASLR, guarded/canary-protected kernel stacks, DMA trust/IOMMU policy, cross-resource quotas, complete signal permissions/delivery, malformed-pointer testing and a written threat model. Current root-only credentials and bounded VFS modes do not provide multi-user isolation.
+Still open:
 
-Hardware work includes physical Intel and AMD boots, RAM above 4 GiB, multiple controllers/namespaces/NICs, timeout/reset recovery, USB hubs/HID variation, ACPI power-off/reboot, interrupt-routing variation, DMA constraints and graceful RAM-backed recovery when no supported disk is usable.
+- hardware discovery still needs a clean split between minimal initialization and optional diagnostic validation;
+- PID 1 and `/bin` are still seeded from embedded build assets;
+- no disk-installed root or recovery image package manager;
+- AHCI is not a retained persistence backend.
 
-Roadmap links: G413â€“G426, G427â€“G465 and G466â€“G500.
+## Priority 3 — security and hardware robustness
 
-## ?Usable hobby OS? acceptance gate
+**Verdict: mostly open; threat boundaries are now documented.**
 
-ZigOs should not claim this gate until one normal permanent session can mount a writable disk root, preserve a file across reboot, execute an independently installed ELF, launch userspace PID 1 and an interactive userspace shell, use a real TTY, run and reclaim substantially more than eight processes, use RAM above 4 GiB, block/wait/signal/reap correctly, expose a versioned ABI, provide userspace UDP and pass repeated stress/malformed-input sessions on at least one documented physical machine.
+Delivered foundations:
+
+- private CR3 spaces, user/supervisor separation, NX and W^X;
+- pointer validation and process fault containment;
+- guarded userspace stack regions;
+- bounded process, descriptor, socket, mapping and page resources;
+- exact allocator and lifecycle cleanup gates;
+- `docs/THREAT-MODEL.md` now states assets, trust assumptions, attacker abilities, mitigations, known gaps and security acceptance conditions.
+
+Security work still open:
+
+- real UID/GID identity and ownership-aware VFS permissions;
+- capability enforcement across all syscalls;
+- complete signal permission/delivery/return;
+- SMEP/SMAP and kernel W^X audit;
+- ASLR/KASLR;
+- protected kernel stacks and stack canaries;
+- IOMMU/DMA isolation;
+- cross-resource pressure and OOM policy;
+- comprehensive pointer/parser fuzzing;
+- executable/package trust and signing.
+
+Hardware work still open:
+
+- documented physical Intel and AMD boots;
+- normal use of RAM above 4 GiB;
+- multiple controllers, namespaces and NICs;
+- USB hubs and broader HID devices;
+- device timeout/reset recovery;
+- ACPI shutdown/reboot;
+- interrupt-routing variations;
+- per-device DMA constraints.
+
+Graceful diskless normal recovery is now delivered and tested; broad physical-hardware recovery is not.
+
+## “Usable hobby OS” acceptance gate
+
+ZigOs should not claim this gate until one normal permanent session can mount a writable disk root, preserve files across reboot, install an independently supplied ELF, run userspace PID 1 and an interactive userspace shell, use a real TTY, run and reclaim substantially more than the bounded fixture workload, use RAM above 4 GiB, block/wait/signal/reap correctly, expose a versioned compatibility policy, provide userspace networking and pass repeated stress/malformed-input sessions on at least one documented Intel and one documented AMD machine.

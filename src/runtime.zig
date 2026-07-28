@@ -37,6 +37,7 @@ const runtime_init_elf = @import("runtime_sdk").init;
 const runtime_shell_elf = @import("runtime_sdk").shell;
 const runtime_fs_elf = @import("runtime_sdk").fs;
 const runtime_dns_elf = @import("runtime_sdk").dns;
+const runtime_c_sdk_elf = @import("runtime_sdk").c_sdk;
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_wait_for_interrupt() callconv(cc) void;
@@ -45,6 +46,24 @@ extern fn zigos_enable_interrupts() callconv(cc) void;
 pub const Profile = enum {
     diagnostic,
     normal,
+};
+
+const generated_pseudo_operations = runtime_vfs.PseudoOperations{
+    .read = readGeneratedPseudo,
+    .poll = pollGeneratedPseudo,
+};
+const null_pseudo_operations = runtime_vfs.PseudoOperations{
+    .read = readNullPseudo,
+    .write = writeDiscardPseudo,
+    .poll = pollNullOrZeroPseudo,
+};
+const zero_pseudo_operations = runtime_vfs.PseudoOperations{
+    .read = readZeroPseudo,
+    .write = writeDiscardPseudo,
+    .poll = pollNullOrZeroPseudo,
+};
+const console_pseudo_operations = runtime_vfs.PseudoOperations{
+    .stream = .console,
 };
 
 pub const Configuration = struct {
@@ -249,7 +268,6 @@ fn initialize(configuration: Configuration) !void {
     state = undefined;
     state.config = configuration;
     state.vfs.initialize();
-    state.vfs.setPseudoReader(null, readPseudoBytes);
     state.processes.initialize(0);
     state.descriptors.initialize();
     state.persistence.initialize();
@@ -396,15 +414,22 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/sh.elf", runtime_shell_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/fs.elf", runtime_fs_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/dns.elf", runtime_dns_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/c-sdk.elf", runtime_c_sdk_elf, 0o555, false, 0);
 
-    const pseudo_paths = [_][]const u8{
-        "/proc/version",   "/proc/uptime", "/proc/meminfo", "/proc/processes",
-        "/proc/mounts",    "/dev/console", "/dev/null",     "/dev/zero",
-        "/net/interfaces", "/net/routes",  "/net/arp",      "/net/sockets",
+    const generated_pseudo_paths = [_][]const u8{
+        "/proc/version", "/proc/uptime",    "/proc/meminfo", "/proc/processes",
+        "/proc/mounts",  "/net/interfaces", "/net/routes",   "/net/arp",
+        "/net/sockets",
     };
-    for (pseudo_paths) |path| _ = try state.vfs.createPseudo(0, path, 0o444, 0);
+    for (generated_pseudo_paths) |path| {
+        _ = try state.vfs.createPseudoWithOperations(0, path, 0o444, 0, &generated_pseudo_operations, null);
+    }
+    _ = try state.vfs.createPseudoWithOperations(0, "/dev/console", 0o666, 0, &console_pseudo_operations, null);
+    _ = try state.vfs.createPseudoWithOperations(0, "/dev/null", 0o666, 0, &null_pseudo_operations, null);
+    _ = try state.vfs.createPseudoWithOperations(0, "/dev/zero", 0o666, 0, &zero_pseudo_operations, null);
 
-    _ = try state.vfs.mount(0, "/boot", .boot_fat, true, if (state.config.nvme_ready) "nvme0p1" else "ahci0p1");
+    const boot_source = if (state.config.nvme_ready) "nvme0p1" else if (state.config.ahci_ready) "ahci0p1" else "embedded-assets";
+    _ = try state.vfs.mount(0, "/boot", .boot_fat, true, boot_source);
     _ = try state.vfs.mount(0, "/proc", .procfs, true, "process-table");
     _ = try state.vfs.mount(0, "/dev", .devfs, true, "kernel-devices");
     _ = try state.vfs.mount(0, "/net", .netfs, true, "network-state");
@@ -2103,15 +2128,8 @@ fn writeDescriptorPath(path: []const u8, bytes: []const u8, append: bool) !void 
     try state.descriptors.close(&state.vfs, &state.processes, state.shell_handle, fd);
 }
 
-fn readPseudoBytes(_: ?*anyopaque, node: u16, offset: usize, destination: []u8) usize {
+fn readGeneratedPseudo(_: ?*anyopaque, node: u16, offset: usize, destination: []u8) runtime_vfs.Error!usize {
     if (destination.len == 0 or state.pseudo_busy) return 0;
-    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
-    const path = state.vfs.canonicalPath(node, &path_buffer) catch return 0;
-    if (equal(path, "/dev/null")) return 0;
-    if (equal(path, "/dev/zero")) {
-        @memset(destination, 0);
-        return destination.len;
-    }
     state.pseudo_busy = true;
     defer state.pseudo_busy = false;
     var output = Output.init(&state.pseudo_buffer);
@@ -2119,6 +2137,27 @@ fn readPseudoBytes(_: ?*anyopaque, node: u16, offset: usize, destination: []u8) 
     const count = @min(destination.len, output.length - offset);
     @memcpy(destination[0..count], output.slice()[offset .. offset + count]);
     return count;
+}
+
+fn readNullPseudo(_: ?*anyopaque, _: u16, _: usize, _: []u8) runtime_vfs.Error!usize {
+    return 0;
+}
+
+fn readZeroPseudo(_: ?*anyopaque, _: u16, _: usize, destination: []u8) runtime_vfs.Error!usize {
+    @memset(destination, 0);
+    return destination.len;
+}
+
+fn writeDiscardPseudo(_: ?*anyopaque, _: u16, _: usize, input: []const u8) runtime_vfs.Error!usize {
+    return input.len;
+}
+
+fn pollGeneratedPseudo(_: ?*anyopaque, _: u16, requested: u16) runtime_vfs.Error!u16 {
+    return requested & runtime_abi.poll_readable;
+}
+
+fn pollNullOrZeroPseudo(_: ?*anyopaque, _: u16, requested: u16) runtime_vfs.Error!u16 {
+    return requested & (runtime_abi.poll_readable | runtime_abi.poll_writable);
 }
 
 fn formatPseudo(node: u16, output: *Output) bool {
@@ -2142,12 +2181,6 @@ fn formatPseudo(node: u16, output: *Output) bool {
         commandPs(output);
     } else if (equal(path, "/proc/mounts")) {
         commandMount(output);
-    } else if (equal(path, "/dev/null")) {
-        return true;
-    } else if (equal(path, "/dev/zero")) {
-        return true;
-    } else if (equal(path, "/dev/console")) {
-        output.line("COM1 serial console");
     } else if (equal(path, "/net/interfaces")) {
         commandIfconfig(output);
     } else if (equal(path, "/net/routes")) {
@@ -2256,13 +2289,19 @@ fn finishNormalRuntime() noreturn {
     const userspace_report = runtime_user.report();
     const physical_report = state.config.physical_memory.report();
     const physical_rejections = physical_report.invalid_frees + physical_report.double_frees + physical_report.metadata_failures;
+    const diskless_recovery = !state.config.nvme_ready and !state.config.ahci_ready;
+    const persistence_clean = if (persistence_report.mounted)
+        persistence_report.io_failures == 0 and persistence_report.corrupt_headers == 0
+    else
+        diskless_recovery and persistence_report.mounts == 0 and persistence_report.syncs == 0 and
+            persistence_report.io_failures == 0 and persistence_report.corrupt_headers == 0;
     const clean = init_process.pid == 1 and init_process.state == .zombie and init_process.exit_status == 0 and
         state.shell_exit_requested and state.init_reaped_shell and state.vfs.validate() and fs_report.mounts >= 5 and
         process_report.live == 1 and process_report.zombies == 1 and process_report.total_reaped >= 1 and
         descriptor_report.namespaces == 0 and descriptor_report.descriptors == 0 and descriptor_report.open_descriptions == 0 and
         tty_report.foreground_process_group == 2 and tty_report.buffered_bytes == 0 and tty_report.edited_bytes == 0 and
         tty_report.bytes_submitted == tty_report.bytes_read and tty_report.blocked_reads >= 1 and tty_report.reader_wakeups >= 1 and
-        persistence_report.mounted and persistence_report.io_failures == 0 and persistence_report.corrupt_headers == 0 and
+        persistence_clean and
         userspace_report.used_pages == 0 and userspace_report.live_contexts == 0 and userspace_report.launches >= 3 and
         userspace_report.exits >= 3 and userspace_report.allocator_allocations == userspace_report.allocator_releases and
         userspace_report.allocator_out_of_memory == 0 and userspace_report.allocator_rejections == 0 and
@@ -2287,17 +2326,54 @@ fn finishNormalRuntime() noreturn {
     emitDecimal(physical_report.allocations);
     emit("/");
     emitDecimal(physical_report.frees);
+    emit(" storage ");
+    emit(if (persistence_report.mounted) "persistent" else if (diskless_recovery) "diskless-ram-root" else "unavailable");
     emit(" clean ");
     emit(if (clean) "yes" else "no");
-    emit("\r\nZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes cleanup ");
+    emit("\r\nZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage ");
+    emit(if (persistence_report.mounted) "persistent" else if (diskless_recovery) "diskless-ram-root" else "unavailable");
+    emit(" cleanup ");
     emit(if (clean) "yes" else "no");
     emit("\r\n");
     while (true) zigos_wait_for_interrupt();
 }
 
+const ShutdownDrain = struct {
+    dispatches: usize = 0,
+    wakeups: usize = 0,
+    finalized: usize = 0,
+    reaped: usize = 0,
+    swept: usize = 0,
+};
+
+fn drainDiagnosticUserspace() !ShutdownDrain {
+    var result = ShutdownDrain{};
+    var drain_tick = currentTick();
+    var idle_passes: usize = 0;
+    var passes: usize = 0;
+    while (passes < runtime_process.maximum_processes * 4 and idle_passes < 8) : (passes += 1) {
+        drain_tick +%= 1;
+        result.wakeups += state.processes.wakeExpired(drain_tick);
+        result.finalized += try runtime_user.finalizeTerminalContexts();
+        if (try runtime_user.serviceOne(drain_tick)) |_| {
+            result.dispatches += 1;
+            idle_passes = 0;
+        } else {
+            idle_passes += 1;
+        }
+    }
+    result.finalized += try runtime_user.finalizeTerminalContexts();
+    result.reaped += try state.processes.reapTerminalChildren(state.shell_handle);
+    result.reaped += state.processes.reapOrphans();
+    result.swept += runtime_user.sweepReleasedContexts();
+    return result;
+}
+
 fn finishDiagnosticRuntime() noreturn {
     apic.setTimerHook(null);
     apic.stopCurrentProcessorTimer(descriptor_tables.persistent_runtime_timer_vector);
+    const shutdown_drain = drainDiagnosticUserspace() catch |err| runtimeFailure(@errorName(err));
+    const swept_contexts = shutdown_drain.swept;
     const fs_report = state.vfs.report();
     const process_report = state.processes.report();
     const descriptor_report = state.descriptors.report();
@@ -2344,6 +2420,16 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(state.idle_halts);
     emit(" service-passes ");
     emitDecimal(state.device_service_passes);
+    emit("\r\nZigOs shutdown drain: dispatches ");
+    emitDecimal(shutdown_drain.dispatches);
+    emit(" wakeups ");
+    emitDecimal(shutdown_drain.wakeups);
+    emit(" finalized ");
+    emitDecimal(shutdown_drain.finalized);
+    emit(" reaped ");
+    emitDecimal(shutdown_drain.reaped);
+    emit(" swept ");
+    emitDecimal(shutdown_drain.swept);
     emit("\r\n");
     emit("ZigOs persistent VFS: nodes ");
     emitDecimal(fs_report.nodes_used);
@@ -2525,6 +2611,8 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(userspace_report.syscalls);
     emit(" reclaimed ");
     emitDecimal(userspace_report.reclaimed_pages);
+    emit(" stale-contexts-swept ");
+    emitDecimal(swept_contexts);
     emit(" allocator alloc/release/retains ");
     emitDecimal(userspace_report.allocator_allocations);
     emit("/");

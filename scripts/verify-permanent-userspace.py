@@ -51,6 +51,10 @@ def main() -> int:
     qemu_test = text("scripts/test-qemu.ps1")
     persistence_test = text("scripts/test-x86_64-persistence.py")
     normal_boot_test = text("scripts/test-normal-boot.py")
+    diskless_normal_boot_test = text("scripts/test-diskless-normal-boot.py")
+    c_header = text("sdk/c/include/zigos.h")
+    c_library = text("sdk/c/zigos.c")
+    c_conformance = text("sdk/c/conformance.c")
     elf_source = text("src/elf64.zig")
     sdk_source = text("sdk/zig/zigos.zig")
     sdk_startup = text("sdk/zig/syscall.asm")
@@ -148,6 +152,7 @@ def main() -> int:
     require(persistence_test, "after_second_hash == after_first_hash", "host gate requires a second physical disk mutation")
     require(workflow, "test-x86_64-persistence.py", "Windows CI runs the two-boot persistence gate")
     require(workflow, "test-normal-boot.py", "Windows CI runs the normal userspace-shell gate")
+    require(workflow, "test-diskless-normal-boot.py", "Windows CI runs the diskless RAM-root recovery gate")
     require(build_graph, '"normal-boot"', "build graph exposes an explicit normal-boot profile")
     require(build_graph, 'sdk/zig/init.zig', "build graph compiles the userspace init")
     require(build_graph, '"artifacts/init.elf"', "userspace init is installed as a standalone artifact")
@@ -172,6 +177,7 @@ def main() -> int:
     require(executor, "activeProcesses().wait(context.handle, blocking_target, false)", "blocking wait uses the PID-sensitive target")
     forbid(executor, "activeProcesses().wait(context.handle, target_handle, false)", "wait-any collapses to the first live child")
     require(wait_conformance, "Both children are live when wait-any blocks", "CPL3 wait-any regression overlaps long and short children")
+    require(wait_conformance, "32 ticks", "CPL3 wait-any regression keeps a wide deterministic completion margin")
     require(wait_conformance, "cmp eax, r13d", "wait-any must return the short child's PID")
     require(wait_conformance, "mov esi, WNOHANG", "fixture proves the long child remains live after wait-any")
     require(wait_conformance, "cmp eax, r12d", "fixture later waits for the long child explicitly")
@@ -181,6 +187,10 @@ def main() -> int:
     require(sdk_source, "pub fn shutdown", "SDK wraps normal-profile shutdown")
     require(sdk_source, "pub fn getcwd", "SDK wraps getcwd")
     require(sdk_source, "pub fn chdir", "SDK wraps chdir")
+    require(sdk_source, "pub fn ioctl", "Zig SDK wraps ioctl")
+    require(sdk_source, "pub fn stat", "Zig SDK wraps path stat")
+    require(sdk_source, "pub fn openat", "Zig SDK wraps openat")
+    require(sdk_source, "pub fn fsync", "Zig SDK wraps descriptor fsync")
     require(sdk_init, "ZigOs userspace init PID 1", "standalone Zig init identifies its real PID 1 role")
     require(sdk_init, "zigos.spawnv", "userspace init launches the shell through the public ABI")
     require(sdk_init, "zigos.wait", "userspace init waits for and reaps the shell")
@@ -191,18 +201,26 @@ def main() -> int:
     require(normal_boot_test, "ZigOs userspace init PID 1", "normal QEMU gate requires a real CPL3 PID 1")
     require(normal_boot_test, "userspace init reaped shell PID 2 status 0", "normal QEMU gate requires PID 1 supervision and reap")
     require(normal_boot_test, "process 3 exited 42", "normal QEMU gate proves userspace shell spawn/wait")
-    require(normal_boot_test, "alloc/free 97/97 clean yes", "normal QEMU gate requires exact physical reclamation")
+    require(normal_boot_test, "alloc/free 97/97 storage persistent clean yes", "normal QEMU gate requires exact physical reclamation and persistent mode")
     require(normal_boot_test, "forbidden", "normal QEMU gate rejects diagnostic proof markers")
-    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 5:
-        raise SystemExit("permanent-userspace contract missing: ABI version 1.5")
+    require(kernel, "continuing normal boot with embedded assets and RAM-backed root", "normal boot no longer hard-fails without permanent storage")
+    require(runtime, "diskless-ram-root", "normal shutdown distinguishes the diskless recovery profile")
+    require(diskless_normal_boot_test, "usb-storage", "diskless gate boots the EFI image from unsupported USB storage")
+    require(diskless_normal_boot_test, "sync: unsupported", "diskless userspace reports persistence unavailability explicitly")
+    require(diskless_normal_boot_test, "storage diskless-ram-root cleanup yes", "diskless QEMU gate requires clean resource reclamation")
+    require(runtime, "ZigOs shutdown drain:", "diagnostic shutdown drains and reaps delayed terminal userspace")
+    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 6:
+        raise SystemExit("permanent-userspace contract missing: ABI version 1.6")
     expected_fs_syscalls = {"lseek": 98, "mkdir": 99, "unlink": 100, "rmdir": 101, "rename": 102, "chmod": 103}
     expected_network_syscalls = {"sendto": 104, "recvfrom": 105, "getpeername": 106, "setnonblock": 107}
+    expected_platform_syscalls = {"ioctl": 108, "stat": 109, "openat": 110, "fsync": 111}
     syscall_spec = abi_spec["syscalls"]
     core_numbering_valid = syscall_spec.get("spawnv") == 96 and syscall_spec.get("sync") == 97
     fs_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_fs_syscalls.items())
     network_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_network_syscalls.items())
-    if not core_numbering_valid or not fs_numbering_valid or not network_numbering_valid:
-        raise SystemExit("permanent-userspace contract missing: ABI 1.5 syscall numbering")
+    platform_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_platform_syscalls.items())
+    if not core_numbering_valid or not fs_numbering_valid or not network_numbering_valid or not platform_numbering_valid:
+        raise SystemExit("permanent-userspace contract missing: ABI 1.6 syscall numbering")
     if abi_spec.get("message_flags") != {"dontwait": 1}:
         raise SystemExit("permanent-userspace contract missing: bounded MSG_DONTWAIT value")
     if abi_spec.get("seek_whence") != {"start": 0, "current": 1, "end": 2}:
@@ -251,8 +269,8 @@ def main() -> int:
     require(build_graph, '"artifacts/dns.elf"', "userspace resolver is installed as a standalone artifact")
     require(runtime, '"/bin/dns.elf"', "userspace resolver fixture is installed into the runtime VFS")
     require(dns_source, "pub fn resolveA", "SDK exposes a bounded userspace DNS A resolver")
-    require(dns_source, "try zigos.sendto", "userspace resolver transmits through ABI 1.5 datagrams")
-    require(dns_source, "zigos.recvfrom", "userspace resolver receives through ABI 1.5 datagrams")
+    require(dns_source, "try zigos.sendto", "userspace resolver transmits through ABI 1.6 datagrams")
+    require(dns_source, "zigos.recvfrom", "userspace resolver receives through ABI 1.6 datagrams")
     require(dns_source, "error.WouldBlock", "userspace resolver retries nonblocking receive until a tick deadline")
     require(dns_source, "fn skipName", "userspace resolver validates compressed DNS names")
     require(dns_conformance, 'dns.resolveA(server, "localhost", 200)', "live Zig fixture resolves localhost through the SDK")
@@ -275,6 +293,15 @@ def main() -> int:
     require(build_graph, 'verify-zigos-sdk-elf.py', "directly linked SDK ELF has an independent host verifier")
     require(asset_builder, 'sdk_syscall_object', "asset graph assembles the freestanding syscall/startup bridge")
     require(abi_generator, 'sdk" / "zig" / "abi.zig"', "machine-readable ABI generator emits the public Zig SDK ABI")
+    require(abi_generator, 'sdk" / "c" / "include" / "zigos.h"', "machine-readable ABI generator emits the public C header")
+    require(build_graph, "sdk/c/conformance.c", "build graph compiles an independent freestanding C conformance program")
+    require(build_graph, '"artifacts/c-sdk.elf"', "C SDK conformance is installed as a standalone artifact")
+    require(runtime, '"/bin/c-sdk.elf"', "C SDK conformance is installed in the runtime VFS")
+    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(6)", "generated C header publishes ABI 1.6")
+    require(c_header, "ZIGOS_IOCTL_TTY_GET_FLAGS", "generated C header publishes terminal ioctl requests")
+    require(c_library, "zigos_openat", "C wrapper library exposes openat")
+    require(c_library, "zigos_fsync", "C wrapper library exposes descriptor fsync")
+    require(c_conformance, "generated header/library/device/ioctl/stat/openat/fsync passed", "booted C fixture covers the ABI 1.6 platform slice")
     require(sdk_startup, "mov rdi, [r12]", "SDK startup reads argc from the canonical initial stack")
     require(sdk_startup, "lea rsi, [r12 + 8]", "SDK startup derives argv from the canonical initial stack")
     require(sdk_startup, "zigos_syscall6:", "SDK supplies the six-register int 0x80 bridge")
@@ -286,15 +313,21 @@ def main() -> int:
     require(executor, "fn syscallRecvFrom", "kernel exposes source-address UDP reception")
     require(executor, "fn syscallGetPeerName", "kernel exposes connected UDP peer inspection")
     require(executor, "fn syscallSetNonblocking", "kernel stores explicit per-socket nonblocking mode")
+    require(executor, "fn syscallIoctl", "kernel exposes descriptor ioctl")
+    require(executor, "fn syscallStat", "kernel exposes path-based stat")
+    require(executor, "fn syscallOpenAt", "kernel exposes directory-relative openat")
+    require(executor, "fn syscallFsync", "kernel exposes descriptor-targeted persistence sync")
+    require(executor, "@min(maximum_socket_slots, e1000e.udpEndpointCapacity())", "ABI reports the four usable driver endpoints rather than eight bookkeeping slots")
+    require(e1000e_source, "pub fn udpEndpointCapacity", "retained NIC publishes its hardware UDP endpoint capacity")
     require(executor, "slot.nonblocking or (flags & runtime_abi.message_dontwait) != 0", "empty UDP receives return EWOULDBLOCK in both nonblocking modes")
     for wrapper in ("pub fn sendto", "pub fn recvfrom", "pub fn getpeername", "pub fn setNonblocking"):
-        require(sdk_source, wrapper, f"SDK exposes UDP ABI 1.5 wrapper {wrapper[7:]}")
+        require(sdk_source, wrapper, f"SDK exposes UDP ABI 1.6 wrapper {wrapper[7:]}")
     require(socket_conformance, "SYS_SENDTO", "CPL3 socket fixture transmits an unconnected DNS datagram")
     require(socket_conformance, "SYS_RECVFROM", "CPL3 socket fixture receives source metadata")
     require(socket_conformance, "SYS_GETPEERNAME", "CPL3 socket fixture checks its connected peer")
     require(socket_conformance, "SYS_SETNONBLOCK", "CPL3 socket fixture checks socket-level nonblocking mode")
     require(socket_conformance, "ZIGOS_MSG_DONTWAIT", "CPL3 socket fixture checks per-call nonblocking mode")
-    require(runtime_test, "socket-api: sendto/recvfrom/getpeername/nonblocking passed", "required live QEMU session proves ABI 1.5 UDP controls")
+    require(runtime_test, "socket-api: sendto/recvfrom/getpeername/nonblocking passed", "required live QEMU session proves ABI 1.6 UDP controls")
     require(sdk_conformance, "startup/argv/abi/files/vm/errno passed", "Zig conformance binary spans startup and core wrappers")
     require(sdk_abi, "pub const AbiInfo = extern struct", "generated SDK ABI publishes stable structure layouts")
     require(sdk_verifier, "physical not in (0, virtual)", "SDK ELF verifier accepts only zero or conventional p_paddr")
@@ -326,7 +359,13 @@ def main() -> int:
     require(executor, "syscall.syscall_send", "userspace UDP send")
     require(executor, "syscall.syscall_recv", "blocking userspace UDP receive")
     require(executor, "serviceNetwork", "network ingress wakes blocked socket readers")
-    require(vfs_source, "setPseudoReader", "pseudo files use a VFS backend rather than shell path dispatch")
+    require(vfs_source, "pub const PseudoOperations", "pseudo and device nodes publish per-node operation tables")
+    require(vfs_source, "pub fn createPseudoWithOperations", "VFS registers independently operated pseudo/device nodes")
+    require(vfs_source, "pub fn ioctlOpen", "VFS dispatches device ioctl through the node operation table")
+    require(runtime, "/dev/null", "runtime registers a writable null device")
+    require(runtime, "/dev/zero", "runtime registers a writable zero device")
+    require(runtime, "/dev/console", "runtime registers an openable console stream")
+    forbid(vfs_source, "setPseudoReader", "a global pseudo-reader shortcut returned")
     require(executor, "std.math.add(u64, current_tick, frame.rdi)", "overflow-safe sleep deadlines")
     require(executor, "runtime_abi.descriptor(frame.rdi)", "descriptor registers are range-checked before narrowing")
     require(executor, "runtime_abi.openFlagBits(frame.rsi)", "open flags are validated before narrowing")
@@ -355,6 +394,8 @@ def main() -> int:
     require(runtime, "writeProcessCommand(process, output)", "job reporting is derived from process records")
     require(process_source, "pub fn scheduleNextKind(self: *Table, kind: Kind, current_handle: ?u64)", "kind scheduling has no exclusion side channel")
     require(executor, "childForWait(context.handle, target_pid)", "userspace wait queries children without materializing a process snapshot")
+    require(process_source, "terminal_sequence", "wait-any records terminal completion order independently of process-table slots")
+    require(process_source, "earliest_sequence", "wait-any selects the earliest completed terminal child")
     forbid(executor, "activeProcesses().snapshot()", "userspace wait copies the full process table onto the syscall stack")
     require(process_source, "pub fn processAt", "process inspection uses bounded slot views")
     require(runtime, "state.processes.processAt", "the shell process listing avoids a full process-table return value")
@@ -422,8 +463,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 63:
-        raise SystemExit(f"canonical isolated-test declaration total must be 63, found {declared_tests}")
+    if declared_tests != 67:
+        raise SystemExit(f"canonical isolated-test declaration total must be 67, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -483,14 +524,17 @@ def main() -> int:
         "Post-bootstrap physical memory manager active:",
         "bootstrap allocator sealed",
         "ZigOs post-bootstrap physical memory: total ",
-        "peak 48 alloc/free 231/231 failed/rejected 0/0 clean yes",
-        "peak 48 alloc/free 262/262 failed/rejected 0/0 clean yes",
-        "launches/exits/faults 14/12/1",
-        "launches/exits/faults 16/14/1",
-        "reclaimed 231 allocator alloc/release/retains 231/231/0",
-        "reclaimed 262 allocator alloc/release/retains 262/262/0",
+        "peak 48 alloc/free 246/246 failed/rejected 0/0 clean yes",
+        "peak 48 alloc/free 277/277 failed/rejected 0/0 clean yes",
+        "launches/exits/faults 15/13/1",
+        "launches/exits/faults 17/15/1",
+        "reclaimed 246 stale-contexts-swept 0 allocator alloc/release/retains 246/246/0",
+        "reclaimed 277 stale-contexts-swept 0 allocator alloc/release/retains 277/277/0",
         "tty-api: blocking read/poll/line discipline passed",
         "zig-sdk: startup/argv/abi/files/vm/errno passed",
+        "c-sdk: ABI 1.6 discovery passed",
+        "c-sdk: generated header/library/device/ioctl/stat/openat/fsync passed",
+        "ZigOs shutdown drain:",
         "exec: PID 16 state zombie status 0x56",
         "ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes",
         "sync complete: ramfs mutations ",
@@ -517,7 +561,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: diagnostic and normal userspace profiles, real Zig SDK/ELF/TTY/network execution, retained NVMe writes, crash-safe A/B persistence, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.6 Zig/C SDKs, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

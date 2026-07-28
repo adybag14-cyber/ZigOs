@@ -88,6 +88,7 @@ pub const Process = struct {
     argument_count: u8 = 0,
     cwd_node: u16 = 0,
     exit_status: u32 = 0,
+    terminal_sequence: u64 = 0,
     fault_vector: u16 = 0,
     fault_address: u64 = 0,
     pending_signals: u64 = 0,
@@ -148,6 +149,7 @@ pub const Report = struct {
 pub const Table = struct {
     processes: [maximum_processes]Process = @splat(.{}),
     next_pid: u32 = 1,
+    next_terminal_sequence: u64 = 1,
     scheduler_cursor: usize = 0,
     init_handle: u64 = 0,
     total_created: u64 = 0,
@@ -392,6 +394,7 @@ pub const Table = struct {
         if (self.processes[slot].terminal()) return Error.AlreadyTerminal;
         self.processes[slot].state = .zombie;
         self.processes[slot].exit_status = status;
+        self.recordTerminalSequence(slot);
         self.processes[slot].wait_reason = .none;
         self.processes[slot].wake_tick = 0;
         self.processes[slot].wait_target = 0;
@@ -403,6 +406,7 @@ pub const Table = struct {
         const slot = try self.resolve(handle);
         if (self.processes[slot].terminal()) return Error.AlreadyTerminal;
         self.processes[slot].state = .faulted;
+        self.recordTerminalSequence(slot);
         self.processes[slot].fault_vector = vector;
         self.processes[slot].fault_address = address;
         self.processes[slot].exit_status = 0x8000_0000 | @as(u32, vector);
@@ -463,27 +467,36 @@ pub const Table = struct {
     pub fn childForWait(self: *const Table, parent_handle: u64, target_pid: u32) Error!?u64 {
         const parent_slot = try self.resolve(parent_handle);
         var first_child: ?u64 = null;
+        var earliest_terminal: ?u64 = null;
+        var earliest_sequence: u64 = std.math.maxInt(u64);
         for (0..self.processes.len) |slot| {
             const process = &self.processes[slot];
             if (!process.used or process.parent_slot != parent_slot) continue;
             if (target_pid != 0 and process.pid != target_pid) continue;
             if (first_child == null) first_child = process.handle;
-            if (process.terminal()) return process.handle;
+            if (target_pid != 0) return process.handle;
+            if (process.terminal() and process.terminal_sequence < earliest_sequence) {
+                earliest_terminal = process.handle;
+                earliest_sequence = process.terminal_sequence;
+            }
         }
         if (first_child == null) return Error.NotChild;
-        return first_child;
+        return earliest_terminal orelse first_child;
     }
 
     pub fn wait(self: *Table, parent_handle: u64, target_handle: ?u64, nonblocking: bool) Error!?Status {
         const parent_slot = try self.resolve(parent_handle);
         var candidate: ?usize = null;
+        var earliest_sequence: u64 = std.math.maxInt(u64);
         for (0..self.processes.len) |slot| {
             const process = &self.processes[slot];
             if (!process.used or process.parent_slot != parent_slot) continue;
             if (target_handle) |target| if (process.handle != target) continue;
-            if (process.terminal()) {
+            if (!process.terminal()) continue;
+            if (target_handle != null or process.terminal_sequence < earliest_sequence) {
                 candidate = slot;
-                break;
+                earliest_sequence = process.terminal_sequence;
+                if (target_handle != null) break;
             }
         }
         if (candidate) |slot| return @as(?Status, try self.reapSlot(parent_slot, slot));
@@ -503,16 +516,20 @@ pub const Table = struct {
         return null;
     }
 
-    pub fn reapOrphans(self: *Table) usize {
-        const init_slot = self.resolve(self.init_handle) catch return 0;
+    pub fn reapTerminalChildren(self: *Table, parent_handle: u64) Error!usize {
+        const parent_slot = try self.resolve(parent_handle);
         var reaped: usize = 0;
         var slot: usize = 0;
         while (slot < self.processes.len) : (slot += 1) {
-            if (!self.processes[slot].used or self.processes[slot].parent_slot != init_slot or !self.processes[slot].terminal()) continue;
-            _ = self.reapSlot(init_slot, slot) catch continue;
+            if (!self.processes[slot].used or self.processes[slot].parent_slot != parent_slot or !self.processes[slot].terminal()) continue;
+            _ = try self.reapSlot(parent_slot, slot);
             reaped += 1;
         }
         return reaped;
+    }
+
+    pub fn reapOrphans(self: *Table) usize {
+        return self.reapTerminalChildren(self.init_handle) catch 0;
     }
 
     pub fn setResourceUsage(self: *Table, handle: u64, pages: u32, descriptors: u16, sockets: u16) Error!void {
@@ -568,6 +585,12 @@ pub const Table = struct {
             }
         }
         return result;
+    }
+
+    fn recordTerminalSequence(self: *Table, slot: usize) void {
+        self.processes[slot].terminal_sequence = self.next_terminal_sequence;
+        self.next_terminal_sequence +%= 1;
+        if (self.next_terminal_sequence == 0) self.next_terminal_sequence = 1;
     }
 
     fn spawnInternal(
@@ -783,6 +806,18 @@ test "orphan children are adopted and auto reaped by init" {
     try std.testing.expectEqual(@as(usize, 2), table.reapOrphans());
 }
 
+test "terminal child reaping works for non-init supervisors" {
+    var table = Table.init(0);
+    const root = table.initHandle();
+    const supervisor = try table.spawn(root, .kernel, "supervisor", &.{}, 0, 0, 0, 1, .{});
+    const first = try table.spawn(supervisor, .userspace, "first", &.{}, 0, 0, 0, 2, .{});
+    const second = try table.spawn(supervisor, .userspace, "second", &.{}, 0, 0, 0, 3, .{});
+    try table.exit(first, 1);
+    try table.exit(second, 2);
+    try std.testing.expectEqual(@as(usize, 2), try table.reapTerminalChildren(supervisor));
+    try std.testing.expectEqual(@as(u16, 0), (try table.get(supervisor)).child_count);
+}
+
 test "signals enforce uid permissions masks and terminal kill" {
     var table = Table.init(0);
     const root = table.initHandle();
@@ -844,12 +879,13 @@ test "wait any and WNOHANG preserve children until a terminal result exists" {
     const second = try table.spawn(parent, .userspace, "second", &.{}, 0, 0, 0, 1, .{});
     try std.testing.expect((try table.wait(parent, null, true)) == null);
     try std.testing.expectEqual(@as(u16, 2), (try table.get(parent)).child_count);
+    const second_pid = (try table.get(second)).pid;
     try table.exit(second, 22);
+    try table.exit(first, 11);
     const any = (try table.wait(parent, null, false)).?;
+    try std.testing.expectEqual(second_pid, any.pid);
     try std.testing.expectEqual(@as(u32, 22), any.exit_status);
     try std.testing.expectEqual(@as(u16, 1), (try table.get(parent)).child_count);
-    try std.testing.expect((try table.wait(parent, first, true)) == null);
-    try table.exit(first, 11);
     const exact = (try table.wait(parent, first, false)).?;
     try std.testing.expectEqual(@as(u32, 11), exact.exit_status);
 }
@@ -862,6 +898,7 @@ test "childForWait selects exact and terminal children without a process snapsho
     const first_pid = (try table.get(first)).pid;
     try std.testing.expectEqual(first, (try table.childForWait(parent, first_pid)).?);
     try table.exit(second, 9);
+    try table.exit(first, 8);
     try std.testing.expectEqual(second, (try table.childForWait(parent, 0)).?);
     try std.testing.expectError(Error.NotChild, table.childForWait(first, 0));
 }

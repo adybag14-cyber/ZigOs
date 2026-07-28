@@ -130,19 +130,44 @@ pub fn build(b: *std.Build) void {
     dns_conformance.setLinkerScript(b.path("sdk/zig/linker.ld"));
     dns_conformance.step.dependOn(&assets.step);
 
+    const c_sdk_module = b.createModule(.{
+        .target = sdk_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+        .code_model = .large,
+        .pic = false,
+        .stack_protector = false,
+        .stack_check = false,
+    });
+    c_sdk_module.addIncludePath(b.path("sdk/c/include"));
+    c_sdk_module.addCSourceFiles(.{
+        .files = &.{ "sdk/c/zigos.c", "sdk/c/conformance.c" },
+        .flags = &.{ "-std=c11", "-ffreestanding", "-fno-builtin", "-fno-stack-protector", "-fno-pic" },
+    });
+    c_sdk_module.addObjectFile(b.path("build/sdk/syscall.o"));
+    const c_sdk_conformance = b.addExecutable(.{
+        .name = "c-sdk",
+        .root_module = c_sdk_module,
+    });
+    c_sdk_conformance.entry = .{ .symbol_name = "_start" };
+    c_sdk_conformance.setLinkerScript(b.path("sdk/zig/linker.ld"));
+    c_sdk_conformance.step.dependOn(&assets.step);
+
     const sdk_embed = b.addWriteFiles();
     _ = sdk_embed.addCopyFile(sdk_conformance.getEmittedBin(), "sdk.elf");
     _ = sdk_embed.addCopyFile(userspace_init.getEmittedBin(), "init.elf");
     _ = sdk_embed.addCopyFile(userspace_shell.getEmittedBin(), "sh.elf");
     _ = sdk_embed.addCopyFile(fs_conformance.getEmittedBin(), "fs.elf");
     _ = sdk_embed.addCopyFile(dns_conformance.getEmittedBin(), "dns.elf");
+    _ = sdk_embed.addCopyFile(c_sdk_conformance.getEmittedBin(), "c-sdk.elf");
     const sdk_embed_module = sdk_embed.add(
         "runtime_sdk.zig",
         "pub const sdk = @embedFile(\"sdk.elf\");\n" ++
             "pub const init = @embedFile(\"init.elf\");\n" ++
             "pub const shell = @embedFile(\"sh.elf\");\n" ++
             "pub const fs = @embedFile(\"fs.elf\");\n" ++
-            "pub const dns = @embedFile(\"dns.elf\");\n",
+            "pub const dns = @embedFile(\"dns.elf\");\n" ++
+            "pub const c_sdk = @embedFile(\"c-sdk.elf\");\n",
     );
 
     const target = b.resolveTargetQuery(.{
@@ -211,6 +236,10 @@ pub fn build(b: *std.Build) void {
         dns_conformance.getEmittedBin(),
         "artifacts/dns.elf",
     );
+    const install_c_sdk = b.addInstallFile(
+        c_sdk_conformance.getEmittedBin(),
+        "artifacts/c-sdk.elf",
+    );
     install_service.step.dependOn(&assets.step);
     install_process.step.dependOn(&assets.step);
     install_exec.step.dependOn(&assets.step);
@@ -231,6 +260,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_shell.step);
     b.getInstallStep().dependOn(&install_fs.step);
     b.getInstallStep().dependOn(&install_dns.step);
+    b.getInstallStep().dependOn(&install_c_sdk.step);
 
     const verify_efi = b.addSystemCommand(&.{ python, "scripts/verify-efi.py" });
     verify_efi.addFileArg(kernel.getEmittedBin());
@@ -244,6 +274,8 @@ pub fn build(b: *std.Build) void {
     verify_fs.addFileArg(fs_conformance.getEmittedBin());
     const verify_dns = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_dns.addFileArg(dns_conformance.getEmittedBin());
+    const verify_c_sdk = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
+    verify_c_sdk.addFileArg(c_sdk_conformance.getEmittedBin());
     const verify_permanent_userspace = b.addSystemCommand(&.{ python, "scripts/verify-permanent-userspace.py" });
     verify_permanent_userspace.setCwd(b.path("."));
     verify_permanent_userspace.step.dependOn(&assets.step);
@@ -293,5 +325,6 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&verify_shell.step);
     check_step.dependOn(&verify_fs.step);
     check_step.dependOn(&verify_dns.step);
+    check_step.dependOn(&verify_c_sdk.step);
     check_step.dependOn(&verify_permanent_userspace.step);
 }

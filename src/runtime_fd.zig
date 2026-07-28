@@ -324,14 +324,35 @@ pub const System = struct {
         tick: u64,
     ) Error!u16 {
         const process = try processes.get(process_handle);
+        return self.openFileAt(vfs, processes, process_handle, process.cwd_node, path, flags, mode, tick);
+    }
+
+    pub fn openFileAt(
+        self: *System,
+        vfs: *runtime_vfs.Vfs,
+        processes: *runtime_process.Table,
+        process_handle: u64,
+        directory_node: u16,
+        path: []const u8,
+        flags: runtime_vfs.OpenFlags,
+        mode: u16,
+        tick: u64,
+    ) Error!u16 {
+        const process = try processes.get(process_handle);
         const namespace_slot = try self.resolveNamespace(process_handle);
         try self.requireDescriptorCapacity(&self.namespaces[namespace_slot], process, 1);
         const fd = self.findFreeDescriptors(&self.namespaces[namespace_slot], 1) orelse return Error.DescriptorLimit;
         const open_slot = self.findFreeOpenDescriptions(1) orelse return Error.OpenDescriptionLimit;
         const generation = nextGeneration(self.open_descriptions[open_slot[0]].generation);
         const owner = makeOpenId(open_slot[0], generation);
-        const vfs_handle = try vfs.open(owner, process.cwd_node, path, flags, mode, tick);
-        self.initializeDescription(open_slot[0], .vfs, flags.read, flags.write, flags.append, invalid_resource, 0, owner, vfs_handle);
+        const vfs_handle = try vfs.open(owner, directory_node, path, flags, mode, tick);
+        const stream = try vfs.pseudoStreamOpen(owner, vfs_handle);
+        const kind: DescriptionKind = if (stream == .console) .terminal else .vfs;
+        if (kind == .terminal and self.terminal_backend == null) {
+            try vfs.close(owner, vfs_handle);
+            return Error.InvalidOperation;
+        }
+        self.initializeDescription(open_slot[0], kind, flags.read, flags.write, flags.append, invalid_resource, 0, owner, vfs_handle);
         self.namespaces[namespace_slot].descriptors[fd[0]] = .{
             .used = true,
             .open_index = @intCast(open_slot[0]),
@@ -716,15 +737,30 @@ pub const System = struct {
         const open_index = try self.resolveDescriptor(namespace_slot, fd);
         const description = self.open_descriptions[open_index];
         return switch (description.kind) {
-            .terminal => .{
-                .node = std.math.maxInt(u32),
-                .generation = description.generation,
-                .kind = @intFromEnum(runtime_vfs.Kind.pseudo),
-                .readonly = 0,
-                .mode = 0o666,
-                .mount_id = 0,
-                .size = 0,
-                .modified_tick = 0,
+            .terminal => blk: {
+                if (description.vfs_handle != 0) {
+                    const info = try vfs.statOpen(description.vfs_owner, description.vfs_handle);
+                    break :blk .{
+                        .node = info.node,
+                        .generation = info.generation,
+                        .kind = @intFromEnum(info.kind),
+                        .readonly = @intFromBool(info.readonly),
+                        .mode = info.mode,
+                        .mount_id = info.mount_id,
+                        .size = info.size,
+                        .modified_tick = info.modified_tick,
+                    };
+                }
+                break :blk .{
+                    .node = std.math.maxInt(u32),
+                    .generation = description.generation,
+                    .kind = @intFromEnum(runtime_vfs.Kind.pseudo),
+                    .readonly = 0,
+                    .mode = 0o666,
+                    .mount_id = 0,
+                    .size = 0,
+                    .modified_tick = 0,
+                };
             },
             .vfs => blk: {
                 const info = try vfs.statOpen(description.vfs_owner, description.vfs_handle);
@@ -783,6 +819,7 @@ pub const System = struct {
 
     pub fn poll(
         self: *const System,
+        vfs: *const runtime_vfs.Vfs,
         processes: *const runtime_process.Table,
         process_handle: u64,
         fd: u16,
@@ -804,10 +841,7 @@ pub const System = struct {
                 }
                 if (description.writable) ready |= runtime_abi.poll_writable;
             },
-            .vfs => {
-                if (description.readable) ready |= runtime_abi.poll_readable;
-                if (description.writable) ready |= runtime_abi.poll_writable;
-            },
+            .vfs => ready |= try vfs.pollOpen(description.vfs_owner, description.vfs_handle, requested),
             .udp_socket => {
                 const poll_fn = self.external_poll orelse return Error.InvalidOperation;
                 ready |= poll_fn(self.external_context, description.resource_index, description.resource_generation, requested);
@@ -831,6 +865,65 @@ pub const System = struct {
         return ready & requested;
     }
 
+    pub fn directoryNode(
+        self: *const System,
+        vfs: *const runtime_vfs.Vfs,
+        processes: *const runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+    ) Error!u16 {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        const description = self.open_descriptions[open_index];
+        if (description.kind != .vfs) return Error.NotDirectory;
+        return vfs.directoryNodeOpen(description.vfs_owner, description.vfs_handle);
+    }
+
+    pub fn persistentSyncRequired(
+        self: *const System,
+        vfs: *const runtime_vfs.Vfs,
+        processes: *const runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+    ) Error!bool {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        const description = self.open_descriptions[open_index];
+        if (description.kind != .vfs and !(description.kind == .terminal and description.vfs_handle != 0))
+            return Error.InvalidOperation;
+        return vfs.persistentOpen(description.vfs_owner, description.vfs_handle);
+    }
+
+    pub fn ioctl(
+        self: *System,
+        vfs: *runtime_vfs.Vfs,
+        processes: *runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+        request: u64,
+        argument: u64,
+    ) Error!u64 {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        const description = self.open_descriptions[open_index];
+        return switch (description.kind) {
+            .terminal => blk: {
+                const terminal = self.terminal_backend orelse return Error.InvalidOperation;
+                if (request == runtime_abi.constants.ioctl_tty_get_flags) break :blk terminal.modeFlags();
+                if (request == runtime_abi.constants.ioctl_tty_set_flags) {
+                    if (!terminal.setModeFlags(argument)) return Error.InvalidOperation;
+                    break :blk 0;
+                }
+                return Error.UnsupportedOperation;
+            },
+            .vfs => vfs.ioctlOpen(description.vfs_owner, description.vfs_handle, request, argument),
+            else => Error.UnsupportedOperation,
+        };
+    }
+
     pub fn snapshot(
         self: *const System,
         vfs: *const runtime_vfs.Vfs,
@@ -846,7 +939,13 @@ pub const System = struct {
             var resource_id: u64 = 0;
             var offset_or_buffered: usize = 0;
             switch (description.kind) {
-                .terminal => {},
+                .terminal => {
+                    if (description.vfs_handle != 0) {
+                        const info = try vfs.openInfo(description.vfs_owner, description.vfs_handle);
+                        resource_id = (@as(u64, info.node_generation) << 32) | info.node;
+                        offset_or_buffered = info.offset;
+                    }
+                },
                 .vfs => {
                     const info = try vfs.openInfo(description.vfs_owner, description.vfs_handle);
                     resource_id = (@as(u64, info.node_generation) << 32) | info.node;
@@ -954,7 +1053,10 @@ pub const System = struct {
             }
             if (description.generation == 0 or description.references == 0 or description.references != expected_references[index]) return false;
             switch (description.kind) {
-                .terminal => if (description.resource_index != invalid_resource) return false,
+                .terminal => {
+                    if (description.resource_index != invalid_resource) return false;
+                    if (description.vfs_handle != 0) _ = vfs.openInfo(description.vfs_owner, description.vfs_handle) catch return false;
+                },
                 .vfs => {
                     _ = vfs.openInfo(description.vfs_owner, description.vfs_handle) catch return false;
                 },
@@ -1031,6 +1133,7 @@ pub const System = struct {
         const description = self.open_descriptions[open_index];
         if (!description.used or description.references == 0) return Error.CorruptState;
         if (description.references == 1) switch (description.kind) {
+            .terminal => if (description.vfs_handle != 0) try vfs.close(description.vfs_owner, description.vfs_handle),
             .vfs => try vfs.close(description.vfs_owner, description.vfs_handle),
             .udp_socket => {
                 const close_fn = self.external_close orelse return Error.InvalidOperation;
@@ -1203,6 +1306,43 @@ fn initializeTestProcess(table: *runtime_process.Table, name: []const u8, limit:
     return table.spawn(table.initHandle(), .userspace, name, &.{name}, 0, 1000, 1000, 0, .{
         .maximum_descriptors = limit,
     });
+}
+
+test "VFS console opens as a terminal and supports ioctl state" {
+    var fs = runtime_vfs.Vfs.init();
+    const dev = try fs.mkdir(0, "/dev", 0o755, 0);
+    const console_operations = runtime_vfs.PseudoOperations{ .stream = .console };
+    _ = try fs.createPseudoWithOperations(dev, "console", 0o666, 0, &console_operations, null);
+    _ = try fs.mount(0, "/dev", .devfs, true, "kernel-devices");
+
+    var processes = runtime_process.Table.init(0);
+    const process = processes.initHandle();
+    var tty = runtime_tty.Tty.init(process);
+    var system = System.init();
+    system.setTerminalBackend(&tty);
+    try system.bindProcess(&processes, process, true);
+
+    const fd = try system.openFile(&fs, &processes, process, "/dev/console", .{ .write = true }, 0, 0);
+    try std.testing.expectEqual(DescriptionKind.terminal, try system.descriptorKind(&processes, process, fd));
+    const info = try system.stat(&fs, &processes, process, fd);
+    try std.testing.expectEqual(@as(u16, 0o666), info.mode);
+    try std.testing.expectEqual(@as(u8, 0), info.readonly);
+    try std.testing.expectEqual(
+        runtime_abi.constants.tty_echo | runtime_abi.constants.tty_canonical | runtime_abi.constants.tty_signals,
+        try system.ioctl(&fs, &processes, process, fd, runtime_abi.constants.ioctl_tty_get_flags, 0),
+    );
+    try std.testing.expectEqual(@as(u64, 0), try system.ioctl(
+        &fs,
+        &processes,
+        process,
+        fd,
+        runtime_abi.constants.ioctl_tty_set_flags,
+        runtime_abi.constants.tty_echo,
+    ));
+    try std.testing.expectEqual(runtime_abi.constants.tty_echo, tty.modeFlags());
+    try std.testing.expectEqual(@as(usize, 7), (try system.write(&fs, &processes, process, fd, "console", 0)).count);
+    try system.close(&fs, &processes, process, fd);
+    try std.testing.expect(system.validate(&fs, &processes));
 }
 
 test "numeric descriptor namespace uses lowest free descriptor" {

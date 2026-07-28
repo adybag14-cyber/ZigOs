@@ -69,11 +69,11 @@ jobs:
         shell: pwsh
         run: .\scripts\test-qemu.ps1 -Network -NoHpet -NoPs2 -CpuCount 1 -NoUsbKeyboard -NoGraphics -TimeoutSeconds 180
 
-      - name: Drive 44-command permanent-userspace COM1 runtime (offline)
+      - name: Drive 45-command permanent-userspace COM1 runtime (offline)
         shell: pwsh
         run: .\scripts\test-runtime.ps1 -TimeoutSeconds 180
 
-      - name: Drive 46-command permanent-userspace COM1 runtime (live network)
+      - name: Drive 47-command permanent-userspace COM1 runtime (live network)
         shell: pwsh
         run: .\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 
@@ -115,6 +115,10 @@ jobs:
       - name: Boot normal userspace PID 2 shell profile
         shell: pwsh
         run: python .\scripts\test-normal-boot.py --boot-timeout 240
+
+      - name: Boot diskless normal RAM-root recovery profile
+        shell: pwsh
+        run: python .\scripts\test-diskless-normal-boot.py --skip-build --boot-timeout 240
 
   reproducibility:
     name: Cross-platform artifact identity gate

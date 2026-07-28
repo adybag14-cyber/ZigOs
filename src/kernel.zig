@@ -195,7 +195,11 @@ pub fn enter(info: *const boot.BootInfo) callconv(cc) noreturn {
     );
     const ahci_storage_ready = inspectAhci(pci_inventory, &frame_allocator, legacy_irq_target);
     if (!nvme_storage_ready and !ahci_storage_ready) {
-        storageFailure("no supported NVMe namespace or SATA device was usable");
+        if (build_options.normal_boot) {
+            debugWrite("No permanent storage backend usable; continuing normal boot with embedded assets and RAM-backed root\r\n");
+        } else {
+            storageFailure("no supported NVMe namespace or SATA device was usable");
+        }
     }
     debugWrite("Interactive input ready: USB keyboard ");
     debugWrite(if (usb_keyboard_ready) "yes" else "no");
@@ -14057,7 +14061,7 @@ fn inspectAhci(inventory: pci.Inventory, allocator: *memory.FrameAllocator, inte
         if (port.active and port.device_type == .sata) active_sata_count += 1;
     }
     if (active_sata_count == 0) {
-        debugWrite("AHCI controller has no active SATA devices; continuing with NVMe storage\r\n");
+        debugWrite("AHCI controller has no active SATA devices; continuing without AHCI storage\r\n");
         return false;
     }
     const identity = ahci.identifyFirstSata(controller, allocator, interrupt_target) orelse

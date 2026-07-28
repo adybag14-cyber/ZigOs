@@ -240,6 +240,7 @@ pub fn fromError(err: anyerror) i64 {
         error.TooManyOpenFiles, error.OpenDescriptionLimit => errno_system_file_limit,
         error.DescriptorLimit => errno_process_file_limit,
         error.NotSeekable => errno_not_seekable,
+        error.UnsupportedOperation => errno_no_syscall,
         error.BrokenPipe => errno_broken_pipe,
         error.NotSocket => errno_not_socket,
         error.NotConnected => errno_not_connected,

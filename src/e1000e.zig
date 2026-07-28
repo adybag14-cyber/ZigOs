@@ -79,6 +79,10 @@ const ring_bytes: u32 = ring_descriptor_count * @sizeOf(RxDescriptor);
 const completion_queue_capacity: usize = 32;
 const software_packet_queue_capacity: usize = 8;
 const udp_endpoint_capacity: usize = 4;
+
+pub fn udpEndpointCapacity() usize {
+    return udp_endpoint_capacity;
+}
 const maximum_software_packet_bytes: usize = 2048;
 const maximum_ethernet_frame_bytes: usize = 1518;
 pub const maximum_udp_payload_bytes: usize = maximum_ethernet_frame_bytes - 14 - ipv4_header_bytes - 8;

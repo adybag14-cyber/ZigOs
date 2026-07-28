@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 5,
+    "minor": 6,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -63,7 +63,11 @@
     "sendto": 104,
     "recvfrom": 105,
     "getpeername": 106,
-    "setnonblock": 107
+    "setnonblock": 107,
+    "ioctl": 108,
+    "stat": 109,
+    "openat": 110,
+    "fsync": 111
   },
   "errno": {
     "permission": -1,
@@ -124,5 +128,17 @@
   },
   "message_flags": {
     "dontwait": 1
+  },
+  "directory_fds": {
+    "cwd": -100
+  },
+  "ioctl_requests": {
+    "tty_get_flags": 21505,
+    "tty_set_flags": 21506
+  },
+  "tty_flags": {
+    "echo": 0,
+    "canonical": 1,
+    "signals": 2
   }
 }

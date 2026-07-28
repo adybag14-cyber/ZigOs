@@ -260,6 +260,30 @@ pub fn fstat(fd: u16, info: *Stat) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_fstat, fd, ptrValue(info), 0, 0, 0, 0));
 }
 
+pub fn stat(path: [*:0]const u8, info: *Stat) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_stat, ptrValue(path), ptrValue(info), 0, 0, 0, 0));
+}
+
+pub fn ioctl(fd: u16, request: u64, argument: u64) Error!u64 {
+    return result(zigos_syscall6(abi.syscall_ioctl, fd, request, argument, 0, 0, 0));
+}
+
+pub fn openat(directory_fd: i64, path: [*:0]const u8, flags: OpenFlags, mode: u16) Error!u16 {
+    return @intCast(try result(zigos_syscall6(
+        abi.syscall_openat,
+        @bitCast(directory_fd),
+        ptrValue(path),
+        flags.bits(),
+        mode,
+        0,
+        0,
+    )));
+}
+
+pub fn fsync(fd: u16) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_fsync, fd, 0, 0, 0, 0, 0));
+}
+
 pub fn getdents(fd: u16, entries: []DirectoryEntry) Error!usize {
     const bytes = entries.len * @sizeOf(DirectoryEntry);
     const returned = try result(zigos_syscall6(abi.syscall_getdents, fd, ptrValue(entries.ptr), bytes, 0, 0, 0));

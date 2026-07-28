@@ -602,6 +602,10 @@ pub fn handleSyscall(
         syscall.syscall_recvfrom => return syscallRecvFrom(context, frame, fx_state),
         syscall.syscall_getpeername => return syscallGetPeerName(context, frame),
         syscall.syscall_setnonblock => return syscallSetNonblocking(context, frame),
+        syscall.syscall_ioctl => return syscallIoctl(context, frame),
+        syscall.syscall_stat => return syscallStat(context, frame),
+        syscall.syscall_openat => return syscallOpenAt(context, frame),
+        syscall.syscall_fsync => return syscallFsync(context, frame, fx_state),
         syscall.syscall_shutdown => return syscallShutdown(context, frame, fx_state),
         syscall.syscall_getcwd => return syscallGetcwd(context, frame),
         syscall.syscall_chdir => return syscallChdir(context, frame),
@@ -722,6 +726,31 @@ pub fn forget(handle: u64) void {
     const index = findContext(handle) orelse return;
     if (!contexts[index].resources_released) return;
     _ = resetContext(index);
+}
+
+pub fn finalizeTerminalContexts() !usize {
+    var finalized: usize = 0;
+    for (0..contexts.len) |index| {
+        if (!contexts[index].used or contexts[index].resources_released) continue;
+        const process = activeProcesses().get(contexts[index].handle) catch continue;
+        if (!process.terminal()) continue;
+        try finalize(contexts[index].handle);
+        finalized += 1;
+    }
+    return finalized;
+}
+
+pub fn sweepReleasedContexts() usize {
+    var swept: usize = 0;
+    for (0..contexts.len) |index| {
+        if (!contexts[index].used or !contexts[index].resources_released) continue;
+        _ = activeProcesses().get(contexts[index].handle) catch {
+            _ = resetContext(index);
+            swept += 1;
+            continue;
+        };
+    }
+    return swept;
 }
 
 pub fn takeOutput(handle: u64, destination: []u8) usize {
@@ -922,7 +951,7 @@ fn syscallSync(
     fx_state: *align(16) interrupt_context.FxState,
 ) u64 {
     if (!persistent_storage_capability) {
-        frame.rax = reject(runtime_abi.errno_read_only);
+        frame.rax = reject(runtime_abi.errno_no_syscall);
         return 0;
     }
     const callback = sync_fn orelse {
@@ -1598,6 +1627,7 @@ fn syscallPoll(context: *Context, frame: *interrupt_context.Frame) u64 {
     var ready_count: usize = 0;
     for (descriptors[0..count]) |*descriptor| {
         descriptor.returned = activeDescriptors().poll(
+            activeVfs(),
             activeProcesses(),
             context.handle,
             descriptor.fd,
@@ -1654,7 +1684,7 @@ fn syscallAbiQuery(context: *Context, frame: *interrupt_context.Frame) u64 {
         .maximum_path_bytes = runtime_vfs.maximum_path_length,
         .maximum_processes = runtime_process.maximum_processes,
         .maximum_descriptors = runtime_fd.maximum_descriptors_per_process,
-        .maximum_sockets = if (e1000e.activeDevice() != null) maximum_socket_slots else 0,
+        .maximum_sockets = if (e1000e.activeDevice() != null) @min(maximum_socket_slots, e1000e.udpEndpointCapacity()) else 0,
     });
     if (!copyToUser(context, frame.rdi, std.mem.asBytes(&info))) {
         frame.rax = reject(errno_fault);
@@ -2401,6 +2431,148 @@ fn syscallOpen(context: *Context, frame: *interrupt_context.Frame) u64 {
     };
     frame.rax = fd;
     return 0;
+}
+
+fn syscallIoctl(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    frame.rax = activeDescriptors().ioctl(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        fd,
+        frame.rsi,
+        frame.rdx,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    return 0;
+}
+
+fn syscallStat(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    if (!validateRange(context, frame.rsi, @sizeOf(runtime_abi.Stat), true)) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const info = activeVfs().stat(process.cwd_node, path_buffer[0..path_length]) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const result = runtime_abi.Stat{
+        .node = info.node,
+        .generation = info.generation,
+        .kind = @intFromEnum(info.kind),
+        .readonly = @intFromBool(info.readonly),
+        .mode = info.mode,
+        .mount_id = info.mount_id,
+        .size = info.size,
+        .modified_tick = info.modified_tick,
+    };
+    if (!copyToUser(context, frame.rsi, std.mem.asBytes(&result))) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallOpenAt(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const path_length = copyUserString(context, frame.rsi, &path_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const bits = runtime_abi.openFlagBits(frame.rdx) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const mode = runtime_abi.mode(frame.r10) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const path = path_buffer[0..path_length];
+    const directory_node = if (path.len != 0 and path[0] == '/')
+        process.cwd_node
+    else if (@as(i64, @bitCast(frame.rdi)) == syscall.directory_fd_cwd)
+        process.cwd_node
+    else blk: {
+        const directory_fd = runtime_abi.descriptor(frame.rdi) orelse {
+            frame.rax = reject(errno_bad_fd);
+            return 0;
+        };
+        break :blk activeDescriptors().directoryNode(
+            activeVfs(),
+            activeProcesses(),
+            context.handle,
+            directory_fd,
+        ) catch |err| {
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        };
+    };
+    const flags = runtime_vfs.OpenFlags{
+        .read = (bits & runtime_abi.open_read) != 0,
+        .write = (bits & runtime_abi.open_write) != 0,
+        .create = (bits & runtime_abi.open_create) != 0,
+        .truncate = (bits & runtime_abi.open_truncate) != 0,
+        .append = (bits & runtime_abi.open_append) != 0,
+    };
+    const fd = activeDescriptors().openFileAt(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        directory_node,
+        path,
+        flags,
+        mode,
+        current_tick,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = fd;
+    return 0;
+}
+
+fn syscallFsync(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const persistent = activeDescriptors().persistentSyncRequired(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        fd,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (!persistent) {
+        frame.rax = 0;
+        return 0;
+    }
+    return syscallSync(context, frame, fx_state);
 }
 
 fn blockAndRetry(

@@ -9,7 +9,26 @@ pub const maximum_open_files: usize = 64;
 pub const maximum_directory_entries: usize = 64;
 pub const invalid_node: u16 = 0xFFFF;
 
-pub const PseudoReadFn = *const fn (context: ?*anyopaque, node: u16, offset: usize, output: []u8) usize;
+pub const PseudoReadFn = *const fn (context: ?*anyopaque, node: u16, offset: usize, output: []u8) Error!usize;
+pub const PseudoWriteFn = *const fn (context: ?*anyopaque, node: u16, offset: usize, input: []const u8) Error!usize;
+pub const PseudoPollFn = *const fn (context: ?*anyopaque, node: u16, requested: u16) Error!u16;
+pub const PseudoIoctlFn = *const fn (context: ?*anyopaque, node: u16, request: u64, argument: u64) Error!u64;
+pub const PseudoCloseFn = *const fn (context: ?*anyopaque, node: u16, owner_pid: u32) void;
+
+pub const PseudoStream = enum(u8) {
+    console,
+};
+
+pub const PseudoOperations = struct {
+    read: ?PseudoReadFn = null,
+    write: ?PseudoWriteFn = null,
+    poll: ?PseudoPollFn = null,
+    ioctl: ?PseudoIoctlFn = null,
+    close: ?PseudoCloseFn = null,
+    stream: ?PseudoStream = null,
+};
+
+const unsupported_pseudo_operations = PseudoOperations{};
 
 pub const Kind = enum(u8) {
     file,
@@ -45,6 +64,8 @@ pub const Error = error{
     TooManyOpenFiles,
     CrossMount,
     Cycle,
+    UnsupportedOperation,
+    NotSeekable,
 };
 
 pub const Stat = struct {
@@ -89,6 +110,8 @@ const Node = struct {
     readonly: bool = false,
     mount_id: u8 = 0,
     modified_tick: u64 = 0,
+    pseudo_operations: ?*const PseudoOperations = null,
+    pseudo_context: ?*anyopaque = null,
 
     fn nameSlice(self: *const Node) []const u8 {
         return self.name[0..self.name_length];
@@ -157,8 +180,6 @@ pub const Vfs = struct {
     open_files: [maximum_open_files]OpenFile = @splat(.{}),
     mutations: u64 = 0,
     rejected_operations: u64 = 0,
-    pseudo_context: ?*anyopaque = null,
-    pseudo_reader: ?PseudoReadFn = null,
 
     pub fn init() Vfs {
         var self: Vfs = undefined;
@@ -194,11 +215,6 @@ pub const Vfs = struct {
         return 0;
     }
 
-    pub fn setPseudoReader(self: *Vfs, context: ?*anyopaque, reader: ?PseudoReadFn) void {
-        self.pseudo_context = context;
-        self.pseudo_reader = reader;
-    }
-
     pub fn resolve(self: *const Vfs, cwd: u16, path: []const u8) Error!u16 {
         if (path.len == 0) return self.validateDirectory(cwd);
         if (path.len > maximum_path_length) return Error.PathTooLong;
@@ -230,7 +246,7 @@ pub const Vfs = struct {
             .kind = node.kind,
             .size = node.size,
             .mode = node.mode,
-            .readonly = node.readonly or self.mountReadonly(node.mount_id),
+            .readonly = self.nodeReadonly(node_index),
             .mount_id = node.mount_id,
             .modified_tick = node.modified_tick,
         };
@@ -248,7 +264,7 @@ pub const Vfs = struct {
                 .node = @intCast(index),
                 .kind = node.kind,
                 .size = node.size,
-                .readonly = node.readonly or self.mountReadonly(node.mount_id),
+                .readonly = self.nodeReadonly(@intCast(index)),
             };
             record.name_length = node.name_length;
             @memcpy(record.name[0..node.name_length], node.nameSlice());
@@ -270,8 +286,23 @@ pub const Vfs = struct {
     }
 
     pub fn createPseudo(self: *Vfs, cwd: u16, path: []const u8, mode: u16, tick: u64) Error!u16 {
+        return self.createPseudoWithOperations(cwd, path, mode, tick, &unsupported_pseudo_operations, null);
+    }
+
+    pub fn createPseudoWithOperations(
+        self: *Vfs,
+        cwd: u16,
+        path: []const u8,
+        mode: u16,
+        tick: u64,
+        operations: ?*const PseudoOperations,
+        context: ?*anyopaque,
+    ) Error!u16 {
         const parent_name = try self.parentAndName(cwd, path);
-        return self.createNode(parent_name.parent, parent_name.name, .pseudo, mode, true, tick);
+        const node_index = try self.createNode(parent_name.parent, parent_name.name, .pseudo, mode, false, tick);
+        self.nodes[node_index].pseudo_operations = operations;
+        self.nodes[node_index].pseudo_context = context;
+        return node_index;
     }
 
     pub fn ensureDirectory(self: *Vfs, cwd: u16, path: []const u8, mode: u16, tick: u64) Error!u16 {
@@ -305,10 +336,7 @@ pub const Vfs = struct {
         const node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if ((node.mode & 0o444) == 0) return Error.PermissionDenied;
-        if (node.kind == .pseudo) {
-            const reader = self.pseudo_reader orelse return 0;
-            return reader(self.pseudo_context, node_index, offset, output);
-        }
+        if (node.kind == .pseudo) return self.readPseudo(node_index, offset, output);
         if (offset > node.size) return Error.InvalidOffset;
         const count = @min(output.len, node.size - offset);
         @memcpy(output[0..count], node.data[offset .. offset + count]);
@@ -325,11 +353,16 @@ pub const Vfs = struct {
 
     pub fn write(self: *Vfs, cwd: u16, path: []const u8, offset: usize, bytes: []const u8, truncate_first: bool, tick: u64) Error!usize {
         const node_index = try self.resolve(cwd, path);
+        if (self.nodes[node_index].kind == .pseudo) {
+            if (truncate_first) return Error.UnsupportedOperation;
+            return self.writePseudo(node_index, offset, bytes);
+        }
         return self.writeNode(node_index, offset, bytes, truncate_first, tick);
     }
 
     pub fn append(self: *Vfs, cwd: u16, path: []const u8, bytes: []const u8, tick: u64) Error!usize {
         const node_index = try self.resolve(cwd, path);
+        if (self.nodes[node_index].kind == .pseudo) return self.writePseudo(node_index, 0, bytes);
         return self.writeNode(node_index, self.nodes[node_index].size, bytes, false, tick);
     }
 
@@ -465,6 +498,13 @@ pub const Vfs = struct {
         };
         if (self.nodes[node_index].kind == .directory) {
             if (flags.write or flags.create or flags.truncate or flags.append) return Error.IsDirectory;
+        } else if (self.nodes[node_index].kind == .pseudo) {
+            const operations = self.nodes[node_index].pseudo_operations orelse return Error.UnsupportedOperation;
+            if (flags.create or flags.truncate or flags.append) return Error.UnsupportedOperation;
+            if (flags.read and ((self.nodes[node_index].mode & 0o444) == 0 or
+                (operations.read == null and operations.stream == null))) return Error.PermissionDenied;
+            if (flags.write and ((self.nodes[node_index].mode & 0o222) == 0 or
+                (operations.write == null and operations.stream == null))) return Error.PermissionDenied;
         } else {
             if (flags.read and (self.nodes[node_index].mode & 0o444) == 0) return Error.PermissionDenied;
             if (flags.write) try self.requireWritableFile(node_index);
@@ -496,7 +536,13 @@ pub const Vfs = struct {
 
     pub fn close(self: *Vfs, owner_pid: u32, handle: u32) Error!void {
         const index = try self.resolveOpen(owner_pid, handle);
-        const generation = self.open_files[index].generation;
+        const open_file = self.open_files[index];
+        if (self.nodes[open_file.node].kind == .pseudo) {
+            if (self.nodes[open_file.node].pseudo_operations) |operations| {
+                if (operations.close) |close_fn| close_fn(self.nodes[open_file.node].pseudo_context, open_file.node, owner_pid);
+            }
+        }
+        const generation = open_file.generation;
         self.open_files[index] = .{ .generation = generation };
     }
 
@@ -504,6 +550,11 @@ pub const Vfs = struct {
         var count: usize = 0;
         for (&self.open_files) |*open_file| {
             if (!open_file.used or open_file.owner_pid != owner_pid) continue;
+            if (self.nodes[open_file.node].kind == .pseudo) {
+                if (self.nodes[open_file.node].pseudo_operations) |operations| {
+                    if (operations.close) |close_fn| close_fn(self.nodes[open_file.node].pseudo_context, open_file.node, owner_pid);
+                }
+            }
             const generation = open_file.generation;
             open_file.* = .{ .generation = generation };
             count += 1;
@@ -518,8 +569,7 @@ pub const Vfs = struct {
         const node = &self.nodes[open_file.node];
         if (node.kind == .directory) return Error.IsDirectory;
         if (node.kind == .pseudo) {
-            const reader = self.pseudo_reader orelse return 0;
-            const count = reader(self.pseudo_context, open_file.node, open_file.offset, output);
+            const count = try self.readPseudo(open_file.node, open_file.offset, output);
             open_file.offset += count;
             return count;
         }
@@ -555,7 +605,7 @@ pub const Vfs = struct {
                 .node = @intCast(node_index),
                 .kind = node.kind,
                 .size = node.size,
-                .readonly = node.readonly or self.mountReadonly(node.mount_id),
+                .readonly = self.nodeReadonly(@intCast(node_index)),
             };
             record.name_length = node.name_length;
             @memcpy(record.name[0..node.name_length], node.nameSlice());
@@ -570,6 +620,11 @@ pub const Vfs = struct {
         const index = try self.resolveOpen(owner_pid, handle);
         var open_file = &self.open_files[index];
         if (!open_file.writable) return Error.PermissionDenied;
+        if (self.nodes[open_file.node].kind == .pseudo) {
+            const written = try self.writePseudo(open_file.node, open_file.offset, bytes);
+            open_file.offset += written;
+            return written;
+        }
         if (open_file.append) open_file.offset = self.nodes[open_file.node].size;
         const written = try self.writeNode(open_file.node, open_file.offset, bytes, false, tick);
         open_file.offset += written;
@@ -579,6 +634,7 @@ pub const Vfs = struct {
     pub fn seek(self: *Vfs, owner_pid: u32, handle: u32, offset: i64, whence: enum { start, current, end }) Error!usize {
         const index = try self.resolveOpen(owner_pid, handle);
         var open_file = &self.open_files[index];
+        if (self.nodes[open_file.node].kind == .pseudo) return Error.NotSeekable;
         const base: i64 = switch (whence) {
             .start => 0,
             .current => @intCast(open_file.offset),
@@ -603,6 +659,58 @@ pub const Vfs = struct {
         };
     }
 
+    pub fn pseudoStreamOpen(self: *const Vfs, owner_pid: u32, handle: u32) Error!?PseudoStream {
+        const index = try self.resolveOpen(owner_pid, handle);
+        const node = &self.nodes[self.open_files[index].node];
+        if (node.kind != .pseudo) return null;
+        const operations = node.pseudo_operations orelse return Error.UnsupportedOperation;
+        return operations.stream;
+    }
+
+    pub fn pollOpen(self: *const Vfs, owner_pid: u32, handle: u32, requested: u16) Error!u16 {
+        const index = try self.resolveOpen(owner_pid, handle);
+        const open_file = self.open_files[index];
+        const node = &self.nodes[open_file.node];
+        if (node.kind != .pseudo) {
+            var ready: u16 = 0;
+            if (open_file.readable) ready |= 1 << 0;
+            if (open_file.writable) ready |= 1 << 1;
+            return ready & requested;
+        }
+        const operations = node.pseudo_operations orelse return Error.UnsupportedOperation;
+        const poll_fn = operations.poll orelse {
+            var ready: u16 = 0;
+            if (open_file.readable and operations.read != null) ready |= 1 << 0;
+            if (open_file.writable and operations.write != null) ready |= 1 << 1;
+            return ready & requested;
+        };
+        return try poll_fn(node.pseudo_context, open_file.node, requested);
+    }
+
+    pub fn ioctlOpen(self: *Vfs, owner_pid: u32, handle: u32, request: u64, argument: u64) Error!u64 {
+        const index = try self.resolveOpen(owner_pid, handle);
+        const node = &self.nodes[self.open_files[index].node];
+        if (node.kind != .pseudo) return Error.UnsupportedOperation;
+        const operations = node.pseudo_operations orelse return Error.UnsupportedOperation;
+        const ioctl_fn = operations.ioctl orelse return Error.UnsupportedOperation;
+        return ioctl_fn(node.pseudo_context, self.open_files[index].node, request, argument);
+    }
+
+    pub fn directoryNodeOpen(self: *const Vfs, owner_pid: u32, handle: u32) Error!u16 {
+        const index = try self.resolveOpen(owner_pid, handle);
+        const node_index = self.open_files[index].node;
+        if (self.nodes[node_index].kind != .directory) return Error.NotDirectory;
+        return node_index;
+    }
+
+    pub fn persistentOpen(self: *const Vfs, owner_pid: u32, handle: u32) Error!bool {
+        const index = try self.resolveOpen(owner_pid, handle);
+        const mount_id = self.nodes[self.open_files[index].node].mount_id;
+        if (mount_id == 0) return false;
+        const mount_index: usize = mount_id - 1;
+        return mount_index < self.mounts.len and self.mounts[mount_index].used and self.mounts[mount_index].kind == .zigos_persist;
+    }
+
     pub fn truncateOpen(self: *Vfs, owner_pid: u32, handle: u32, size: usize, tick: u64) Error!void {
         if (size > maximum_file_size) return Error.FileTooLarge;
         const index = try self.resolveOpen(owner_pid, handle);
@@ -623,6 +731,7 @@ pub const Vfs = struct {
             const node = &self.nodes[index];
             if (!node.used) continue;
             if (node.generation == 0 or node.name_length > maximum_name_length or node.size > maximum_file_size) return false;
+            if (node.kind == .pseudo and node.pseudo_operations == null) return false;
             if (index != 0) {
                 if (node.parent >= self.nodes.len or !self.nodes[node.parent].used or self.nodes[node.parent].kind != .directory) return false;
                 var current: u16 = @intCast(index);
@@ -736,6 +845,20 @@ pub const Vfs = struct {
         return @intCast(index);
     }
 
+    fn readPseudo(self: *const Vfs, node_index: u16, offset: usize, output: []u8) Error!usize {
+        const node = &self.nodes[node_index];
+        const operations = node.pseudo_operations orelse return Error.UnsupportedOperation;
+        const read_fn = operations.read orelse return Error.PermissionDenied;
+        return read_fn(node.pseudo_context, node_index, offset, output);
+    }
+
+    fn writePseudo(self: *Vfs, node_index: u16, offset: usize, bytes: []const u8) Error!usize {
+        const node = &self.nodes[node_index];
+        const operations = node.pseudo_operations orelse return Error.UnsupportedOperation;
+        const write_fn = operations.write orelse return Error.PermissionDenied;
+        return write_fn(node.pseudo_context, node_index, offset, bytes);
+    }
+
     fn writeNode(self: *Vfs, node_index: u16, offset: usize, bytes: []const u8, truncate_first: bool, tick: u64) Error!usize {
         try self.requireWritableFile(node_index);
         if (offset > maximum_file_size or bytes.len > maximum_file_size - offset) return Error.FileTooLarge;
@@ -769,6 +892,15 @@ pub const Vfs = struct {
         self.mutations +%= 1;
     }
 
+    fn nodeReadonly(self: *const Vfs, node_index: u16) bool {
+        const node = &self.nodes[node_index];
+        if (node.kind == .pseudo) {
+            const operations = node.pseudo_operations orelse return true;
+            return operations.write == null and operations.stream == null;
+        }
+        return node.readonly or self.mountReadonly(node.mount_id);
+    }
+
     fn mountReadonly(self: *const Vfs, mount_id: u8) bool {
         if (mount_id == 0) return false;
         const index: usize = mount_id - 1;
@@ -777,7 +909,7 @@ pub const Vfs = struct {
 
     fn assignMountRecursive(self: *Vfs, node_index: u16, mount_id: u8, readonly: bool) void {
         self.nodes[node_index].mount_id = mount_id;
-        if (readonly) self.nodes[node_index].readonly = true;
+        if (readonly and self.nodes[node_index].kind != .pseudo) self.nodes[node_index].readonly = true;
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
             if (node.used and index != node_index and node.parent == node_index) self.assignMountRecursive(@intCast(index), mount_id, readonly);
@@ -831,6 +963,78 @@ fn sortDirectoryRecords(records: []DirectoryRecord) void {
         }
         records[position] = value;
     }
+}
+
+const TestPseudoContext = struct {
+    written: usize = 0,
+    closes: usize = 0,
+};
+
+fn testPseudoRead(_: ?*anyopaque, _: u16, offset: usize, output: []u8) Error!usize {
+    const payload = "device";
+    if (offset >= payload.len) return 0;
+    const count = @min(output.len, payload.len - offset);
+    @memcpy(output[0..count], payload[offset .. offset + count]);
+    return count;
+}
+
+fn testPseudoWrite(context: ?*anyopaque, _: u16, _: usize, input: []const u8) Error!usize {
+    const state: *TestPseudoContext = @ptrCast(@alignCast(context.?));
+    state.written += input.len;
+    return input.len;
+}
+
+fn testPseudoPoll(_: ?*anyopaque, _: u16, requested: u16) Error!u16 {
+    return requested & 0x3;
+}
+
+fn testPseudoIoctl(_: ?*anyopaque, _: u16, request: u64, argument: u64) Error!u64 {
+    return request + argument;
+}
+
+fn testPseudoClose(context: ?*anyopaque, _: u16, _: u32) void {
+    const state: *TestPseudoContext = @ptrCast(@alignCast(context.?));
+    state.closes += 1;
+}
+
+const test_pseudo_operations = PseudoOperations{
+    .read = testPseudoRead,
+    .write = testPseudoWrite,
+    .poll = testPseudoPoll,
+    .ioctl = testPseudoIoctl,
+    .close = testPseudoClose,
+};
+
+const test_console_operations = PseudoOperations{ .stream = .console };
+
+test "VFS pseudo nodes dispatch independent operations inside read only devfs" {
+    var fs = Vfs.init();
+    const dev = try fs.mkdir(0, "/dev", 0o755, 1);
+    var context = TestPseudoContext{};
+    _ = try fs.createPseudoWithOperations(dev, "device", 0o666, 2, &test_pseudo_operations, &context);
+    _ = try fs.createPseudoWithOperations(dev, "console", 0o666, 2, &test_console_operations, null);
+    _ = try fs.mount(0, "/dev", .devfs, true, "kernel-devices");
+
+    const info = try fs.stat(0, "/dev/device");
+    try std.testing.expect(!info.readonly);
+    try std.testing.expectEqual(@as(u16, 0o666), info.mode);
+
+    const handle = try fs.open(7, 0, "/dev/device", .{ .read = true, .write = true }, 0, 3);
+    var output: [8]u8 = undefined;
+    const count = try fs.readOpen(7, handle, &output);
+    try std.testing.expectEqualStrings("device", output[0..count]);
+    try std.testing.expectEqual(@as(usize, 3), try fs.writeOpen(7, handle, "abc", 4));
+    try std.testing.expectEqual(@as(u16, 3), try fs.pollOpen(7, handle, 3));
+    try std.testing.expectEqual(@as(u64, 12), try fs.ioctlOpen(7, handle, 5, 7));
+    try std.testing.expectEqual(@as(?PseudoStream, null), try fs.pseudoStreamOpen(7, handle));
+    try fs.close(7, handle);
+    try std.testing.expectEqual(@as(usize, 3), context.written);
+    try std.testing.expectEqual(@as(usize, 1), context.closes);
+
+    const console = try fs.open(8, 0, "/dev/console", .{ .write = true }, 0, 5);
+    try std.testing.expectEqual(PseudoStream.console, (try fs.pseudoStreamOpen(8, console)).?);
+    try fs.close(8, console);
+    try std.testing.expect(fs.validate());
 }
 
 test "VFS resolves absolute relative dot and parent paths" {

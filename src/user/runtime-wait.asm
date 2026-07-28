@@ -29,7 +29,7 @@ _start:
     test rax, rax
     js .fail_write_start
 
-    ; Long child A sleeps for three ticks.
+    ; Long child A sleeps for 32 ticks, leaving a wide scheduling margin.
     mov eax, SYS_SPAWN
     mov rdi, SLEEP_PATH
     mov esi, SLEEP_PATH_LEN

@@ -179,6 +179,26 @@ pub const Tty = struct {
         return ready & requested;
     }
 
+    pub fn modeFlags(self: *const Tty) u64 {
+        var flags: u64 = 0;
+        if (self.echo_enabled) flags |= runtime_abi.constants.tty_echo;
+        if (self.canonical_enabled) flags |= runtime_abi.constants.tty_canonical;
+        if (self.signals_enabled) flags |= runtime_abi.constants.tty_signals;
+        return flags;
+    }
+
+    pub fn setModeFlags(self: *Tty, flags: u64) bool {
+        const allowed = runtime_abi.constants.tty_echo |
+            runtime_abi.constants.tty_canonical |
+            runtime_abi.constants.tty_signals;
+        if ((flags & ~allowed) != 0) return false;
+        self.echo_enabled = (flags & runtime_abi.constants.tty_echo) != 0;
+        self.canonical_enabled = (flags & runtime_abi.constants.tty_canonical) != 0;
+        self.signals_enabled = (flags & runtime_abi.constants.tty_signals) != 0;
+        if (!self.canonical_enabled) self.edit_length = 0;
+        return true;
+    }
+
     pub fn report(self: *const Tty) Report {
         return .{
             .foreground_process_group = self.foreground_process_group,
@@ -271,6 +291,20 @@ pub const Tty = struct {
         return true;
     }
 };
+
+test "terminal mode flags round trip and reject unknown bits" {
+    var tty = Tty.init(0);
+    try std.testing.expectEqual(
+        runtime_abi.constants.tty_echo | runtime_abi.constants.tty_canonical | runtime_abi.constants.tty_signals,
+        tty.modeFlags(),
+    );
+    try std.testing.expect(tty.setModeFlags(runtime_abi.constants.tty_echo));
+    try std.testing.expect(tty.echo_enabled);
+    try std.testing.expect(!tty.canonical_enabled);
+    try std.testing.expect(!tty.signals_enabled);
+    try std.testing.expect(!tty.setModeFlags(@as(u64, 1) << 63));
+    try std.testing.expectEqual(runtime_abi.constants.tty_echo, tty.modeFlags());
+}
 
 test "canonical terminal blocks edits wakes and returns one line" {
     var processes = runtime_process.Table.init(0);

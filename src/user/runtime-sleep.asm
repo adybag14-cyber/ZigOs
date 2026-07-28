@@ -16,7 +16,7 @@ entry:
     jne failure
 
     mov eax, SYS_SLEEP
-    mov edi, 3
+    mov edi, 32
     int 0x80
     test eax, eax
     jne failure
