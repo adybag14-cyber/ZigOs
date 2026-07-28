@@ -64,6 +64,9 @@ def generate(spec: dict) -> tuple[str, str, str]:
     for name, value in spec.get("tty_flags", {}).items():
         zig.append(f"pub const tty_{name}: u64 = @as(u64, 1) << {value};\n")
         nasm.append(f"%define ZIGOS_TTY_{name.upper()} (1 << {value})\n")
+    for name, value in spec.get("fallocate_flags", {}).items():
+        zig.append(f"pub const fallocate_{name}: u64 = @as(u64, 1) << {value};\n")
+        nasm.append(f"%define ZIGOS_FALLOCATE_{name.upper()} (1 << {value})\n")
     for group in ("capabilities", "syscalls", "errno"):
         zig.append("\n")
         nasm.append("\n")
@@ -211,6 +214,8 @@ def generate_c(spec: dict) -> str:
         lines.append(f"#define ZIGOS_IOCTL_{name.upper()} UINT64_C({value})\n")
     for name, value in spec.get("tty_flags", {}).items():
         lines.append(f"#define ZIGOS_TTY_{name.upper()} (UINT64_C(1) << {value})\n")
+    for name, value in spec.get("fallocate_flags", {}).items():
+        lines.append(f"#define ZIGOS_FALLOCATE_{name.upper()} (UINT64_C(1) << {value})\n")
     lines.append("\n")
     for name, bit in spec["capabilities"].items():
         lines.append(f"#define ZIGOS_CAP_{name.upper()} (UINT64_C(1) << {bit})\n")
@@ -262,6 +267,7 @@ def generate_c(spec: dict) -> str:
         "int64_t zigos_stat_path(const char *path, zigos_stat *info);\n",
         "int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);\n",
         "int64_t zigos_fsync(uint16_t fd);\n",
+        "int64_t zigos_fallocate(uint16_t fd, uint64_t mode, uint64_t offset, uint64_t length);\n",
         "int64_t zigos_symlink(const char *target, const char *path);\n",
         "int64_t zigos_readlink(const char *path, void *bytes, size_t length);\n",
         "int64_t zigos_link(const char *old_path, const char *new_path);\n",

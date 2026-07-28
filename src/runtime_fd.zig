@@ -727,6 +727,26 @@ pub const System = struct {
         try vfs.truncateOpen(description.vfs_owner, description.vfs_handle, size, tick);
     }
 
+    pub fn fallocate(
+        self: *System,
+        vfs: *runtime_vfs.Vfs,
+        processes: *runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+        offset: usize,
+        length: usize,
+        flags: runtime_vfs.AllocationFlags,
+        tick: u64,
+    ) Error!void {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        const description = self.open_descriptions[open_index];
+        if (description.kind != .vfs) return Error.NotSeekable;
+        if (!description.writable) return Error.NotWritable;
+        try vfs.allocateOpen(description.vfs_owner, description.vfs_handle, offset, length, flags, tick);
+    }
+
     pub fn descriptorKind(
         self: *const System,
         processes: *const runtime_process.Table,
@@ -1554,6 +1574,32 @@ test "descriptor truncate is independent of shared offset" {
     var bytes: [16]u8 = undefined;
     const result = try system.read(&fs, &processes, process, fd, &bytes);
     try std.testing.expectEqualStrings("0123", bytes[0..result.count]);
+}
+
+test "descriptor fallocate preserves size punches holes and enforces writability" {
+    var fs = runtime_vfs.Vfs.init();
+    try initializeTestFilesystem(&fs);
+    var processes = runtime_process.Table.init(0);
+    var system = System.init();
+    const process = processes.initHandle();
+    try system.bindProcess(&processes, process, false);
+    const fd = try system.openFile(&fs, &processes, process, "/tmp/sparse-fd", .{ .read = true, .write = true, .create = true, .truncate = true }, 0o644, 1);
+    try system.fallocate(&fs, &processes, process, fd, 2 * runtime_vfs.file_block_size, runtime_vfs.file_block_size, .{ .keep_size = true }, 2);
+    try std.testing.expectEqual(@as(u64, 0), (try system.stat(&fs, &processes, process, fd)).size);
+    try system.fallocate(&fs, &processes, process, fd, 2 * runtime_vfs.file_block_size, 4, .{}, 3);
+    try std.testing.expectEqual(@as(u64, 2 * runtime_vfs.file_block_size + 4), (try system.stat(&fs, &processes, process, fd)).size);
+    _ = try system.seek(&fs, &processes, process, fd, 2 * runtime_vfs.file_block_size, .start);
+    try std.testing.expectEqual(@as(usize, 4), (try system.write(&fs, &processes, process, fd, "DATA", 4)).count);
+    try system.fallocate(&fs, &processes, process, fd, 2 * runtime_vfs.file_block_size, runtime_vfs.file_block_size, .{ .keep_size = true, .punch_hole = true }, 5);
+    _ = try system.seek(&fs, &processes, process, fd, 2 * runtime_vfs.file_block_size, .start);
+    var zeros: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), (try system.read(&fs, &processes, process, fd, &zeros)).count);
+    try std.testing.expectEqualSlices(u8, &@as([4]u8, @splat(0)), &zeros);
+    const read_only = try system.openFile(&fs, &processes, process, "/tmp/sparse-fd", .{ .read = true }, 0, 6);
+    try std.testing.expectError(Error.NotWritable, system.fallocate(&fs, &processes, process, read_only, 0, runtime_vfs.file_block_size, .{}, 7));
+    try system.close(&fs, &processes, process, read_only);
+    try system.close(&fs, &processes, process, fd);
+    try std.testing.expect(system.validate(&fs, &processes));
 }
 
 test "descriptor quota failures leave all tables unchanged" {

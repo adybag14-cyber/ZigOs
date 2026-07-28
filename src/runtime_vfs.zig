@@ -9,6 +9,10 @@ pub const maximum_path_length: usize = 255;
 pub const maximum_symlink_depth: usize = 8;
 pub const maximum_symlink_target_length: usize = maximum_path_length;
 pub const maximum_file_size: usize = 32 * 1024;
+pub const file_block_size: usize = 4096;
+pub const file_blocks_per_node: usize = maximum_file_size / file_block_size;
+pub const maximum_data_blocks: usize = 256;
+pub const invalid_data_block: u16 = 0xFFFF;
 pub const maximum_mounts: usize = 8;
 pub const maximum_open_files: usize = 64;
 pub const maximum_directory_entries: usize = 64;
@@ -114,7 +118,8 @@ const Node = struct {
     kind: Kind = .file,
     link_count: u16 = 0,
     size: usize = 0,
-    data: [maximum_file_size]u8 = @splat(0),
+    file_blocks: [file_blocks_per_node]u16 = @splat(invalid_data_block),
+    symlink_data: [maximum_symlink_target_length]u8 = @splat(0),
     mode: u16 = 0o644,
     readonly: bool = false,
     mount_id: u8 = 0,
@@ -122,6 +127,13 @@ const Node = struct {
     data_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
     pseudo_operations: ?*const PseudoOperations = null,
     pseudo_context: ?*anyopaque = null,
+};
+
+const DataBlock = struct {
+    used: bool = false,
+    owner_node: u16 = invalid_node,
+    owner_slot: u8 = 0,
+    data: [file_block_size]u8 = @splat(0),
 };
 
 const Dentry = struct {
@@ -185,6 +197,18 @@ pub const OpenFlags = packed struct(u8) {
     _padding: u3 = 0,
 };
 
+pub const AllocationFlags = packed struct(u8) {
+    keep_size: bool = false,
+    punch_hole: bool = false,
+    _padding: u6 = 0,
+};
+
+pub const SparseFileInfo = struct {
+    size: usize,
+    allocation_bitmap: u8,
+    allocated_blocks: u8,
+};
+
 const OpenFile = struct {
     used: bool = false,
     generation: u16 = 0,
@@ -229,10 +253,18 @@ pub const Report = struct {
     dentry_cache_releases: u64,
     data_lock_tickets: u64,
     data_lock_outstanding: u64,
+    data_pool_lock_tickets: u64,
+    data_pool_lock_outstanding: u64,
+    allocated_blocks: usize,
+    allocated_bytes: usize,
+    sparse_hole_bytes: usize,
 };
 
 pub const Vfs = struct {
     nodes: [maximum_nodes]Node = @splat(.{}),
+    data_blocks: [maximum_data_blocks]DataBlock = @splat(.{}),
+    data_pool_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
+    view_scratch: [maximum_file_size]u8 = @splat(0),
     dentries: [maximum_dentries]Dentry = @splat(.{}),
     dentry_cache: [maximum_dentry_cache_entries]DentryCacheEntry = @splat(.{}),
     mounts: [maximum_mounts]Mount = @splat(.{}),
@@ -374,7 +406,7 @@ pub const Vfs = struct {
         if (target.len > maximum_symlink_target_length) return Error.PathTooLong;
         const parent_name = try self.parentAndName(cwd, path);
         const node_index = try self.createNode(parent_name.parent, parent_name.name, .symlink, 0o777, false, tick);
-        @memcpy(self.nodes[node_index].data[0..target.len], target);
+        @memcpy(self.nodes[node_index].symlink_data[0..target.len], target);
         self.nodes[node_index].size = target.len;
         return node_index;
     }
@@ -391,7 +423,7 @@ pub const Vfs = struct {
         if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].link_count == 0) return Error.NotFound;
         const node = &self.nodes[node_index];
         if (node.kind != .symlink) return Error.NotSymlink;
-        return node.data[0..node.size];
+        return node.symlink_data[0..node.size];
     }
 
     pub fn createPseudo(self: *Vfs, cwd: u16, path: []const u8, mode: u16, tick: u64) Error!u16 {
@@ -429,12 +461,11 @@ pub const Vfs = struct {
         };
         var node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
+        if (node.kind != .file) return Error.UnsupportedOperation;
         if (node.readonly or self.mountReadonly(node.mount_id)) return Error.ReadOnly;
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
-        @memset(&node.data, 0);
-        @memcpy(node.data[0..bytes.len], bytes);
-        node.size = bytes.len;
+        _ = try self.writeNodeLocked(node_index, 0, bytes, true, tick);
         node.mode = mode;
         node.readonly = readonly;
         node.modified_tick = tick;
@@ -450,7 +481,7 @@ pub const Vfs = struct {
         if (node.kind == .pseudo) return self.readPseudo(node_index, offset, output);
         if (offset > node.size) return Error.InvalidOffset;
         const count = @min(output.len, node.size - offset);
-        @memcpy(output[0..count], node.data[offset .. offset + count]);
+        self.readFileData(node_index, offset, output[0..count]);
         return count;
     }
 
@@ -459,7 +490,10 @@ pub const Vfs = struct {
         const node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if ((node.mode & 0o444) == 0) return Error.PermissionDenied;
-        return node.data[0..node.size];
+        if (node.kind != .file) return Error.UnsupportedOperation;
+        @memset(&self.view_scratch, 0);
+        self.readFileData(node_index, 0, self.view_scratch[0..node.size]);
+        return self.view_scratch[0..node.size];
     }
 
     pub fn write(self: *Vfs, cwd: u16, path: []const u8, offset: usize, bytes: []const u8, truncate_first: bool, tick: u64) Error!usize {
@@ -485,6 +519,11 @@ pub const Vfs = struct {
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
         self.truncateNodeLocked(node_index, size, tick);
+    }
+
+    pub fn allocate(self: *Vfs, cwd: u16, path: []const u8, offset: usize, length: usize, flags: AllocationFlags, tick: u64) Error!void {
+        const node_index = try self.resolve(cwd, path);
+        try self.allocateNode(node_index, offset, length, flags, tick);
     }
 
     pub fn unlink(self: *Vfs, cwd: u16, path: []const u8) Error!void {
@@ -708,7 +747,7 @@ pub const Vfs = struct {
         }
         if (open_file.offset > node.size) return Error.InvalidOffset;
         const count = @min(output.len, node.size - open_file.offset);
-        @memcpy(output[0..count], node.data[open_file.offset .. open_file.offset + count]);
+        self.readFileData(open_file.node, open_file.offset, output[0..count]);
         open_file.offset += count;
         return count;
     }
@@ -868,7 +907,73 @@ pub const Vfs = struct {
         self.truncateNodeLocked(node_index, size, tick);
     }
 
+    pub fn allocateOpen(self: *Vfs, owner_pid: u32, handle: u32, offset: usize, length: usize, flags: AllocationFlags, tick: u64) Error!void {
+        const index = try self.resolveOpen(owner_pid, handle);
+        if (!self.open_files[index].writable) return Error.PermissionDenied;
+        try self.allocateNode(self.open_files[index].node, offset, length, flags, tick);
+    }
+
+    pub fn sparseFileInfoNode(self: *const Vfs, node_index: u16) Error!SparseFileInfo {
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].kind != .file) return Error.NotFound;
+        const node = &self.nodes[node_index];
+        var bitmap: u8 = 0;
+        var count: u8 = 0;
+        for (node.file_blocks, 0..) |block_index, slot| {
+            if (block_index == invalid_data_block) continue;
+            bitmap |= @as(u8, 1) << @intCast(slot);
+            count += 1;
+        }
+        return .{ .size = self.nodes[node_index].size, .allocation_bitmap = bitmap, .allocated_blocks = count };
+    }
+
+    pub fn readAllocatedBlockNode(self: *const Vfs, node_index: u16, slot: usize, output: *[file_block_size]u8) Error!bool {
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].kind != .file or slot >= file_blocks_per_node) return Error.NotFound;
+        const block_index = self.nodes[node_index].file_blocks[slot];
+        if (block_index == invalid_data_block) {
+            @memset(output, 0);
+            return false;
+        }
+        @memcpy(output, &self.data_blocks[block_index].data);
+        return true;
+    }
+
+    pub fn restoreSparseFile(self: *Vfs, cwd: u16, path: []const u8, mode: u16, size: usize, allocation_bitmap: u8, allocated_data: []const u8, tick: u64) Error!u16 {
+        if (size > maximum_file_size) return Error.FileTooLarge;
+        const allocated_count: usize = @popCount(allocation_bitmap);
+        if (allocated_data.len != allocated_count * file_block_size) return Error.InvalidPath;
+        const node_index = self.resolve(cwd, path) catch |err| switch (err) {
+            Error.NotFound => try self.create(cwd, path, mode, tick),
+            else => return err,
+        };
+        var node = &self.nodes[node_index];
+        if (node.kind == .directory) return Error.IsDirectory;
+        if (node.kind != .file) return Error.UnsupportedOperation;
+        if (node.readonly or self.mountReadonly(node.mount_id)) return Error.ReadOnly;
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
+        _ = self.data_pool_lock.acquire();
+        defer self.data_pool_lock.release();
+        const reusable = self.nodeAllocatedBlockCount(node_index);
+        if (allocated_count > self.freeDataBlockCount() + reusable) return Error.NoSpace;
+        self.releaseAllFileBlocksLocked(node_index);
+        var data_offset: usize = 0;
+        var slot: usize = 0;
+        while (slot < file_blocks_per_node) : (slot += 1) {
+            if ((allocation_bitmap & (@as(u8, 1) << @intCast(slot))) == 0) continue;
+            self.allocateFileBlockLocked(node_index, slot);
+            const block_index = node.file_blocks[slot];
+            @memcpy(&self.data_blocks[block_index].data, allocated_data[data_offset .. data_offset + file_block_size]);
+            data_offset += file_block_size;
+        }
+        node.size = size;
+        node.mode = mode & 0o777;
+        node.modified_tick = tick;
+        self.mutations +%= 1;
+        return node_index;
+    }
+
     pub fn validate(self: *const Vfs) bool {
+        if (self.data_pool_lock.next() != self.data_pool_lock.serving()) return false;
         if (!self.nodes[0].used or self.nodes[0].generation == 0 or self.nodes[0].kind != .directory or self.nodes[0].link_count != 1) return false;
         var counted_links: [maximum_nodes]u16 = @splat(0);
         counted_links[0] = 1;
@@ -892,6 +997,7 @@ pub const Vfs = struct {
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
             if (node.data_lock.next() != node.data_lock.serving()) return false;
+            if (node.kind != .file) for (node.file_blocks) |block_index| if (block_index != invalid_data_block) return false;
             if (!node.used) {
                 if (counted_links[index] != 0) return false;
                 continue;
@@ -913,6 +1019,23 @@ pub const Vfs = struct {
                 }
                 if (current != 0) return false;
             }
+        }
+        var referenced_blocks: [maximum_data_blocks]bool = @splat(false);
+        for (0..self.nodes.len) |node_index| {
+            const node = &self.nodes[node_index];
+            if (!node.used or node.kind != .file) continue;
+            for (node.file_blocks, 0..) |block_index, slot| {
+                if (block_index == invalid_data_block) continue;
+                if (block_index >= self.data_blocks.len or referenced_blocks[block_index]) return false;
+                const block = &self.data_blocks[block_index];
+                if (!block.used or block.owner_node != node_index or block.owner_slot != slot) return false;
+                referenced_blocks[block_index] = true;
+            }
+        }
+        for (0..self.data_blocks.len) |block_index| {
+            const block = &self.data_blocks[block_index];
+            if (block.used != referenced_blocks[block_index]) return false;
+            if (!block.used and (block.owner_node != invalid_node or block.owner_slot != 0)) return false;
         }
         for (self.dentry_cache) |cache_entry| {
             if (!cache_entry.used) continue;
@@ -981,6 +1104,11 @@ pub const Vfs = struct {
             .dentry_cache_releases = self.dentry_cache_releases,
             .data_lock_tickets = 0,
             .data_lock_outstanding = 0,
+            .data_pool_lock_tickets = self.data_pool_lock.next(),
+            .data_pool_lock_outstanding = self.data_pool_lock.next() -% self.data_pool_lock.serving(),
+            .allocated_blocks = 0,
+            .allocated_bytes = 0,
+            .sparse_hole_bytes = 0,
         };
         for (0..self.nodes.len) |node_index| {
             const node = &self.nodes[node_index];
@@ -991,12 +1119,24 @@ pub const Vfs = struct {
             if (!node.used) continue;
             result.nodes_used += 1;
             result.bytes_used += node.size;
+            if (node.kind == .file) {
+                const logical_blocks = (node.size + file_block_size - 1) / file_block_size;
+                var slot: usize = 0;
+                while (slot < logical_blocks) : (slot += 1) {
+                    if (node.file_blocks[slot] != invalid_data_block) continue;
+                    result.sparse_hole_bytes += @min(file_block_size, node.size - slot * file_block_size);
+                }
+            }
             switch (node.kind) {
                 .file, .symlink => result.files += 1,
                 .directory => result.directories += 1,
                 .pseudo => result.pseudo_files += 1,
             }
         }
+        for (0..self.data_blocks.len) |block_index| {
+            result.allocated_blocks += @intFromBool(self.data_blocks[block_index].used);
+        }
+        result.allocated_bytes = result.allocated_blocks * file_block_size;
         for (self.dentries) |entry| result.dentries_used += @intFromBool(entry.used);
         for (self.dentry_cache) |cache_entry| {
             result.dentry_cache_entries += @intFromBool(cache_entry.used);
@@ -1032,7 +1172,7 @@ pub const Vfs = struct {
             const has_suffix = position < path.len;
             if (self.nodes[child].kind == .symlink and (follow_final or has_suffix)) {
                 if (depth >= maximum_symlink_depth) return Error.Cycle;
-                const target = self.nodes[child].data[0..self.nodes[child].size];
+                const target = self.nodes[child].symlink_data[0..self.nodes[child].size];
                 current = try self.resolveInternal(entry.parent, target, true, depth + 1);
             } else {
                 current = self.followMount(child);
@@ -1310,13 +1450,10 @@ pub const Vfs = struct {
 
     fn writeNodeLocked(self: *Vfs, node_index: u16, offset: usize, bytes: []const u8, truncate_first: bool, tick: u64) Error!usize {
         if (offset > maximum_file_size or bytes.len > maximum_file_size - offset) return Error.FileTooLarge;
+        try self.prepareWriteBlocks(node_index, offset, bytes.len, truncate_first);
         var node = &self.nodes[node_index];
-        if (truncate_first) {
-            @memset(&node.data, 0);
-            node.size = 0;
-        }
-        if (offset > node.size) @memset(node.data[node.size..offset], 0);
-        @memcpy(node.data[offset .. offset + bytes.len], bytes);
+        if (truncate_first) node.size = 0;
+        self.copyIntoFileBlocks(node_index, offset, bytes);
         node.size = @max(node.size, offset + bytes.len);
         node.modified_tick = tick;
         self.mutations +%= 1;
@@ -1325,11 +1462,158 @@ pub const Vfs = struct {
 
     fn truncateNodeLocked(self: *Vfs, node_index: u16, size: usize, tick: u64) void {
         var node = &self.nodes[node_index];
-        if (size < node.size) @memset(node.data[size..node.size], 0);
-        if (size > node.size) @memset(node.data[node.size..size], 0);
+        if (size < node.size) {
+            _ = self.data_pool_lock.acquire();
+            defer self.data_pool_lock.release();
+            const first_released_slot = (size + file_block_size - 1) / file_block_size;
+            if (size != 0 and size % file_block_size != 0) {
+                const slot = size / file_block_size;
+                const block_index = node.file_blocks[slot];
+                if (block_index != invalid_data_block) @memset(self.data_blocks[block_index].data[size % file_block_size ..], 0);
+            }
+            var slot = first_released_slot;
+            while (slot < file_blocks_per_node) : (slot += 1) self.releaseFileBlockLocked(node_index, slot);
+        }
         node.size = size;
         node.modified_tick = tick;
         self.mutations +%= 1;
+    }
+
+    fn allocateNode(self: *Vfs, node_index: u16, offset: usize, length: usize, flags: AllocationFlags, tick: u64) Error!void {
+        if (length == 0) return Error.InvalidOffset;
+        if (offset > maximum_file_size or length > maximum_file_size - offset) return Error.FileTooLarge;
+        if (flags.punch_hole and !flags.keep_size) return Error.InvalidOffset;
+        try self.requireWritableFile(node_index);
+        var node = &self.nodes[node_index];
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
+        if (flags.punch_hole) {
+            self.punchHoleLocked(node_index, offset, length);
+        } else {
+            try self.prepareWriteBlocks(node_index, offset, length, false);
+            if (!flags.keep_size) node.size = @max(node.size, offset + length);
+        }
+        node.modified_tick = tick;
+        self.mutations +%= 1;
+    }
+
+    fn punchHoleLocked(self: *Vfs, node_index: u16, offset: usize, length: usize) void {
+        _ = self.data_pool_lock.acquire();
+        defer self.data_pool_lock.release();
+        const end = offset + length;
+        const first_slot = offset / file_block_size;
+        const last_slot = (end - 1) / file_block_size;
+        var slot = first_slot;
+        while (slot <= last_slot) : (slot += 1) {
+            const block_index = self.nodes[node_index].file_blocks[slot];
+            if (block_index == invalid_data_block) continue;
+            const block_start = slot * file_block_size;
+            const overlap_start = @max(offset, block_start) - block_start;
+            const overlap_end = @min(end, block_start + file_block_size) - block_start;
+            if (overlap_start == 0 and overlap_end == file_block_size) {
+                self.releaseFileBlockLocked(node_index, slot);
+            } else {
+                @memset(self.data_blocks[block_index].data[overlap_start..overlap_end], 0);
+            }
+        }
+    }
+
+    fn readFileData(self: *const Vfs, node_index: u16, offset: usize, output: []u8) void {
+        var copied: usize = 0;
+        while (copied < output.len) {
+            const logical_offset = offset + copied;
+            const slot = logical_offset / file_block_size;
+            const block_offset = logical_offset % file_block_size;
+            const count = @min(output.len - copied, file_block_size - block_offset);
+            const block_index = self.nodes[node_index].file_blocks[slot];
+            if (block_index == invalid_data_block) {
+                @memset(output[copied .. copied + count], 0);
+            } else {
+                @memcpy(output[copied .. copied + count], self.data_blocks[block_index].data[block_offset .. block_offset + count]);
+            }
+            copied += count;
+        }
+    }
+
+    fn copyIntoFileBlocks(self: *Vfs, node_index: u16, offset: usize, bytes: []const u8) void {
+        var copied: usize = 0;
+        while (copied < bytes.len) {
+            const logical_offset = offset + copied;
+            const slot = logical_offset / file_block_size;
+            const block_offset = logical_offset % file_block_size;
+            const count = @min(bytes.len - copied, file_block_size - block_offset);
+            const block_index = self.nodes[node_index].file_blocks[slot];
+            std.debug.assert(block_index != invalid_data_block);
+            @memcpy(self.data_blocks[block_index].data[block_offset .. block_offset + count], bytes[copied .. copied + count]);
+            copied += count;
+        }
+    }
+
+    fn prepareWriteBlocks(self: *Vfs, node_index: u16, offset: usize, length: usize, truncate_first: bool) Error!void {
+        _ = self.data_pool_lock.acquire();
+        defer self.data_pool_lock.release();
+        const first_slot = offset / file_block_size;
+        const last_slot = if (length == 0) first_slot else (offset + length - 1) / file_block_size;
+        var required: usize = 0;
+        if (length != 0) {
+            var slot = first_slot;
+            while (slot <= last_slot) : (slot += 1) {
+                if (truncate_first or self.nodes[node_index].file_blocks[slot] == invalid_data_block) required += 1;
+            }
+        }
+        const reusable = if (truncate_first) self.nodeAllocatedBlockCount(node_index) else 0;
+        if (required > self.freeDataBlockCount() + reusable) return Error.NoSpace;
+        if (truncate_first) self.releaseAllFileBlocksLocked(node_index);
+        if (length == 0) return;
+        var slot = first_slot;
+        while (slot <= last_slot) : (slot += 1) {
+            if (self.nodes[node_index].file_blocks[slot] == invalid_data_block) self.allocateFileBlockLocked(node_index, slot);
+        }
+    }
+
+    fn allocateFileBlockLocked(self: *Vfs, node_index: u16, slot: usize) void {
+        for (&self.data_blocks, 0..) |*block, block_index| {
+            if (block.used) continue;
+            block.* = .{ .used = true, .owner_node = node_index, .owner_slot = @intCast(slot) };
+            self.nodes[node_index].file_blocks[slot] = @intCast(block_index);
+            return;
+        }
+        unreachable;
+    }
+
+    fn releaseFileBlockLocked(self: *Vfs, node_index: u16, slot: usize) void {
+        const block_index = self.nodes[node_index].file_blocks[slot];
+        if (block_index == invalid_data_block) return;
+        std.debug.assert(block_index < self.data_blocks.len);
+        std.debug.assert(self.data_blocks[block_index].used);
+        std.debug.assert(self.data_blocks[block_index].owner_node == node_index);
+        std.debug.assert(self.data_blocks[block_index].owner_slot == slot);
+        self.data_blocks[block_index] = .{};
+        self.nodes[node_index].file_blocks[slot] = invalid_data_block;
+    }
+
+    fn releaseAllFileBlocks(self: *Vfs, node_index: u16) void {
+        _ = self.data_pool_lock.acquire();
+        defer self.data_pool_lock.release();
+        self.releaseAllFileBlocksLocked(node_index);
+    }
+
+    fn releaseAllFileBlocksLocked(self: *Vfs, node_index: u16) void {
+        var slot: usize = 0;
+        while (slot < file_blocks_per_node) : (slot += 1) self.releaseFileBlockLocked(node_index, slot);
+    }
+
+    fn nodeAllocatedBlockCount(self: *const Vfs, node_index: u16) usize {
+        const node = &self.nodes[node_index];
+        var count: usize = 0;
+        for (node.file_blocks) |block_index| count += @intFromBool(block_index != invalid_data_block);
+        return count;
+    }
+
+    fn freeDataBlockCount(self: *const Vfs) usize {
+        var count: usize = 0;
+        for (0..self.data_blocks.len) |block_index| count += @intFromBool(!self.data_blocks[block_index].used);
+        return count;
     }
 
     fn requireWritableFile(self: *const Vfs, node_index: u16) Error!void {
@@ -1410,6 +1694,7 @@ pub const Vfs = struct {
     }
 
     fn reclaimNode(self: *Vfs, node_index: u16) void {
+        self.releaseAllFileBlocks(node_index);
         const generation = self.nodes[node_index].generation;
         self.nodes[node_index] = .{ .generation = generation };
     }
@@ -1602,6 +1887,7 @@ test "VFS pseudo nodes dispatch independent operations inside read only devfs" {
     try std.testing.expectEqual(@as(u16, 3), try fs.pollOpen(7, handle, 3));
     try std.testing.expectEqual(@as(u64, 12), try fs.ioctlOpen(7, handle, 5, 7));
     try std.testing.expectEqual(@as(?PseudoStream, null), try fs.pseudoStreamOpen(7, handle));
+    try std.testing.expectError(Error.UnsupportedOperation, fs.putFile(0, "/dev/device", "dense", 0o644, false, 4));
     try fs.close(7, handle);
     try std.testing.expectEqual(@as(usize, 3), context.written);
     try std.testing.expectEqual(@as(usize, 1), context.closes);
@@ -1691,6 +1977,74 @@ test "VFS append writes are atomic across independent concurrent writers" {
     try std.testing.expectEqual(@as(u64, expected_records), after.data_lock_tickets - before);
     try std.testing.expectEqual(@as(u64, 0), after.data_lock_outstanding);
     for (0..workers) |worker_index| try fs.close(@intCast(worker_index + 1), handles[worker_index]);
+    try std.testing.expect(fs.validate());
+}
+
+test "VFS sparse holes allocate punch persist size and reuse bounded blocks" {
+    var fs = Vfs.init();
+    _ = try fs.mkdir(0, "/tmp", 0o777, 1);
+    const handle = try fs.open(1, 0, "/tmp/sparse", .{ .read = true, .write = true, .create = true }, 0o644, 2);
+    _ = try fs.seek(1, handle, 2 * file_block_size, .start);
+    try std.testing.expectEqual(@as(usize, 4), try fs.writeOpen(1, handle, "DATA", 3));
+    var info = try fs.sparseFileInfoNode((try fs.stat(0, "/tmp/sparse")).node);
+    try std.testing.expectEqual(@as(usize, 2 * file_block_size + 4), info.size);
+    try std.testing.expectEqual(@as(u8, 1 << 2), info.allocation_bitmap);
+    try std.testing.expectEqual(@as(u8, 1), info.allocated_blocks);
+    var bytes: [2 * file_block_size + 4]u8 = undefined;
+    try std.testing.expectEqual(bytes.len, try fs.read(0, "/tmp/sparse", 0, &bytes));
+    for (bytes[0 .. 2 * file_block_size]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    try std.testing.expectEqualStrings("DATA", bytes[2 * file_block_size ..]);
+
+    try fs.allocateOpen(1, handle, 0, file_block_size, .{ .keep_size = true }, 4);
+    info = try fs.sparseFileInfoNode((try fs.stat(0, "/tmp/sparse")).node);
+    try std.testing.expectEqual(@as(u8, (1 << 0) | (1 << 2)), info.allocation_bitmap);
+    try std.testing.expectEqual(@as(usize, 2 * file_block_size + 4), info.size);
+    try fs.allocateOpen(1, handle, 2 * file_block_size, file_block_size, .{ .keep_size = true, .punch_hole = true }, 5);
+    info = try fs.sparseFileInfoNode((try fs.stat(0, "/tmp/sparse")).node);
+    try std.testing.expectEqual(@as(u8, 1 << 0), info.allocation_bitmap);
+    try std.testing.expectEqual(@as(usize, 2 * file_block_size + 4), info.size);
+    var punched: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try fs.read(0, "/tmp/sparse", 2 * file_block_size, &punched));
+    try std.testing.expectEqualSlices(u8, &@as([4]u8, @splat(0)), &punched);
+    try std.testing.expectError(Error.InvalidOffset, fs.allocateOpen(1, handle, 0, file_block_size, .{ .punch_hole = true }, 6));
+
+    const full: [maximum_file_size]u8 = @splat(0x6D);
+    var file_index: usize = 0;
+    while (file_index < maximum_data_blocks / file_blocks_per_node - 1) : (file_index += 1) {
+        var path_buffer: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "/tmp/full-{d}", .{file_index});
+        _ = try fs.putFile(0, path, &full, 0o600, false, 7);
+    }
+    _ = try fs.putFile(0, "/tmp/tail", full[0 .. 7 * file_block_size], 0o600, false, 8);
+    try std.testing.expectEqual(maximum_data_blocks, fs.report().allocated_blocks);
+    const victim = try fs.open(2, 0, "/tmp/victim", .{ .read = true, .write = true, .create = true }, 0o600, 8);
+    const before_failure = fs.report();
+    try std.testing.expectError(Error.NoSpace, fs.allocateOpen(2, victim, 0, file_block_size, .{}, 9));
+    const after_failure = fs.report();
+    try std.testing.expectEqual(before_failure.allocated_blocks, after_failure.allocated_blocks);
+    try std.testing.expectEqual(@as(usize, 0), (try fs.statOpen(2, victim)).size);
+    try fs.unlink(0, "/tmp/full-0");
+    try fs.allocateOpen(2, victim, 0, file_block_size, .{}, 10);
+    try std.testing.expectEqual(@as(usize, file_block_size), (try fs.statOpen(2, victim)).size);
+    try std.testing.expectEqual(maximum_data_blocks - file_blocks_per_node + 1, fs.report().allocated_blocks);
+    try fs.close(1, handle);
+    try fs.close(2, victim);
+    try std.testing.expect(fs.validate());
+}
+
+test "VFS sparse restoration applies final nonwritable mode after privileged reconstruction" {
+    var fs = Vfs.init();
+    _ = try fs.mkdir(0, "/persist", 0o755, 1);
+    const block: [file_block_size]u8 = @splat(0x4B);
+    const node = try fs.restoreSparseFile(0, "/persist/tool.elf", 0o555, 17, 0x01, &block, 2);
+    const info = try fs.stat(0, "/persist/tool.elf");
+    try std.testing.expectEqual(node, info.node);
+    try std.testing.expectEqual(@as(u16, 0o555), info.mode);
+    try std.testing.expectEqual(@as(usize, 17), info.size);
+    var bytes: [17]u8 = undefined;
+    try std.testing.expectEqual(bytes.len, try fs.read(0, "/persist/tool.elf", 0, &bytes));
+    for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0x4B), byte);
+    try std.testing.expectError(Error.PermissionDenied, fs.write(0, "/persist/tool.elf", 0, "x", false, 3));
     try std.testing.expect(fs.validate());
 }
 

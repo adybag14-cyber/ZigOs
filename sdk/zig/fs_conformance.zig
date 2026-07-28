@@ -12,6 +12,8 @@ const hard_link_path = "/persist/abi14/hard-current";
 const link_target = "renamed.txt";
 const loop_a_path = "/persist/abi14/loop-a";
 const loop_b_path = "/persist/abi14/loop-b";
+const sparse_path = "/persist/abi14/sparse.bin";
+const sparse_offset = 2 * zigos.constants.abi_page_size;
 
 pub export fn zigos_main(
     argc: usize,
@@ -84,6 +86,14 @@ fn initialize() zigos.Error!u32 {
     }
     try zigos.unlink(loop_a_path);
     try zigos.unlink(loop_b_path);
+    const sparse = try zigos.open(sparse_path, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o600);
+    try zigos.fallocate(sparse, .{ .keep_size = true }, 0, zigos.constants.abi_page_size);
+    var sparse_info: zigos.Stat = undefined;
+    try zigos.fstat(sparse, &sparse_info);
+    if (sparse_info.size != 0) return error.InvalidArgument;
+    if (try zigos.lseek(sparse, sparse_offset, .start) != sparse_offset) return error.InvalidArgument;
+    try zigos.writeAll(sparse, "tail");
+    try zigos.close(sparse);
     try zigos.mkdir(temporary_directory, 0o755);
     const temporary = try zigos.open(temporary_path, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o600);
     try zigos.writeAll(temporary, "open-after-unlink");
@@ -101,7 +111,7 @@ fn initialize() zigos.Error!u32 {
     try zigos.unlink(temporary_path);
     try zigos.rmdir(temporary_directory);
     try zigos.sync();
-    try zigos.writeAll(1, "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/open-unlink/rmdir/sync passed\r\n");
+    try zigos.writeAll(1, "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/fallocate/sparse/open-unlink/rmdir/sync passed\r\n");
     return 0x58;
 }
 
@@ -133,12 +143,31 @@ fn verify() zigos.Error!u32 {
     if (try zigos.read(linked, &linked_payload) != linked_payload.len or !equal(&linked_payload, payload))
         return error.InvalidArgument;
     try zigos.close(linked);
+    const sparse = try zigos.open(sparse_path, .{ .read = true, .write = true }, 0);
+    var sparse_info: zigos.Stat = undefined;
+    try zigos.fstat(sparse, &sparse_info);
+    if (sparse_info.size != sparse_offset + 4) return error.InvalidArgument;
+    var sparse_prefix: [16]u8 = undefined;
+    if (try zigos.read(sparse, &sparse_prefix) != sparse_prefix.len) return error.InvalidArgument;
+    for (sparse_prefix) |byte| if (byte != 0) return error.InvalidArgument;
+    if (try zigos.lseek(sparse, sparse_offset, .start) != sparse_offset) return error.InvalidArgument;
+    var sparse_tail: [4]u8 = undefined;
+    if (try zigos.read(sparse, &sparse_tail) != sparse_tail.len or !equal(&sparse_tail, "tail")) return error.InvalidArgument;
+    if (zigos.fallocate(sparse, .{ .punch_hole = true }, sparse_offset, zigos.constants.abi_page_size)) |_| return error.InvalidArgument else |err| {
+        if (err != error.InvalidArgument) return err;
+    }
+    try zigos.fallocate(sparse, .{ .keep_size = true, .punch_hole = true }, sparse_offset, zigos.constants.abi_page_size);
+    if (try zigos.lseek(sparse, sparse_offset, .start) != sparse_offset) return error.InvalidArgument;
+    if (try zigos.read(sparse, &sparse_tail) != sparse_tail.len) return error.InvalidArgument;
+    for (sparse_tail) |byte| if (byte != 0) return error.InvalidArgument;
+    try zigos.close(sparse);
+    try zigos.unlink(sparse_path);
     try zigos.unlink(link_path);
     try zigos.unlink(hard_link_path);
     try zigos.unlink(renamed_path);
     try zigos.rmdir(root_path);
     try zigos.sync();
-    try zigos.writeAll(1, "fs-api: recovery/mode/seek/hard-link/symlink/cleanup passed\r\n");
+    try zigos.writeAll(1, "fs-api: recovery/mode/seek/hard-link/symlink/fallocate/sparse/cleanup passed\r\n");
     return 0x59;
 }
 

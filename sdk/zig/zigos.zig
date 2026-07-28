@@ -96,6 +96,16 @@ pub const MessageFlags = packed struct(u8) {
     }
 };
 
+pub const FallocateFlags = packed struct(u8) {
+    keep_size: bool = false,
+    punch_hole: bool = false,
+    reserved: u6 = 0,
+
+    pub fn bits(self: FallocateFlags) u64 {
+        return @as(u8, @bitCast(self));
+    }
+};
+
 fn ptrValue(pointer: anytype) u64 {
     return @intFromPtr(pointer);
 }
@@ -282,6 +292,10 @@ pub fn openat(directory_fd: i64, path: [*:0]const u8, flags: OpenFlags, mode: u1
 
 pub fn fsync(fd: u16) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_fsync, fd, 0, 0, 0, 0, 0));
+}
+
+pub fn fallocate(fd: u16, flags: FallocateFlags, offset: usize, length: usize) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_fallocate, fd, flags.bits(), offset, length, 0, 0));
 }
 
 pub fn getdents(fd: u16, entries: []DirectoryEntry) Error!usize {

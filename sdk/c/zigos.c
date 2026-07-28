@@ -52,6 +52,10 @@ int64_t zigos_fsync(uint16_t fd) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_FSYNC, fd, 0, 0, 0, 0, 0);
 }
 
+int64_t zigos_fallocate(uint16_t fd, uint64_t mode, uint64_t offset, uint64_t length) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_FALLOCATE, fd, mode, offset, length, 0, 0);
+}
+
 int64_t zigos_symlink(const char *target, const char *path) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_SYMLINK, pointer_value(target), pointer_value(path), 0, 0, 0, 0);
 }

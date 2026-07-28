@@ -18,7 +18,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 75 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe two-boot persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 78 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe two-boot persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -26,13 +26,13 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 
 - a dedicated 100 Hz LAPIC timer and interrupt-enabled HLT idle loop;
 - a permanent PID 1 record; in normal boot it runs the directly linked Zig `/bin/init.elf`, launches the interactive Zig PID 2 shell, waits for it and reaps it before final shutdown;
-- a bounded writable VFS with an explicit parent-linked mount tree and six mounted namespaces;
+- a bounded writable VFS with an explicit parent-linked mount tree, six mounted namespaces, and a shared 256-page ordinary-file pool supporting zero-filled sparse holes;
 - a generation-safe 64-slot process table whose ordinary round-robin service path owns foreground, background and fixture CPL3 dispatch without a second job table or direct shell dispatcher;
 - process-local numeric descriptors, shared open-file descriptions and bounded blocking pipes;
 - up to 64 retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 4,096-slot ownership table;
 - private CR3 roots, strict W^X `PT_LOAD` mappings, eight-page stacks and unmapped guards;
 - complete GPR and FXSAVE context preservation across syscalls and timer preemption;
-- a pointer-validated ABI 1.8 with generated kernel Zig, NASM, public Zig and C interfaces, capability discovery, bounded `spawnv`, System V-style argv/envp/auxv startup, persistent `sync`, descriptor `lseek`/`fsync`, path `stat`, `openat`, TTY `ioctl`, pathname mutation, UDP datagram controls, exact waitpid, wait-any and WNOHANG;
+- a pointer-validated ABI 1.9 with generated kernel Zig, NASM, public Zig and C interfaces, capability discovery, bounded `spawnv`, System V-style argv/envp/auxv startup, persistent `sync`, descriptor `lseek`/`fsync`/`fallocate`, path `stat`, `openat`, TTY `ioctl`, pathname mutation, sparse preallocation/hole punching, UDP datagram controls, exact waitpid, wait-any and WNOHANG;
 - freestanding Zig and C SDKs with generated ABI structures, a SysV AMD64 startup/syscall shim, typed file/process/VM/poll/UDP/filesystem wrappers, a bounded DNS A resolver, environment/auxiliary helpers, a directly linked `/bin/init.elf`, and independently verified `/bin/sdk.elf`, `/bin/fs.elf`, `/bin/dns.elf` and `/bin/c-sdk.elf` conformance programs;
 - an explicit `-Dnormal-boot=true` profile that skips the software proof suite, attaches `/bin/init.elf` to the reserved PID 1 handle, lets that CPL3 init supervise `/bin/sh.elf` as PID 2, and falls back to a tested RAM-root recovery session when no NVMe or SATA backend is usable;
 - page-granular anonymous `mmap`, subrange `munmap`, W^X `mprotect` and expandable/shrinkable `brk`;
@@ -94,12 +94,13 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 - `/bin/vm.elf` proving ABI discovery, anonymous mapping, W^X protection changes, unmapping and heap-break growth/shrink before exiting with status `0x52`;
 - `/bin/io.elf` proving descriptor-backed open/read/fstat/getdents/poll before exiting with status `0x53`;
 - `/bin/socket.elf` proving socket-level and per-call nonblocking `EWOULDBLOCK`, unconnected DNS `sendto`, blocking scheduler-woken `recvfrom` with source metadata, `getpeername`, connected send, poll and close before exiting with status `0x54`;
-- `/bin/dns.elf` proving that an arbitrary directly linked Zig process can encode a DNS A request, use ABI 1.8 datagrams, retry nonblocking receive to a tick deadline, validate compressed response records and resolve `localhost` to `127.0.0.1` before exiting with status `0x5A`;
-- `/bin/c-sdk.elf` proving ABI 1.8 generated C layouts and wrappers, writable `/dev/null` and `/dev/zero`, an openable `/dev/console`, TTY ioctl flags, path `stat`, directory-descriptor and absolute `openat`, descriptor `fsync`, `symlink`, `readlink`, loop rejection, hard-link identity and stat link counts before exiting with status `0x57`;
+- `/bin/dns.elf` proving that an arbitrary directly linked Zig process can encode a DNS A request, use ABI 1.9 datagrams, retry nonblocking receive to a tick deadline, validate compressed response records and resolve `localhost` to `127.0.0.1` before exiting with status `0x5A`;
+- `/bin/c-sdk.elf` proving ABI 1.9 generated C layouts and wrappers, writable `/dev/null` and `/dev/zero`, an openable `/dev/console`, TTY ioctl flags, path `stat`, directory-descriptor and absolute `openat`, descriptor `fsync`, `symlink`, `readlink`, loop rejection, hard-link identity/stat link counts, sparse preallocation and hole punching before exiting with status `0x57`;
 - `/bin/init.elf` running as CPL3 PID 1, launching `/bin/sh.elf` through `spawnv`, waiting for PID 2, reaping it and issuing final shutdown;
 - the normal userspace shell copying `/bin/sdk.elf` to `/persist/persist-sdk.elf`, committing it through syscall 97, resolving `persist-sdk` through `PATH=/bin:/persist` and receiving status `0x56`;
 - the two-boot NVMe gate restoring and executing `/persist/persist-sdk.elf` before committing the alternate journal generation;
-- `/bin/fs.elf` proving userspace `mkdir`, write, `lseek`, replacement rename over an open destination, chmod, persistent hard and symbolic links, unlink-while-open with descriptor access and final-close reclamation, rmdir and sync, then reboot-verifying mode/content/offset and committing cleanup from CPL3;
+- the same two-boot gate committing eight boot-one records, including a sparse allocation map, then restoring/verifying it in CPL3 and cleaning to three boot-two records;
+- `/bin/fs.elf` proving userspace `mkdir`, write, `lseek`, replacement rename over an open destination, chmod, persistent hard and symbolic links, sparse `fallocate`/hole punching, unlink-while-open with descriptor access and final-close reclamation, rmdir and sync, then reboot-verifying mode/content/offset/sparse holes and committing cleanup from CPL3;
 - the normal Zig shell exercising write, append, mkdir, rm, rmdir, mv and chmod without invoking the diagnostic kernel command implementation;
 - real `10.0.2.2` ICMP and `localhost` DNS results in the network profile;
 - explicit unavailable responses in the offline profile;
@@ -110,7 +111,7 @@ Representative exact shutdown contracts are:
 ```text
 # Offline
 ZigOs persistent runtime shutdown: commands 45 failed 0
-ZigOs persistent VFS: ... data-lock tickets/outstanding 30/0 ... clean yes
+ZigOs persistent VFS: ... data-lock tickets/outstanding 30/0 pool-lock tickets/outstanding 43/0 blocks/bytes/holes 70/286720/0 clean yes
 ZigOs persistent descriptors: ... dup/inherited/cloexec 2/56/1 ... clean yes
 ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
 ZigOs post-bootstrap physical memory: ... peak 48 alloc/free 247/247 failed/rejected 0/0 clean yes
@@ -119,7 +120,7 @@ ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes
 
 # Live e1000e
 ZigOs persistent runtime shutdown: commands 47 failed 0
-ZigOs persistent VFS: ... data-lock tickets/outstanding 30/0 ... clean yes
+ZigOs persistent VFS: ... data-lock tickets/outstanding 30/0 pool-lock tickets/outstanding 43/0 blocks/bytes/holes 70/286720/0 clean yes
 ZigOs persistent descriptors: ... dup/inherited/cloexec 2/62/1 ... clean yes
 ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
 ZigOs post-bootstrap physical memory: ... peak 48 alloc/free 278/278 failed/rejected 0/0 clean yes
@@ -304,7 +305,7 @@ zig-out/
     `-- runtime-*.elf
 ```
 
-`zig build test` executes ten canonical host-test roots covering 75 unique `std.testing` declarations across eleven source files, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence, ELF loading and the DNS codec. Imported tests may execute from more than one root, but the source contract counts each declaration once.
+`zig build test` executes ten canonical host-test roots covering 78 unique `std.testing` declarations across eleven source files, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence, ELF loading and the DNS codec. Imported tests may execute from more than one root, but the source contract counts each declaration once.
 
 `zig build check` runs formatting, all isolated tests, the UEFI build and portable PE/COFF verification.
 
@@ -351,11 +352,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    6,927,872 bytes
-SHA-256: 25CA32AABD29CBE07ED61B9ABBCC1F97F170A62D706B56BED7168A6DFDDF2AF9
+Size:    4,934,144 bytes
+SHA-256: E0A1F2515B782F1524C2B5C1FDD19AD2E0AF0B4221B8EC3213315E9658E2422E
 ```
 
-This identity is from the locally validated Windows diagnostic ABI 1.8 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots and per-inode ticket-locked atomic append. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic ABI 1.9 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots, per-inode ticket-locked atomic append and a shared sparse-file block pool with persistent allocation maps. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
@@ -392,7 +393,7 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 75 unique isolated declarations, directly linked Zig/C SDK, init, shell and DNS verification, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 78 unique isolated declarations, directly linked Zig/C SDK, init, shell and DNS verification, x86-64 UEFI build, portable PE verification and artifact upload.
 - **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 45-command offline and 47-command live-network permanent COM1 sessions, the x86-64 NVMe two-boot proof, persistent and diskless normal boots, and the legacy i686 build/two-boot regression.
 - **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 

@@ -363,7 +363,18 @@ fn initializePersistentStorage() !void {
         .write_fn = persistentWriteBlock,
         .flush_fn = persistentFlush,
     };
-    try state.persistence.mount(&state.vfs, device, currentTick());
+    state.persistence.mount(&state.vfs, device, currentTick()) catch |err| {
+        if (state.persistence.restoreFailure()) |failure| {
+            emit("Persistent restore rejected record ");
+            emitDecimal(failure.record_index);
+            emit(" kind ");
+            emitDecimal(failure.record_kind);
+            emit(" VFS error ");
+            emit(@errorName(failure.vfs_error));
+            emit("\r\n");
+        }
+        return err;
+    };
 }
 
 fn persistentReadBlock(context: ?*anyopaque, lba: u64, output: []u8) bool {
@@ -884,6 +895,14 @@ fn commandDf(output: *Output) void {
     output.decimal(report.bytes_used);
     output.write("/");
     output.decimal(runtime_vfs.maximum_nodes * runtime_vfs.maximum_file_size);
+    output.write(" resident-blocks ");
+    output.decimal(report.allocated_blocks);
+    output.write("/");
+    output.decimal(runtime_vfs.maximum_data_blocks);
+    output.write(" allocated-bytes ");
+    output.decimal(report.allocated_bytes);
+    output.write(" hole-bytes ");
+    output.decimal(report.sparse_hole_bytes);
     output.write(" mounts ");
     output.decimal(report.mounts);
     output.write(" open ");
@@ -2301,7 +2320,10 @@ fn finishNormalRuntime() noreturn {
     const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
         fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases and fs_report.dentry_cache_hits > 0 and
         fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0 and
-        fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0;
+        fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0 and
+        fs_report.data_pool_lock_tickets > 0 and fs_report.data_pool_lock_outstanding == 0 and
+        fs_report.allocated_blocks > 0 and fs_report.allocated_blocks <= runtime_vfs.maximum_data_blocks and
+        fs_report.allocated_bytes == fs_report.allocated_blocks * runtime_vfs.file_block_size;
     const clean = init_process.pid == 1 and init_process.state == .zombie and init_process.exit_status == 0 and
         state.shell_exit_requested and state.init_reaped_shell and vfs_clean and fs_report.mounts >= 5 and
         process_report.live == 1 and process_report.zombies == 1 and process_report.total_reaped >= 1 and
@@ -2415,7 +2437,10 @@ fn finishDiagnosticRuntime() noreturn {
     const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
         fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases and fs_report.dentry_cache_hits > 0 and
         fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0 and
-        fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0;
+        fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0 and
+        fs_report.data_pool_lock_tickets > 0 and fs_report.data_pool_lock_outstanding == 0 and
+        fs_report.allocated_blocks > 0 and fs_report.allocated_blocks <= runtime_vfs.maximum_data_blocks and
+        fs_report.allocated_bytes == fs_report.allocated_blocks * runtime_vfs.file_block_size;
     const descriptor_clean = state.descriptors.validate(&state.vfs, &state.processes) and
         descriptor_report.namespaces == 1 and descriptor_report.descriptors == 3 and
         descriptor_report.open_descriptions == 3 and descriptor_report.terminal_descriptions == 3 and
@@ -2480,6 +2505,16 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(fs_report.data_lock_tickets);
     emit("/");
     emitDecimal(fs_report.data_lock_outstanding);
+    emit(" pool-lock tickets/outstanding ");
+    emitDecimal(fs_report.data_pool_lock_tickets);
+    emit("/");
+    emitDecimal(fs_report.data_pool_lock_outstanding);
+    emit(" blocks/bytes/holes ");
+    emitDecimal(fs_report.allocated_blocks);
+    emit("/");
+    emitDecimal(fs_report.allocated_bytes);
+    emit("/");
+    emitDecimal(fs_report.sparse_hole_bytes);
     emit(" clean ");
     emit(if (vfs_clean) "yes" else "no");
     emit("\r\n");

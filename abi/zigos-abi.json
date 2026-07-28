@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 8,
+    "minor": 9,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -70,7 +70,8 @@
     "fsync": 111,
     "symlink": 112,
     "readlink": 113,
-    "link": 114
+    "link": 114,
+    "fallocate": 115
   },
   "errno": {
     "permission": -1,
@@ -143,5 +144,9 @@
     "echo": 0,
     "canonical": 1,
     "signals": 2
+  },
+  "fallocate_flags": {
+    "keep_size": 0,
+    "punch_hole": 1
   }
 }

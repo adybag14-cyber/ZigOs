@@ -609,6 +609,7 @@ pub fn handleSyscall(
         syscall.syscall_symlink => return syscallSymlink(context, frame),
         syscall.syscall_readlink => return syscallReadlink(context, frame),
         syscall.syscall_link => return syscallLink(context, frame),
+        syscall.syscall_fallocate => return syscallFallocate(context, frame),
         syscall.syscall_shutdown => return syscallShutdown(context, frame, fx_state),
         syscall.syscall_getcwd => return syscallGetcwd(context, frame),
         syscall.syscall_chdir => return syscallChdir(context, frame),
@@ -2628,6 +2629,43 @@ fn syscallReadlink(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     }
     frame.rax = count;
+    return 0;
+}
+
+fn syscallFallocate(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const bits = runtime_abi.fallocateFlagBits(frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const offset: usize = std.math.cast(usize, frame.rdx) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const length: usize = std.math.cast(usize, frame.r10) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    activeDescriptors().fallocate(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        fd,
+        offset,
+        length,
+        .{
+            .keep_size = (bits & runtime_abi.fallocate_keep_size) != 0,
+            .punch_hole = (bits & runtime_abi.fallocate_punch_hole) != 0,
+        },
+        current_tick,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = 0;
     return 0;
 }
 

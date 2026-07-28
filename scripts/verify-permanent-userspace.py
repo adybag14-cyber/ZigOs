@@ -192,6 +192,7 @@ def main() -> int:
     require(sdk_source, "pub fn stat", "Zig SDK wraps path stat")
     require(sdk_source, "pub fn openat", "Zig SDK wraps openat")
     require(sdk_source, "pub fn fsync", "Zig SDK wraps descriptor fsync")
+    require(sdk_source, "pub fn fallocate", "Zig SDK wraps sparse allocation and hole punching")
     require(sdk_init, "ZigOs userspace init PID 1", "standalone Zig init identifies its real PID 1 role")
     require(sdk_init, "zigos.spawnv", "userspace init launches the shell through the public ABI")
     require(sdk_init, "zigos.wait", "userspace init waits for and reaps the shell")
@@ -210,20 +211,22 @@ def main() -> int:
     require(diskless_normal_boot_test, "sync: unsupported", "diskless userspace reports persistence unavailability explicitly")
     require(diskless_normal_boot_test, "storage diskless-ram-root cleanup yes", "diskless QEMU gate requires clean resource reclamation")
     require(runtime, "ZigOs shutdown drain:", "diagnostic shutdown drains and reaps delayed terminal userspace")
-    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 8:
-        raise SystemExit("permanent-userspace contract missing: ABI version 1.8")
+    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 9:
+        raise SystemExit("permanent-userspace contract missing: ABI version 1.9")
     expected_fs_syscalls = {"lseek": 98, "mkdir": 99, "unlink": 100, "rmdir": 101, "rename": 102, "chmod": 103}
     expected_network_syscalls = {"sendto": 104, "recvfrom": 105, "getpeername": 106, "setnonblock": 107}
-    expected_platform_syscalls = {"ioctl": 108, "stat": 109, "openat": 110, "fsync": 111, "symlink": 112, "readlink": 113, "link": 114}
+    expected_platform_syscalls = {"ioctl": 108, "stat": 109, "openat": 110, "fsync": 111, "symlink": 112, "readlink": 113, "link": 114, "fallocate": 115}
     syscall_spec = abi_spec["syscalls"]
     core_numbering_valid = syscall_spec.get("spawnv") == 96 and syscall_spec.get("sync") == 97
     fs_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_fs_syscalls.items())
     network_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_network_syscalls.items())
     platform_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_platform_syscalls.items())
     if not core_numbering_valid or not fs_numbering_valid or not network_numbering_valid or not platform_numbering_valid:
-        raise SystemExit("permanent-userspace contract missing: ABI 1.8 syscall numbering")
+        raise SystemExit("permanent-userspace contract missing: ABI 1.9 syscall numbering")
     if abi_spec.get("message_flags") != {"dontwait": 1}:
         raise SystemExit("permanent-userspace contract missing: bounded MSG_DONTWAIT value")
+    if abi_spec.get("fallocate_flags") != {"keep_size": 0, "punch_hole": 1}:
+        raise SystemExit("permanent-userspace contract missing: bounded fallocate mode values")
     if abi_spec.get("seek_whence") != {"start": 0, "current": 1, "end": 2}:
         raise SystemExit("permanent-userspace contract missing: seek-whence values")
     if abi_spec.get("limits") != {
@@ -257,12 +260,15 @@ def main() -> int:
     require(normal_boot_test, "cp /bin/sdk.elf /persist/persist-sdk.elf", "normal profile installs an ELF into the persistent mount")
     require(normal_boot_test, "persistent storage synchronized", "normal profile commits the installed ELF")
     require(persistence_test, "exec /persist/persist-sdk.elf alpha beta", "boot two executes the restored persistent ELF")
-    require(persistence_test, "header_a.record_count != 7 or header_b.record_count != 3", "two-boot gate requires file, directory, symbolic-link and hard-link records then userspace cleanup")
+    require(persistence_test, "header_a.record_count != 8 or header_b.record_count != 3", "two-boot gate requires sparse file, directory, symbolic-link and hard-link records then userspace cleanup")
     require(executor, "syscallLseek", "ABI exposes descriptor seek without offset truncation")
     require(executor, "syscallMkdir", "ABI exposes userspace directory creation")
     require(executor, "syscallSinglePathMutation", "ABI exposes unlink and rmdir through one checked path")
     require(executor, "syscallRename", "ABI copies both rename paths before mutation")
     require(executor, "syscallChmod", "ABI exposes permission-bit mutation")
+    require(executor, "syscallFallocate", "ABI exposes checked descriptor sparse allocation and hole punching")
+    require(runtime_abi, "pub fn fallocateFlagBits", "kernel ABI rejects unknown and contradictory fallocate modes")
+    require(fd_source, "pub fn fallocate", "descriptor layer enforces VFS ownership and writability for fallocate")
     for wrapper in ("pub fn lseek", "pub fn mkdir", "pub fn unlink", "pub fn rmdir", "pub fn rename", "pub fn chmod"):
         require(sdk_source, wrapper, f"SDK exposes {wrapper[7:]}")
     require(build_graph, "sdk/zig/fs_conformance.zig", "build graph compiles the independent filesystem ABI fixture")
@@ -278,7 +284,7 @@ def main() -> int:
     require(runtime_test, "exec /bin/dns.elf", "required live COM1 session executes the userspace resolver")
     require(runtime_test, "dns-sdk: userspace resolver localhost -> 127.0.0.1 passed", "required live COM1 session verifies the resolver result")
     require(runtime, '"/bin/fs.elf"', "filesystem ABI fixture is installed into the runtime VFS")
-    require(fs_conformance, "init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/open-unlink/rmdir/sync passed", "fixture exercises replacement rename and deferred open-file unlink")
+    require(fs_conformance, "init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/fallocate/sparse/open-unlink/rmdir/sync passed", "fixture exercises sparse allocation, replacement rename and deferred open-file unlink")
     require(vfs_source, "const Dentry = struct", "VFS separates directory-entry names from node identity")
     require(vfs_source, "dentries: [maximum_dentries]Dentry", "VFS owns a bounded dentry namespace table")
     require(vfs_source, "const DentryCacheEntry = struct", "VFS separates cached lookup entries from authoritative dentries")
@@ -301,6 +307,24 @@ def main() -> int:
     require(vfs_source, "open_file.offset = offset + written;", "descriptor append updates its final offset before releasing the inode data lock")
     require(vfs_source, 'test "VFS append writes are atomic across independent concurrent writers"', "four host threads prove append records are neither overlapped nor lost")
     require(vfs_source, "std.Thread.spawn", "append atomicity is tested with actual concurrent host writers")
+    require(vfs_source, "pub const file_block_size: usize = 4096", "sparse files use bounded page-sized logical blocks")
+    require(vfs_source, "pub const maximum_data_blocks: usize = 256", "regular files share a bounded one-mebibyte block pool")
+    require(vfs_source, "file_blocks: [file_blocks_per_node]u16", "file nodes retain sparse logical-to-resident block maps")
+    require(vfs_source, "data_blocks: [maximum_data_blocks]DataBlock", "VFS owns one shared resident data-block pool")
+    require(vfs_source, "data_pool_lock: synchronization.TicketLock", "shared block ownership has an explicit serialization lock")
+    forbid(vfs_source, "data: [maximum_file_size]u8", "regular files silently returned to per-node dense backing")
+    require(vfs_source, "fn prepareWriteBlocks", "writes allocate all required sparse blocks before changing the map")
+    require(vfs_source, "if (node.kind == .directory) return Error.IsDirectory;\n        if (node.kind != .file) return Error.UnsupportedOperation;", "dense file installation rejects pseudo and other non-regular nodes before sparse allocation")
+    require(vfs_source, 'fs.putFile(0, "/dev/device", "dense"', "pseudo-node regression prevents sparse-block ownership through putFile")
+    require(vfs_source, "if (required > self.freeDataBlockCount() + reusable) return Error.NoSpace", "pool exhaustion is rejected before destructive remapping")
+    require(vfs_source, "fn punchHoleLocked", "full resident pages can be released while partial ranges are zeroed")
+    require(vfs_source, "fn readFileData", "reads synthesize zeros for unallocated logical blocks")
+    require(vfs_source, "pub fn restoreSparseFile", "journal recovery restores allocation maps and logical size directly")
+    require(vfs_source, "for (0..self.data_blocks.len)", "large shared-pool scans use indexed references rather than stack copies")
+    forbid(vfs_source, "for (self.data_blocks)", "large shared-pool iteration copied one mebibyte onto the kernel stack")
+    require(vfs_source, 'test "VFS sparse holes allocate punch persist size and reuse bounded blocks"', "isolated sparse test proves holes, KEEP_SIZE, punching, exhaustion atomicity and block reuse")
+    require(vfs_source, 'test "VFS sparse restoration applies final nonwritable mode after privileged reconstruction"', "recovery can reconstruct executable 0555 files before applying final mode")
+    require(fd_source, 'test "descriptor fallocate preserves size punches holes and enforces writability"', "descriptor fallocate has an ownership and mode regression test")
     require(vfs_source, "parent_id: u8 = 0", "mount entries retain explicit parent-mount identity")
     require(vfs_source, "mountpoint_node: u16 = invalid_node", "mount entries retain covered mountpoint nodes")
     require(vfs_source, "root_node: u16 = invalid_node", "mount entries own separate mounted root nodes")
@@ -326,12 +350,19 @@ def main() -> int:
     require(runtime, "fs_report.dentry_cache_hits > 0", "release gates require real cache hits")
     require(runtime, "fs_report.data_lock_tickets > 0", "release gates require exercised inode data locks")
     require(runtime, "fs_report.data_lock_outstanding == 0", "release gates require every inode data-lock ticket to drain")
+    require(runtime, "fs_report.data_pool_lock_tickets > 0", "release gates require exercised sparse-pool allocation")
+    require(runtime, "fs_report.data_pool_lock_outstanding == 0", "release gates require the sparse-pool lock to drain")
+    require(runtime, "fs_report.allocated_bytes == fs_report.allocated_blocks * runtime_vfs.file_block_size", "release gates verify resident block accounting")
     require(runtime, "cache entries/refs", "diagnostic shutdown reports cache occupancy and references")
     require(runtime, "acquire/release", "diagnostic shutdown reports cache reference accounting")
     require(runtime, "data-lock tickets/outstanding", "diagnostic shutdown reports inode data-lock accounting")
+    require(runtime, "pool-lock tickets/outstanding", "diagnostic shutdown reports sparse-pool lock accounting")
+    require(runtime, "blocks/bytes/holes", "diagnostic shutdown distinguishes resident storage from logical holes")
     require(runtime_test, "cache entries/refs ", "required permanent-runtime sessions expose dentry-cache resource state")
     require(runtime_test, " acquire/release ", "required permanent-runtime sessions expose balanced cache references")
     require(runtime_test, " data-lock tickets/outstanding ", "required permanent-runtime sessions expose drained inode data locks")
+    require(runtime_test, " pool-lock tickets/outstanding ", "required permanent-runtime sessions expose drained sparse-pool locks")
+    require(runtime_test, " blocks/bytes/holes ", "required permanent-runtime sessions expose sparse storage accounting")
     require(vfs_source, 'test "VFS hard links share node identity data and deferred lifetime"', "hard-link identity, nlink and final-close lifetime are isolated-tested")
     require(vfs_source, "pub const maximum_symlink_depth: usize = 8", "VFS publishes a bounded symbolic-link traversal limit")
     require(vfs_source, "pub fn resolveNoFollow", "VFS exposes final-component no-follow lookup for namespace mutation")
@@ -345,7 +376,7 @@ def main() -> int:
     require(vfs_source, 'test "VFS unlink detaches names and reclaims after the final open handle"', "deferred unlink is isolated-tested across independent handles")
     require(fd_source, 'test "directory openat and deferred unlink survive descriptor aliases"', "descriptor test combines directory-relative openat with shared-description lifetime")
     require(fd_source, "pub fn statFromVfs", "path stat and descriptor fstat share one descriptor-layer VFS-to-ABI metadata conversion")
-    require(fs_conformance, "recovery/mode/seek/hard-link/symlink/cleanup passed", "fixture verifies rebooted data and cleans it through userspace")
+    require(fs_conformance, "recovery/mode/seek/hard-link/symlink/fallocate/sparse/cleanup passed", "fixture verifies rebooted sparse data and cleans it through userspace")
     require(normal_boot_test, "mkdir /persist/shell-state", "normal shell exercises userspace mkdir")
     require(normal_boot_test, "write /persist/shell-state/renamed.txt stale-destination", "normal shell creates an existing rename destination")
     require(normal_boot_test, "chmod 600 /persist/shell-state/renamed.txt", "normal shell exercises replacement rename and chmod")
@@ -353,6 +384,11 @@ def main() -> int:
     require(persistence_test, "exec /bin/fs.elf verify", "boot two verifies and removes the restored objects in CPL3")
     require(persist_source, "symlink = 3", "persistent record model retains symbolic-link identity")
     require(persist_source, "hard_link = 4", "persistent record model retains hard-link aliases")
+    require(persist_source, "sparse_file = 5", "persistent record model retains logical size and sparse allocation maps")
+    require(persist_source, "allocation_bitmap = data[0]", "persistent restore decodes resident-block identity")
+    require(persist_source, "vfs.restoreSparseFile", "persistent restore reconstructs sparse files without densifying holes")
+    require(persist_source, "restoration_failure", "persistent restore retains exact rejected record diagnostics")
+    require(runtime, "Persistent restore rejected record", "boot diagnostics expose record index, kind and VFS error")
     require(persist_source, "try self.restorePass(vfs, candidate, tick, true)", "persistent restore resolves hard links in a second pass")
     require(persist_source, "vfs.canonicalEntryNode", "persistent serialization writes file data only for a canonical dentry")
     require(fs_conformance, "zigos.symlink", "booted Zig filesystem fixture creates persistent and cyclic symbolic links")
@@ -373,15 +409,17 @@ def main() -> int:
     require(build_graph, "sdk/c/conformance.c", "build graph compiles an independent freestanding C conformance program")
     require(build_graph, '"artifacts/c-sdk.elf"', "C SDK conformance is installed as a standalone artifact")
     require(runtime, '"/bin/c-sdk.elf"', "C SDK conformance is installed in the runtime VFS")
-    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(8)", "generated C header publishes ABI 1.8")
+    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(9)", "generated C header publishes ABI 1.9")
     require(c_header, "ZIGOS_IOCTL_TTY_GET_FLAGS", "generated C header publishes terminal ioctl requests")
     require(c_library, "zigos_openat", "C wrapper library exposes openat")
     require(c_library, "zigos_fsync", "C wrapper library exposes descriptor fsync")
     require(c_library, "zigos_symlink", "C wrapper library exposes symbolic-link creation")
     require(c_library, "zigos_readlink", "C wrapper library exposes link-target reads")
     require(c_library, "zigos_link", "C wrapper library exposes hard-link creation")
+    require(c_library, "zigos_fallocate", "C wrapper library exposes sparse allocation and hole punching")
+    require(c_header, "ZIGOS_FALLOCATE_KEEP_SIZE", "generated C header publishes sparse allocation flags")
     require(c_header, "uint8_t link_count", "generated C stat layout exposes namespace link counts")
-    require(c_conformance, "generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink passed", "booted C fixture covers devices, directory-relative openat, symbolic links and hard-link identity/counts")
+    require(c_conformance, "generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse passed", "booted C fixture covers devices, links, sparse allocation and hole punching")
     require(c_conformance, "nondirectory != ZIGOS_ERRNO_NOT_DIRECTORY", "C fixture rejects relative openat on a non-directory descriptor")
     require(c_conformance, 'INT64_C(32767), "/etc/hostname"', "absolute openat ignores an otherwise invalid directory descriptor")
     require(sdk_startup, "mov rdi, [r12]", "SDK startup reads argc from the canonical initial stack")
@@ -552,8 +590,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 75:
-        raise SystemExit(f"canonical isolated-test declaration total must be 75, found {declared_tests}")
+    if declared_tests != 78:
+        raise SystemExit(f"canonical isolated-test declaration total must be 78, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -621,10 +659,12 @@ def main() -> int:
         "reclaimed 278 stale-contexts-swept 0 allocator alloc/release/retains 278/278/0",
         "tty-api: blocking read/poll/line discipline passed",
         "zig-sdk: startup/argv/abi/files/vm/errno passed",
-        "c-sdk: ABI 1.8 discovery passed",
-        "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink passed",
+        "c-sdk: ABI 1.9 discovery passed",
+        "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse passed",
         "ZigOs shutdown drain:",
         " data-lock tickets/outstanding ",
+        " pool-lock tickets/outstanding ",
+        " blocks/bytes/holes ",
         "exec: PID 16 state zombie status 0x56",
         "ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes",
         "sync complete: ramfs mutations ",
@@ -651,7 +691,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.8 Zig/C SDKs, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.9 Zig/C SDKs, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

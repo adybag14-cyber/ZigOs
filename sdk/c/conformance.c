@@ -71,7 +71,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.8 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.9 discovery passed\r\n")) {
         return 0xC4;
     }
 
@@ -183,13 +183,34 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xD3, "hard link shared data/cleanup");
     }
 
-    int64_t host_fd = zigos_openat(ZIGOS_AT_CWD, "/etc/hostname", ZIGOS_OPEN_READ, 0);
-    if (host_fd < 0 || zigos_fsync((uint16_t)host_fd) != 0 || zigos_close((uint16_t)host_fd) != 0) {
-        return fail(0xD4, "descriptor fsync");
+    static const char sparse_path[] = "/tmp/c-sdk-sparse";
+    (void)remove_path(sparse_path);
+    int64_t sparse_fd = zigos_open(sparse_path, ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE | ZIGOS_OPEN_CREATE | ZIGOS_OPEN_TRUNCATE, 0600);
+    zigos_stat sparse_info = {0};
+    uint8_t sparse_zeros[4] = {1, 1, 1, 1};
+    if (sparse_fd < 0 ||
+        zigos_fallocate((uint16_t)sparse_fd, ZIGOS_FALLOCATE_KEEP_SIZE, 0, ZIGOS_PAGE_SIZE) != 0 ||
+        zigos_fstat((uint16_t)sparse_fd, &sparse_info) != 0 || sparse_info.size != 0 ||
+        zigos_fallocate((uint16_t)sparse_fd, 0, 2 * ZIGOS_PAGE_SIZE, 4) != 0 ||
+        zigos_syscall6(ZIGOS_SYS_LSEEK, (uint16_t)sparse_fd, 2 * ZIGOS_PAGE_SIZE, ZIGOS_SEEK_START, 0, 0, 0) != 2 * ZIGOS_PAGE_SIZE ||
+        zigos_write((uint16_t)sparse_fd, "DATA", 4) != 4 ||
+        zigos_fallocate((uint16_t)sparse_fd, ZIGOS_FALLOCATE_PUNCH_HOLE, 2 * ZIGOS_PAGE_SIZE, ZIGOS_PAGE_SIZE) != (uint64_t)ZIGOS_ERRNO_INVALID ||
+        zigos_fallocate((uint16_t)sparse_fd, ZIGOS_FALLOCATE_KEEP_SIZE | ZIGOS_FALLOCATE_PUNCH_HOLE, 2 * ZIGOS_PAGE_SIZE, ZIGOS_PAGE_SIZE) != 0 ||
+        zigos_fstat((uint16_t)sparse_fd, &sparse_info) != 0 || sparse_info.size != 2 * ZIGOS_PAGE_SIZE + 4 ||
+        zigos_syscall6(ZIGOS_SYS_LSEEK, (uint16_t)sparse_fd, 2 * ZIGOS_PAGE_SIZE, ZIGOS_SEEK_START, 0, 0, 0) != 2 * ZIGOS_PAGE_SIZE ||
+        zigos_read((uint16_t)sparse_fd, sparse_zeros, sizeof(sparse_zeros)) != (int64_t)sizeof(sparse_zeros) ||
+        sparse_zeros[0] != 0 || sparse_zeros[1] != 0 || sparse_zeros[2] != 0 || sparse_zeros[3] != 0 ||
+        zigos_close((uint16_t)sparse_fd) != 0 || remove_path(sparse_path) != 0) {
+        return fail(0xD4, "fallocate sparse keep-size/punch");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink passed\r\n")) {
-        return 0xD5;
+    int64_t host_fd = zigos_openat(ZIGOS_AT_CWD, "/etc/hostname", ZIGOS_OPEN_READ, 0);
+    if (host_fd < 0 || zigos_fsync((uint16_t)host_fd) != 0 || zigos_close((uint16_t)host_fd) != 0) {
+        return fail(0xD5, "descriptor fsync");
+    }
+
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse passed\r\n")) {
+        return 0xD6;
     }
     return 0x57;
 }

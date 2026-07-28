@@ -59,6 +59,10 @@ pub const map_allowed: u64 = map_private | map_anonymous | map_fixed | map_fixed
 pub const message_dontwait: u64 = constants.message_dontwait;
 pub const message_allowed: u64 = message_dontwait;
 
+pub const fallocate_keep_size: u64 = constants.fallocate_keep_size;
+pub const fallocate_punch_hole: u64 = constants.fallocate_punch_hole;
+pub const fallocate_allowed: u64 = fallocate_keep_size | fallocate_punch_hole;
+
 pub const poll_readable: u16 = 1 << 0;
 pub const poll_writable: u16 = 1 << 1;
 pub const poll_error: u16 = 1 << 2;
@@ -211,6 +215,13 @@ pub fn messageFlagBits(value: u64) ?u8 {
     return @intCast(value);
 }
 
+pub fn fallocateFlagBits(value: u64) ?u8 {
+    if ((value & ~fallocate_allowed) != 0) return null;
+    const bits: u8 = @intCast(value);
+    if ((bits & fallocate_punch_hole) != 0 and (bits & fallocate_keep_size) == 0) return null;
+    return bits;
+}
+
 pub fn mode(value: u64) ?u16 {
     return std.math.cast(u16, value);
 }
@@ -286,6 +297,11 @@ test "open protection map and message flags reject unknown or contradictory bits
     try std.testing.expectEqual(@as(?u8, @intCast(message_dontwait)), messageFlagBits(message_dontwait));
     try std.testing.expect(messageFlagBits(message_dontwait << 1) == null);
     try std.testing.expect(messageFlagBits(std.math.maxInt(u64)) == null);
+    try std.testing.expectEqual(@as(?u8, 0), fallocateFlagBits(0));
+    try std.testing.expectEqual(@as(?u8, @intCast(fallocate_keep_size)), fallocateFlagBits(fallocate_keep_size));
+    try std.testing.expectEqual(@as(?u8, @intCast(fallocate_keep_size | fallocate_punch_hole)), fallocateFlagBits(fallocate_keep_size | fallocate_punch_hole));
+    try std.testing.expect(fallocateFlagBits(fallocate_punch_hole) == null);
+    try std.testing.expect(fallocateFlagBits(std.math.maxInt(u64)) == null);
 }
 
 test "mode arguments reject values wider than the ABI" {
