@@ -325,7 +325,7 @@ try {
     if ($Network) {
         $required += @(
             'socket-api: start',
-            'socket-api: socket/bind/connect/send/poll/close passed',
+            'socket-api: sendto/recvfrom/getpeername/nonblocking passed',
             'exec: PID 17 state zombie status 0x54',
             'serial COM1 online; framebuffer no; USB keyboard no; NVMe yes; AHCI no; e1000e yes',
             'e1000e0: up mac 52:54:00:12:34:56 ipv4 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 dns 10.0.2.3',

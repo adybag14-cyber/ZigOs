@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 4,
+    "minor": 5,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -59,7 +59,11 @@
     "unlink": 100,
     "rmdir": 101,
     "rename": 102,
-    "chmod": 103
+    "chmod": 103,
+    "sendto": 104,
+    "recvfrom": 105,
+    "getpeername": 106,
+    "setnonblock": 107
   },
   "errno": {
     "permission": -1,
@@ -117,5 +121,8 @@
     "start": 0,
     "current": 1,
     "end": 2
+  },
+  "message_flags": {
+    "dontwait": 1
   }
 }

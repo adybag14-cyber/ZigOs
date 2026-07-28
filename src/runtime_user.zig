@@ -112,6 +112,7 @@ const SocketSlot = struct {
     used: bool = false,
     generation: u32 = 0,
     socket: ?e1000e.UdpSocket = null,
+    nonblocking: bool = false,
 };
 
 const Context = struct {
@@ -597,6 +598,10 @@ pub fn handleSyscall(
         syscall.syscall_send => return syscallSend(context, frame),
         syscall.syscall_recv => return syscallRecv(context, frame, fx_state),
         syscall.syscall_getsockname => return syscallGetSockName(context, frame),
+        syscall.syscall_sendto => return syscallSendTo(context, frame),
+        syscall.syscall_recvfrom => return syscallRecvFrom(context, frame, fx_state),
+        syscall.syscall_getpeername => return syscallGetPeerName(context, frame),
+        syscall.syscall_setnonblock => return syscallSetNonblocking(context, frame),
         syscall.syscall_shutdown => return syscallShutdown(context, frame, fx_state),
         syscall.syscall_getcwd => return syscallGetcwd(context, frame),
         syscall.syscall_chdir => return syscallChdir(context, frame),
@@ -1106,12 +1111,6 @@ fn syscallConnect(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_fault);
         return 0;
     };
-    const port = @byteSwap(address.port_be);
-    const ipv4 = socketAddressBytes(&address).*;
-    if (port == 0 or allZero(&ipv4)) {
-        frame.rax = reject(errno_invalid);
-        return 0;
-    }
     const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -1120,13 +1119,16 @@ fn syscallConnect(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.errno_connection_refused);
         return 0;
     };
+    const peer = udpPeerForAddress(device, address) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
     if (slot.socket == null) slot.socket = e1000e.openEphemeralUdpSocket(device);
     const socket = slot.socket orelse {
         frame.rax = reject(runtime_abi.errno_no_space);
         return 0;
     };
-    const mac = if (std.mem.eql(u8, &ipv4, &device.local_ipv4)) device.local_mac else device.gateway_mac;
-    if (!e1000e.connectUdpSocket(device, socket, .{ .mac = mac, .ipv4 = ipv4, .port = port })) {
+    if (!e1000e.connectUdpSocket(device, socket, peer)) {
         frame.rax = reject(runtime_abi.errno_connection_refused);
         return 0;
     }
@@ -1143,7 +1145,11 @@ fn syscallSend(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     };
-    if (frame.r10 != 0 or length > maximum_io_bytes or !validateRange(context, frame.rsi, length, false)) {
+    if (runtime_abi.messageFlagBits(frame.r10) == null) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    if (length > maximum_io_bytes or !validateRange(context, frame.rsi, length, false)) {
         frame.rax = reject(if (length > maximum_io_bytes) errno_invalid else errno_fault);
         return 0;
     }
@@ -1164,11 +1170,66 @@ fn syscallSend(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.errno_connection_refused);
         return 0;
     };
-    if (!e1000e.runtimePollingMode() or !e1000e.runtimeMmioAccessible(device)) {
+    if (!runtimeNetworkReady(device)) {
         frame.rax = reject(runtime_abi.errno_io);
         return 0;
     }
     if (e1000e.sendConnectedUdpDatagram(device, socket, 64, bytes[0..length]) == null) {
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    }
+    frame.rax = length;
+    return 0;
+}
+
+fn syscallSendTo(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const length: usize = std.math.cast(usize, frame.rdx) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (runtime_abi.messageFlagBits(frame.r10) == null) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    if (length > maximum_io_bytes or !validateRange(context, frame.rsi, length, false)) {
+        frame.rax = reject(if (length > maximum_io_bytes) errno_invalid else errno_fault);
+        return 0;
+    }
+    const address = readSocketAddress(context, frame.r8, frame.r9) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    var bytes: [maximum_io_bytes]u8 = undefined;
+    if (length != 0 and !copyFromUser(context, frame.rsi, bytes[0..length])) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const device = e1000e.activeDevice() orelse {
+        frame.rax = reject(runtime_abi.errno_connection_refused);
+        return 0;
+    };
+    const peer = udpPeerForAddress(device, address) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (slot.socket == null) slot.socket = e1000e.openEphemeralUdpSocket(device);
+    const socket = slot.socket orelse {
+        frame.rax = reject(runtime_abi.errno_no_space);
+        return 0;
+    };
+    if (!runtimeNetworkReady(device)) {
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    }
+    if (e1000e.sendUdpDatagramTo(device, socket, peer, 64, bytes[0..length]) == null) {
         frame.rax = reject(runtime_abi.errno_io);
         return 0;
     }
@@ -1181,6 +1242,23 @@ fn syscallRecv(
     frame: *interrupt_context.Frame,
     fx_state: *align(16) interrupt_context.FxState,
 ) u64 {
+    return syscallReceiveDatagram(context, frame, fx_state, false);
+}
+
+fn syscallRecvFrom(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    return syscallReceiveDatagram(context, frame, fx_state, true);
+}
+
+fn syscallReceiveDatagram(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+    copy_source: bool,
+) u64 {
     const fd = runtime_abi.descriptor(frame.rdi) orelse {
         frame.rax = reject(errno_bad_fd);
         return 0;
@@ -1189,7 +1267,14 @@ fn syscallRecv(
         frame.rax = reject(errno_invalid);
         return 0;
     };
-    if (frame.r10 != 0 or length > maximum_io_bytes or !validateRange(context, frame.rsi, length, true)) {
+    const flags = runtime_abi.messageFlagBits(frame.r10) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (length > maximum_io_bytes or !validateRange(context, frame.rsi, length, true) or
+        (copy_source and (frame.r9 < @sizeOf(runtime_abi.Ipv4SocketAddress) or
+            !validateRange(context, frame.r8, @sizeOf(runtime_abi.Ipv4SocketAddress), true))))
+    {
         frame.rax = reject(if (length > maximum_io_bytes) errno_invalid else errno_fault);
         return 0;
     }
@@ -1211,6 +1296,10 @@ fn syscallRecv(
     };
     var bytes: [maximum_io_bytes]u8 = undefined;
     const received = e1000e.receiveUdpInto(device, socket, bytes[0..length]) orelse {
+        if (slot.nonblocking or (flags & runtime_abi.message_dontwait) != 0) {
+            frame.rax = reject(errno_would_block);
+            return 0;
+        }
         activeProcesses().block(context.handle, .socket_read, socketWaitKey(resource.index, resource.generation)) catch |err| {
             frame.rax = reject(runtime_abi.fromError(err));
             return 0;
@@ -1218,6 +1307,10 @@ fn syscallRecv(
         return blockAndRetry(context, frame, fx_state);
     };
     if (received.copied_length != 0 and !copyToUser(context, frame.rsi, bytes[0..received.copied_length])) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    if (copy_source and !writeSocketAddress(context, frame.r8, frame.r9, received.source_ipv4, received.source_port)) {
         frame.rax = reject(errno_fault);
         return 0;
     }
@@ -1230,12 +1323,6 @@ fn syscallGetSockName(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_bad_fd);
         return 0;
     };
-    if (frame.rdx < @sizeOf(runtime_abi.Ipv4SocketAddress) or
-        !validateRange(context, frame.rsi, @sizeOf(runtime_abi.Ipv4SocketAddress), true))
-    {
-        frame.rax = reject(errno_fault);
-        return 0;
-    }
     const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -1248,18 +1335,63 @@ fn syscallGetSockName(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.errno_connection_refused);
         return 0;
     };
-    var address = runtime_abi.Ipv4SocketAddress{
-        .family = runtime_abi.address_family_ipv4,
-        .port_be = @byteSwap(socket.local_port),
-        .address_be = 0,
-    };
-    @memcpy(std.mem.asBytes(&address.address_be), &device.local_ipv4);
-    if (!copyToUser(context, frame.rsi, std.mem.asBytes(&address))) {
+    if (!writeSocketAddress(context, frame.rsi, frame.rdx, device.local_ipv4, socket.local_port)) {
         frame.rax = reject(errno_fault);
         return 0;
     }
     frame.rax = @sizeOf(runtime_abi.Ipv4SocketAddress);
     return 0;
+}
+
+fn syscallGetPeerName(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const socket = slot.socket orelse {
+        frame.rax = reject(runtime_abi.errno_not_connected);
+        return 0;
+    };
+    const device = e1000e.activeDevice() orelse {
+        frame.rax = reject(runtime_abi.errno_connection_refused);
+        return 0;
+    };
+    const peer = e1000e.udpSocketPeer(device, socket) orelse {
+        frame.rax = reject(runtime_abi.errno_not_connected);
+        return 0;
+    };
+    if (!writeSocketAddress(context, frame.rsi, frame.rdx, peer.ipv4, peer.port)) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = @sizeOf(runtime_abi.Ipv4SocketAddress);
+    return 0;
+}
+
+fn syscallSetNonblocking(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    if (frame.rsi > 1) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    slot.nonblocking = frame.rsi != 0;
+    frame.rax = 0;
+    return 0;
+}
+
+fn runtimeNetworkReady(device: *e1000e.Device) bool {
+    return e1000e.runtimePollingMode() and e1000e.runtimeMmioAccessible(device);
 }
 
 pub fn serviceNetwork() usize {
@@ -1287,6 +1419,35 @@ fn readSocketAddress(context: *const Context, pointer: u64, size: u64) ?runtime_
 
 fn socketAddressBytes(address: *const runtime_abi.Ipv4SocketAddress) *const [4]u8 {
     return @ptrCast(&address.address_be);
+}
+
+fn writeSocketAddress(
+    context: *const Context,
+    pointer: u64,
+    size: u64,
+    ipv4: [4]u8,
+    port: u16,
+) bool {
+    if (size < @sizeOf(runtime_abi.Ipv4SocketAddress) or
+        !validateRange(context, pointer, @sizeOf(runtime_abi.Ipv4SocketAddress), true)) return false;
+    var address = runtime_abi.Ipv4SocketAddress{
+        .family = runtime_abi.address_family_ipv4,
+        .port_be = @byteSwap(port),
+        .address_be = 0,
+    };
+    @memcpy(std.mem.asBytes(&address.address_be), &ipv4);
+    return copyToUser(context, pointer, std.mem.asBytes(&address));
+}
+
+fn udpPeerForAddress(device: *const e1000e.Device, address: runtime_abi.Ipv4SocketAddress) ?e1000e.UdpPeer {
+    const port = @byteSwap(address.port_be);
+    const ipv4 = socketAddressBytes(&address).*;
+    if (port == 0 or allZero(&ipv4)) return null;
+    return .{
+        .mac = if (std.mem.eql(u8, &ipv4, &device.local_ipv4)) device.local_mac else device.gateway_mac,
+        .ipv4 = ipv4,
+        .port = port,
+    };
 }
 
 fn allZero(bytes: []const u8) bool {

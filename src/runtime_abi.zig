@@ -56,6 +56,9 @@ pub const map_fixed: u64 = 1 << 2;
 pub const map_fixed_no_replace: u64 = 1 << 3;
 pub const map_allowed: u64 = map_private | map_anonymous | map_fixed | map_fixed_no_replace;
 
+pub const message_dontwait: u64 = constants.message_dontwait;
+pub const message_allowed: u64 = message_dontwait;
+
 pub const poll_readable: u16 = 1 << 0;
 pub const poll_writable: u16 = 1 << 1;
 pub const poll_error: u16 = 1 << 2;
@@ -203,6 +206,11 @@ pub fn mapFlagBits(value: u64) ?u8 {
     return bits;
 }
 
+pub fn messageFlagBits(value: u64) ?u8 {
+    if ((value & ~message_allowed) != 0) return null;
+    return @intCast(value);
+}
+
 pub fn mode(value: u64) ?u16 {
     return std.math.cast(u16, value);
 }
@@ -266,7 +274,7 @@ test "descriptor arguments reject narrowing aliases" {
     try std.testing.expect(descriptor(std.math.maxInt(u64)) == null);
 }
 
-test "open protection and map flags reject unknown or contradictory bits" {
+test "open protection map and message flags reject unknown or contradictory bits" {
     try std.testing.expectEqual(@as(?u8, open_allowed), openFlagBits(open_allowed));
     try std.testing.expect(openFlagBits(open_allowed + 1) == null);
     try std.testing.expectEqual(@as(?u8, protection_read | protection_write), protectionBits(protection_read | protection_write));
@@ -274,6 +282,9 @@ test "open protection and map flags reject unknown or contradictory bits" {
     try std.testing.expectEqual(@as(?u8, map_private | map_anonymous), mapFlagBits(map_private | map_anonymous));
     try std.testing.expect(mapFlagBits(map_anonymous) == null);
     try std.testing.expect(mapFlagBits(map_private | map_anonymous | map_fixed | map_fixed_no_replace) == null);
+    try std.testing.expectEqual(@as(?u8, @intCast(message_dontwait)), messageFlagBits(message_dontwait));
+    try std.testing.expect(messageFlagBits(message_dontwait << 1) == null);
+    try std.testing.expect(messageFlagBits(std.math.maxInt(u64)) == null);
 }
 
 test "mode arguments reject values wider than the ABI" {

@@ -55,6 +55,7 @@ def main() -> int:
     sdk_source = text("sdk/zig/zigos.zig")
     sdk_startup = text("sdk/zig/syscall.asm")
     sdk_conformance = text("sdk/zig/conformance.zig")
+    socket_conformance = text("src/user/runtime-socket.asm")
     sdk_init = text("sdk/zig/init.zig")
     fs_conformance = text("sdk/zig/fs_conformance.zig")
     sdk_shell = text("sdk/zig/shell.zig")
@@ -180,11 +181,18 @@ def main() -> int:
     require(normal_boot_test, "process 3 exited 42", "normal QEMU gate proves userspace shell spawn/wait")
     require(normal_boot_test, "alloc/free 97/97 clean yes", "normal QEMU gate requires exact physical reclamation")
     require(normal_boot_test, "forbidden", "normal QEMU gate rejects diagnostic proof markers")
-    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 4:
-        raise SystemExit("permanent-userspace contract missing: ABI version 1.4")
+    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 5:
+        raise SystemExit("permanent-userspace contract missing: ABI version 1.5")
     expected_fs_syscalls = {"lseek": 98, "mkdir": 99, "unlink": 100, "rmdir": 101, "rename": 102, "chmod": 103}
-    if abi_spec["syscalls"].get("spawnv") != 96 or abi_spec["syscalls"].get("sync") != 97 or any(abi_spec["syscalls"].get(name) != number for name, number in expected_fs_syscalls.items()):
-        raise SystemExit("permanent-userspace contract missing: ABI 1.4 syscall numbering")
+    expected_network_syscalls = {"sendto": 104, "recvfrom": 105, "getpeername": 106, "setnonblock": 107}
+    syscall_spec = abi_spec["syscalls"]
+    core_numbering_valid = syscall_spec.get("spawnv") == 96 and syscall_spec.get("sync") == 97
+    fs_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_fs_syscalls.items())
+    network_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_network_syscalls.items())
+    if not core_numbering_valid or not fs_numbering_valid or not network_numbering_valid:
+        raise SystemExit("permanent-userspace contract missing: ABI 1.5 syscall numbering")
+    if abi_spec.get("message_flags") != {"dontwait": 1}:
+        raise SystemExit("permanent-userspace contract missing: bounded MSG_DONTWAIT value")
     if abi_spec.get("seek_whence") != {"start": 0, "current": 1, "end": 2}:
         raise SystemExit("permanent-userspace contract missing: seek-whence values")
     if abi_spec.get("limits") != {
@@ -210,7 +218,7 @@ def main() -> int:
     require(sdk_conformance, "zig-sdk: envp/auxv passed", "SDK conformance validates startup vectors")
     require(normal_boot_test, "persist-sdk alpha beta", "normal QEMU gate proves persistent PATH lookup, argv and inherited envp")
     require(normal_boot_test, "process 4 exited 86", "normal QEMU gate proves spawnv child status")
-    require(executor, "syscallSync", "userspace can commit the persistent VFS through ABI 1.4")
+    require(executor, "syscallSync", "userspace can commit the persistent VFS through the versioned ABI")
     require(runtime, "syncPersistentStorage", "sync syscall reaches the crash-safe journal backend")
     require(sdk_source, "pub fn sync", "SDK exposes persistence sync")
     require(sdk_shell, "fn commandCp", "userspace shell copies files through descriptors")
@@ -250,6 +258,20 @@ def main() -> int:
     require(sdk_source, "pub fn queryAbi", "SDK exposes typed ABI discovery")
     require(sdk_source, "pub fn mmap", "SDK exposes typed virtual-memory wrappers")
     require(sdk_source, "pub fn socket", "SDK exposes typed UDP socket wrappers")
+    require(runtime_abi, "pub fn messageFlagBits", "ABI rejects unknown full-width message flags before narrowing")
+    require(executor, "fn syscallSendTo", "kernel exposes unconnected UDP datagram transmission")
+    require(executor, "fn syscallRecvFrom", "kernel exposes source-address UDP reception")
+    require(executor, "fn syscallGetPeerName", "kernel exposes connected UDP peer inspection")
+    require(executor, "fn syscallSetNonblocking", "kernel stores explicit per-socket nonblocking mode")
+    require(executor, "slot.nonblocking or (flags & runtime_abi.message_dontwait) != 0", "empty UDP receives return EWOULDBLOCK in both nonblocking modes")
+    for wrapper in ("pub fn sendto", "pub fn recvfrom", "pub fn getpeername", "pub fn setNonblocking"):
+        require(sdk_source, wrapper, f"SDK exposes UDP ABI 1.5 wrapper {wrapper[7:]}")
+    require(socket_conformance, "SYS_SENDTO", "CPL3 socket fixture transmits an unconnected DNS datagram")
+    require(socket_conformance, "SYS_RECVFROM", "CPL3 socket fixture receives source metadata")
+    require(socket_conformance, "SYS_GETPEERNAME", "CPL3 socket fixture checks its connected peer")
+    require(socket_conformance, "SYS_SETNONBLOCK", "CPL3 socket fixture checks socket-level nonblocking mode")
+    require(socket_conformance, "ZIGOS_MSG_DONTWAIT", "CPL3 socket fixture checks per-call nonblocking mode")
+    require(runtime_test, "socket-api: sendto/recvfrom/getpeername/nonblocking passed", "required live QEMU session proves ABI 1.5 UDP controls")
     require(sdk_conformance, "startup/argv/abi/files/vm/errno passed", "Zig conformance binary spans startup and core wrappers")
     require(sdk_abi, "pub const AbiInfo = extern struct", "generated SDK ABI publishes stable structure layouts")
     require(sdk_verifier, "physical not in (0, virtual)", "SDK ELF verifier accepts only zero or conventional p_paddr")
@@ -351,7 +373,7 @@ def main() -> int:
     require(runtime_abi, "pub const AbiInfo = extern struct", "versioned machine-readable ABI information")
     require(runtime_abi, "pub fn fromError", "stable kernel-error to userspace-errno mapping")
     require(runtime_abi, "descriptor arguments reject narrowing aliases", "hostile descriptor-width tests")
-    require(runtime_abi, "open protection and map flags reject unknown or contradictory bits", "hostile ABI flag tests")
+    require(runtime_abi, "open protection map and message flags reject unknown or contradictory bits", "hostile ABI flag tests")
     require(abi_generator, 'newline="\\n"', "ABI generator emits deterministic LF files")
     require(assets, '"generate-abi.py"', "asset generation refreshes ABI constants before assembly")
     if abi_spec.get("abi", {}).get("major") != 1 or abi_spec.get("abi", {}).get("page_size") != 4096:

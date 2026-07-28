@@ -7,14 +7,20 @@ ORG 0
 %define START_MESSAGE   (DATA_BASE + 0)
 %define PASS_MESSAGE    (DATA_BASE + 64)
 %define PAYLOAD         (DATA_BASE + 160)
+%define DNS_QUERY       (DATA_BASE + 192)
 %define ABI_INFO        (DATA_BASE + 256)
 %define LOCAL_ADDRESS   (DATA_BASE + 320)
 %define PEER_ADDRESS    (DATA_BASE + 336)
 %define POLL_BUFFER     (DATA_BASE + 352)
+%define DNS_ADDRESS     (DATA_BASE + 368)
+%define SOURCE_ADDRESS  (DATA_BASE + 384)
+%define RECEIVE_BUFFER  (DATA_BASE + 400)
 
 %define START_LENGTH    19
-%define PASS_LENGTH     56
+%define PASS_LENGTH     60
 %define PAYLOAD_LENGTH  8
+%define DNS_QUERY_LENGTH 27
+%define RECEIVE_CAPACITY 512
 
 _start:
     mov eax, SYS_WRITE
@@ -34,6 +40,8 @@ _start:
     mov rbx, ABI_INFO
     test qword [rbx + 24], ZIGOS_CAP_UDP_SOCKETS
     jz .fail_abi
+    cmp word [rbx + 8], 5
+    jb .fail_abi
 
     mov eax, SYS_SOCKET
     mov edi, 2                  ; AF_INET
@@ -72,7 +80,87 @@ _start:
     cmp dword [rbx + 4], 0x0F02000A   ; 10.0.2.15 bytes
     jne .fail_name
 
-    ; Connect to QEMU's retained gateway and transmit through e1000e.
+    ; Socket-level nonblocking mode must reject an empty queue immediately.
+    mov eax, SYS_SETNONBLOCK
+    mov edi, r12d
+    mov esi, 1
+    int 0x80
+    test eax, eax
+    jnz .fail_nonblock
+
+    mov eax, SYS_RECVFROM
+    mov edi, r12d
+    mov rsi, RECEIVE_BUFFER
+    mov edx, RECEIVE_CAPACITY
+    xor r10d, r10d
+    mov r8, SOURCE_ADDRESS
+    mov r9d, 8
+    int 0x80
+    cmp rax, ERRNO_WOULD_BLOCK
+    jne .fail_nonblock
+
+    mov eax, SYS_SETNONBLOCK
+    mov edi, r12d
+    xor esi, esi
+    int 0x80
+    test eax, eax
+    jnz .fail_nonblock
+
+    ; Per-call MSG_DONTWAIT must have the same empty-queue result.
+    mov eax, SYS_RECVFROM
+    mov edi, r12d
+    mov rsi, RECEIVE_BUFFER
+    mov edx, RECEIVE_CAPACITY
+    mov r10d, ZIGOS_MSG_DONTWAIT
+    mov r8, SOURCE_ADDRESS
+    mov r9d, 8
+    int 0x80
+    cmp rax, ERRNO_WOULD_BLOCK
+    jne .fail_nonblock
+
+    ; Send an unconnected DNS query to QEMU's retained resolver.
+    mov rbx, DNS_ADDRESS
+    mov word [rbx + 0], 2
+    mov word [rbx + 2], 0x3500         ; network-order port 53
+    mov dword [rbx + 4], 0x0302000A    ; 10.0.2.3 bytes
+    mov eax, SYS_SENDTO
+    mov edi, r12d
+    mov rsi, DNS_QUERY
+    mov edx, DNS_QUERY_LENGTH
+    xor r10d, r10d
+    mov r8, DNS_ADDRESS
+    mov r9d, 8
+    int 0x80
+    cmp eax, DNS_QUERY_LENGTH
+    jne .fail_sendto
+
+    ; Blocking recvfrom returns through the normal scheduler wakeup path.
+    mov eax, SYS_RECVFROM
+    mov edi, r12d
+    mov rsi, RECEIVE_BUFFER
+    mov edx, RECEIVE_CAPACITY
+    xor r10d, r10d
+    mov r8, SOURCE_ADDRESS
+    mov r9d, 8
+    int 0x80
+    cmp eax, 12
+    jb .fail_recvfrom
+    mov r13d, eax
+
+    mov rbx, SOURCE_ADDRESS
+    cmp word [rbx + 0], 2
+    jne .fail_source
+    cmp word [rbx + 2], 0x3500
+    jne .fail_source
+    cmp dword [rbx + 4], 0x0302000A
+    jne .fail_source
+    mov rbx, RECEIVE_BUFFER
+    cmp word [rbx + 0], 0x5A5A
+    jne .fail_recvfrom
+    test byte [rbx + 2], 0x80          ; DNS response bit
+    jz .fail_recvfrom
+
+    ; Connect to QEMU's retained gateway and verify the stored peer.
     mov rbx, PEER_ADDRESS
     mov word [rbx + 0], 2
     mov word [rbx + 2], 0x0900         ; network-order port 9
@@ -84,6 +172,21 @@ _start:
     int 0x80
     test eax, eax
     jnz .fail_connect
+
+    mov eax, SYS_GETPEERNAME
+    mov edi, r12d
+    mov rsi, SOURCE_ADDRESS
+    mov edx, 8
+    int 0x80
+    cmp eax, 8
+    jne .fail_peer
+    mov rbx, SOURCE_ADDRESS
+    cmp word [rbx + 0], 2
+    jne .fail_peer
+    cmp word [rbx + 2], 0x0900
+    jne .fail_peer
+    cmp dword [rbx + 4], 0x0202000A
+    jne .fail_peer
 
     mov rbx, POLL_BUFFER
     mov word [rbx + 0], r12w
@@ -144,20 +247,35 @@ _start:
 .fail_name:
     mov edi, 0xB4
     jmp .exit_failure
-.fail_connect:
+.fail_nonblock:
     mov edi, 0xB5
     jmp .exit_failure
-.fail_poll:
+.fail_sendto:
     mov edi, 0xB6
     jmp .exit_failure
-.fail_send:
+.fail_recvfrom:
     mov edi, 0xB7
     jmp .exit_failure
-.fail_close:
+.fail_source:
     mov edi, 0xB8
     jmp .exit_failure
-.fail_pass:
+.fail_connect:
     mov edi, 0xB9
+    jmp .exit_failure
+.fail_peer:
+    mov edi, 0xBA
+    jmp .exit_failure
+.fail_poll:
+    mov edi, 0xBB
+    jmp .exit_failure
+.fail_send:
+    mov edi, 0xBC
+    jmp .exit_failure
+.fail_close:
+    mov edi, 0xBD
+    jmp .exit_failure
+.fail_pass:
+    mov edi, 0xBE
 .exit_failure:
     mov eax, SYS_EXIT
     int 0x80

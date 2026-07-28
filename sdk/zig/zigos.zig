@@ -87,6 +87,15 @@ pub const MapFlags = packed struct(u8) {
     }
 };
 
+pub const MessageFlags = packed struct(u8) {
+    dontwait: bool = false,
+    reserved: u7 = 0,
+
+    pub fn bits(self: MessageFlags) u64 {
+        return @as(u8, @bitCast(self));
+    }
+};
+
 fn ptrValue(pointer: anytype) u64 {
     return @intFromPtr(pointer);
 }
@@ -283,6 +292,38 @@ pub fn recv(fd: u16, bytes: []u8) Error!usize {
 
 pub fn getsockname(fd: u16, address: *Ipv4SocketAddress) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_getsockname, fd, ptrValue(address), @sizeOf(Ipv4SocketAddress), 0, 0, 0));
+}
+
+pub fn sendto(fd: u16, bytes: []const u8, address: *const Ipv4SocketAddress) Error!usize {
+    return @intCast(try result(zigos_syscall6(
+        abi.syscall_sendto,
+        fd,
+        ptrValue(bytes.ptr),
+        bytes.len,
+        0,
+        ptrValue(address),
+        @sizeOf(Ipv4SocketAddress),
+    )));
+}
+
+pub fn recvfrom(fd: u16, bytes: []u8, address: *Ipv4SocketAddress, flags: MessageFlags) Error!usize {
+    return @intCast(try result(zigos_syscall6(
+        abi.syscall_recvfrom,
+        fd,
+        ptrValue(bytes.ptr),
+        bytes.len,
+        flags.bits(),
+        ptrValue(address),
+        @sizeOf(Ipv4SocketAddress),
+    )));
+}
+
+pub fn getpeername(fd: u16, address: *Ipv4SocketAddress) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_getpeername, fd, ptrValue(address), @sizeOf(Ipv4SocketAddress), 0, 0, 0));
+}
+
+pub fn setNonblocking(fd: u16, enabled: bool) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_setnonblock, fd, @intFromBool(enabled), 0, 0, 0, 0));
 }
 
 pub const SeekWhence = enum(u64) {

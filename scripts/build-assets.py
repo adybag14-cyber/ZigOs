@@ -64,11 +64,12 @@ def runtime_tty_data() -> bytes:
 
 
 def runtime_socket_data() -> bytes:
-    data = bytearray(512)
+    data = bytearray(1024)
     fields = {
         0: b"socket-api: start\r\n",
-        64: b"socket-api: socket/bind/connect/send/poll/close passed\r\n",
+        64: b"socket-api: sendto/recvfrom/getpeername/nonblocking passed\r\n",
         160: b"UDP-CPL3",
+        192: bytes.fromhex("5A5A01000001000000000000096C6F63616C686F73740000010001"),
     }
     for offset, value in fields.items():
         data[offset : offset + len(value)] = value

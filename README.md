@@ -32,7 +32,7 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 - up to 64 retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 4,096-slot ownership table;
 - private CR3 roots, strict W^X `PT_LOAD` mappings, eight-page stacks and unmapped guards;
 - complete GPR and FXSAVE context preservation across syscalls and timer preemption;
-- a pointer-validated ABI 1.4 with generated Zig/NASM constants, capability discovery, bounded `spawnv`, System V-style argv/envp/auxv startup, persistent `sync`, descriptor `lseek`, pathname mutation, exact waitpid, wait-any and WNOHANG;
+- a pointer-validated ABI 1.5 with generated Zig/NASM constants, capability discovery, bounded `spawnv`, System V-style argv/envp/auxv startup, persistent `sync`, descriptor `lseek`, pathname mutation, UDP datagram controls, exact waitpid, wait-any and WNOHANG;
 - a freestanding Zig SDK with generated ABI structures, a SysV AMD64 startup shim, typed file/process/VM/poll/UDP/filesystem wrappers, environment/auxiliary helpers, a directly linked `/bin/init.elf`, and independently verified `/bin/sdk.elf` and `/bin/fs.elf` conformance programs;
 - an explicit `-Dnormal-boot=true` profile that skips the software proof suite, attaches `/bin/init.elf` to the reserved PID 1 handle, and lets that CPL3 init launch and supervise `/bin/sh.elf` as PID 2;
 - page-granular anonymous `mmap`, subrange `munmap`, W^X `mprotect` and expandable/shrinkable `brk`;
@@ -66,7 +66,7 @@ Shell and utilities:
   hash hexdump grep wc head shutdown
 ```
 
-`run PATH [ARGS...]` and `exec PATH [ARGS...]` launch a foreground CPL3 child from VFS-resident ELF64 bytes. The current `exec` command does **not** replace the shell image in place. `spawn PATH [ARGS...]` launches the same retained executable model in the background. `/bin` remains boot-seeded RAM-VFS content, but the userspace shell can copy an ELF into `/persist`, mutate persistent files and directories through ABI 1.4, commit with `sync`, search `/bin:/persist`, and execute the restored NVMe-backed file after reboot.
+`run PATH [ARGS...]` and `exec PATH [ARGS...]` launch a foreground CPL3 child from VFS-resident ELF64 bytes. The current `exec` command does **not** replace the shell image in place. `spawn PATH [ARGS...]` launches the same retained executable model in the background. `/bin` remains boot-seeded RAM-VFS content, but the userspace shell can copy an ELF into `/persist`, mutate persistent files and directories through the versioned ABI, commit with `sync`, search `/bin:/persist`, and execute the restored NVMe-backed file after reboot.
 
 `ping` and `dns` use the retained e1000e device for real bounded ICMP and UDP/DNS transactions when the network profile is present. `ifconfig`, `netstat`, `routes` and `arp` expose retained device state. With no e1000e device, all of these commands report explicit unavailability; none emits canned success, addresses or packets.
 
@@ -93,7 +93,7 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 - `/bin/wait.elf` spawning two VFS-backed CPL3 children and proving exact waitpid, wait-any and WNOHANG before exiting with status `0x31`;
 - `/bin/vm.elf` proving ABI discovery, anonymous mapping, W^X protection changes, unmapping and heap-break growth/shrink before exiting with status `0x52`;
 - `/bin/io.elf` proving descriptor-backed open/read/fstat/getdents/poll before exiting with status `0x53`;
-- `/bin/socket.elf` proving UDP socket/bind/connect/send/poll/getsockname/close on the live profile before exiting with status `0x54`;
+- `/bin/socket.elf` proving socket-level and per-call nonblocking `EWOULDBLOCK`, unconnected DNS `sendto`, blocking scheduler-woken `recvfrom` with source metadata, `getpeername`, connected send, poll and close before exiting with status `0x54`;
 - `/bin/init.elf` running as CPL3 PID 1, launching `/bin/sh.elf` through `spawnv`, waiting for PID 2, reaping it and issuing final shutdown;
 - the normal userspace shell copying `/bin/sdk.elf` to `/persist/persist-sdk.elf`, committing it through syscall 97, resolving `persist-sdk` through `PATH=/bin:/persist` and receiving status `0x56`;
 - the two-boot NVMe gate restoring and executing `/persist/persist-sdk.elf` before committing the alternate journal generation;
@@ -333,11 +333,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    6,868,480 bytes
-SHA-256: 7518D506107A424BA74D954268817F975B1A07B331A1FB394666122CDD48498E
+Size:    6,870,016 bytes
+SHA-256: 1A4C3B6DCB6AAD1DBB0D59A0F5A176C458DB068BA072600994C4238875932210
 ```
 
-This identity is from the locally validated Windows diagnostic build after the unified permanent-userspace scheduler advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic build after the ABI 1.5 UDP datagram-controls advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
@@ -430,7 +430,7 @@ src/serial.zig                    COM1 transmit and receive
 - Persistent-runtime fork, copy-on-write, flexible stack growth, environment vectors and auxiliary vectors are not implemented.
 - Shell pipeline stages still exchange bounded kernel buffers; `pipex` is the real executable pipe proof rather than a general process pipeline.
 - The writable x86-64 root filesystem is RAM-backed and does not survive reboot; `/boot` remains read-only.
-- The userspace network ABI is UDP-only and bounded to eight descriptor-backed sockets with a fixed receive queue. There is no TCP listen/accept/data API, `sendto`/`recvfrom`, socket-option layer, IPv6 or production network stack.
+- The userspace network ABI is UDP-only and bounded to eight descriptor-backed sockets with a fixed receive queue. It now supports connected and unconnected datagrams, source-address receive, peer inspection, poll, and socket-level/per-call nonblocking receive, but there is no TCP listen/accept/data API, general socket-option layer, IPv6 or production network stack.
 - Permanent userspace scheduling currently runs on the BSP rather than an SMP scheduler.
 - Hardware support remains strongly aligned with QEMU q35, QEMU NVMe/xHCI and Intel 82574L emulation.
 - ABI version 1.2 provides generated syscall numbers, bounded startup/spawn vectors, capability discovery and errno conventions, but it is still experimental: there is no SDK compatibility guarantee, complete user/group permission model, ASLR, IOMMU DMA isolation or executable-signing policy.

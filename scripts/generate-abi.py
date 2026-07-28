@@ -52,6 +52,9 @@ def generate(spec: dict) -> tuple[str, str, str]:
     for name, value in spec["seek_whence"].items():
         zig.append(f"pub const seek_{name}: u64 = {value};\n")
         nasm.append(f"%define ZIGOS_SEEK_{name.upper()} {value}\n")
+    for name, value in spec["message_flags"].items():
+        zig.append(f"pub const message_{name}: u64 = {value};\n")
+        nasm.append(f"%define ZIGOS_MSG_{name.upper()} {value}\n")
     for group in ("capabilities", "syscalls", "errno"):
         zig.append("\n")
         nasm.append("\n")
