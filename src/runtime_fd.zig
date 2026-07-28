@@ -11,6 +11,19 @@ pub const pipe_capacity: usize = 1024;
 pub const invalid_open_description: u16 = 0xFFFF;
 pub const invalid_resource: u16 = 0xFFFF;
 
+pub fn statFromVfs(info: runtime_vfs.Stat) runtime_abi.Stat {
+    return .{
+        .node = info.node,
+        .generation = info.generation,
+        .kind = @intFromEnum(info.kind),
+        .readonly = @intFromBool(info.readonly),
+        .mode = info.mode,
+        .mount_id = info.mount_id,
+        .size = info.size,
+        .modified_tick = info.modified_tick,
+    };
+}
+
 pub const Error = runtime_process.Error || runtime_vfs.Error || error{
     NamespaceExists,
     NamespaceMissing,
@@ -739,17 +752,7 @@ pub const System = struct {
         return switch (description.kind) {
             .terminal => blk: {
                 if (description.vfs_handle != 0) {
-                    const info = try vfs.statOpen(description.vfs_owner, description.vfs_handle);
-                    break :blk .{
-                        .node = info.node,
-                        .generation = info.generation,
-                        .kind = @intFromEnum(info.kind),
-                        .readonly = @intFromBool(info.readonly),
-                        .mode = info.mode,
-                        .mount_id = info.mount_id,
-                        .size = info.size,
-                        .modified_tick = info.modified_tick,
-                    };
+                    break :blk statFromVfs(try vfs.statOpen(description.vfs_owner, description.vfs_handle));
                 }
                 break :blk .{
                     .node = std.math.maxInt(u32),
@@ -762,19 +765,7 @@ pub const System = struct {
                     .modified_tick = 0,
                 };
             },
-            .vfs => blk: {
-                const info = try vfs.statOpen(description.vfs_owner, description.vfs_handle);
-                break :blk .{
-                    .node = info.node,
-                    .generation = info.generation,
-                    .kind = @intFromEnum(info.kind),
-                    .readonly = @intFromBool(info.readonly),
-                    .mode = info.mode,
-                    .mount_id = info.mount_id,
-                    .size = info.size,
-                    .modified_tick = info.modified_tick,
-                };
-            },
+            .vfs => statFromVfs(try vfs.statOpen(description.vfs_owner, description.vfs_handle)),
             .udp_socket => .{
                 .node = std.math.maxInt(u32) - @as(u32, description.resource_index),
                 .generation = @truncate(description.resource_generation),
@@ -1378,6 +1369,59 @@ test "dup and dup2 share a VFS open description and offset" {
     try std.testing.expectEqualStrings("alpha-beta", bytes[0..result.count]);
     const snapshot = try system.snapshot(&fs, &processes, handle);
     try std.testing.expectEqual(@as(u16, 3), snapshot.entries[3].references);
+    try std.testing.expect(system.validate(&fs, &processes));
+}
+
+test "directory openat and deferred unlink survive descriptor aliases" {
+    var fs = runtime_vfs.Vfs.init();
+    try initializeTestFilesystem(&fs);
+    const directory = try fs.mkdir(0, "/tmp/base", 0o755, 1);
+    var processes = runtime_process.Table.init(0);
+    var system = System.init();
+    const process = processes.initHandle();
+    try system.bindProcess(&processes, process, false);
+
+    const directory_fd = try system.openFile(&fs, &processes, process, "/tmp/base", .{ .read = true }, 0, 2);
+    try std.testing.expectEqual(directory, try system.directoryNode(&fs, &processes, process, directory_fd));
+    const file_fd = try system.openFileAt(
+        &fs,
+        &processes,
+        process,
+        directory,
+        "note",
+        .{ .read = true, .write = true, .create = true, .truncate = true },
+        0o644,
+        3,
+    );
+    try std.testing.expectError(Error.NotDirectory, system.directoryNode(&fs, &processes, process, file_fd));
+    _ = try system.write(&fs, &processes, process, file_fd, "open-data", 4);
+    const alias = try system.duplicate(&processes, process, file_fd);
+
+    try fs.unlink(directory, "note");
+    try std.testing.expectError(runtime_vfs.Error.NotFound, fs.stat(directory, "note"));
+    _ = try system.seek(&fs, &processes, process, alias, 0, .start);
+    var bytes: [16]u8 = undefined;
+    const first_read = try system.read(&fs, &processes, process, alias, &bytes);
+    try std.testing.expectEqualStrings("open-data", bytes[0..first_read.count]);
+
+    try system.close(&fs, &processes, process, file_fd);
+    _ = try system.seek(&fs, &processes, process, alias, 0, .start);
+    const second_read = try system.read(&fs, &processes, process, alias, &bytes);
+    try std.testing.expectEqualStrings("open-data", bytes[0..second_read.count]);
+    try system.close(&fs, &processes, process, alias);
+
+    const replacement = try system.openFileAt(
+        &fs,
+        &processes,
+        process,
+        directory,
+        "note",
+        .{ .read = true, .write = true, .create = true },
+        0o644,
+        5,
+    );
+    try system.close(&fs, &processes, process, replacement);
+    try system.close(&fs, &processes, process, directory_fd);
     try std.testing.expect(system.validate(&fs, &processes));
 }
 

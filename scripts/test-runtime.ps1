@@ -298,7 +298,7 @@ try {
         'c-sdk: start',
         'c-sdk: argc/argv passed',
         'c-sdk: ABI 1.6 discovery passed',
-        'c-sdk: generated header/library/device/ioctl/stat/openat/fsync passed',
+        'c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync passed',
         'exec: PID 17 state zombie status 0x57',
         'serial COM1 online',
         'fsck ramfs/persist: clean',

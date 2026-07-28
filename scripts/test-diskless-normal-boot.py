@@ -184,7 +184,7 @@ def main() -> int:
                 "ZigOs userspace init PID 1",
                 "ZigOs userspace shell PID 2",
                 "c-sdk: ABI 1.6 discovery passed",
-                "c-sdk: generated header/library/device/ioctl/stat/openat/fsync passed",
+                "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync passed",
                 "process 3 exited 87",
                 "sync: unsupported",
                 "userspace shell requested shutdown",

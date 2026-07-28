@@ -6,7 +6,7 @@ This document records the current disposition of the post-Capstone architecture 
 
 The maintained x86-64 release line now requires:
 
-- 67 unique isolated Zig test declarations;
+- 69 unique isolated Zig test declarations;
 - generated ABI constants checked for staleness;
 - independent Zig and C userspace ELF verification;
 - a 45-command offline permanent-runtime COM1 session;
@@ -125,6 +125,8 @@ What it still is not:
 
 `/persist` remains a serialized bounded RAM-VFS subtree. Normal VFS operations do not directly manipulate scalable on-disk inode, extent or free-space structures. `/` remains RAM-backed and `/bin` is initially embedded in the EFI image.
 
+The bounded VFS now also provides real directory-descriptor-relative `openat`, one shared `stat`/`fstat` metadata conversion, and POSIX-style unlink lifetime for ordinary open files: the pathname disappears immediately, existing open descriptions remain usable, and the node is reclaimed after the final close. Detached files are absent from persistence snapshots because serialization walks only the visible namespace.
+
 Still open:
 
 - disk-backed root;
@@ -153,7 +155,7 @@ Delivered through ABI 1.6:
 - independently linked Zig and C conformance ELFs;
 - userspace DNS codec/resolver, init and shell.
 
-The booted C fixture proves generated layout compatibility, ABI discovery, `/dev/null`, `/dev/zero`, `/dev/console`, TTY ioctl flags, path stat, openat and fsync from a non-Zig application.
+The booted C fixture proves generated layout compatibility, ABI discovery, `/dev/null`, `/dev/zero`, `/dev/console`, TTY ioctl flags, path stat, directory-descriptor and absolute `openat` semantics, and `fsync` from a non-Zig application.
 
 Still open:
 

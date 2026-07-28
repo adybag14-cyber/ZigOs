@@ -201,7 +201,7 @@ def main() -> int:
     require(normal_boot_test, "ZigOs userspace init PID 1", "normal QEMU gate requires a real CPL3 PID 1")
     require(normal_boot_test, "userspace init reaped shell PID 2 status 0", "normal QEMU gate requires PID 1 supervision and reap")
     require(normal_boot_test, "process 3 exited 42", "normal QEMU gate proves userspace shell spawn/wait")
-    require(normal_boot_test, "alloc/free 97/97 storage persistent clean yes", "normal QEMU gate requires exact physical reclamation and persistent mode")
+    require(normal_boot_test, "alloc/free 99/99 storage persistent clean yes", "normal QEMU gate requires exact physical reclamation and persistent mode")
     require(normal_boot_test, "forbidden", "normal QEMU gate rejects diagnostic proof markers")
     require(kernel, "continuing normal boot with embedded assets and RAM-backed root", "normal boot no longer hard-fails without permanent storage")
     require(runtime, "diskless-ram-root", "normal shutdown distinguishes the diskless recovery profile")
@@ -277,7 +277,13 @@ def main() -> int:
     require(runtime_test, "exec /bin/dns.elf", "required live COM1 session executes the userspace resolver")
     require(runtime_test, "dns-sdk: userspace resolver localhost -> 127.0.0.1 passed", "required live COM1 session verifies the resolver result")
     require(runtime, '"/bin/fs.elf"', "filesystem ABI fixture is installed into the runtime VFS")
-    require(fs_conformance, "init/mkdir/write/seek/rename/chmod/unlink/rmdir/sync passed", "fixture exercises every ABI 1.4 mutation")
+    require(fs_conformance, "init/mkdir/write/seek/rename/chmod/open-unlink/rmdir/sync passed", "fixture exercises ABI 1.4 mutation plus deferred open-file unlink")
+    require(vfs_source, "linked: bool = false", "VFS separates namespace attachment from retained node lifetime")
+    require(vfs_source, "fn unlinkNode", "unlink has a dedicated detach-or-reclaim path")
+    require(vfs_source, "fn maybeReclaimUnlinked", "last open handle reclaims detached nodes")
+    require(vfs_source, 'test "VFS unlink detaches names and reclaims after the final open handle"', "deferred unlink is isolated-tested across independent handles")
+    require(fd_source, 'test "directory openat and deferred unlink survive descriptor aliases"', "descriptor test combines directory-relative openat with shared-description lifetime")
+    require(fd_source, "pub fn statFromVfs", "path stat and descriptor fstat share one descriptor-layer VFS-to-ABI metadata conversion")
     require(fs_conformance, "recovery/mode/seek/cleanup passed", "fixture verifies rebooted data and cleans it through userspace")
     require(normal_boot_test, "mkdir /persist/shell-state", "normal shell exercises userspace mkdir")
     require(normal_boot_test, "chmod 600 /persist/shell-state/renamed.txt", "normal shell exercises write/append/rename/chmod")
@@ -301,7 +307,9 @@ def main() -> int:
     require(c_header, "ZIGOS_IOCTL_TTY_GET_FLAGS", "generated C header publishes terminal ioctl requests")
     require(c_library, "zigos_openat", "C wrapper library exposes openat")
     require(c_library, "zigos_fsync", "C wrapper library exposes descriptor fsync")
-    require(c_conformance, "generated header/library/device/ioctl/stat/openat/fsync passed", "booted C fixture covers the ABI 1.6 platform slice")
+    require(c_conformance, "generated header/library/device/ioctl/stat/directory-openat/fsync passed", "booted C fixture covers real directory-relative and absolute openat semantics")
+    require(c_conformance, "nondirectory != ZIGOS_ERRNO_NOT_DIRECTORY", "C fixture rejects relative openat on a non-directory descriptor")
+    require(c_conformance, 'INT64_C(32767), "/etc/hostname"', "absolute openat ignores an otherwise invalid directory descriptor")
     require(sdk_startup, "mov rdi, [r12]", "SDK startup reads argc from the canonical initial stack")
     require(sdk_startup, "lea rsi, [r12 + 8]", "SDK startup derives argv from the canonical initial stack")
     require(sdk_startup, "zigos_syscall6:", "SDK supplies the six-register int 0x80 bridge")
@@ -463,8 +471,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 67:
-        raise SystemExit(f"canonical isolated-test declaration total must be 67, found {declared_tests}")
+    if declared_tests != 69:
+        raise SystemExit(f"canonical isolated-test declaration total must be 69, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -533,7 +541,7 @@ def main() -> int:
         "tty-api: blocking read/poll/line discipline passed",
         "zig-sdk: startup/argv/abi/files/vm/errno passed",
         "c-sdk: ABI 1.6 discovery passed",
-        "c-sdk: generated header/library/device/ioctl/stat/openat/fsync passed",
+        "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync passed",
         "ZigOs shutdown drain:",
         "exec: PID 16 state zombie status 0x56",
         "ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes",

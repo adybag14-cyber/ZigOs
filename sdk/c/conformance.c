@@ -119,10 +119,14 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
     int64_t version_fd = proc_fd < 0 ? proc_fd : zigos_openat(proc_fd, "version", ZIGOS_OPEN_READ, 0);
     char version[64];
     const int64_t version_length = version_fd < 0 ? version_fd : zigos_read((uint16_t)version_fd, version, sizeof(version));
+    const int64_t nondirectory = version_fd < 0 ? version_fd : zigos_openat(version_fd, "child", ZIGOS_OPEN_READ, 0);
+    const int64_t absolute_fd = zigos_openat(INT64_C(32767), "/etc/hostname", ZIGOS_OPEN_READ, 0);
     if (proc_fd < 0 || version_fd < 0 || version_length <= 0 ||
         !text_starts_with(version, (size_t)version_length, "ZigOs 19.0.0") ||
-        zigos_close((uint16_t)version_fd) != 0 || zigos_close((uint16_t)proc_fd) != 0) {
-        return fail(0xCD, "openat /proc/version");
+        nondirectory != ZIGOS_ERRNO_NOT_DIRECTORY || absolute_fd < 0 ||
+        zigos_close((uint16_t)absolute_fd) != 0 || zigos_close((uint16_t)version_fd) != 0 ||
+        zigos_close((uint16_t)proc_fd) != 0) {
+        return fail(0xCD, "directory-relative/absolute openat");
     }
 
     int64_t host_fd = zigos_openat(ZIGOS_AT_CWD, "/etc/hostname", ZIGOS_OPEN_READ, 0);
@@ -130,7 +134,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xCE, "descriptor fsync");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/openat/fsync passed\r\n")) {
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync passed\r\n")) {
         return 0xCF;
     }
     return 0x57;

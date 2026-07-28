@@ -99,6 +99,7 @@ pub const DirectoryList = struct {
 
 const Node = struct {
     used: bool = false,
+    linked: bool = false,
     generation: u16 = 0,
     kind: Kind = .file,
     parent: u16 = invalid_node,
@@ -191,6 +192,7 @@ pub const Vfs = struct {
         self.* = .{};
         self.nodes[0] = .{
             .used = true,
+            .linked = true,
             .generation = 1,
             .kind = .directory,
             .parent = 0,
@@ -258,7 +260,7 @@ pub const Vfs = struct {
         var result = DirectoryList{};
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
-            if (!node.used or index == directory or node.parent != directory) continue;
+            if (!node.used or !node.linked or index == directory or node.parent != directory) continue;
             if (result.count >= result.records.len) return Error.NoSpace;
             var record = DirectoryRecord{
                 .node = @intCast(index),
@@ -381,7 +383,7 @@ pub const Vfs = struct {
     pub fn unlink(self: *Vfs, cwd: u16, path: []const u8) Error!void {
         const node_index = try self.resolve(cwd, path);
         if (self.nodes[node_index].kind == .directory) return Error.IsDirectory;
-        try self.removeNode(node_index);
+        try self.unlinkNode(node_index);
     }
 
     pub fn rmdir(self: *Vfs, cwd: u16, path: []const u8) Error!void {
@@ -389,7 +391,7 @@ pub const Vfs = struct {
         if (node_index == 0 or self.nodes[node_index].kind != .directory) return Error.NotDirectory;
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
-            if (node.used and index != node_index and node.parent == node_index) return Error.DirectoryNotEmpty;
+            if (node.used and node.linked and index != node_index and node.parent == node_index) return Error.DirectoryNotEmpty;
         }
         try self.removeNode(node_index);
     }
@@ -420,7 +422,7 @@ pub const Vfs = struct {
 
     pub fn canonicalPath(self: *const Vfs, node_index: u16, output: []u8) Error![]const u8 {
         if (output.len < 2) return Error.PathTooLong;
-        if (node_index >= self.nodes.len or !self.nodes[node_index].used) return Error.NotFound;
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or !self.nodes[node_index].linked) return Error.NotFound;
         if (node_index == 0) {
             output[0] = '/';
             return output[0..1];
@@ -537,26 +539,30 @@ pub const Vfs = struct {
     pub fn close(self: *Vfs, owner_pid: u32, handle: u32) Error!void {
         const index = try self.resolveOpen(owner_pid, handle);
         const open_file = self.open_files[index];
-        if (self.nodes[open_file.node].kind == .pseudo) {
+        const node_index = open_file.node;
+        if (self.nodes[node_index].kind == .pseudo) {
             if (self.nodes[open_file.node].pseudo_operations) |operations| {
                 if (operations.close) |close_fn| close_fn(self.nodes[open_file.node].pseudo_context, open_file.node, owner_pid);
             }
         }
         const generation = open_file.generation;
         self.open_files[index] = .{ .generation = generation };
+        self.maybeReclaimUnlinked(node_index);
     }
 
     pub fn closeAll(self: *Vfs, owner_pid: u32) usize {
         var count: usize = 0;
         for (&self.open_files) |*open_file| {
             if (!open_file.used or open_file.owner_pid != owner_pid) continue;
-            if (self.nodes[open_file.node].kind == .pseudo) {
+            const node_index = open_file.node;
+            if (self.nodes[node_index].kind == .pseudo) {
                 if (self.nodes[open_file.node].pseudo_operations) |operations| {
                     if (operations.close) |close_fn| close_fn(self.nodes[open_file.node].pseudo_context, open_file.node, owner_pid);
                 }
             }
             const generation = open_file.generation;
             open_file.* = .{ .generation = generation };
+            self.maybeReclaimUnlinked(node_index);
             count += 1;
         }
         return count;
@@ -726,14 +732,19 @@ pub const Vfs = struct {
     }
 
     pub fn validate(self: *const Vfs) bool {
-        if (!self.nodes[0].used or self.nodes[0].kind != .directory or self.nodes[0].parent != 0) return false;
+        if (!self.nodes[0].used or !self.nodes[0].linked or self.nodes[0].kind != .directory or self.nodes[0].parent != 0) return false;
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
             if (!node.used) continue;
             if (node.generation == 0 or node.name_length > maximum_name_length or node.size > maximum_file_size) return false;
             if (node.kind == .pseudo and node.pseudo_operations == null) return false;
             if (index != 0) {
-                if (node.parent >= self.nodes.len or !self.nodes[node.parent].used or self.nodes[node.parent].kind != .directory) return false;
+                if (!node.linked) {
+                    if (node.kind == .directory or node.parent != invalid_node or node.name_length != 0 or !self.hasOpenReferences(@intCast(index))) return false;
+                    for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == index) return false;
+                    continue;
+                }
+                if (node.parent >= self.nodes.len or !self.nodes[node.parent].used or !self.nodes[node.parent].linked or self.nodes[node.parent].kind != .directory) return false;
                 var current: u16 = @intCast(index);
                 var depth: usize = 0;
                 while (current != 0 and depth < self.nodes.len) : (depth += 1) current = self.nodes[current].parent;
@@ -741,7 +752,7 @@ pub const Vfs = struct {
             }
             for (index + 1..self.nodes.len) |other_index| {
                 const other = &self.nodes[other_index];
-                if (!other.used or other.parent != node.parent or other.name_length != node.name_length) continue;
+                if (!other.used or !node.linked or !other.linked or other.parent != node.parent or other.name_length != node.name_length) continue;
                 if (std.ascii.eqlIgnoreCase(other.nameSlice(), node.nameSlice())) return false;
             }
         }
@@ -786,7 +797,7 @@ pub const Vfs = struct {
     }
 
     fn validateDirectory(self: *const Vfs, node_index: u16) Error!u16 {
-        if (node_index >= self.nodes.len or !self.nodes[node_index].used) return Error.NotFound;
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or !self.nodes[node_index].linked) return Error.NotFound;
         if (self.nodes[node_index].kind != .directory) return Error.NotDirectory;
         return node_index;
     }
@@ -794,7 +805,7 @@ pub const Vfs = struct {
     fn findChild(self: *const Vfs, parent: u16, name: []const u8) ?u16 {
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
-            if (!node.used or node.parent != parent or node.name_length != name.len) continue;
+            if (!node.used or !node.linked or node.parent != parent or node.name_length != name.len) continue;
             if (std.ascii.eqlIgnoreCase(node.nameSlice(), name)) return @intCast(index);
         }
         return null;
@@ -831,6 +842,7 @@ pub const Vfs = struct {
         const generation = nextGeneration(self.nodes[index].generation);
         self.nodes[index] = .{
             .used = true,
+            .linked = true,
             .generation = generation,
             .kind = kind,
             .parent = parent,
@@ -883,13 +895,46 @@ pub const Vfs = struct {
         if ((node.mode & 0o222) == 0) return Error.PermissionDenied;
     }
 
-    fn removeNode(self: *Vfs, node_index: u16) Error!void {
-        if (node_index == 0 or node_index >= self.nodes.len or !self.nodes[node_index].used) return Error.NotFound;
+    fn unlinkNode(self: *Vfs, node_index: u16) Error!void {
+        if (node_index == 0 or node_index >= self.nodes.len or !self.nodes[node_index].used or !self.nodes[node_index].linked) return Error.NotFound;
         if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
-        for (self.open_files) |open_file| if (open_file.used and open_file.node == node_index) return Error.Busy;
+        for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == node_index) return Error.Busy;
+        if (self.hasOpenReferences(node_index)) {
+            var node = &self.nodes[node_index];
+            node.linked = false;
+            node.parent = invalid_node;
+            node.name = @splat(0);
+            node.name_length = 0;
+        } else {
+            self.reclaimNode(node_index);
+        }
+        self.mutations +%= 1;
+    }
+
+    fn removeNode(self: *Vfs, node_index: u16) Error!void {
+        if (node_index == 0 or node_index >= self.nodes.len or !self.nodes[node_index].used or !self.nodes[node_index].linked) return Error.NotFound;
+        if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
+        for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == node_index) return Error.Busy;
+        if (self.hasOpenReferences(node_index)) return Error.Busy;
+        self.reclaimNode(node_index);
+        self.mutations +%= 1;
+    }
+
+    fn hasOpenReferences(self: *const Vfs, node_index: u16) bool {
+        for (self.open_files) |open_file| {
+            if (open_file.used and open_file.node == node_index and open_file.node_generation == self.nodes[node_index].generation) return true;
+        }
+        return false;
+    }
+
+    fn maybeReclaimUnlinked(self: *Vfs, node_index: u16) void {
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].linked) return;
+        if (!self.hasOpenReferences(node_index)) self.reclaimNode(node_index);
+    }
+
+    fn reclaimNode(self: *Vfs, node_index: u16) void {
         const generation = self.nodes[node_index].generation;
         self.nodes[node_index] = .{ .generation = generation };
-        self.mutations +%= 1;
     }
 
     fn nodeReadonly(self: *const Vfs, node_index: u16) bool {
@@ -912,7 +957,7 @@ pub const Vfs = struct {
         if (readonly and self.nodes[node_index].kind != .pseudo) self.nodes[node_index].readonly = true;
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
-            if (node.used and index != node_index and node.parent == node_index) self.assignMountRecursive(@intCast(index), mount_id, readonly);
+            if (node.used and node.linked and index != node_index and node.parent == node_index) self.assignMountRecursive(@intCast(index), mount_id, readonly);
         }
     }
 
@@ -1091,6 +1136,38 @@ test "VFS generation handles reject stale and foreign owners" {
     try std.testing.expectError(Error.InvalidHandle, fs.readOpen(8, handle, &output));
     try fs.close(7, handle);
     try std.testing.expectError(Error.InvalidHandle, fs.readOpen(7, handle, &output));
+}
+
+test "VFS unlink detaches names and reclaims after the final open handle" {
+    var fs = Vfs.init();
+    _ = try fs.mkdir(0, "/tmp", 0o777, 1);
+    const baseline_nodes = fs.report().nodes_used;
+    _ = try fs.putFile(0, "/tmp/live", "alpha", 0o644, false, 2);
+    const first = try fs.open(7, 0, "/tmp/live", .{ .read = true, .write = true }, 0, 3);
+    const second = try fs.open(8, 0, "/tmp/live", .{ .read = true }, 0, 4);
+    const original = try fs.statOpen(7, first);
+
+    try fs.unlink(0, "/tmp/live");
+    try std.testing.expectError(Error.NotFound, fs.stat(0, "/tmp/live"));
+    try std.testing.expectEqual(baseline_nodes + 1, fs.report().nodes_used);
+    try std.testing.expectEqual(@as(usize, 5), try fs.seek(7, first, 0, .end));
+    try std.testing.expectEqual(@as(usize, 5), try fs.writeOpen(7, first, "-beta", 5));
+    var bytes: [16]u8 = undefined;
+    const count = try fs.readOpen(8, second, &bytes);
+    try std.testing.expectEqualStrings("alpha-beta", bytes[0..count]);
+    try std.testing.expectEqual(@as(usize, 10), (try fs.statOpen(7, first)).size);
+    try std.testing.expect(fs.validate());
+
+    try fs.close(7, first);
+    try std.testing.expectEqual(baseline_nodes + 1, fs.report().nodes_used);
+    try fs.close(8, second);
+    try std.testing.expectEqual(baseline_nodes, fs.report().nodes_used);
+    try std.testing.expectError(Error.InvalidHandle, fs.statOpen(8, second));
+
+    _ = try fs.putFile(0, "/tmp/live", "new", 0o644, false, 6);
+    const replacement = try fs.stat(0, "/tmp/live");
+    try std.testing.expect(replacement.generation != original.generation);
+    try std.testing.expect(fs.validate());
 }
 
 test "VFS mount policy protects read only trees" {

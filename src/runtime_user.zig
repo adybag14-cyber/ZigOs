@@ -2470,16 +2470,7 @@ fn syscallStat(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const result = runtime_abi.Stat{
-        .node = info.node,
-        .generation = info.generation,
-        .kind = @intFromEnum(info.kind),
-        .readonly = @intFromBool(info.readonly),
-        .mode = info.mode,
-        .mount_id = info.mount_id,
-        .size = info.size,
-        .modified_tick = info.modified_tick,
-    };
+    const result = runtime_fd.statFromVfs(info);
     if (!copyToUser(context, frame.rsi, std.mem.asBytes(&result))) {
         frame.rax = reject(errno_fault);
         return 0;

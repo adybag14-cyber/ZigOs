@@ -32,12 +32,23 @@ fn initialize() zigos.Error!u32 {
     try zigos.rename(source_path, renamed_path);
     try zigos.chmod(renamed_path, 0o600);
     try zigos.mkdir(temporary_directory, 0o755);
-    const temporary = try zigos.open(temporary_path, .{ .write = true, .create = true, .truncate = true }, 0o600);
+    const temporary = try zigos.open(temporary_path, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o600);
+    try zigos.writeAll(temporary, "open-after-unlink");
+    try zigos.unlink(temporary_path);
+    var missing_info: zigos.Stat = undefined;
+    if (zigos.stat(temporary_path, &missing_info)) |_| return error.InvalidArgument else |err| {
+        if (err != error.NotFound) return err;
+    }
+    if (try zigos.lseek(temporary, 0, .start) != 0) return error.InvalidArgument;
+    var unlinked_sample: [17]u8 = undefined;
+    if (try zigos.read(temporary, &unlinked_sample) != unlinked_sample.len or !equal(&unlinked_sample, "open-after-unlink")) return error.InvalidArgument;
     try zigos.close(temporary);
+    const replacement = try zigos.open(temporary_path, .{ .write = true, .create = true, .truncate = true }, 0o600);
+    try zigos.close(replacement);
     try zigos.unlink(temporary_path);
     try zigos.rmdir(temporary_directory);
     try zigos.sync();
-    try zigos.writeAll(1, "fs-api: init/mkdir/write/seek/rename/chmod/unlink/rmdir/sync passed\r\n");
+    try zigos.writeAll(1, "fs-api: init/mkdir/write/seek/rename/chmod/open-unlink/rmdir/sync passed\r\n");
     return 0x58;
 }
 
