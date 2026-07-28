@@ -270,18 +270,17 @@ pub const Table = struct {
     }
 
     pub fn scheduleNext(self: *Table, current_handle: ?u64) ?u64 {
-        return self.scheduleNextEligible(current_handle, null, null);
+        return self.scheduleNextEligible(current_handle, null);
     }
 
-    pub fn scheduleNextKind(self: *Table, kind: Kind, current_handle: ?u64, excluded_handle: ?u64) ?u64 {
-        return self.scheduleNextEligible(current_handle, kind, excluded_handle);
+    pub fn scheduleNextKind(self: *Table, kind: Kind, current_handle: ?u64) ?u64 {
+        return self.scheduleNextEligible(current_handle, kind);
     }
 
     fn scheduleNextEligible(
         self: *Table,
         current_handle: ?u64,
         required_kind: ?Kind,
-        excluded_handle: ?u64,
     ) ?u64 {
         if (current_handle) |handle| {
             if (self.resolve(handle)) |slot| {
@@ -294,7 +293,6 @@ pub const Table = struct {
             var process = &self.processes[self.scheduler_cursor];
             if (!process.used or process.state != .runnable) continue;
             if (required_kind) |kind| if (process.kind != kind) continue;
-            if (excluded_handle != null and process.handle == excluded_handle.?) continue;
             process.state = .running;
             process.remaining_slice = @max(@as(u8, 1), process.time_slice);
             process.context_switches +%= 1;
@@ -305,8 +303,7 @@ pub const Table = struct {
             if (self.resolve(handle)) |slot| {
                 const process = &self.processes[slot];
                 if (process.used and process.state == .runnable and
-                    (required_kind == null or process.kind == required_kind.?) and
-                    (excluded_handle == null or process.handle != excluded_handle.?))
+                    (required_kind == null or process.kind == required_kind.?))
                 {
                     process.state = .running;
                     return handle;
@@ -748,6 +745,14 @@ test "sleep block wake and round robin scheduling" {
     try table.setRunnable(init_handle);
     const first = table.scheduleNext(null).?;
     try std.testing.expect(first == a or first == b or first == init_handle);
+    try table.setRunnable(first);
+    const first_user = table.scheduleNextKind(.userspace, null).?;
+    try std.testing.expect(first_user == a or first_user == b);
+    try table.setRunnable(first_user);
+    const second_user = table.scheduleNextKind(.userspace, null).?;
+    try std.testing.expect(second_user == a or second_user == b);
+    try std.testing.expect(second_user != first_user);
+    try table.setRunnable(second_user);
     try table.sleep(a, 10);
     try table.block(b, .pipe_read, 99);
     try std.testing.expectEqual(@as(usize, 0), table.wakeExpired(9));

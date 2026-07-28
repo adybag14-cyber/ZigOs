@@ -60,14 +60,7 @@ pub const Configuration = struct {
 };
 
 const maximum_pipeline_bytes: usize = runtime_vfs.maximum_file_size;
-const maximum_jobs: usize = 24;
-
-const Job = struct {
-    active: bool = false,
-    handle: u64 = 0,
-    command: [runtime_command.maximum_token_length + 1]u8 = @splat(0),
-    command_length: u8 = 0,
-};
+const pipex_writer_gate: u64 = 0x5049_5045_5857_5254;
 
 const Output = struct {
     storage: *[maximum_pipeline_bytes]u8,
@@ -175,7 +168,6 @@ const State = struct {
     shell_handle: u64 = 0,
     shell_exit_requested: bool = false,
     init_reaped_shell: bool = false,
-    jobs: [maximum_jobs]Job = @splat(.{}),
     pipeline_a: [maximum_pipeline_bytes]u8 = @splat(0),
     pipeline_b: [maximum_pipeline_bytes]u8 = @splat(0),
     input_buffer: [maximum_pipeline_bytes]u8 = @splat(0),
@@ -195,7 +187,6 @@ const State = struct {
     last_serviced_tick: u64 = 0,
     shell_sleeping: bool = false,
     shell_waiting: bool = false,
-    foreground_handle: ?u64 = null,
     shutdown_requested: bool = false,
     prompt_visible: bool = false,
     ignore_next_lf: bool = false,
@@ -241,7 +232,7 @@ pub fn run(configuration: Configuration) noreturn {
             if (state.shutdown_requested) break;
         }
         if (configuration.profile == .normal and !state.shutdown_requested) {
-            const serviced = runtime_user.serviceOne(currentTick(), null) catch |err| runtimeFailure(@errorName(err));
+            const serviced = runtime_user.serviceOne(currentTick()) catch |err| runtimeFailure(@errorName(err));
             if (serviced) |handle| flushUserspaceOutput(handle);
         }
         if (state.shutdown_requested) finishRuntime();
@@ -262,7 +253,6 @@ fn initialize(configuration: Configuration) !void {
     state.persistence.initialize();
     state.environment = runtime_command.Environment.init();
     state.editor = .{};
-    state.jobs = @splat(.{});
     state.pipeline_a = @splat(0);
     state.pipeline_b = @splat(0);
     state.input_buffer = @splat(0);
@@ -285,7 +275,6 @@ fn initialize(configuration: Configuration) !void {
     state.init_reaped_shell = false;
     state.shell_sleeping = false;
     state.shell_waiting = false;
-    state.foreground_handle = null;
     state.shutdown_requested = false;
     state.prompt_visible = false;
     state.ignore_next_lf = false;
@@ -439,7 +428,7 @@ fn serviceRuntime() void {
     var tick = state.last_serviced_tick + 1;
     while (tick <= now) : (tick += 1) {
         _ = state.processes.wakeExpired(tick);
-        serviceJobs(tick);
+        serviceUserspace(tick);
         state.device_service_passes +%= 1;
         if (state.config.network_ready) {
             state.network_service_passes +%= 1;
@@ -464,19 +453,8 @@ fn serviceRuntime() void {
     }
 }
 
-fn serviceJobs(tick: u64) void {
-    for (&state.jobs) |*job| {
-        if (!job.active) continue;
-        const process = state.processes.get(job.handle) catch {
-            job.active = false;
-            continue;
-        };
-        if (process.terminal()) runtime_user.finalize(job.handle) catch {};
-    }
-    const serviced = runtime_user.serviceOne(
-        tick,
-        if (state.config.profile == .diagnostic) state.foreground_handle else null,
-    ) catch |err| blk: {
+fn serviceUserspace(tick: u64) void {
+    const serviced = runtime_user.serviceOne(tick) catch |err| blk: {
         emit("runtime dispatch failure: ");
         emit(@errorName(err));
         emit("\r\n");
@@ -487,8 +465,12 @@ fn serviceJobs(tick: u64) void {
         state.processes.setRunning(state.shell_handle) catch {};
 }
 
+fn shellOwnsTerminal() bool {
+    return state.tty.foregroundMatches(&state.processes, state.shell_handle) catch false;
+}
+
 fn consumeInput(byte: u8) void {
-    if (state.foreground_handle != null) {
+    if (!shellOwnsTerminal()) {
         consumeForegroundInput(byte);
         return;
     }
@@ -986,26 +968,27 @@ fn commandPipeExecutables(output: *Output) void {
     };
     shell_write_open = false;
 
-    var reader_dispatches: usize = 0;
+    state.processes.block(writer, .device_io, pipex_writer_gate) catch |err| {
+        abortExecutable(reader);
+        abortExecutable(writer);
+        return shellError("pipex writer gate", err, output);
+    };
+    const block_deadline = currentTick() + 100;
     var blocked_reader = state.processes.get(reader) catch {
         abortExecutable(reader);
         abortExecutable(writer);
-        return output.line("pipex: reader vanished before dispatch");
+        return output.line("pipex: reader vanished before scheduling");
     };
-    while (reader_dispatches < 16 and
-        (blocked_reader.state == .runnable or blocked_reader.state == .running)) : (reader_dispatches += 1)
-    {
-        runtime_user.dispatch(reader, currentTick()) catch |err| {
-            abortExecutable(reader);
-            abortExecutable(writer);
-            return shellError("pipex reader dispatch", err, output);
-        };
-        state.processes.setRunning(state.shell_handle) catch {};
+    while (blocked_reader.state == .runnable or blocked_reader.state == .running) {
+        serviceRuntime();
         blocked_reader = state.processes.get(reader) catch {
             abortExecutable(reader);
             abortExecutable(writer);
-            return output.line("pipex: reader vanished after dispatch");
+            return output.line("pipex: reader vanished after scheduling");
         };
+        if (blocked_reader.state == .blocked) break;
+        if (currentTick() >= block_deadline) break;
+        zigos_wait_for_interrupt();
     }
     if (blocked_reader.state != .blocked or blocked_reader.wait_reason != .pipe_read) {
         abortExecutable(reader);
@@ -1014,6 +997,13 @@ fn commandPipeExecutables(output: *Output) void {
         output.write(@tagName(blocked_reader.state));
         output.write(" reason ");
         output.line(@tagName(blocked_reader.wait_reason));
+        state.failed_commands +%= 1;
+        return;
+    }
+    if (state.processes.wakeMatching(.device_io, pipex_writer_gate, false) != 1) {
+        abortExecutable(reader);
+        abortExecutable(writer);
+        output.line("pipex: writer scheduler gate did not wake exactly once");
         state.failed_commands +%= 1;
         return;
     }
@@ -1069,7 +1059,6 @@ fn abortExecutable(handle: u64) void {
     runtime_user.finalize(handle) catch {};
     _ = state.processes.wait(state.shell_handle, handle, true) catch null;
     runtime_user.forget(handle);
-    removeJob(handle);
     state.processes.setRunning(state.shell_handle) catch {};
 }
 
@@ -1279,19 +1268,41 @@ fn commandPs(output: *Output) void {
 }
 
 fn commandJobs(output: *Output) void {
+    const shell = state.processes.get(state.shell_handle) catch return output.line("no jobs");
     var any = false;
-    for (state.jobs) |job| {
-        if (!job.active) continue;
+    for (0..runtime_process.maximum_processes) |slot| {
+        const process = state.processes.processAt(slot) orelse continue;
+        if (process.kind != .userspace or process.ppid != shell.pid) continue;
         any = true;
-        const process = state.processes.get(job.handle) catch continue;
         output.byte('[');
         output.decimal(process.pid);
         output.write("] ");
         output.write(@tagName(process.state));
         output.write(" ");
-        output.line(job.command[0..job.command_length]);
+        writeProcessCommand(process, output);
+        output.write("\r\n");
     }
     if (!any) output.line("no jobs");
+}
+
+fn writeProcessCommand(process: *const runtime_process.Process, output: *Output) void {
+    const command = if (process.argument_count == 0) process.nameSlice() else process.arguments[0].slice();
+    if (command.len == 0 or std.mem.indexOfScalar(u8, command, '/') != null) {
+        output.write(command);
+        return;
+    }
+    const prefixes = [_][]const u8{ "/bin/", "/persist/" };
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    for (prefixes) |prefix| {
+        if (prefix.len + command.len > runtime_vfs.maximum_path_length) continue;
+        @memcpy(path_buffer[0..prefix.len], prefix);
+        @memcpy(path_buffer[prefix.len .. prefix.len + command.len], command);
+        const candidate = path_buffer[0 .. prefix.len + command.len];
+        _ = state.vfs.resolve(0, candidate) catch continue;
+        output.write(candidate);
+        return;
+    }
+    output.write(command);
 }
 
 fn commandSpawn(stage: *const runtime_command.Stage, output: *Output) void {
@@ -1337,15 +1348,6 @@ fn spawnExecutablePath(
     background: bool,
     output: *Output,
 ) ?u64 {
-    var job_index: usize = 0;
-    if (background) {
-        while (job_index < state.jobs.len and state.jobs[job_index].active) : (job_index += 1) {}
-        if (job_index >= state.jobs.len) {
-            output.line("spawn: job table full");
-            return null;
-        }
-    }
-
     const image_bytes = state.vfs.readOnlyView(state.cwd, path) catch |err| {
         shellError(if (background) "spawn" else "exec", err, output);
         return null;
@@ -1389,13 +1391,6 @@ fn spawnExecutablePath(
 
     const identity = runtime_user.imageIdentity(handle) orelse unreachable;
     if (background) {
-        var job = Job{
-            .active = true,
-            .handle = handle,
-            .command_length = @intCast(@min(path.len, runtime_command.maximum_token_length)),
-        };
-        @memcpy(job.command[0..job.command_length], path[0..job.command_length]);
-        state.jobs[job_index] = job;
         const process = state.processes.get(handle) catch return handle;
         output.byte('[');
         output.decimal(process.pid);
@@ -1411,20 +1406,31 @@ fn spawnExecutablePath(
 }
 
 fn driveForeground(handle: u64, output: *Output) ?runtime_process.Status {
-    if (state.foreground_handle != null) {
+    if (!shellOwnsTerminal()) {
         output.line("exec: another foreground process is already active");
         return null;
     }
-    state.foreground_handle = handle;
     state.tty.setForeground(&state.processes, handle) catch |err| {
-        state.foreground_handle = null;
         shellError("exec terminal foreground", err, output);
         return null;
     };
+    state.shell_waiting = true;
     defer {
+        state.shell_waiting = false;
         state.tty.setForeground(&state.processes, state.shell_handle) catch {};
-        state.foreground_handle = null;
+        state.processes.setRunning(state.shell_handle) catch {};
     }
+
+    const initial = state.processes.get(handle) catch |err| {
+        shellError("exec", err, output);
+        return null;
+    };
+    if (!initial.terminal())
+        _ = state.processes.wait(state.shell_handle, handle, false) catch |err| {
+            shellError("exec wait", err, output);
+            return null;
+        };
+
     while (true) {
         const received_input = serviceForegroundInput();
         const process = state.processes.get(handle) catch |err| {
@@ -1432,27 +1438,12 @@ fn driveForeground(handle: u64, output: *Output) ?runtime_process.Status {
             return null;
         };
         if (process.terminal()) break;
-        const now = currentTick();
-        _ = state.processes.wakeExpired(now);
-        const refreshed = state.processes.get(handle) catch return null;
-        switch (refreshed.state) {
-            .runnable, .running => runtime_user.dispatch(handle, now) catch |err| {
-                state.processes.fault(handle, 13, 0) catch {};
-                runtime_user.finalize(handle) catch {};
-                shellError("exec dispatch", err, output);
-                break;
-            },
-            .sleeping, .blocked => {
-                serviceRuntime();
-                if (!received_input) zigos_wait_for_interrupt();
-            },
-            .stopped => {
-                output.line("exec: process stopped; resume or kill it from a background job");
-                return null;
-            },
-            else => zigos_wait_for_interrupt(),
+        if (process.state == .stopped) {
+            output.line("exec: process stopped; resume or kill it from a background job");
+            return null;
         }
-        state.processes.setRunning(state.shell_handle) catch {};
+        serviceRuntime();
+        if (!received_input) zigos_wait_for_interrupt();
     }
 
     runtime_user.finalize(handle) catch |err| shellError("exec cleanup", err, output);
@@ -1467,12 +1458,6 @@ fn driveForeground(handle: u64, output: *Output) ?runtime_process.Status {
     runtime_user.forget(handle);
     state.processes.setRunning(state.shell_handle) catch {};
     return status;
-}
-
-fn removeJob(handle: u64) void {
-    for (&state.jobs) |*job| {
-        if (job.active and job.handle == handle) job.active = false;
-    }
 }
 
 fn commandKill(stage: *const runtime_command.Stage, output: *Output) void {
@@ -1536,7 +1521,6 @@ fn commandWait(stage: *const runtime_command.Stage, output: *Output) void {
     }
     output.write("\r\n");
     runtime_user.forget(handle);
-    removeJob(handle);
 }
 
 fn commandCrash(stage: *const runtime_command.Stage, output: *Output) void {

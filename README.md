@@ -27,7 +27,7 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 - a dedicated 100 Hz LAPIC timer and interrupt-enabled HLT idle loop;
 - a permanent PID 1 record; in normal boot it runs the directly linked Zig `/bin/init.elf`, launches the interactive Zig PID 2 shell, waits for it and reaps it before final shutdown;
 - a bounded writable VFS and six mounted namespaces;
-- a generation-safe 64-slot process table;
+- a generation-safe 64-slot process table whose ordinary round-robin service path owns foreground, background and fixture CPL3 dispatch without a second job table or direct shell dispatcher;
 - process-local numeric descriptors, shared open-file descriptions and bounded blocking pipes;
 - up to 64 retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 4,096-slot ownership table;
 - private CR3 roots, strict W^X `PT_LOAD` mappings, eight-page stacks and unmapped guards;
@@ -192,7 +192,7 @@ The permanent process table now owns real executable lifecycle records. It provi
 
 The permanent executor supports up to 64 retained CPL3 process slots and 1,024 tracked mappings per context. After boot validation, the monotonic allocator is sealed and every remaining usable firmware extent is transferred to a reclaiming physical-memory manager. The executor requests pages on demand below 4 GiB through a 256-slot ownership table; final releases poison pages, return them to the manager and require exact ownership-layer and physical-manager allocation/free balance at shutdown. Each process receives a private CR3, a complete saved integer/FX context, an eight-page stack, an unmapped guard page and cloned descriptor namespace. Untouched extents above 4 GiB are retained and counted, but ordinary runtime use of them awaits a direct physical-memory map.
 
-This is still not a general POSIX process implementation. There is no persistent-runtime fork/COW, in-place exec, dynamic linker, flexible stack growth, ASLR or SMP userspace scheduler.
+This is still not a general POSIX process implementation. There is no persistent-runtime fork/COW, in-place exec, dynamic linker, flexible stack growth, ASLR, SMP userspace scheduler, or unified task object combining process metadata with saved architecture context.
 
 ## Existing bounded x86-64 capabilities
 
@@ -334,10 +334,10 @@ Capstone 19 reference UEFI image:
 
 ```text
 Size:    6,868,480 bytes
-SHA-256: 385DAFDB5AA2E5AD2EC8278CDC825C00811DAFD322EF087E0B30FA5BB5A0A681
+SHA-256: 7518D506107A424BA74D954268817F975B1A07B331A1FB394666122CDD48498E
 ```
 
-This identity is from the locally validated Windows diagnostic build after the userspace PID 1 supervision advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic build after the unified permanent-userspace scheduler advance. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 

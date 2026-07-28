@@ -443,11 +443,11 @@ pub fn dispatch(handle: u64, tick: u64) !void {
     if (process.terminal()) try finalize(handle);
 }
 
-pub fn serviceOne(tick: u64, excluded_handle: ?u64) !?u64 {
+pub fn serviceOne(tick: u64) !?u64 {
     if (!initialized or user_active) return error.InvalidDispatchState;
     var scanned: usize = 0;
     while (scanned < runtime_process.maximum_processes) : (scanned += 1) {
-        const handle = activeProcesses().scheduleNextKind(.userspace, null, excluded_handle) orelse return null;
+        const handle = activeProcesses().scheduleNextKind(.userspace, null) orelse return null;
         const context_index = findContext(handle) orelse {
             activeProcesses().setRunnable(handle) catch {};
             continue;
