@@ -73,7 +73,7 @@ jobs:
         shell: pwsh
         run: .\scripts\test-runtime.ps1 -TimeoutSeconds 180
 
-      - name: Drive 45-command permanent-userspace COM1 runtime (live network)
+      - name: Drive 46-command permanent-userspace COM1 runtime (live network)
         shell: pwsh
         run: .\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 

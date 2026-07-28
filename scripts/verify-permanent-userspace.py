@@ -58,6 +58,8 @@ def main() -> int:
     socket_conformance = text("src/user/runtime-socket.asm")
     sdk_init = text("sdk/zig/init.zig")
     fs_conformance = text("sdk/zig/fs_conformance.zig")
+    dns_source = text("sdk/zig/dns.zig")
+    dns_conformance = text("sdk/zig/dns_conformance.zig")
     sdk_shell = text("sdk/zig/shell.zig")
     sdk_abi = text("sdk/zig/abi.zig")
     sdk_verifier = text("scripts/verify-zigos-sdk-elf.py")
@@ -235,6 +237,17 @@ def main() -> int:
     for wrapper in ("pub fn lseek", "pub fn mkdir", "pub fn unlink", "pub fn rmdir", "pub fn rename", "pub fn chmod"):
         require(sdk_source, wrapper, f"SDK exposes {wrapper[7:]}")
     require(build_graph, "sdk/zig/fs_conformance.zig", "build graph compiles the independent filesystem ABI fixture")
+    require(build_graph, "sdk/zig/dns_conformance.zig", "build graph compiles the userspace resolver fixture")
+    require(build_graph, '"artifacts/dns.elf"', "userspace resolver is installed as a standalone artifact")
+    require(runtime, '"/bin/dns.elf"', "userspace resolver fixture is installed into the runtime VFS")
+    require(dns_source, "pub fn resolveA", "SDK exposes a bounded userspace DNS A resolver")
+    require(dns_source, "try zigos.sendto", "userspace resolver transmits through ABI 1.5 datagrams")
+    require(dns_source, "zigos.recvfrom", "userspace resolver receives through ABI 1.5 datagrams")
+    require(dns_source, "error.WouldBlock", "userspace resolver retries nonblocking receive until a tick deadline")
+    require(dns_source, "fn skipName", "userspace resolver validates compressed DNS names")
+    require(dns_conformance, 'dns.resolveA(server, "localhost", 200)', "live Zig fixture resolves localhost through the SDK")
+    require(runtime_test, "exec /bin/dns.elf", "required live COM1 session executes the userspace resolver")
+    require(runtime_test, "dns-sdk: userspace resolver localhost -> 127.0.0.1 passed", "required live COM1 session verifies the resolver result")
     require(runtime, '"/bin/fs.elf"', "filesystem ABI fixture is installed into the runtime VFS")
     require(fs_conformance, "init/mkdir/write/seek/rename/chmod/unlink/rmdir/sync passed", "fixture exercises every ABI 1.4 mutation")
     require(fs_conformance, "recovery/mode/seek/cleanup passed", "fixture verifies rebooted data and cleans it through userspace")
@@ -393,13 +406,14 @@ def main() -> int:
         "src/memory.zig",
         "src/runtime_persist.zig",
         "src/elf64.zig",
+        "sdk/zig/dns.zig",
     )
     declared_tests = sum(
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 60:
-        raise SystemExit(f"canonical isolated-test declaration total must be 60, found {declared_tests}")
+    if declared_tests != 63:
+        raise SystemExit(f"canonical isolated-test declaration total must be 63, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -411,6 +425,7 @@ def main() -> int:
         '"src/runtime_page_pool.zig"',
         '"src/runtime_persist.zig"',
         '"src/elf64.zig"',
+        '"sdk/zig/dns.zig"',
     ):
         require(build_graph, source_path, f"isolated test graph includes {source_path}")
 
@@ -459,11 +474,11 @@ def main() -> int:
         "bootstrap allocator sealed",
         "ZigOs post-bootstrap physical memory: total ",
         "peak 32 alloc/free 231/231 failed/rejected 0/0 clean yes",
-        "peak 32 alloc/free 247/247 failed/rejected 0/0 clean yes",
+        "peak 32 alloc/free 262/262 failed/rejected 0/0 clean yes",
         "launches/exits/faults 14/12/1",
-        "launches/exits/faults 15/13/1",
+        "launches/exits/faults 16/14/1",
         "reclaimed 231 allocator alloc/release/retains 231/231/0",
-        "reclaimed 247 allocator alloc/release/retains 247/247/0",
+        "reclaimed 262 allocator alloc/release/retains 262/262/0",
         "tty-api: blocking read/poll/line discipline passed",
         "zig-sdk: startup/argv/abi/files/vm/errno passed",
         "exec: PID 16 state zombie status 0x56",

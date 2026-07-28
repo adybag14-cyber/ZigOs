@@ -111,17 +111,38 @@ pub fn build(b: *std.Build) void {
     fs_conformance.setLinkerScript(b.path("sdk/zig/linker.ld"));
     fs_conformance.step.dependOn(&assets.step);
 
+    const dns_module = b.createModule(.{
+        .root_source_file = b.path("sdk/zig/dns_conformance.zig"),
+        .target = sdk_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+        .code_model = .large,
+        .pic = false,
+        .stack_protector = false,
+        .stack_check = false,
+    });
+    dns_module.addObjectFile(b.path("build/sdk/syscall.o"));
+    const dns_conformance = b.addExecutable(.{
+        .name = "dns",
+        .root_module = dns_module,
+    });
+    dns_conformance.entry = .{ .symbol_name = "_start" };
+    dns_conformance.setLinkerScript(b.path("sdk/zig/linker.ld"));
+    dns_conformance.step.dependOn(&assets.step);
+
     const sdk_embed = b.addWriteFiles();
     _ = sdk_embed.addCopyFile(sdk_conformance.getEmittedBin(), "sdk.elf");
     _ = sdk_embed.addCopyFile(userspace_init.getEmittedBin(), "init.elf");
     _ = sdk_embed.addCopyFile(userspace_shell.getEmittedBin(), "sh.elf");
     _ = sdk_embed.addCopyFile(fs_conformance.getEmittedBin(), "fs.elf");
+    _ = sdk_embed.addCopyFile(dns_conformance.getEmittedBin(), "dns.elf");
     const sdk_embed_module = sdk_embed.add(
         "runtime_sdk.zig",
         "pub const sdk = @embedFile(\"sdk.elf\");\n" ++
             "pub const init = @embedFile(\"init.elf\");\n" ++
             "pub const shell = @embedFile(\"sh.elf\");\n" ++
-            "pub const fs = @embedFile(\"fs.elf\");\n",
+            "pub const fs = @embedFile(\"fs.elf\");\n" ++
+            "pub const dns = @embedFile(\"dns.elf\");\n",
     );
 
     const target = b.resolveTargetQuery(.{
@@ -186,6 +207,10 @@ pub fn build(b: *std.Build) void {
         fs_conformance.getEmittedBin(),
         "artifacts/fs.elf",
     );
+    const install_dns = b.addInstallFile(
+        dns_conformance.getEmittedBin(),
+        "artifacts/dns.elf",
+    );
     install_service.step.dependOn(&assets.step);
     install_process.step.dependOn(&assets.step);
     install_exec.step.dependOn(&assets.step);
@@ -205,6 +230,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_init.step);
     b.getInstallStep().dependOn(&install_shell.step);
     b.getInstallStep().dependOn(&install_fs.step);
+    b.getInstallStep().dependOn(&install_dns.step);
 
     const verify_efi = b.addSystemCommand(&.{ python, "scripts/verify-efi.py" });
     verify_efi.addFileArg(kernel.getEmittedBin());
@@ -216,6 +242,8 @@ pub fn build(b: *std.Build) void {
     verify_shell.addFileArg(userspace_shell.getEmittedBin());
     const verify_fs = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_fs.addFileArg(fs_conformance.getEmittedBin());
+    const verify_dns = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
+    verify_dns.addFileArg(dns_conformance.getEmittedBin());
     const verify_permanent_userspace = b.addSystemCommand(&.{ python, "scripts/verify-permanent-userspace.py" });
     verify_permanent_userspace.setCwd(b.path("."));
     verify_permanent_userspace.step.dependOn(&assets.step);
@@ -242,6 +270,7 @@ pub fn build(b: *std.Build) void {
         "src/runtime_page_pool.zig",
         "src/runtime_persist.zig",
         "src/elf64.zig",
+        "sdk/zig/dns.zig",
     }) |source_path| {
         const tests = b.addTest(.{
             .root_module = b.createModule(.{
@@ -263,5 +292,6 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&verify_init.step);
     check_step.dependOn(&verify_shell.step);
     check_step.dependOn(&verify_fs.step);
+    check_step.dependOn(&verify_dns.step);
     check_step.dependOn(&verify_permanent_userspace.step);
 }

@@ -35,6 +35,7 @@ const runtime_sdk_elf = @import("runtime_sdk").sdk;
 const runtime_init_elf = @import("runtime_sdk").init;
 const runtime_shell_elf = @import("runtime_sdk").shell;
 const runtime_fs_elf = @import("runtime_sdk").fs;
+const runtime_dns_elf = @import("runtime_sdk").dns;
 
 extern fn zigos_debug_putc(character: u8) callconv(cc) void;
 extern fn zigos_wait_for_interrupt() callconv(cc) void;
@@ -392,6 +393,7 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/init.elf", runtime_init_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/sh.elf", runtime_shell_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/fs.elf", runtime_fs_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/dns.elf", runtime_dns_elf, 0o555, false, 0);
 
     const pseudo_paths = [_][]const u8{
         "/proc/version",   "/proc/uptime", "/proc/meminfo", "/proc/processes",
