@@ -6,7 +6,7 @@ This document records the current disposition of the post-Capstone architecture 
 
 The maintained x86-64 release line now requires:
 
-- 73 unique isolated Zig test declarations;
+- 74 unique isolated Zig test declarations;
 - generated ABI constants checked for staleness;
 - independent Zig and C userspace ELF verification;
 - a 45-command offline permanent-runtime COM1 session;
@@ -130,6 +130,7 @@ Replacement rename is now supported for an existing same-mount file. All kind, m
 Symbolic links are represented as distinct VFS nodes. Normal path lookup follows relative and absolute targets with an eight-link maximum, while `unlink`, `rmdir`, rename-source lookup and `readlink` do not follow the final component. Link records and target text survive the A/B journal and are revalidated by a second CPL3 boot.
 Directory-entry names are now stored separately from node data and metadata in a bounded dentry table. Ordinary files can have multiple same-mount dentries; stat reports their shared node/generation and link count, unlink removes one name, and zero-link nodes remain alive only while descriptors reference them. The journal writes canonical file data once and restores alias records in a second pass.
 A separate bounded dentry lookup cache now stores generation-validated parent/name mappings. Traversal acquires and releases references, referenced entries are not eligible for LRU eviction, namespace mutations invalidate matching entries, and a full pinned cache falls back to authoritative lookup. Normal and diagnostic shutdown require zero cache references and balanced acquire/release accounting.
+Mounts now form an explicit bounded tree. Every non-root mount records its parent mount, covered mountpoint and distinct mounted root; lookup and directory capabilities cross mountpoints, `..` escapes mounted roots through the parent namespace, canonical paths cross nested roots, and unmount requires child mounts and open descriptors to be released first. The kernel still has no public mount/unmount ABI and does not yet track process working directories as unmount references.
 
 Still open:
 

@@ -863,7 +863,7 @@ fn commandMount(output: *Output) void {
     for (mounts) |mount_entry| {
         if (!mount_entry.used) continue;
         var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
-        const path = state.vfs.canonicalPath(mount_entry.node, &path_buffer) catch "/?";
+        const path = state.vfs.canonicalPath(mount_entry.root_node, &path_buffer) catch "/?";
         output.write(mount_entry.sourceSlice());
         output.write(" on ");
         output.write(path);

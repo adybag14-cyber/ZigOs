@@ -290,6 +290,18 @@ def main() -> int:
     require(vfs_source, "if (cache_entry.references != 0) continue", "referenced cache entries cannot be evicted")
     require(vfs_source, "return .{ .dentry = dentry_index }", "cache exhaustion falls back to authoritative lookup")
     require(vfs_source, 'test "VFS dentry cache references protect pinned entries and invalidate mutations"', "isolated test proves reference pinning, LRU eviction and mutation invalidation")
+    require(vfs_source, "parent_id: u8 = 0", "mount entries retain explicit parent-mount identity")
+    require(vfs_source, "mountpoint_node: u16 = invalid_node", "mount entries retain covered mountpoint nodes")
+    require(vfs_source, "root_node: u16 = invalid_node", "mount entries own separate mounted root nodes")
+    require(vfs_source, "fn mountAtNode", "resolver can detect mountpoint boundaries")
+    require(vfs_source, "fn mountForRoot", "parent and canonical traversal can detect mounted roots")
+    require(vfs_source, "fn followMount", "path components cross mountpoints into mounted roots")
+    require(vfs_source, "fn allocateMountRoot", "mount creates a distinct root node")
+    require(vfs_source, "fn migrateMountChildren", "pre-seeded namespace contents move into the mounted root")
+    require(vfs_source, "mount_entry.parent_id == mount_id", "unmount rejects a mount that still owns child mounts")
+    require(vfs_source, "fn destroyMountNamespace", "child-first unmount releases the mounted namespace")
+    require(vfs_source, 'test "VFS nested mount roots cross boundaries and unmount child first"', "isolated test proves nested mount traversal, mounted-root parent semantics and child-first unmount")
+    forbid(vfs_source, "fn assignMountRecursive", "flat recursive mount tagging returned")
     require(vfs_source, "link_count: u16 = 0", "VFS nodes retain explicit namespace link counts")
     require(vfs_source, "fn entryForPath", "namespace mutations resolve final dentries independently of node lookup")
     require(vfs_source, "fn detachOrReclaimEntry", "unlink and replacement rename release one dentry before inode reclamation")
@@ -297,6 +309,7 @@ def main() -> int:
     require(vfs_source, "pub fn link", "VFS creates same-mount hard-link dentries")
     require(vfs_source, "const node_index = try self.resolveNoFollow(cwd, old_path);", "hard-link creation does not follow a final symbolic-link source")
     require(runtime, "output.decimal(info.link_count)", "diagnostic shell stat exposes namespace link counts")
+    require(runtime, "canonicalPath(mount_entry.root_node", "mount command reports mounted roots rather than covered nodes")
     require(runtime, "fs_report.dentry_cache_references == 0", "normal and diagnostic release gates require zero live cache references")
     require(runtime, "fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases", "release gates require balanced cache reference accounting")
     require(runtime, "fs_report.dentry_cache_hits > 0", "release gates require real cache hits")
@@ -524,8 +537,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 73:
-        raise SystemExit(f"canonical isolated-test declaration total must be 73, found {declared_tests}")
+    if declared_tests != 74:
+        raise SystemExit(f"canonical isolated-test declaration total must be 74, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',

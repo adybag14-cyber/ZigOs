@@ -18,7 +18,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 73 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe two-boot persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 74 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe two-boot persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -26,7 +26,7 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 
 - a dedicated 100 Hz LAPIC timer and interrupt-enabled HLT idle loop;
 - a permanent PID 1 record; in normal boot it runs the directly linked Zig `/bin/init.elf`, launches the interactive Zig PID 2 shell, waits for it and reaps it before final shutdown;
-- a bounded writable VFS and six mounted namespaces;
+- a bounded writable VFS with an explicit parent-linked mount tree and six mounted namespaces;
 - a generation-safe 64-slot process table whose ordinary round-robin service path owns foreground, background and fixture CPL3 dispatch without a second job table or direct shell dispatcher;
 - process-local numeric descriptors, shared open-file descriptions and bounded blocking pipes;
 - up to 64 retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 4,096-slot ownership table;
@@ -151,6 +151,7 @@ The x86-64 runtime VFS currently provides:
 - replacement rename over an existing same-mount file, including retained descriptors to the old destination;
 - separate bounded dentries and link-counted nodes, with same-mount hard links sharing data and metadata;
 - a separate 16-entry generation-validated dentry lookup cache with reference pinning, LRU eviction, mutation invalidation and authoritative fallback;
+- parent-linked mounts with distinct mountpoint/root nodes, nested traversal, mounted-root `..`, canonical paths across boundaries and child-first unmount protection;
 - relative and absolute symbolic links, non-following `readlink` and an eight-link traversal limit;
 - immediate pathname removal with deferred reclamation while open descriptions still reference a file;
 - directory-descriptor-relative `openat` and one shared VFS-to-ABI metadata conversion for `stat`/`fstat`;
@@ -301,7 +302,7 @@ zig-out/
     `-- runtime-*.elf
 ```
 
-`zig build test` executes ten canonical host-test roots covering 73 unique `std.testing` declarations across eleven source files, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence, ELF loading and the DNS codec. Imported tests may execute from more than one root, but the source contract counts each declaration once.
+`zig build test` executes ten canonical host-test roots covering 74 unique `std.testing` declarations across eleven source files, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence, ELF loading and the DNS codec. Imported tests may execute from more than one root, but the source contract counts each declaration once.
 
 `zig build check` runs formatting, all isolated tests, the UEFI build and portable PE/COFF verification.
 
@@ -389,7 +390,7 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 73 unique isolated declarations, directly linked Zig/C SDK, init, shell and DNS verification, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 74 unique isolated declarations, directly linked Zig/C SDK, init, shell and DNS verification, x86-64 UEFI build, portable PE verification and artifact upload.
 - **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 45-command offline and 47-command live-network permanent COM1 sessions, the x86-64 NVMe two-boot proof, persistent and diskless normal boots, and the legacy i686 build/two-boot regression.
 - **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 

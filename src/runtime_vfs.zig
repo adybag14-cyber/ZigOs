@@ -161,7 +161,9 @@ const DentryReference = struct {
 pub const Mount = struct {
     used: bool = false,
     id: u8 = 0,
-    node: u16 = invalid_node,
+    parent_id: u8 = 0,
+    mountpoint_node: u16 = invalid_node,
+    root_node: u16 = invalid_node,
     kind: MountKind = .ramfs,
     readonly: bool = false,
     source: [32]u8 = @splat(0),
@@ -262,7 +264,9 @@ pub const Vfs = struct {
         self.mounts[0] = .{
             .used = true,
             .id = 1,
-            .node = 0,
+            .parent_id = 0,
+            .mountpoint_node = 0,
+            .root_node = 0,
             .kind = .ramfs,
             .readonly = false,
             .source = sourceArray("ramfs"),
@@ -315,13 +319,14 @@ pub const Vfs = struct {
         for (self.dentries, 0..) |entry, entry_index| {
             if (!entry.used or entry.parent != directory) continue;
             if (result.count >= result.records.len) return Error.NoSpace;
-            const node = &self.nodes[entry.node];
+            const visible_node = self.followMount(entry.node);
+            const node = &self.nodes[visible_node];
             var record = DirectoryRecord{
-                .node = entry.node,
+                .node = visible_node,
                 .entry = @intCast(entry_index),
                 .kind = node.kind,
                 .size = node.size,
-                .readonly = self.nodeReadonly(entry.node),
+                .readonly = self.nodeReadonly(visible_node),
             };
             record.name_length = entry.name_length;
             @memcpy(record.name[0..entry.name_length], entry.nameSlice());
@@ -496,6 +501,7 @@ pub const Vfs = struct {
     pub fn rename(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, tick: u64) Error!void {
         const source_entry = try self.entryForPath(cwd, old_path);
         const source = self.dentries[source_entry].node;
+        if (self.mountAtNode(source) != null) return Error.Busy;
         const destination = try self.parentAndName(cwd, new_path);
         if (self.nodes[source].mount_id != self.nodes[destination.parent].mount_id) return Error.CrossMount;
         if (self.nodes[source].readonly or self.mountReadonly(self.nodes[source].mount_id) or self.nodes[destination.parent].readonly)
@@ -527,12 +533,13 @@ pub const Vfs = struct {
             output[0] = '/';
             return output[0..1];
         }
-        var chain: [maximum_nodes]u16 = undefined;
+        var chain: [maximum_nodes + maximum_mounts]u16 = undefined;
         var count: usize = 0;
         var current = node_index;
         while (current != 0) {
             if (count >= chain.len) return Error.Cycle;
-            const entry_index = self.canonicalDentry(current) orelse return Error.NotFound;
+            const namespace_node = if (self.mountForRoot(current)) |mount_entry| mount_entry.mountpoint_node else current;
+            const entry_index = self.canonicalDentry(namespace_node) orelse return Error.NotFound;
             chain[count] = entry_index;
             count += 1;
             current = self.dentries[entry_index].parent;
@@ -553,24 +560,33 @@ pub const Vfs = struct {
 
     pub fn mount(self: *Vfs, cwd: u16, path: []const u8, kind: MountKind, readonly: bool, source: []const u8) Error!u8 {
         if (source.len > 32) return Error.NameTooLong;
-        const node_index = try self.resolve(cwd, path);
-        if (self.nodes[node_index].kind != .directory) return Error.NotDirectory;
-        for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == node_index) return Error.Busy;
-        var mount_index: usize = 0;
+        const mountpoint_entry = try self.entryForPath(cwd, path);
+        const mountpoint_node = self.dentries[mountpoint_entry].node;
+        if (self.nodes[mountpoint_node].kind != .directory) return Error.NotDirectory;
+        if (self.mountAtNode(mountpoint_node) != null) return Error.Busy;
+        for (self.mounts) |mount_entry| {
+            if (!mount_entry.used or mount_entry.id == 1) continue;
+            if (self.isDescendant(mount_entry.mountpoint_node, mountpoint_node)) return Error.Busy;
+        }
+        var mount_index: usize = 1;
         while (mount_index < self.mounts.len and self.mounts[mount_index].used) : (mount_index += 1) {}
         if (mount_index >= self.mounts.len) return Error.NoSpace;
+        const root_node = try self.allocateMountRoot(mountpoint_node, @intCast(mount_index + 1));
+        errdefer self.reclaimNode(root_node);
         const mount_id: u8 = @intCast(mount_index + 1);
         var mount_entry = Mount{
             .used = true,
             .id = mount_id,
-            .node = node_index,
+            .parent_id = self.nodes[mountpoint_node].mount_id,
+            .mountpoint_node = mountpoint_node,
+            .root_node = root_node,
             .kind = kind,
             .readonly = readonly,
             .source_length = @intCast(source.len),
         };
         @memcpy(mount_entry.source[0..source.len], source);
         self.mounts[mount_index] = mount_entry;
-        self.assignMountRecursive(node_index, mount_id, readonly);
+        self.migrateMountChildren(mountpoint_node, root_node, mount_id);
         self.mutations +%= 1;
         return mount_id;
     }
@@ -579,12 +595,18 @@ pub const Vfs = struct {
         if (mount_id <= 1) return Error.Busy;
         const mount_index: usize = mount_id - 1;
         if (mount_index >= self.mounts.len or !self.mounts[mount_index].used) return Error.NotFound;
-        const node_index = self.mounts[mount_index].node;
+        for (self.mounts) |mount_entry| {
+            if (mount_entry.used and mount_entry.parent_id == mount_id) return Error.Busy;
+        }
         for (self.open_files) |open_file| {
             if (open_file.used and self.nodes[open_file.node].mount_id == mount_id) return Error.Busy;
         }
-        const parent_mount = self.nodes[try self.directoryParent(node_index)].mount_id;
-        self.assignMountRecursive(node_index, parent_mount, false);
+        for (self.dentry_cache) |cache_entry| {
+            if (!cache_entry.used or cache_entry.references == 0 or cache_entry.dentry >= self.dentries.len) continue;
+            const dentry = &self.dentries[cache_entry.dentry];
+            if (dentry.used and self.nodes[dentry.node].mount_id == mount_id) return Error.Busy;
+        }
+        self.destroyMountNamespace(mount_id);
         self.mounts[mount_index] = .{};
         self.mutations +%= 1;
     }
@@ -708,13 +730,14 @@ pub const Vfs = struct {
         while (entry_index < self.dentries.len and count < output.len) : (entry_index += 1) {
             const entry = &self.dentries[entry_index];
             if (!entry.used or entry.parent != directory) continue;
-            const node = &self.nodes[entry.node];
+            const visible_node = self.followMount(entry.node);
+            const node = &self.nodes[visible_node];
             var record = DirectoryRecord{
-                .node = entry.node,
+                .node = visible_node,
                 .entry = @intCast(entry_index),
                 .kind = node.kind,
                 .size = node.size,
-                .readonly = self.nodeReadonly(entry.node),
+                .readonly = self.nodeReadonly(visible_node),
             };
             record.name_length = entry.name_length;
             @memcpy(record.name[0..entry.name_length], entry.nameSlice());
@@ -838,6 +861,11 @@ pub const Vfs = struct {
         if (!self.nodes[0].used or self.nodes[0].generation == 0 or self.nodes[0].kind != .directory or self.nodes[0].link_count != 1) return false;
         var counted_links: [maximum_nodes]u16 = @splat(0);
         counted_links[0] = 1;
+        for (self.mounts) |mount_entry| {
+            if (!mount_entry.used or mount_entry.id == 1) continue;
+            if (mount_entry.root_node >= self.nodes.len) return false;
+            counted_links[mount_entry.root_node] = std.math.add(u16, counted_links[mount_entry.root_node], 1) catch return false;
+        }
         for (self.dentries, 0..) |entry, entry_index| {
             if (!entry.used) continue;
             if (entry.generation == 0 or entry.name_length == 0 or entry.name_length > maximum_name_length) return false;
@@ -861,7 +889,7 @@ pub const Vfs = struct {
             if (node.kind == .symlink and (node.size == 0 or node.size > maximum_symlink_target_length)) return false;
             if (index != 0 and node.link_count == 0) {
                 if (node.kind == .directory or !self.hasOpenReferences(@intCast(index))) return false;
-                for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == index) return false;
+                for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.root_node == index) return false;
                 continue;
             }
             if (node.kind == .directory and index != 0) {
@@ -882,7 +910,32 @@ pub const Vfs = struct {
         }
         for (self.mounts, 0..) |mount_entry, index| {
             if (!mount_entry.used) continue;
-            if (mount_entry.id != index + 1 or mount_entry.node >= self.nodes.len or !self.nodes[mount_entry.node].used or self.nodes[mount_entry.node].link_count == 0) return false;
+            if (mount_entry.id != index + 1 or mount_entry.root_node >= self.nodes.len or mount_entry.mountpoint_node >= self.nodes.len) return false;
+            if (!self.nodes[mount_entry.root_node].used or self.nodes[mount_entry.root_node].kind != .directory or self.nodes[mount_entry.root_node].link_count == 0) return false;
+            if (!self.nodes[mount_entry.mountpoint_node].used or self.nodes[mount_entry.mountpoint_node].kind != .directory or self.nodes[mount_entry.mountpoint_node].link_count == 0) return false;
+            if (index == 0) {
+                if (mount_entry.id != 1 or mount_entry.parent_id != 0 or mount_entry.root_node != 0 or mount_entry.mountpoint_node != 0) return false;
+            } else {
+                if (mount_entry.parent_id == 0 or mount_entry.parent_id == mount_entry.id) return false;
+                const parent_index: usize = mount_entry.parent_id - 1;
+                if (parent_index >= self.mounts.len or !self.mounts[parent_index].used) return false;
+                if (self.nodes[mount_entry.mountpoint_node].mount_id != mount_entry.parent_id or self.nodes[mount_entry.root_node].mount_id != mount_entry.id) return false;
+                if (self.canonicalDentry(mount_entry.root_node) != null) return false;
+                if (self.mountAtNode(mount_entry.mountpoint_node) == null or self.mountAtNode(mount_entry.mountpoint_node).?.id != mount_entry.id) return false;
+                var current_id = mount_entry.parent_id;
+                var depth: usize = 0;
+                while (current_id != 1 and depth < self.mounts.len) : (depth += 1) {
+                    const current_index: usize = current_id - 1;
+                    if (current_index >= self.mounts.len or !self.mounts[current_index].used) return false;
+                    current_id = self.mounts[current_index].parent_id;
+                }
+                if (current_id != 1) return false;
+            }
+            for (index + 1..self.mounts.len) |other_index| {
+                const other = self.mounts[other_index];
+                if (!other.used) continue;
+                if (other.mountpoint_node == mount_entry.mountpoint_node or other.root_node == mount_entry.root_node) return false;
+            }
         }
         for (self.open_files) |open_file| {
             if (!open_file.used) continue;
@@ -964,7 +1017,7 @@ pub const Vfs = struct {
                 const target = self.nodes[child].data[0..self.nodes[child].size];
                 current = try self.resolveInternal(entry.parent, target, true, depth + 1);
             } else {
-                current = child;
+                current = self.followMount(child);
             }
         }
         return current;
@@ -972,8 +1025,9 @@ pub const Vfs = struct {
 
     fn validateDirectory(self: *const Vfs, node_index: u16) Error!u16 {
         if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].link_count == 0) return Error.NotFound;
-        if (self.nodes[node_index].kind != .directory) return Error.NotDirectory;
-        return node_index;
+        const visible_node = self.followMount(node_index);
+        if (self.nodes[visible_node].kind != .directory) return Error.NotDirectory;
+        return visible_node;
     }
 
     fn findDentry(self: *Vfs, parent: u16, name: []const u8) ?u16 {
@@ -1124,6 +1178,10 @@ pub const Vfs = struct {
     fn directoryParent(self: *const Vfs, node_index: u16) Error!u16 {
         if (node_index == 0) return 0;
         if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].kind != .directory or self.nodes[node_index].link_count == 0) return Error.NotDirectory;
+        if (self.mountForRoot(node_index)) |mount_entry| {
+            const entry_index = self.canonicalDentry(mount_entry.mountpoint_node) orelse return Error.NotFound;
+            return self.dentries[entry_index].parent;
+        }
         const entry_index = self.canonicalDentry(node_index) orelse return Error.NotFound;
         return self.dentries[entry_index].parent;
     }
@@ -1237,7 +1295,7 @@ pub const Vfs = struct {
         if (entry_index >= self.dentries.len or !self.dentries[entry_index].used) return Error.NotFound;
         const node_index = self.dentries[entry_index].node;
         if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
-        for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == node_index) return Error.Busy;
+        if (self.mountAtNode(node_index) != null) return Error.Busy;
         self.detachOrReclaimEntry(entry_index);
         self.mutations +%= 1;
     }
@@ -1246,7 +1304,7 @@ pub const Vfs = struct {
         const source_node = &self.nodes[source];
         const target_node = &self.nodes[target];
         if (target_node.readonly or self.mountReadonly(target_node.mount_id)) return Error.ReadOnly;
-        for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == target) return Error.Busy;
+        if (self.mountAtNode(target) != null) return Error.Busy;
         if (source_node.kind == .pseudo or target_node.kind == .pseudo) return Error.UnsupportedOperation;
         if (source_node.kind == .directory and target_node.kind != .directory) return Error.NotDirectory;
         if (source_node.kind != .directory and target_node.kind == .directory) return Error.IsDirectory;
@@ -1278,7 +1336,7 @@ pub const Vfs = struct {
         if (entry_index >= self.dentries.len or !self.dentries[entry_index].used) return Error.NotFound;
         const node_index = self.dentries[entry_index].node;
         if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
-        for (self.mounts) |mount_entry| if (mount_entry.used and mount_entry.node == node_index) return Error.Busy;
+        if (self.mountAtNode(node_index) != null) return Error.Busy;
         if (self.hasOpenReferences(node_index)) return Error.Busy;
         self.detachOrReclaimEntry(entry_index);
         self.mutations +%= 1;
@@ -1322,11 +1380,65 @@ pub const Vfs = struct {
         return index < self.mounts.len and self.mounts[index].used and self.mounts[index].readonly;
     }
 
-    fn assignMountRecursive(self: *Vfs, node_index: u16, mount_id: u8, readonly: bool) void {
+    fn mountAtNode(self: *const Vfs, node_index: u16) ?*const Mount {
+        for (&self.mounts) |*mount_entry| {
+            if (mount_entry.used and mount_entry.id != 1 and mount_entry.mountpoint_node == node_index) return mount_entry;
+        }
+        return null;
+    }
+
+    fn mountForRoot(self: *const Vfs, node_index: u16) ?*const Mount {
+        for (&self.mounts) |*mount_entry| {
+            if (mount_entry.used and mount_entry.id != 1 and mount_entry.root_node == node_index) return mount_entry;
+        }
+        return null;
+    }
+
+    fn followMount(self: *const Vfs, node_index: u16) u16 {
+        return if (self.mountAtNode(node_index)) |mount_entry| mount_entry.root_node else node_index;
+    }
+
+    fn allocateMountRoot(self: *Vfs, mountpoint_node: u16, mount_id: u8) Error!u16 {
+        var node_index: usize = 1;
+        while (node_index < self.nodes.len and self.nodes[node_index].used) : (node_index += 1) {}
+        if (node_index >= self.nodes.len) return Error.NoSpace;
+        const generation = nextGeneration(self.nodes[node_index].generation);
+        self.nodes[node_index] = .{
+            .used = true,
+            .generation = generation,
+            .kind = .directory,
+            .link_count = 1,
+            .mode = self.nodes[mountpoint_node].mode,
+            .mount_id = mount_id,
+            .modified_tick = self.nodes[mountpoint_node].modified_tick,
+        };
+        return @intCast(node_index);
+    }
+
+    fn migrateMountChildren(self: *Vfs, mountpoint_node: u16, root_node: u16, mount_id: u8) void {
+        for (&self.dentries, 0..) |*entry, entry_index| {
+            if (!entry.used or entry.parent != mountpoint_node) continue;
+            self.invalidateCachedDentry(@intCast(entry_index));
+            entry.parent = root_node;
+            self.assignNodeMountRecursive(entry.node, mount_id);
+        }
+    }
+
+    fn assignNodeMountRecursive(self: *Vfs, node_index: u16, mount_id: u8) void {
         self.nodes[node_index].mount_id = mount_id;
-        if (readonly and self.nodes[node_index].kind != .pseudo) self.nodes[node_index].readonly = true;
         for (self.dentries) |entry| {
-            if (entry.used and entry.parent == node_index) self.assignMountRecursive(entry.node, mount_id, readonly);
+            if (entry.used and entry.parent == node_index) self.assignNodeMountRecursive(entry.node, mount_id);
+        }
+    }
+
+    fn destroyMountNamespace(self: *Vfs, mount_id: u8) void {
+        for (0..self.dentries.len) |entry_index| {
+            const entry = &self.dentries[entry_index];
+            if (!entry.used or self.nodes[entry.node].mount_id != mount_id) continue;
+            self.releaseDentry(@intCast(entry_index));
+        }
+        for (1..self.nodes.len) |node_index| {
+            if (self.nodes[node_index].used and self.nodes[node_index].mount_id == mount_id) self.reclaimNode(@intCast(node_index));
         }
     }
 
@@ -1696,6 +1808,53 @@ test "VFS unlink detaches names and reclaims after the final open handle" {
     try std.testing.expect(fs.validate());
 }
 
+test "VFS nested mount roots cross boundaries and unmount child first" {
+    var fs = Vfs.init();
+    const outer_point = try fs.mkdir(0, "/outer", 0o755, 1);
+    _ = try fs.putFile(outer_point, "seed", "outer-data", 0o644, false, 2);
+    const outer_id = try fs.mount(0, "/outer", .ramfs, false, "outer-fs");
+    const outer_root = try fs.resolve(0, "/outer");
+    try std.testing.expect(outer_root != outer_point);
+    try std.testing.expectEqualStrings("outer-data", try fs.readOnlyView(0, "/outer/seed"));
+    try std.testing.expectEqual(@as(u16, 0), try fs.resolve(outer_root, ".."));
+
+    const inner_point = try fs.mkdir(outer_root, "inner", 0o755, 3);
+    _ = try fs.putFile(inner_point, "seed", "inner-data", 0o644, false, 4);
+    const inner_id = try fs.mount(outer_root, "inner", .netfs, true, "inner-fs");
+    const inner_root = try fs.resolve(0, "/outer/inner");
+    try std.testing.expect(inner_root != inner_point);
+    try std.testing.expectEqualStrings("inner-data", try fs.readOnlyView(0, "/outer/inner/seed"));
+    try std.testing.expectError(Error.ReadOnly, fs.write(0, "/outer/inner/seed", 0, "x", false, 5));
+    try std.testing.expectEqual(outer_root, try fs.resolve(inner_root, ".."));
+
+    var path_buffer: [maximum_path_length + 1]u8 = undefined;
+    try std.testing.expectEqualStrings("/outer", try fs.canonicalPath(outer_root, &path_buffer));
+    try std.testing.expectEqualStrings("/outer/inner", try fs.canonicalPath(inner_root, &path_buffer));
+    try std.testing.expectEqualStrings("/outer/inner/seed", try fs.canonicalPath(try fs.resolve(0, "/outer/inner/seed"), &path_buffer));
+
+    const mounts = fs.mountList();
+    try std.testing.expectEqual(@as(u8, 1), mounts[outer_id - 1].parent_id);
+    try std.testing.expectEqual(outer_point, mounts[outer_id - 1].mountpoint_node);
+    try std.testing.expectEqual(outer_root, mounts[outer_id - 1].root_node);
+    try std.testing.expectEqual(outer_id, mounts[inner_id - 1].parent_id);
+    try std.testing.expectEqual(inner_point, mounts[inner_id - 1].mountpoint_node);
+    try std.testing.expectEqual(inner_root, mounts[inner_id - 1].root_node);
+
+    try std.testing.expectError(Error.Busy, fs.rmdir(0, "/outer/inner"));
+    try std.testing.expectError(Error.Busy, fs.rename(0, "/outer/inner", "/outer/renamed", 6));
+    try std.testing.expectError(Error.Busy, fs.unmount(outer_id));
+    const handle = try fs.open(7, 0, "/outer/inner/seed", .{ .read = true }, 0, 7);
+    try std.testing.expectError(Error.Busy, fs.unmount(inner_id));
+    try fs.close(7, handle);
+    try fs.unmount(inner_id);
+    try std.testing.expectEqual(inner_point, try fs.resolve(0, "/outer/inner"));
+    try std.testing.expectError(Error.NotFound, fs.resolve(0, "/outer/inner/seed"));
+    try fs.unmount(outer_id);
+    try std.testing.expectEqual(outer_point, try fs.resolve(0, "/outer"));
+    try std.testing.expectError(Error.NotFound, fs.resolve(0, "/outer/seed"));
+    try std.testing.expectEqual(@as(usize, 1), fs.report().mounts);
+    try std.testing.expect(fs.validate());
+}
 test "VFS mount policy protects read only trees" {
     var fs = Vfs.init();
     const boot = try fs.mkdir(0, "/boot", 0o755, 1);
