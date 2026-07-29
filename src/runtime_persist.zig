@@ -18,6 +18,7 @@ pub const Error = error{
     Corrupt,
     NoSpace,
     InvalidRecord,
+    UnsupportedOperation,
 };
 
 pub const ReadFn = *const fn (context: ?*anyopaque, lba: u64, output: []u8) bool;
@@ -93,6 +94,7 @@ pub const Store = struct {
     record_count: u32 = 0,
     payload_length: u32 = 0,
     payload: [maximum_payload_bytes]u8 = @splat(0),
+    next_payload: [maximum_payload_bytes]u8 = @splat(0),
     sector: [4096]u8 = @splat(0),
     path_queue: [runtime_vfs.maximum_nodes][runtime_vfs.maximum_path_length + 1]u8 = @splat(@splat(0)),
     path_lengths: [runtime_vfs.maximum_nodes]u16 = @splat(0),
@@ -151,9 +153,99 @@ pub const Store = struct {
     }
 
     pub fn sync(self: *Store, vfs: *runtime_vfs.Vfs) Error!void {
+        const snapshot = try self.serialize(vfs, &self.next_payload);
+        try self.commitSnapshot(&self.next_payload, snapshot);
+    }
+
+    pub fn syncFile(self: *Store, vfs: *runtime_vfs.Vfs, node_index: u16) Error!void {
+        if (self.device == null or !self.mounted) return Error.NotConfigured;
+        if (!(vfs.persistentNode(node_index) catch return Error.InvalidRecord)) return Error.UnsupportedOperation;
+        const stat = vfs.statNode(node_index) catch return Error.InvalidRecord;
+        if (stat.kind != .file or stat.link_count == 0 or self.generation == 0 or self.payload_length < 4)
+            return Error.UnsupportedOperation;
+
+        var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
+        const canonical = vfs.canonicalPath(node_index, &path_buffer) catch return Error.UnsupportedOperation;
+        if (!std.mem.startsWith(u8, canonical, persist_prefix) or canonical.len == persist_prefix.len)
+            return Error.UnsupportedOperation;
+        const relative = canonical[persist_prefix.len..];
+
+        @memset(&self.next_payload, 0);
+        write32(&self.next_payload, 0, 0);
+        const committed_length: usize = self.payload_length;
+        const committed_count = read32(&self.payload, 0);
+        if (committed_count != self.record_count) return Error.Corrupt;
+        var input_offset: usize = 4;
+        var output_offset: usize = 4;
+        var output_count: u32 = 0;
+        var target_found = false;
+        var record_index: u32 = 0;
+        while (record_index < committed_count) : (record_index += 1) {
+            const record_start = input_offset;
+            if (input_offset + 8 > committed_length) return Error.Corrupt;
+            const kind: RecordKind = switch (self.payload[input_offset]) {
+                1 => .directory,
+                2 => .file,
+                3 => .symlink,
+                4 => .hard_link,
+                5 => .sparse_file,
+                else => return Error.Corrupt,
+            };
+            const path_length: usize = self.payload[input_offset + 1];
+            const data_length: usize = read32(&self.payload, input_offset + 4);
+            input_offset += 8;
+            if (path_length == 0 or input_offset + path_length > committed_length) return Error.Corrupt;
+            const record_path = self.payload[input_offset .. input_offset + path_length];
+            input_offset += path_length;
+            if (!validRelativePath(record_path) or input_offset + data_length > committed_length) return Error.Corrupt;
+            input_offset += data_length;
+            if (std.mem.eql(u8, record_path, relative)) {
+                if (target_found or (kind != .file and kind != .sparse_file)) return Error.UnsupportedOperation;
+                target_found = true;
+                continue;
+            }
+            const record_length = input_offset - record_start;
+            if (output_offset > self.next_payload.len or record_length > self.next_payload.len - output_offset)
+                return Error.NoSpace;
+            @memcpy(self.next_payload[output_offset .. output_offset + record_length], self.payload[record_start..input_offset]);
+            output_offset += record_length;
+            output_count +%= 1;
+        }
+        if (input_offset != committed_length) return Error.Corrupt;
+        if (!target_found) return Error.UnsupportedOperation;
+
+        const sparse = vfs.sparseFileInfoNode(node_index) catch return Error.InvalidRecord;
+        self.record_scratch[0] = sparse.allocation_bitmap;
+        write32(&self.record_scratch, 1, @intCast(sparse.size));
+        var data_offset: usize = 5;
+        var slot: usize = 0;
+        while (slot < runtime_vfs.file_blocks_per_node) : (slot += 1) {
+            if ((sparse.allocation_bitmap & (@as(u8, 1) << @intCast(slot))) == 0) continue;
+            var block: [runtime_vfs.file_block_size]u8 = undefined;
+            if (!(vfs.readAllocatedBlockNode(node_index, slot, &block) catch return Error.InvalidRecord))
+                return Error.InvalidRecord;
+            @memcpy(self.record_scratch[data_offset .. data_offset + block.len], &block);
+            data_offset += block.len;
+        }
+        output_offset = try appendRecord(
+            &self.next_payload,
+            output_offset,
+            relative,
+            .sparse_file,
+            stat.mode,
+            self.record_scratch[0..data_offset],
+        );
+        output_count +%= 1;
+        write32(&self.next_payload, 0, output_count);
+        try self.commitSnapshot(&self.next_payload, .{
+            .payload_length = output_offset,
+            .record_count = output_count,
+        });
+    }
+
+    fn commitSnapshot(self: *Store, next_payload: *const [maximum_payload_bytes]u8, snapshot: Snapshot) Error!void {
         const device = self.device orelse return Error.NotConfigured;
         if (!self.mounted) return Error.NotConfigured;
-        const snapshot = try self.serialize(vfs);
         const slot: u8 = if (self.active_slot == 0) 1 else 0;
         const block_size: usize = device.block_size;
         const sectors: u64 = @intCast((snapshot.payload_length + block_size - 1) / block_size);
@@ -163,7 +255,7 @@ pub const Store = struct {
         while (sector_index < sectors) : (sector_index += 1) {
             @memset(self.sector[0..block_size], 0);
             const count = @min(remaining, block_size);
-            if (count != 0) @memcpy(self.sector[0..count], self.payload[offset .. offset + count]);
+            if (count != 0) @memcpy(self.sector[0..count], next_payload[offset .. offset + count]);
             if (!device.write(slotPayloadStart(device.block_size, slot) + sector_index, self.sector[0..block_size], false)) {
                 self.io_failures +%= 1;
                 return Error.Io;
@@ -184,7 +276,7 @@ pub const Store = struct {
             .slot = slot,
             .generation = generation,
             .payload_length = @intCast(snapshot.payload_length),
-            .payload_crc32 = gpt.crc32(self.payload[0..snapshot.payload_length]),
+            .payload_crc32 = gpt.crc32(next_payload[0..snapshot.payload_length]),
             .record_count = snapshot.record_count,
         });
         if (!device.write(slot, self.sector[0..block_size], true)) {
@@ -197,6 +289,8 @@ pub const Store = struct {
             return Error.Io;
         }
         self.flushes +%= 1;
+        @memset(&self.payload, 0);
+        @memcpy(self.payload[0..snapshot.payload_length], next_payload[0..snapshot.payload_length]);
         self.generation = generation;
         self.active_slot = slot;
         self.record_count = snapshot.record_count;
@@ -258,11 +352,11 @@ pub const Store = struct {
         sparse_file = 5,
     };
 
-    fn serialize(self: *Store, vfs: *runtime_vfs.Vfs) Error!Snapshot {
-        @memset(&self.payload, 0);
+    fn serialize(self: *Store, vfs: *runtime_vfs.Vfs, output: *[maximum_payload_bytes]u8) Error!Snapshot {
+        @memset(output, 0);
         @memset(&self.path_queue, @splat(0));
         @memset(&self.path_lengths, 0);
-        write32(&self.payload, 0, 0);
+        write32(output, 0, 0);
         var used: usize = 4;
         var records: u32 = 0;
         @memcpy(self.path_queue[0][0..persist_root.len], persist_root);
@@ -277,7 +371,7 @@ pub const Store = struct {
                 if (record.kind != .directory) continue;
                 const child = try self.buildChildPath(parent, record.nameSlice());
                 const stat = vfs.stat(0, child) catch return Error.InvalidRecord;
-                used = try appendRecord(&self.payload, used, child[persist_prefix.len..], .directory, stat.mode, &.{});
+                used = try appendRecord(output, used, child[persist_prefix.len..], .directory, stat.mode, &.{});
                 records +%= 1;
                 if (tail >= self.path_queue.len) return Error.NoSpace;
                 @memcpy(self.path_queue[tail][0..child.len], child);
@@ -292,7 +386,7 @@ pub const Store = struct {
                     var canonical_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
                     const canonical = vfs.canonicalPath(record.node, &canonical_buffer) catch return Error.InvalidRecord;
                     if (!std.mem.startsWith(u8, canonical, persist_prefix)) return Error.InvalidRecord;
-                    used = try appendRecord(&self.payload, used, child[persist_prefix.len..], .hard_link, stat.mode, canonical[persist_prefix.len..]);
+                    used = try appendRecord(output, used, child[persist_prefix.len..], .hard_link, stat.mode, canonical[persist_prefix.len..]);
                 } else if (record.kind == .file) {
                     const sparse = vfs.sparseFileInfoNode(record.node) catch return Error.InvalidRecord;
                     self.record_scratch[0] = sparse.allocation_bitmap;
@@ -306,15 +400,15 @@ pub const Store = struct {
                         @memcpy(self.record_scratch[data_offset .. data_offset + block.len], &block);
                         data_offset += block.len;
                     }
-                    used = try appendRecord(&self.payload, used, child[persist_prefix.len..], .sparse_file, stat.mode, self.record_scratch[0..data_offset]);
+                    used = try appendRecord(output, used, child[persist_prefix.len..], .sparse_file, stat.mode, self.record_scratch[0..data_offset]);
                 } else {
                     const data = vfs.symlinkTargetNode(record.node) catch return Error.InvalidRecord;
-                    used = try appendRecord(&self.payload, used, child[persist_prefix.len..], .symlink, stat.mode, data);
+                    used = try appendRecord(output, used, child[persist_prefix.len..], .symlink, stat.mode, data);
                 }
                 records +%= 1;
             }
         }
-        write32(&self.payload, 0, records);
+        write32(output, 0, records);
         return .{ .payload_length = used, .record_count = records };
     }
 
@@ -617,6 +711,7 @@ const TestDisk = struct {
     blocks: [300][512]u8 = @splat(@splat(0)),
     writes: u64 = 0,
     flushes: u64 = 0,
+    fail_write_at: ?u64 = null,
 
     fn read(context: ?*anyopaque, lba: u64, output: []u8) bool {
         const self: *TestDisk = @ptrCast(@alignCast(context.?));
@@ -629,6 +724,7 @@ const TestDisk = struct {
         _ = force_unit_access;
         const self: *TestDisk = @ptrCast(@alignCast(context.?));
         if (lba >= self.blocks.len or input.len != 512) return false;
+        if (self.fail_write_at != null and self.fail_write_at.? == self.writes) return false;
         @memcpy(&self.blocks[lba], input);
         self.writes += 1;
         return true;
@@ -703,6 +799,70 @@ test "alternating snapshots restore a persistent VFS subtree" {
     try std.testing.expectEqual(@as(u64, 2), second_store.report().generation);
     try std.testing.expectEqual(@as(u8, 1), second_store.report().active_slot);
     try std.testing.expect(disk.flushes >= 4);
+}
+
+test "file sync commits one stable file and excludes unrelated dirty state" {
+    var disk: TestDisk = .{};
+    const live_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(live_vfs);
+    live_vfs.initialize();
+    var store: Store = .{};
+    try store.mount(live_vfs, disk.device(), 1);
+    const target_node = try live_vfs.putFile(0, "/persist/target.txt", "target-v1", 0o640, false, 2);
+    _ = try live_vfs.putFile(0, "/persist/other.txt", "other-v1", 0o600, false, 3);
+    try store.sync(live_vfs);
+    try std.testing.expectEqual(@as(u64, 1), store.report().generation);
+
+    _ = try live_vfs.putFile(0, "/persist/target.txt", "target-v2", 0o600, false, 4);
+    try live_vfs.chmod(0, "/persist/target.txt", 0o600, 5);
+    _ = try live_vfs.putFile(0, "/persist/other.txt", "other-v2", 0o700, false, 6);
+    try live_vfs.chmod(0, "/persist/other.txt", 0o700, 7);
+    try store.syncFile(live_vfs, target_node);
+    try std.testing.expectEqual(@as(u64, 2), store.report().generation);
+
+    const recovered_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(recovered_vfs);
+    recovered_vfs.initialize();
+    var recovered: Store = .{};
+    try recovered.mount(recovered_vfs, disk.device(), 8);
+    try std.testing.expectEqualStrings("target-v2", try recovered_vfs.readOnlyView(0, "/persist/target.txt"));
+    try std.testing.expectEqual(@as(u16, 0o600), (try recovered_vfs.stat(0, "/persist/target.txt")).mode);
+    try std.testing.expectEqualStrings("other-v1", try recovered_vfs.readOnlyView(0, "/persist/other.txt"));
+    try std.testing.expectEqual(@as(u16, 0o600), (try recovered_vfs.stat(0, "/persist/other.txt")).mode);
+
+    const new_node = try live_vfs.putFile(0, "/persist/new.txt", "new", 0o644, false, 9);
+    try std.testing.expectError(Error.UnsupportedOperation, store.syncFile(live_vfs, new_node));
+}
+
+test "failed file sync preserves the committed baseline for retry" {
+    var disk: TestDisk = .{};
+    const live_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(live_vfs);
+    live_vfs.initialize();
+    var store: Store = .{};
+    try store.mount(live_vfs, disk.device(), 1);
+    const target_node = try live_vfs.putFile(0, "/persist/target.txt", "before", 0o640, false, 2);
+    try store.sync(live_vfs);
+    const committed_payload = store.payload;
+    const committed_report = store.report();
+
+    _ = try live_vfs.putFile(0, "/persist/target.txt", "after", 0o600, false, 3);
+    disk.fail_write_at = disk.writes;
+    try std.testing.expectError(Error.Io, store.syncFile(live_vfs, target_node));
+    try std.testing.expectEqual(committed_report.generation, store.report().generation);
+    try std.testing.expectEqual(committed_report.active_slot, store.report().active_slot);
+    try std.testing.expectEqual(committed_report.record_count, store.report().record_count);
+    try std.testing.expectEqualSlices(u8, &committed_payload, &store.payload);
+
+    disk.fail_write_at = null;
+    try store.syncFile(live_vfs, target_node);
+    const recovered_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(recovered_vfs);
+    recovered_vfs.initialize();
+    var recovered: Store = .{};
+    try recovered.mount(recovered_vfs, disk.device(), 4);
+    try std.testing.expectEqualStrings("after", try recovered_vfs.readOnlyView(0, "/persist/target.txt"));
+    try std.testing.expectEqual(@as(u64, 2), recovered.report().generation);
 }
 
 test "mount falls back to the previous valid generation" {

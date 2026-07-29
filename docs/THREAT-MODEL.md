@@ -64,6 +64,8 @@ The model does not currently defend against malicious kernel code, compromised f
 
 - Paths are bounded and normalized; traversal, rename cycles and cross-mount rename are rejected.
 - `/persist` uses alternating generations, payload CRCs, payload-before-header ordering, flushes and an FUA commit header.
+- Global sync and stable-path file fsync build in a separate scratch payload; the committed in-memory baseline changes only after payload and FUA header success.
+- File fsync copies unrelated records from the last committed generation, excluding unrelated dirty VFS state; a forced-termination three-boot test verifies that isolation.
 - Mount selects the newest completely valid generation and can fall back from a corrupt newest slot.
 
 ### Devices and networking

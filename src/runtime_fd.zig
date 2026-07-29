@@ -895,6 +895,22 @@ pub const System = struct {
         return vfs.directoryNodeOpen(description.vfs_owner, description.vfs_handle);
     }
 
+    pub fn persistentSyncNode(
+        self: *const System,
+        vfs: *const runtime_vfs.Vfs,
+        processes: *const runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+    ) Error!?u16 {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        const description = self.open_descriptions[open_index];
+        if (description.kind != .vfs and !(description.kind == .terminal and description.vfs_handle != 0))
+            return Error.InvalidOperation;
+        return vfs.persistentOpenNode(description.vfs_owner, description.vfs_handle);
+    }
+
     pub fn persistentSyncRequired(
         self: *const System,
         vfs: *const runtime_vfs.Vfs,
@@ -902,13 +918,7 @@ pub const System = struct {
         process_handle: u64,
         fd: u16,
     ) Error!bool {
-        _ = try processes.get(process_handle);
-        const namespace_slot = try self.resolveNamespace(process_handle);
-        const open_index = try self.resolveDescriptor(namespace_slot, fd);
-        const description = self.open_descriptions[open_index];
-        if (description.kind != .vfs and !(description.kind == .terminal and description.vfs_handle != 0))
-            return Error.InvalidOperation;
-        return vfs.persistentOpen(description.vfs_owner, description.vfs_handle);
+        return (try self.persistentSyncNode(vfs, processes, process_handle, fd)) != null;
     }
 
     pub fn ioctl(

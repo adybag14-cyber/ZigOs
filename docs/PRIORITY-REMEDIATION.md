@@ -6,12 +6,12 @@ This document records the current disposition of the post-Capstone architecture 
 
 The maintained x86-64 release line now requires:
 
-- 78 unique isolated Zig test declarations;
+- 80 unique isolated Zig test declarations;
 - generated ABI constants checked for staleness;
 - independent Zig and C userspace ELF verification;
 - a 45-command offline permanent-runtime COM1 session;
 - a 47-command live-network permanent-runtime COM1 session;
-- a two-boot NVMe persistence proof;
+- a three-boot NVMe persistence proof with forced termination after file-scoped `fsync`;
 - a persistent normal userspace PID 1/PID 2 profile;
 - a USB-booted diskless normal RAM-root recovery profile;
 - byte-identical Linux and Windows release artifacts.
@@ -134,6 +134,8 @@ Mounts now form an explicit bounded tree. Every non-root mount records its paren
 Each inode now owns a portable ticket lock for data and size mutation. Ordinary writes, truncation and append share that lock; append holds it across EOF selection, data copy, file-size update and the calling open description's final offset. A four-thread host test verifies 128 fixed-size records appear exactly once without overlap or loss, while normal and diagnostic shutdown require nonzero lock activity and zero outstanding tickets.
 Ordinary-file bytes now live in a shared pool of 256 page-sized blocks instead of one dense 32 KiB array per node. Each file has eight logical block slots; absent slots read as zero, writes allocate touched slots transactionally, truncate/unlink return blocks, and ABI 1.9 `fallocate` supports bounded preallocation and hole punching. Journal kind 5 preserves logical size and the resident-block bitmap, including executable files whose final mode is `0555`. Required shutdown gates report and drain the pool lock and verify resident block/byte ownership. This remains a bounded 32 KiB-per-file design, not a scalable extent tree.
 ABI 1.10 adds synchronous vectored descriptor I/O without creating a second descriptor path. The kernel copies and validates at most eight 16-byte vector descriptors, validates every nonempty user range and the 1,024-byte aggregate limit before I/O, then performs one existing descriptor write from a gathered buffer or one descriptor read followed by scatter. Invalid later vectors therefore cannot partially mutate a file or consume its shared offset.
+
+Persistent `fsync(fd)` now resolves the exact VFS node and replaces only that existing stable file record in a separate scratch payload built from the last committed generation. Unrelated dirty VFS state is excluded, device-write failure leaves the committed in-memory baseline unchanged, and the shared A/B payload-flush/header-FUA path commits the replacement. A required three-boot gate creates generation 1, fsyncs one target while dirtying an unrelated sparse file, kills QEMU without shutdown, then verifies target data/mode and hard/symbolic aliases while the unrelated file recovers its previous version. New names and changed rename/link topology still require global `sync`; `fdatasync` remains open.
 
 Still open:
 

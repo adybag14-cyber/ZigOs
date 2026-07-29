@@ -887,12 +887,22 @@ pub const Vfs = struct {
         return node_index;
     }
 
-    pub fn persistentOpen(self: *const Vfs, owner_pid: u32, handle: u32) Error!bool {
-        const index = try self.resolveOpen(owner_pid, handle);
-        const mount_id = self.nodes[self.open_files[index].node].mount_id;
+    pub fn persistentNode(self: *const Vfs, node_index: u16) Error!bool {
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used) return Error.NotFound;
+        const mount_id = self.nodes[node_index].mount_id;
         if (mount_id == 0) return false;
         const mount_index: usize = mount_id - 1;
         return mount_index < self.mounts.len and self.mounts[mount_index].used and self.mounts[mount_index].kind == .zigos_persist;
+    }
+
+    pub fn persistentOpenNode(self: *const Vfs, owner_pid: u32, handle: u32) Error!?u16 {
+        const index = try self.resolveOpen(owner_pid, handle);
+        const node_index = self.open_files[index].node;
+        return if (try self.persistentNode(node_index)) node_index else null;
+    }
+
+    pub fn persistentOpen(self: *const Vfs, owner_pid: u32, handle: u32) Error!bool {
+        return (try self.persistentOpenNode(owner_pid, handle)) != null;
     }
 
     pub fn truncateOpen(self: *Vfs, owner_pid: u32, handle: u32, size: usize, tick: u64) Error!void {

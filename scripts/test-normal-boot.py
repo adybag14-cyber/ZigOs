@@ -226,7 +226,7 @@ def main() -> int:
             send(client, process, serial, "sync", b"persistent storage synchronized", 40)
             send(client, process, serial, "persist-sdk alpha beta", b"process 4 exited 86", 40)
             send(client, process, serial, "fs init", b"process 5 exited 88", 60)
-            send(client, process, serial, "fs verify", b"process 6 exited 89", 60)
+            send(client, process, serial, "fs verify-live", b"process 6 exited 89", 60)
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")
@@ -247,12 +247,12 @@ def main() -> int:
                 "process 4 exited 86",
                 "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/fallocate/sparse/open-unlink/rmdir/sync passed",
                 "process 5 exited 88",
-                "fs-api: recovery/mode/seek/hard-link/symlink/fallocate/sparse/cleanup passed",
+                "fs-api: baseline/mode/seek/hard-link/symlink/fallocate/sparse/cleanup passed",
                 "process 6 exited 89",
                 "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 99/99 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 101/101 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

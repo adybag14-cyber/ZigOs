@@ -176,10 +176,12 @@ var syscall_count: u64 = 0;
 
 pub const ShutdownFn = *const fn (context: ?*anyopaque, process_handle: u64) bool;
 pub const SyncFn = *const fn (context: ?*anyopaque) i64;
+pub const SyncFileFn = *const fn (context: ?*anyopaque, node: u16) i64;
 pub const ChildSpawnFn = *const fn (parent_handle: u64, child_handle: u64) bool;
 var system_context: ?*anyopaque = null;
 var shutdown_fn: ?ShutdownFn = null;
 var sync_fn: ?SyncFn = null;
+var sync_file_fn: ?SyncFileFn = null;
 var child_spawn_fn: ?ChildSpawnFn = null;
 var normal_boot_capability: bool = false;
 var persistent_storage_capability: bool = false;
@@ -188,12 +190,14 @@ pub fn setSystemBackend(
     context: ?*anyopaque,
     shutdown_callback: ?ShutdownFn,
     sync_callback: ?SyncFn,
+    sync_file_callback: ?SyncFileFn,
     normal_boot: bool,
     persistent_storage: bool,
 ) void {
     system_context = context;
     shutdown_fn = shutdown_callback;
     sync_fn = sync_callback;
+    sync_file_fn = sync_file_callback;
     normal_boot_capability = normal_boot;
     persistent_storage_capability = persistent_storage;
 }
@@ -230,6 +234,7 @@ pub fn initialize(
     system_context = null;
     shutdown_fn = null;
     sync_fn = null;
+    sync_file_fn = null;
     child_spawn_fn = null;
     normal_boot_capability = false;
     persistent_storage_capability = false;
@@ -2794,7 +2799,7 @@ fn syscallFsync(
         frame.rax = reject(errno_bad_fd);
         return 0;
     };
-    const persistent = activeDescriptors().persistentSyncRequired(
+    const persistent_node = activeDescriptors().persistentSyncNode(
         activeVfs(),
         activeProcesses(),
         context.handle,
@@ -2803,11 +2808,32 @@ fn syscallFsync(
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    if (!persistent) {
+    const node = persistent_node orelse {
         frame.rax = 0;
         return 0;
+    };
+    if (!persistent_storage_capability) {
+        frame.rax = reject(runtime_abi.errno_no_syscall);
+        return 0;
     }
-    return syscallSync(context, frame, fx_state);
+    const callback = sync_file_fn orelse {
+        frame.rax = reject(runtime_abi.errno_no_syscall);
+        return 0;
+    };
+    const user_root = context.space.pml4_address;
+    if (paging.currentCr3Address() != user_root or !paging.activateKernelAddressSpace()) {
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    }
+    const result = callback(system_context, node);
+    if (!paging.activateAddressSpace(user_root)) {
+        saveContext(context, frame, fx_state);
+        activeProcesses().fault(context.handle, 13, user_root) catch {};
+        faults +%= 1;
+        return 1;
+    }
+    frame.rax = if (result < 0) reject(result) else @intCast(result);
+    return 0;
 }
 
 fn blockAndRetry(

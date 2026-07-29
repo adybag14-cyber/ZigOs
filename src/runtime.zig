@@ -326,12 +326,12 @@ fn initialize(configuration: Configuration) !void {
             state.tty.initialize(state.shell_handle);
             try state.tty.setForeground(&state.processes, state.shell_handle);
             try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
-            runtime_user.setSystemBackend(null, null, syncPersistentStorage, false, state.persistence.report().mounted);
+            runtime_user.setSystemBackend(null, null, syncPersistentStorage, syncPersistentFile, false, state.persistence.report().mounted);
         },
         .normal => {
             try state.descriptors.bindProcess(&state.processes, init_handle, true);
             try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
-            runtime_user.setSystemBackend(null, requestNormalShutdown, syncPersistentStorage, true, state.persistence.report().mounted);
+            runtime_user.setSystemBackend(null, requestNormalShutdown, syncPersistentStorage, syncPersistentFile, true, state.persistence.report().mounted);
             runtime_user.setChildSpawnCallback(configureNormalChild);
             state.tty.initialize(init_handle);
             try state.processes.configureInitUserspace("init.elf", &.{"init.elf"}, state.cwd);
@@ -2254,6 +2254,12 @@ fn flushUserspaceOutput(handle: u64) void {
 fn syncPersistentStorage(_: ?*anyopaque) i64 {
     state.filesystem_syncs +%= 1;
     state.persistence.sync(&state.vfs) catch |err| return runtime_abi.fromError(err);
+    return 0;
+}
+
+fn syncPersistentFile(_: ?*anyopaque, node: u16) i64 {
+    state.filesystem_syncs +%= 1;
+    state.persistence.syncFile(&state.vfs, node) catch |err| return runtime_abi.fromError(err);
     return 0;
 }
 

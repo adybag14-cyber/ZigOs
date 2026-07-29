@@ -18,7 +18,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 78 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe two-boot persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 80 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe three-boot file-fsync persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -99,9 +99,9 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 - `/bin/c-sdk.elf` proving ABI 1.10 generated C layouts and wrappers, writable `/dev/null` and `/dev/zero`, an openable `/dev/console`, TTY ioctl flags, path `stat`, directory-descriptor and absolute `openat`, descriptor `fsync`, `symlink`, `readlink`, loop rejection, hard-link identity/stat link counts, sparse preallocation/hole punching and failure-atomic `readv`/`writev` before exiting with status `0x57`;
 - `/bin/init.elf` running as CPL3 PID 1, launching `/bin/sh.elf` through `spawnv`, waiting for PID 2, reaping it and issuing final shutdown;
 - the normal userspace shell copying `/bin/sdk.elf` to `/persist/persist-sdk.elf`, committing it through syscall 97, resolving `persist-sdk` through `PATH=/bin:/persist` and receiving status `0x56`;
-- the two-boot NVMe gate restoring and executing `/persist/persist-sdk.elf` before committing the alternate journal generation;
-- the same two-boot gate committing eight boot-one records, including a sparse allocation map, then restoring/verifying it in CPL3 and cleaning to three boot-two records;
-- `/bin/fs.elf` proving userspace `mkdir`, write, `lseek`, replacement rename over an open destination, chmod, persistent hard and symbolic links, sparse `fallocate`/hole punching, unlink-while-open with descriptor access and final-close reclamation, rmdir and sync, then reboot-verifying mode/content/offset/sparse holes and committing cleanup from CPL3;
+- the three-boot NVMe gate restoring and executing `/persist/persist-sdk.elf` after a forced-termination file-fsync generation;
+- the same gate committing eight boot-one records, replacing only one stable file record in boot two while an unrelated sparse file remains dirty, killing QEMU without shutdown, then recovery-verifying target data/mode/link aliases and exclusion of the unrelated dirty rewrite before cleaning to three boot-three records;
+- `/bin/fs.elf` proving userspace `mkdir`, write, `lseek`, replacement rename over an open destination, chmod, persistent hard and symbolic links, sparse `fallocate`/hole punching, unlink-while-open with descriptor access and final-close reclamation, global sync, file-scoped `fsync`, crash recovery and cleanup from CPL3;
 - the normal Zig shell exercising write, append, mkdir, rm, rmdir, mv and chmod without invoking the diagnostic kernel command implementation;
 - real `10.0.2.2` ICMP and `localhost` DNS results in the network profile;
 - explicit unavailable responses in the offline profile;
@@ -130,7 +130,7 @@ ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 
 # Normal userspace-shell profile
 ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes
-ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 99/99 storage persistent clean yes
+ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 101/101 storage persistent clean yes
 ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes
 
 # Diskless normal RAM-root recovery profile
@@ -306,7 +306,7 @@ zig-out/
     `-- runtime-*.elf
 ```
 
-`zig build test` executes ten canonical host-test roots covering 78 unique `std.testing` declarations across eleven source files, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence, ELF loading and the DNS codec. Imported tests may execute from more than one root, but the source contract counts each declaration once.
+`zig build test` executes ten canonical host-test roots covering 80 unique `std.testing` declarations across eleven source files, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence, ELF loading and the DNS codec. Imported tests may execute from more than one root, but the source contract counts each declaration once.
 
 `zig build check` runs formatting, all isolated tests, the UEFI build and portable PE/COFF verification.
 
@@ -353,11 +353,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    4,939,264 bytes
-SHA-256: 1CD8345631268BD6FA861FD4030FB44705D9AE94CB9C20FAED1378D39691842D
+Size:    5,009,408 bytes
+SHA-256: 42808FF6A224DC3D293E10458688DAB0B91AE572DE45B7DB0E2DB2FFB577FE59
 ```
 
-This identity is from the locally validated Windows diagnostic ABI 1.10 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots, per-inode ticket-locked atomic append, a shared sparse-file block pool with persistent allocation maps and failure-atomic bounded `readv`/`writev`. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic ABI 1.10 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots, per-inode ticket-locked atomic append, a shared sparse-file block pool with persistent allocation maps, failure-atomic bounded `readv`/`writev`, and transactional file-scoped `fsync` for stable committed paths. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
@@ -394,8 +394,8 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 78 unique isolated declarations, directly linked Zig/C SDK, init, shell and DNS verification, x86-64 UEFI build, portable PE verification and artifact upload.
-- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 45-command offline and 47-command live-network permanent COM1 sessions, the x86-64 NVMe two-boot proof, persistent and diskless normal boots, and the legacy i686 build/two-boot regression.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 80 unique isolated declarations, directly linked Zig/C SDK, init, shell and DNS verification, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 45-command offline and 47-command live-network permanent COM1 sessions, the x86-64 NVMe three-boot file-fsync proof, persistent and diskless normal boots, and the legacy i686 build/two-boot regression.
 - **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 
 A green badge therefore represents substantially more than the former reduced single-boot profile.
