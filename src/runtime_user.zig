@@ -485,6 +485,8 @@ pub fn handleSyscall(
         },
         syscall.syscall_write => return syscallWrite(context, frame, fx_state),
         syscall.syscall_read => return syscallRead(context, frame, fx_state),
+        syscall.syscall_writev => return syscallWritev(context, frame, fx_state),
+        syscall.syscall_readv => return syscallReadv(context, frame, fx_state),
         syscall.syscall_getpid => {
             const process = activeProcesses().get(context.handle) catch return forceFault(frame, fx_state, 13, frame.rip);
             frame.rax = process.pid;
@@ -2397,6 +2399,120 @@ fn syscallRead(
         return 0;
     }
     frame.rax = result.count;
+    return 0;
+}
+
+const IoVectorPlanError = error{ Invalid, TooBig, Fault };
+
+const IoVectorPlan = struct {
+    vectors: [runtime_abi.constants.maximum_iovecs]runtime_abi.IoVector = @splat(.{ .pointer = 0, .length = 0 }),
+    count: usize = 0,
+    total: usize = 0,
+};
+
+fn loadIoVectorPlan(context: *const Context, pointer: u64, count_value: u64, write_to_user: bool) IoVectorPlanError!IoVectorPlan {
+    const count = std.math.cast(usize, count_value) orelse return error.Invalid;
+    if (count > runtime_abi.constants.maximum_iovecs) return error.Invalid;
+    var plan = IoVectorPlan{ .count = count };
+    const descriptor_bytes = count * @sizeOf(runtime_abi.IoVector);
+    if (descriptor_bytes != 0) {
+        if (!validateRange(context, pointer, descriptor_bytes, false) or
+            !copyFromUser(context, pointer, std.mem.asBytes(&plan.vectors)[0..descriptor_bytes])) return error.Fault;
+    }
+    for (plan.vectors[0..count]) |vector| {
+        const length = std.math.cast(usize, vector.length) orelse return error.Invalid;
+        plan.total = std.math.add(usize, plan.total, length) catch return error.TooBig;
+        if (plan.total > maximum_io_bytes) return error.TooBig;
+        if (length != 0 and !validateRange(context, vector.pointer, length, write_to_user)) return error.Fault;
+    }
+    return plan;
+}
+
+fn rejectIoVectorPlan(frame: *interrupt_context.Frame, err: IoVectorPlanError) u64 {
+    frame.rax = reject(switch (err) {
+        error.Invalid => errno_invalid,
+        error.TooBig => runtime_abi.errno_too_big,
+        error.Fault => errno_fault,
+    });
+    return 0;
+}
+
+fn syscallWritev(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const plan = loadIoVectorPlan(context, frame.rsi, frame.rdx, false) catch |err| return rejectIoVectorPlan(frame, err);
+    const kind = activeDescriptors().descriptorKind(activeProcesses(), context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    var bytes: [maximum_io_bytes]u8 = undefined;
+    var gathered: usize = 0;
+    for (plan.vectors[0..plan.count]) |vector| {
+        const length: usize = @intCast(vector.length);
+        if (length == 0) continue;
+        if (!copyFromUser(context, vector.pointer, bytes[gathered .. gathered + length])) {
+            frame.rax = reject(errno_fault);
+            return 0;
+        }
+        gathered += length;
+    }
+    const io = activeDescriptors().write(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        fd,
+        bytes[0..plan.total],
+        current_tick,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (io.status == .blocked) return blockAndRetry(context, frame, fx_state);
+    if (kind == .terminal and io.count != 0) appendOutput(context, bytes[0..io.count]);
+    frame.rax = io.count;
+    return 0;
+}
+
+fn syscallReadv(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const plan = loadIoVectorPlan(context, frame.rsi, frame.rdx, true) catch |err| return rejectIoVectorPlan(frame, err);
+    var bytes: [maximum_io_bytes]u8 = undefined;
+    const io = activeDescriptors().read(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        fd,
+        bytes[0..plan.total],
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (io.status == .blocked) return blockAndRetry(context, frame, fx_state);
+    var scattered: usize = 0;
+    for (plan.vectors[0..plan.count]) |vector| {
+        if (scattered == io.count) break;
+        const vector_length: usize = @intCast(vector.length);
+        const count = @min(vector_length, io.count - scattered);
+        if (count != 0 and !copyToUser(context, vector.pointer, bytes[scattered .. scattered + count])) {
+            frame.rax = reject(errno_fault);
+            return 0;
+        }
+        scattered += count;
+    }
+    frame.rax = io.count;
     return 0;
 }
 

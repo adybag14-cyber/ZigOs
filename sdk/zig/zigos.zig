@@ -6,6 +6,7 @@ pub const WaitStatus = abi.WaitStatus;
 pub const Stat = abi.Stat;
 pub const DirectoryEntry = abi.DirectoryEntry;
 pub const PollDescriptor = abi.PollDescriptor;
+pub const IoVector = abi.IoVector;
 pub const Ipv4SocketAddress = abi.Ipv4SocketAddress;
 pub const UserString = abi.UserString;
 pub const SpawnRequest = abi.SpawnRequest;
@@ -166,6 +167,22 @@ pub fn write(fd: u16, bytes: []const u8) Error!usize {
 
 pub fn read(fd: u16, bytes: []u8) Error!usize {
     return @intCast(try result(zigos_syscall6(abi.syscall_read, fd, ptrValue(bytes.ptr), bytes.len, 0, 0, 0)));
+}
+
+pub fn writev(fd: u16, vectors: []const IoVector) Error!usize {
+    return @intCast(try result(zigos_syscall6(abi.syscall_writev, fd, ptrValue(vectors.ptr), vectors.len, 0, 0, 0)));
+}
+
+pub fn readv(fd: u16, vectors: []const IoVector) Error!usize {
+    return @intCast(try result(zigos_syscall6(abi.syscall_readv, fd, ptrValue(vectors.ptr), vectors.len, 0, 0, 0)));
+}
+
+pub fn constVector(bytes: []const u8) IoVector {
+    return .{ .pointer = ptrValue(bytes.ptr), .length = bytes.len };
+}
+
+pub fn mutableVector(bytes: []u8) IoVector {
+    return .{ .pointer = ptrValue(bytes.ptr), .length = bytes.len };
 }
 
 pub fn getpid() Error!u32 {

@@ -47,7 +47,7 @@ Delivered bounded slice:
 - permanent userspace shutdown with zero outstanding owned pages;
 - 4,096 ownership slots and allocation support preserving low and high firmware extents.
 
-The current permanent-runtime integration proves exact 247/247 offline and 278/278 live-network physical allocations/frees with the ABI 1.9 Zig/C and sparse-filesystem fixtures.
+The current permanent-runtime integration proves exact 247/247 offline and 278/278 live-network physical allocations/frees with the ABI 1.10 Zig/C, sparse-filesystem and vectored-I/O fixtures.
 
 Still open:
 
@@ -133,6 +133,7 @@ A separate bounded dentry lookup cache now stores generation-validated parent/na
 Mounts now form an explicit bounded tree. Every non-root mount records its parent mount, covered mountpoint and distinct mounted root; lookup and directory capabilities cross mountpoints, `..` escapes mounted roots through the parent namespace, canonical paths cross nested roots, and unmount requires child mounts and open descriptors to be released first. The kernel still has no public mount/unmount ABI and does not yet track process working directories as unmount references.
 Each inode now owns a portable ticket lock for data and size mutation. Ordinary writes, truncation and append share that lock; append holds it across EOF selection, data copy, file-size update and the calling open description's final offset. A four-thread host test verifies 128 fixed-size records appear exactly once without overlap or loss, while normal and diagnostic shutdown require nonzero lock activity and zero outstanding tickets.
 Ordinary-file bytes now live in a shared pool of 256 page-sized blocks instead of one dense 32 KiB array per node. Each file has eight logical block slots; absent slots read as zero, writes allocate touched slots transactionally, truncate/unlink return blocks, and ABI 1.9 `fallocate` supports bounded preallocation and hole punching. Journal kind 5 preserves logical size and the resident-block bitmap, including executable files whose final mode is `0555`. Required shutdown gates report and drain the pool lock and verify resident block/byte ownership. This remains a bounded 32 KiB-per-file design, not a scalable extent tree.
+ABI 1.10 adds synchronous vectored descriptor I/O without creating a second descriptor path. The kernel copies and validates at most eight 16-byte vector descriptors, validates every nonempty user range and the 1,024-byte aggregate limit before I/O, then performs one existing descriptor write from a gathered buffer or one descriptor read followed by scatter. Invalid later vectors therefore cannot partially mutate a file or consume its shared offset.
 
 Still open:
 
@@ -150,22 +151,23 @@ Still open:
 
 **Verdict: substantially addressed; stable external platform remains open.**
 
-Delivered through ABI 1.9:
+Delivered through ABI 1.10:
 
 - `abi/zigos-abi.json` remains the source of truth;
 - generated matching kernel Zig, NASM, public Zig and C constants/layouts;
-- syscall numbers 64-115 and typed errno values;
+- syscall numbers 64-117 and typed errno values;
 - capability discovery and SysV AMD64 argc/argv/envp/auxv startup;
 - Zig wrappers for process, VM, file, directory, poll and UDP APIs;
 - ABI 1.6 `ioctl`, path `stat`, `openat` and descriptor `fsync`;
 - ABI 1.7 `symlink` and `readlink` with an eight-link traversal bound;
 - ABI 1.8 hard-link creation and stat link counts without changing the 32-byte stat layout;
 - ABI 1.9 descriptor `fallocate`, `KEEP_SIZE` preallocation and `PUNCH_HOLE|KEEP_SIZE` sparse-hole release;
+- ABI 1.10 generated 16-byte `IoVector` layouts and descriptor `readv`/`writev`, bounded to eight vectors and 1,024 total bytes;
 - a generated `sdk/c/include/zigos.h` and freestanding C wrapper library;
 - independently linked Zig and C conformance ELFs;
 - userspace DNS codec/resolver, init and shell.
 
-The booted C fixture proves generated layout compatibility, ABI discovery, `/dev/null`, `/dev/zero`, `/dev/console`, TTY ioctl flags, path stat, directory-descriptor and absolute `openat` semantics, `fsync`, symbolic-link creation, `readlink`, traversal, loop rejection, hard-link identity/link counts, sparse preallocation, invalid-mode rejection and hole punching from a non-Zig application.
+The booted C fixture proves generated layout compatibility, ABI discovery, `/dev/null`, `/dev/zero`, `/dev/console`, TTY ioctl flags, path stat, directory-descriptor and absolute `openat` semantics, `fsync`, symbolic-link creation, `readlink`, traversal, loop rejection, hard-link identity/link counts, sparse preallocation, invalid-mode rejection, hole punching, gathered writes, scattered reads and failure-atomic vector validation from a non-Zig application.
 
 Still open:
 

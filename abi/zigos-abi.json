@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 9,
+    "minor": 10,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -71,7 +71,9 @@
     "symlink": 112,
     "readlink": 113,
     "link": 114,
-    "fallocate": 115
+    "fallocate": 115,
+    "readv": 116,
+    "writev": 117
   },
   "errno": {
     "permission": -1,
@@ -112,7 +114,8 @@
     "arguments": 8,
     "argument_bytes": 31,
     "environment": 8,
-    "environment_bytes": 63
+    "environment_bytes": 63,
+    "iovecs": 8
   },
   "auxiliary_vector": {
     "null": 0,

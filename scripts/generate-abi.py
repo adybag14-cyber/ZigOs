@@ -35,12 +35,14 @@ def generate(spec: dict) -> tuple[str, str, str]:
         f"pub const maximum_argument_bytes: usize = {limits['argument_bytes']};\n",
         f"pub const maximum_environment: usize = {limits['environment']};\n",
         f"pub const maximum_environment_bytes: usize = {limits['environment_bytes']};\n",
+        f"pub const maximum_iovecs: usize = {limits['iovecs']};\n",
     ])
     nasm.extend([
         f"%define ZIGOS_MAX_ARGUMENTS {limits['arguments']}\n",
         f"%define ZIGOS_MAX_ARGUMENT_BYTES {limits['argument_bytes']}\n",
         f"%define ZIGOS_MAX_ENVIRONMENT {limits['environment']}\n",
         f"%define ZIGOS_MAX_ENVIRONMENT_BYTES {limits['environment_bytes']}\n",
+        f"%define ZIGOS_MAX_IOVECS {limits['iovecs']}\n",
     ])
     zig.append("\n")
     nasm.append("\n")
@@ -158,6 +160,10 @@ def generate(spec: dict) -> tuple[str, str, str]:
         "    returned: u16,\n",
         "    reserved: u16,\n",
         "};\n\n",
+        "pub const IoVector = extern struct {\n",
+        "    pointer: u64,\n",
+        "    length: u64,\n",
+        "};\n\n",
         "pub const Ipv4SocketAddress = extern struct {\n",
         "    family: u16,\n",
         "    port_be: u16,\n",
@@ -200,6 +206,7 @@ def generate_c(spec: dict) -> str:
         f"#define ZIGOS_PAGE_SIZE UINT32_C({abi['page_size']})\n",
         f"#define ZIGOS_SYSCALL_BASE UINT16_C({abi['syscall_base']})\n",
         f"#define ZIGOS_SYSCALL_COUNT UINT16_C({max(syscall_values) - min(syscall_values) + 1})\n",
+        f"#define ZIGOS_MAX_IOVECS UINT64_C({spec['limits']['iovecs']})\n",
         "\n",
     ]
     for name, value in spec["auxiliary_vector"].items():
@@ -251,15 +258,19 @@ def generate_c(spec: dict) -> str:
         "typedef struct zigos_poll_descriptor {\n",
         "    uint16_t fd; uint16_t requested; uint16_t returned; uint16_t reserved;\n",
         "} zigos_poll_descriptor;\n\n",
+        "typedef struct zigos_iovec { uint64_t pointer; uint64_t length; } zigos_iovec;\n\n",
         "typedef struct zigos_auxv_entry { uint64_t kind; uint64_t value; } zigos_auxv_entry;\n\n",
         '_Static_assert(sizeof(zigos_abi_info) == 64, "zigos_abi_info layout");\n',
         '_Static_assert(sizeof(zigos_stat) == 32, "zigos_stat layout");\n',
-        '_Static_assert(sizeof(zigos_poll_descriptor) == 8, "zigos_poll_descriptor layout");\n\n',
+        '_Static_assert(sizeof(zigos_poll_descriptor) == 8, "zigos_poll_descriptor layout");\n',
+        '_Static_assert(sizeof(zigos_iovec) == 16, "zigos_iovec layout");\n\n',
         '#ifdef __cplusplus\nextern "C" {\n#endif\n',
         "uint64_t zigos_syscall6(uint64_t number, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6);\n",
         "int64_t zigos_exit(uint32_t status);\n",
         "int64_t zigos_write(uint16_t fd, const void *bytes, size_t length);\n",
         "int64_t zigos_read(uint16_t fd, void *bytes, size_t length);\n",
+        "int64_t zigos_readv(uint16_t fd, const zigos_iovec *vectors, size_t count);\n",
+        "int64_t zigos_writev(uint16_t fd, const zigos_iovec *vectors, size_t count);\n",
         "int64_t zigos_close(uint16_t fd);\n",
         "int64_t zigos_open(const char *path, uint64_t flags, uint16_t mode);\n",
         "int64_t zigos_openat(int64_t directory_fd, const char *path, uint64_t flags, uint16_t mode);\n",

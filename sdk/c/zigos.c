@@ -16,6 +16,14 @@ int64_t zigos_read(uint16_t fd, void *bytes, size_t length) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_READ, fd, pointer_value(bytes), length, 0, 0, 0);
 }
 
+int64_t zigos_readv(uint16_t fd, const zigos_iovec *vectors, size_t count) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_READV, fd, pointer_value(vectors), count, 0, 0, 0);
+}
+
+int64_t zigos_writev(uint16_t fd, const zigos_iovec *vectors, size_t count) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_WRITEV, fd, pointer_value(vectors), count, 0, 0, 0);
+}
+
 int64_t zigos_close(uint16_t fd) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
 }

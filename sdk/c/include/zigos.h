@@ -7,10 +7,11 @@
 
 #define ZIGOS_ABI_MAGIC UINT32_C(0x4942415A)
 #define ZIGOS_ABI_MAJOR UINT16_C(1)
-#define ZIGOS_ABI_MINOR UINT16_C(9)
+#define ZIGOS_ABI_MINOR UINT16_C(10)
 #define ZIGOS_PAGE_SIZE UINT32_C(4096)
 #define ZIGOS_SYSCALL_BASE UINT16_C(64)
-#define ZIGOS_SYSCALL_COUNT UINT16_C(52)
+#define ZIGOS_SYSCALL_COUNT UINT16_C(54)
+#define ZIGOS_MAX_IOVECS UINT64_C(8)
 
 #define ZIGOS_AUX_NULL UINT64_C(0)
 #define ZIGOS_AUX_PAGESZ UINT64_C(6)
@@ -98,6 +99,8 @@
 #define ZIGOS_SYS_READLINK UINT64_C(113)
 #define ZIGOS_SYS_LINK UINT64_C(114)
 #define ZIGOS_SYS_FALLOCATE UINT64_C(115)
+#define ZIGOS_SYS_READV UINT64_C(116)
+#define ZIGOS_SYS_WRITEV UINT64_C(117)
 
 #define ZIGOS_ERRNO_PERMISSION INT64_C(-1)
 #define ZIGOS_ERRNO_NOT_FOUND INT64_C(-2)
@@ -162,11 +165,14 @@ typedef struct zigos_poll_descriptor {
     uint16_t fd; uint16_t requested; uint16_t returned; uint16_t reserved;
 } zigos_poll_descriptor;
 
+typedef struct zigos_iovec { uint64_t pointer; uint64_t length; } zigos_iovec;
+
 typedef struct zigos_auxv_entry { uint64_t kind; uint64_t value; } zigos_auxv_entry;
 
 _Static_assert(sizeof(zigos_abi_info) == 64, "zigos_abi_info layout");
 _Static_assert(sizeof(zigos_stat) == 32, "zigos_stat layout");
 _Static_assert(sizeof(zigos_poll_descriptor) == 8, "zigos_poll_descriptor layout");
+_Static_assert(sizeof(zigos_iovec) == 16, "zigos_iovec layout");
 
 #ifdef __cplusplus
 extern "C" {
@@ -175,6 +181,8 @@ uint64_t zigos_syscall6(uint64_t number, uint64_t a1, uint64_t a2, uint64_t a3, 
 int64_t zigos_exit(uint32_t status);
 int64_t zigos_write(uint16_t fd, const void *bytes, size_t length);
 int64_t zigos_read(uint16_t fd, void *bytes, size_t length);
+int64_t zigos_readv(uint16_t fd, const zigos_iovec *vectors, size_t count);
+int64_t zigos_writev(uint16_t fd, const zigos_iovec *vectors, size_t count);
 int64_t zigos_close(uint16_t fd);
 int64_t zigos_open(const char *path, uint64_t flags, uint16_t mode);
 int64_t zigos_openat(int64_t directory_fd, const char *path, uint64_t flags, uint16_t mode);

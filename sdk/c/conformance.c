@@ -71,7 +71,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.9 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.10 discovery passed\r\n")) {
         return 0xC4;
     }
 
@@ -204,13 +204,59 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xD4, "fallocate sparse keep-size/punch");
     }
 
-    int64_t host_fd = zigos_openat(ZIGOS_AT_CWD, "/etc/hostname", ZIGOS_OPEN_READ, 0);
-    if (host_fd < 0 || zigos_fsync((uint16_t)host_fd) != 0 || zigos_close((uint16_t)host_fd) != 0) {
-        return fail(0xD5, "descriptor fsync");
+    static const char vector_path[] = "/tmp/c-sdk-vectors";
+    (void)remove_path(vector_path);
+    int64_t vector_fd = zigos_open(vector_path, ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE | ZIGOS_OPEN_CREATE | ZIGOS_OPEN_TRUNCATE, 0600);
+    static const char vector_a[] = "vec";
+    static const char vector_b[] = "tor";
+    static const char vector_c[] = "-io";
+    const zigos_iovec write_vectors[] = {
+        {(uint64_t)(uintptr_t)vector_a, sizeof(vector_a) - 1},
+        {0, 0},
+        {(uint64_t)(uintptr_t)vector_b, sizeof(vector_b) - 1},
+        {(uint64_t)(uintptr_t)vector_c, sizeof(vector_c) - 1},
+    };
+    const zigos_iovec invalid_write_vectors[] = {
+        {(uint64_t)(uintptr_t)vector_a, sizeof(vector_a) - 1},
+        {0, 1},
+    };
+    char vector_first[2] = {0};
+    char vector_second[3] = {0};
+    char vector_third[4] = {0};
+    const zigos_iovec read_vectors[] = {
+        {(uint64_t)(uintptr_t)vector_first, sizeof(vector_first)},
+        {(uint64_t)(uintptr_t)vector_second, sizeof(vector_second)},
+        {(uint64_t)(uintptr_t)vector_third, sizeof(vector_third)},
+    };
+    const zigos_iovec invalid_read_vectors[] = {
+        {(uint64_t)(uintptr_t)vector_first, sizeof(vector_first)},
+        {0, 1},
+    };
+    const zigos_iovec oversized_vector = {0, 1025};
+    if (vector_fd < 0 ||
+        zigos_writev((uint16_t)vector_fd, invalid_write_vectors, sizeof(invalid_write_vectors) / sizeof(invalid_write_vectors[0])) != ZIGOS_ERRNO_FAULT ||
+        zigos_fstat((uint16_t)vector_fd, &info) != 0 || info.size != 0 ||
+        zigos_writev((uint16_t)vector_fd, 0, 0) != 0 ||
+        zigos_writev((uint16_t)vector_fd, write_vectors, sizeof(write_vectors) / sizeof(write_vectors[0])) != 9 ||
+        zigos_syscall6(ZIGOS_SYS_LSEEK, (uint16_t)vector_fd, 0, ZIGOS_SEEK_START, 0, 0, 0) != 0 ||
+        zigos_readv((uint16_t)vector_fd, invalid_read_vectors, sizeof(invalid_read_vectors) / sizeof(invalid_read_vectors[0])) != ZIGOS_ERRNO_FAULT ||
+        zigos_readv((uint16_t)vector_fd, read_vectors, sizeof(read_vectors) / sizeof(read_vectors[0])) != 9 ||
+        vector_first[0] != 'v' || vector_first[1] != 'e' ||
+        vector_second[0] != 'c' || vector_second[1] != 't' || vector_second[2] != 'o' ||
+        vector_third[0] != 'r' || vector_third[1] != '-' || vector_third[2] != 'i' || vector_third[3] != 'o' ||
+        zigos_writev((uint16_t)vector_fd, write_vectors, ZIGOS_MAX_IOVECS + 1) != ZIGOS_ERRNO_INVALID ||
+        zigos_writev((uint16_t)vector_fd, &oversized_vector, 1) != ZIGOS_ERRNO_TOO_BIG ||
+        zigos_close((uint16_t)vector_fd) != 0 || remove_path(vector_path) != 0) {
+        return fail(0xD5, "readv/writev gather/scatter/limits");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse passed\r\n")) {
-        return 0xD6;
+    int64_t host_fd = zigos_openat(ZIGOS_AT_CWD, "/etc/hostname", ZIGOS_OPEN_READ, 0);
+    if (host_fd < 0 || zigos_fsync((uint16_t)host_fd) != 0 || zigos_close((uint16_t)host_fd) != 0) {
+        return fail(0xD6, "descriptor fsync");
+    }
+
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
+        return 0xD7;
     }
     return 0x57;
 }

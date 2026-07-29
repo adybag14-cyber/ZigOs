@@ -193,6 +193,10 @@ def main() -> int:
     require(sdk_source, "pub fn openat", "Zig SDK wraps openat")
     require(sdk_source, "pub fn fsync", "Zig SDK wraps descriptor fsync")
     require(sdk_source, "pub fn fallocate", "Zig SDK wraps sparse allocation and hole punching")
+    require(sdk_source, "pub fn writev", "Zig SDK wraps gathered descriptor writes")
+    require(sdk_source, "pub fn readv", "Zig SDK wraps scattered descriptor reads")
+    require(sdk_source, "pub fn constVector", "Zig SDK builds immutable vector descriptors")
+    require(sdk_source, "pub fn mutableVector", "Zig SDK builds mutable vector descriptors")
     require(sdk_init, "ZigOs userspace init PID 1", "standalone Zig init identifies its real PID 1 role")
     require(sdk_init, "zigos.spawnv", "userspace init launches the shell through the public ABI")
     require(sdk_init, "zigos.wait", "userspace init waits for and reaps the shell")
@@ -211,18 +215,18 @@ def main() -> int:
     require(diskless_normal_boot_test, "sync: unsupported", "diskless userspace reports persistence unavailability explicitly")
     require(diskless_normal_boot_test, "storage diskless-ram-root cleanup yes", "diskless QEMU gate requires clean resource reclamation")
     require(runtime, "ZigOs shutdown drain:", "diagnostic shutdown drains and reaps delayed terminal userspace")
-    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 9:
-        raise SystemExit("permanent-userspace contract missing: ABI version 1.9")
+    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 10:
+        raise SystemExit("permanent-userspace contract missing: ABI version 1.10")
     expected_fs_syscalls = {"lseek": 98, "mkdir": 99, "unlink": 100, "rmdir": 101, "rename": 102, "chmod": 103}
     expected_network_syscalls = {"sendto": 104, "recvfrom": 105, "getpeername": 106, "setnonblock": 107}
-    expected_platform_syscalls = {"ioctl": 108, "stat": 109, "openat": 110, "fsync": 111, "symlink": 112, "readlink": 113, "link": 114, "fallocate": 115}
+    expected_platform_syscalls = {"ioctl": 108, "stat": 109, "openat": 110, "fsync": 111, "symlink": 112, "readlink": 113, "link": 114, "fallocate": 115, "readv": 116, "writev": 117}
     syscall_spec = abi_spec["syscalls"]
     core_numbering_valid = syscall_spec.get("spawnv") == 96 and syscall_spec.get("sync") == 97
     fs_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_fs_syscalls.items())
     network_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_network_syscalls.items())
     platform_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_platform_syscalls.items())
     if not core_numbering_valid or not fs_numbering_valid or not network_numbering_valid or not platform_numbering_valid:
-        raise SystemExit("permanent-userspace contract missing: ABI 1.9 syscall numbering")
+        raise SystemExit("permanent-userspace contract missing: ABI 1.10 syscall numbering")
     if abi_spec.get("message_flags") != {"dontwait": 1}:
         raise SystemExit("permanent-userspace contract missing: bounded MSG_DONTWAIT value")
     if abi_spec.get("fallocate_flags") != {"keep_size": 0, "punch_hole": 1}:
@@ -234,8 +238,12 @@ def main() -> int:
         "argument_bytes": 31,
         "environment": 8,
         "environment_bytes": 63,
+        "iovecs": 8,
     }:
         raise SystemExit("permanent-userspace contract missing: bounded spawn-vector limits")
+    require(runtime_abi, "pub const IoVector = extern struct", "ABI publishes a stable 16-byte vectored-I/O descriptor")
+    require(runtime_abi, "@sizeOf(IoVector)", "ABI layout test covers vectored-I/O descriptors")
+    require(runtime_abi, "constants.maximum_iovecs", "kernel ABI consumes the generated eight-vector limit")
     require(runtime_abi, "pub const UserString = extern struct", "ABI publishes bounded user-string descriptors")
     require(runtime_abi, "pub const SpawnRequest = extern struct", "ABI publishes spawnv request layout")
     require(runtime_abi, "pub const AuxvEntry = extern struct", "ABI publishes auxiliary-vector entries")
@@ -267,6 +275,16 @@ def main() -> int:
     require(executor, "syscallRename", "ABI copies both rename paths before mutation")
     require(executor, "syscallChmod", "ABI exposes permission-bit mutation")
     require(executor, "syscallFallocate", "ABI exposes checked descriptor sparse allocation and hole punching")
+    require(executor, "fn loadIoVectorPlan", "kernel copies and validates every vector descriptor before I/O")
+    require(executor, "count > runtime_abi.constants.maximum_iovecs", "kernel rejects more than eight vectors before descriptor-array copy")
+    require(executor, "plan.total > maximum_io_bytes", "vectored I/O preserves the 1024-byte syscall transfer ceiling")
+    require(executor, "validateRange(context, vector.pointer, length, write_to_user)", "all vector data ranges are validated before descriptor I/O")
+    require(executor, "fn syscallWritev", "kernel gathers vectors before one descriptor write")
+    require(executor, "fn syscallReadv", "kernel performs one descriptor read before scattering bytes")
+    require(executor, "bytes[0..plan.total]", "both vectored syscalls use one bounded contiguous staging transaction")
+    require(executor, "for (plan.vectors[0..plan.count])", "kernel gathers and scatters only the validated vector plan")
+    require(executor, "syscall.syscall_writev => return syscallWritev", "ABI dispatch reaches writev")
+    require(executor, "syscall.syscall_readv => return syscallReadv", "ABI dispatch reaches readv")
     require(runtime_abi, "pub fn fallocateFlagBits", "kernel ABI rejects unknown and contradictory fallocate modes")
     require(fd_source, "pub fn fallocate", "descriptor layer enforces VFS ownership and writability for fallocate")
     for wrapper in ("pub fn lseek", "pub fn mkdir", "pub fn unlink", "pub fn rmdir", "pub fn rename", "pub fn chmod"):
@@ -409,7 +427,10 @@ def main() -> int:
     require(build_graph, "sdk/c/conformance.c", "build graph compiles an independent freestanding C conformance program")
     require(build_graph, '"artifacts/c-sdk.elf"', "C SDK conformance is installed as a standalone artifact")
     require(runtime, '"/bin/c-sdk.elf"', "C SDK conformance is installed in the runtime VFS")
-    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(9)", "generated C header publishes ABI 1.9")
+    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(10)", "generated C header publishes ABI 1.10")
+    require(c_header, "ZIGOS_MAX_IOVECS UINT64_C(8)", "generated C header publishes the eight-vector bound")
+    require(c_header, "typedef struct zigos_iovec", "generated C header publishes the stable iovec layout")
+    require(c_header, 'sizeof(zigos_iovec) == 16', "generated C header asserts the iovec binary layout")
     require(c_header, "ZIGOS_IOCTL_TTY_GET_FLAGS", "generated C header publishes terminal ioctl requests")
     require(c_library, "zigos_openat", "C wrapper library exposes openat")
     require(c_library, "zigos_fsync", "C wrapper library exposes descriptor fsync")
@@ -417,9 +438,13 @@ def main() -> int:
     require(c_library, "zigos_readlink", "C wrapper library exposes link-target reads")
     require(c_library, "zigos_link", "C wrapper library exposes hard-link creation")
     require(c_library, "zigos_fallocate", "C wrapper library exposes sparse allocation and hole punching")
+    require(c_library, "zigos_readv", "C wrapper library exposes vectored reads")
+    require(c_library, "zigos_writev", "C wrapper library exposes vectored writes")
     require(c_header, "ZIGOS_FALLOCATE_KEEP_SIZE", "generated C header publishes sparse allocation flags")
     require(c_header, "uint8_t link_count", "generated C stat layout exposes namespace link counts")
-    require(c_conformance, "generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse passed", "booted C fixture covers devices, links, sparse allocation and hole punching")
+    require(c_conformance, "generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed", "booted C fixture covers devices, links, sparse allocation and vectored I/O")
+    require(c_conformance, "invalid_write_vectors", "C fixture proves vector prevalidation prevents partial writes")
+    require(c_conformance, "invalid_read_vectors", "C fixture proves vector prevalidation preserves read offsets")
     require(c_conformance, "nondirectory != ZIGOS_ERRNO_NOT_DIRECTORY", "C fixture rejects relative openat on a non-directory descriptor")
     require(c_conformance, 'INT64_C(32767), "/etc/hostname"', "absolute openat ignores an otherwise invalid directory descriptor")
     require(sdk_startup, "mov rdi, [r12]", "SDK startup reads argc from the canonical initial stack")
@@ -455,7 +480,11 @@ def main() -> int:
     require(socket_conformance, "SYS_SETNONBLOCK", "CPL3 socket fixture checks socket-level nonblocking mode")
     require(socket_conformance, "ZIGOS_MSG_DONTWAIT", "CPL3 socket fixture checks per-call nonblocking mode")
     require(runtime_test, "socket-api: sendto/recvfrom/getpeername/nonblocking passed", "required live QEMU session proves ABI 1.6 UDP controls")
-    require(sdk_conformance, "startup/argv/abi/files/vm/errno passed", "Zig conformance binary spans startup and core wrappers")
+    require(sdk_conformance, "startup/argv/abi/files/vm/errno/readv/writev passed", "Zig conformance binary spans startup, core wrappers and vectored I/O")
+    require(sdk_conformance, "invalid_write_vectors", "Zig fixture proves invalid later vectors cause no partial write")
+    require(sdk_conformance, "invalid_read_vectors", "Zig fixture proves invalid later destinations do not consume the shared offset")
+    require(sdk_conformance, "constants.maximum_iovecs + 1", "Zig fixture proves the generated vector-count bound")
+    require(sdk_conformance, "info.maximum_io_bytes + 1", "Zig fixture proves the total-byte limit")
     require(sdk_abi, "pub const AbiInfo = extern struct", "generated SDK ABI publishes stable structure layouts")
     require(sdk_verifier, "physical not in (0, virtual)", "SDK ELF verifier accepts only zero or conventional p_paddr")
     require(elf_source, "section_header_offset", "production loader validates optional standard section tables")
@@ -658,9 +687,9 @@ def main() -> int:
         "reclaimed 247 stale-contexts-swept 0 allocator alloc/release/retains 247/247/0",
         "reclaimed 278 stale-contexts-swept 0 allocator alloc/release/retains 278/278/0",
         "tty-api: blocking read/poll/line discipline passed",
-        "zig-sdk: startup/argv/abi/files/vm/errno passed",
-        "c-sdk: ABI 1.9 discovery passed",
-        "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse passed",
+        "zig-sdk: startup/argv/abi/files/vm/errno/readv/writev passed",
+        "c-sdk: ABI 1.10 discovery passed",
+        "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
         "ZigOs shutdown drain:",
         " data-lock tickets/outstanding ",
         " pool-lock tickets/outstanding ",
@@ -691,7 +720,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.9 Zig/C SDKs, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.10 Zig/C SDKs, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

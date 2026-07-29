@@ -129,6 +129,11 @@ pub const PollDescriptor = extern struct {
     reserved: u16 = 0,
 };
 
+pub const IoVector = extern struct {
+    pointer: u64,
+    length: u64,
+};
+
 pub const Ipv4SocketAddress = extern struct {
     family: u16,
     port_be: u16,
@@ -322,6 +327,8 @@ test "kernel errors retain distinct userspace errno values" {
 }
 
 test "spawnv request and startup vector layouts are stable" {
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(IoVector));
+    try std.testing.expectEqual(@as(usize, 8), constants.maximum_iovecs);
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(UserString));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(SpawnRequest));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(AuxvEntry));

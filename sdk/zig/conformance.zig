@@ -8,7 +8,7 @@ const argv2_fail_message = "zig-sdk: bad argv2\r\n";
 const argv_message = "zig-sdk: argc/argv passed\r\n";
 const abi_message = "zig-sdk: ABI discovery passed\r\n";
 const startup_vector_message = "zig-sdk: envp/auxv passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/errno passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/errno/readv/writev passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -93,6 +93,54 @@ fn run() zigos.Error!void {
     var bytes: [128]u8 = undefined;
     const count = try zigos.read(fd, &bytes);
     if (count < 5 or !contains(bytes[0..count], "ZigOs")) return error.InvalidArgument;
+
+    const vector_path = "/tmp/zig-sdk-vectors";
+    zigos.unlink(vector_path) catch {};
+    const vector_fd = try zigos.open(vector_path, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o600);
+    const write_vectors = [_]zigos.IoVector{
+        zigos.constVector("vec"),
+        zigos.constVector(""),
+        zigos.constVector("tor"),
+        zigos.constVector("-io"),
+    };
+    const invalid_write_vectors = [_]zigos.IoVector{
+        zigos.constVector("bad"),
+        .{ .pointer = 0, .length = 1 },
+    };
+    if (zigos.writev(vector_fd, &invalid_write_vectors)) |_| return error.InvalidArgument else |err| {
+        if (err != error.Fault) return err;
+    }
+    var vector_status: zigos.Stat = undefined;
+    try zigos.fstat(vector_fd, &vector_status);
+    if (vector_status.size != 0 or try zigos.writev(vector_fd, &.{}) != 0 or try zigos.writev(vector_fd, &write_vectors) != 9) return error.InvalidArgument;
+    if (try zigos.lseek(vector_fd, 0, .start) != 0) return error.InvalidArgument;
+    var first: [2]u8 = undefined;
+    var second: [3]u8 = undefined;
+    var third: [4]u8 = undefined;
+    const read_vectors = [_]zigos.IoVector{
+        zigos.mutableVector(&first),
+        zigos.mutableVector(&second),
+        zigos.mutableVector(&third),
+    };
+    const invalid_read_vectors = [_]zigos.IoVector{
+        zigos.mutableVector(&first),
+        .{ .pointer = 0, .length = 1 },
+    };
+    if (zigos.readv(vector_fd, &invalid_read_vectors)) |_| return error.InvalidArgument else |err| {
+        if (err != error.Fault) return err;
+    }
+    if (try zigos.readv(vector_fd, &read_vectors) != 9 or
+        !equal(&first, "ve") or !equal(&second, "cto") or !equal(&third, "r-io")) return error.InvalidArgument;
+    var too_many: [zigos.constants.maximum_iovecs + 1]zigos.IoVector = @splat(.{ .pointer = 0, .length = 0 });
+    if (zigos.writev(vector_fd, &too_many)) |_| return error.InvalidArgument else |err| {
+        if (err != error.InvalidArgument) return err;
+    }
+    const oversized = [_]zigos.IoVector{.{ .pointer = 0, .length = info.maximum_io_bytes + 1 }};
+    if (zigos.writev(vector_fd, &oversized)) |_| return error.InvalidArgument else |err| {
+        if (err != error.TooBig) return err;
+    }
+    try zigos.close(vector_fd);
+    try zigos.unlink(vector_path);
 
     const mapping = try zigos.mmap(null, zigos.constants.abi_page_size, .{ .read = true, .write = true }, .{});
     mapping[0] = 0x5A;
