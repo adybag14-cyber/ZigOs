@@ -326,12 +326,12 @@ fn initialize(configuration: Configuration) !void {
             state.tty.initialize(state.shell_handle);
             try state.tty.setForeground(&state.processes, state.shell_handle);
             try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
-            runtime_user.setSystemBackend(null, null, syncPersistentStorage, syncPersistentFile, false, state.persistence.report().mounted);
+            runtime_user.setSystemBackend(null, null, syncAllWritableMounts, syncPersistentFile, false, state.persistence.report().mounted);
         },
         .normal => {
             try state.descriptors.bindProcess(&state.processes, init_handle, true);
             try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
-            runtime_user.setSystemBackend(null, requestNormalShutdown, syncPersistentStorage, syncPersistentFile, true, state.persistence.report().mounted);
+            runtime_user.setSystemBackend(null, requestNormalShutdown, syncAllWritableMounts, syncPersistentFile, true, state.persistence.report().mounted);
             runtime_user.setChildSpawnCallback(configureNormalChild);
             state.tty.initialize(init_handle);
             try state.processes.configureInitUserspace("init.elf", &.{"init.elf"}, state.cwd);
@@ -1983,10 +1983,16 @@ fn commandHistory(output: *Output) void {
 }
 
 fn commandSync(output: *Output) void {
-    const result = syncPersistentStorage(null);
+    const result = syncAllWritableMounts(null);
     if (result < 0) return shellError("sync", error.PersistentSyncFailed, output);
     const report = state.persistence.report();
-    output.write("sync complete: ramfs mutations ");
+    output.write("sync complete: writable mounts ");
+    output.decimal(report.writable_mount_syncs);
+    output.write(" immediate ");
+    output.decimal(report.immediate_mount_syncs);
+    output.write(" durable ");
+    output.decimal(report.durable_mount_syncs);
+    output.write("; ramfs mutations ");
     output.decimal(state.vfs.report().mutations);
     output.write("; persistent generation ");
     output.decimal(report.generation);
@@ -2251,7 +2257,7 @@ fn flushUserspaceOutput(handle: u64) void {
     }
 }
 
-fn syncPersistentStorage(_: ?*anyopaque) i64 {
+fn syncAllWritableMounts(_: ?*anyopaque) i64 {
     state.filesystem_syncs +%= 1;
     state.persistence.sync(&state.vfs) catch |err| return runtime_abi.fromError(err);
     return 0;
@@ -2323,9 +2329,18 @@ fn finishNormalRuntime() noreturn {
     const physical_rejections = physical_report.invalid_frees + physical_report.double_frees + physical_report.metadata_failures;
     const diskless_recovery = !state.config.nvme_ready and !state.config.ahci_ready;
     const persistence_clean = if (persistence_report.mounted)
-        persistence_report.io_failures == 0 and persistence_report.corrupt_headers == 0
+        persistence_report.io_failures == 0 and persistence_report.corrupt_headers == 0 and
+            persistence_report.global_syncs >= 1 and
+            persistence_report.writable_mount_syncs == persistence_report.global_syncs * 2 and
+            persistence_report.immediate_mount_syncs == persistence_report.global_syncs and
+            persistence_report.durable_mount_syncs == persistence_report.global_syncs and
+            persistence_report.rejected_sync_plans == 0
     else
         diskless_recovery and persistence_report.mounts == 0 and persistence_report.syncs == 0 and
+            persistence_report.global_syncs >= 1 and
+            persistence_report.writable_mount_syncs == persistence_report.global_syncs and
+            persistence_report.immediate_mount_syncs == persistence_report.global_syncs and
+            persistence_report.durable_mount_syncs == 0 and persistence_report.rejected_sync_plans == 0 and
             persistence_report.io_failures == 0 and persistence_report.corrupt_headers == 0;
     const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
         fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases and fs_report.dentry_cache_hits > 0 and
@@ -2441,7 +2456,11 @@ fn finishDiagnosticRuntime() noreturn {
     const nvme_controller = state.config.nvme_controller;
     const persistence_clean = persistence_report.mounted and persistence_report.generation >= 1 and
         persistence_report.syncs >= 1 and persistence_report.checks >= 1 and persistence_report.io_failures == 0 and
-        persistence_report.corrupt_headers == 0 and nvme_controller != null and
+        persistence_report.corrupt_headers == 0 and persistence_report.global_syncs >= 1 and
+        persistence_report.writable_mount_syncs == persistence_report.global_syncs * 2 and
+        persistence_report.immediate_mount_syncs == persistence_report.global_syncs and
+        persistence_report.durable_mount_syncs == persistence_report.global_syncs and
+        persistence_report.rejected_sync_plans == 0 and nvme_controller != null and
         nvme_controller.?.write_commands == persistence_report.payload_writes + persistence_report.header_writes and
         nvme_controller.?.flush_commands == persistence_report.flushes;
     const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
@@ -2621,6 +2640,16 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(persistence_report.checks);
     emit("/");
     emitDecimal(persistence_report.recoveries);
+    emit(" global/mount/immediate/durable/reject ");
+    emitDecimal(persistence_report.global_syncs);
+    emit("/");
+    emitDecimal(persistence_report.writable_mount_syncs);
+    emit("/");
+    emitDecimal(persistence_report.immediate_mount_syncs);
+    emit("/");
+    emitDecimal(persistence_report.durable_mount_syncs);
+    emit("/");
+    emitDecimal(persistence_report.rejected_sync_plans);
     emit(" payload/header/flush ");
     emitDecimal(persistence_report.payload_writes);
     emit("/");

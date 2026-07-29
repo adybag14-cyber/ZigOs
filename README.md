@@ -18,7 +18,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 81 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe four-boot fsync/fdatasync persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 83 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe four-boot fsync/fdatasync persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -32,7 +32,7 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 - up to 64 retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 4,096-slot ownership table;
 - private CR3 roots, strict W^X `PT_LOAD` mappings, eight-page stacks and unmapped guards;
 - complete GPR and FXSAVE context preservation across syscalls and timer preemption;
-- a pointer-validated ABI 1.11 with generated kernel Zig, NASM, public Zig and C interfaces, capability discovery, bounded `spawnv`, System V-style argv/envp/auxv startup, persistent `sync`, descriptor `lseek`/`fsync`/`fdatasync`/`fallocate`/`readv`/`writev`, path `stat`, `openat`, TTY `ioctl`, pathname mutation, sparse preallocation/hole punching, UDP datagram controls, exact waitpid, wait-any and WNOHANG;
+- a pointer-validated ABI 1.11 with generated kernel Zig, NASM, public Zig and C interfaces, capability discovery, bounded `spawnv`, System V-style argv/envp/auxv startup, all-writable-mount `sync`, descriptor `lseek`/`fsync`/`fdatasync`/`fallocate`/`readv`/`writev`, path `stat`, `openat`, TTY `ioctl`, pathname mutation, sparse preallocation/hole punching, UDP datagram controls, exact waitpid, wait-any and WNOHANG;
 - freestanding Zig and C SDKs with generated ABI structures, a SysV AMD64 startup/syscall shim, typed file/process/VM/poll/UDP/filesystem wrappers, a bounded DNS A resolver, environment/auxiliary helpers, a directly linked `/bin/init.elf`, and independently verified `/bin/sdk.elf`, `/bin/fs.elf`, `/bin/dns.elf` and `/bin/c-sdk.elf` conformance programs;
 - an explicit `-Dnormal-boot=true` profile that skips the software proof suite, attaches `/bin/init.elf` to the reserved PID 1 handle, lets that CPL3 init supervise `/bin/sh.elf` as PID 2, and falls back to a tested RAM-root recovery session when no NVMe or SATA backend is usable;
 - page-granular anonymous `mmap`, subrange `munmap`, W^X `mprotect` and expandable/shrinkable `brk`;
@@ -353,11 +353,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    5,011,456 bytes
-SHA-256: 0729FE9BE980CE89FB96BD89C71CDE9E7E2E2E95AE1978E9E940664E2B17355B
+Size:    5,012,480 bytes
+SHA-256: B5B13ECFBA1EB3BA7F19DEC8B2BFAE2BEEAC1A5D9496BA3AF51EF19D483C0994
 ```
 
-This identity is from the locally validated Windows diagnostic ABI 1.11 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots, per-inode ticket-locked atomic append, a shared sparse-file block pool with persistent allocation maps, failure-atomic bounded `readv`/`writev`, transactional file-scoped `fsync`, and data-only `fdatasync` with committed-mode preservation for stable committed paths. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic ABI 1.11 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots, per-inode ticket-locked atomic append, a shared sparse-file block pool with persistent allocation maps, failure-atomic bounded `readv`/`writev`, transactional file-scoped `fsync`, data-only `fdatasync` with committed-mode preservation for stable committed paths, and transactional global `sync` that prevalidates and visits every writable mount, treats RAM filesystems as immediately synchronized, commits the configured persistent mount once, skips read-only mounts and rejects unsupported writable backends before journal I/O. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 

@@ -247,7 +247,7 @@ fn commandWrite(command: *const Command, append: bool) void {
 
 fn commandSync() void {
     zigos.sync() catch |err| return printError("sync", err);
-    zigos.writeAll(1, "persistent storage synchronized\r\n") catch {};
+    zigos.writeAll(1, "writable mounts synchronized\r\n") catch {};
 }
 
 fn commandPid() void {

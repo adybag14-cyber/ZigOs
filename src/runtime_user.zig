@@ -962,10 +962,6 @@ fn syscallSync(
     frame: *interrupt_context.Frame,
     fx_state: *align(16) interrupt_context.FxState,
 ) u64 {
-    if (!persistent_storage_capability) {
-        frame.rax = reject(runtime_abi.errno_no_syscall);
-        return 0;
-    }
     const callback = sync_fn orelse {
         frame.rax = reject(runtime_abi.errno_no_syscall);
         return 0;

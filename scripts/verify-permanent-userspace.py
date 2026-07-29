@@ -131,7 +131,8 @@ def main() -> int:
     require(nvme_source, "pub fn enterRuntimePollingMode", "NVMe interrupts are explicitly handed off to bounded runtime polling")
     require(runtime, "initializePersistentStorage", "permanent runtime mounts the retained data partition")
     require(runtime, "runtime_persist.BlockDevice", "persistence is layered over a generic block interface")
-    require(runtime, "state.persistence.sync(&state.vfs)", "sync commits the persistent VFS subtree")
+    require(runtime, "state.persistence.sync(&state.vfs)", "global sync executes the validated writable-mount plan")
+    require(runtime, "syncAllWritableMounts", "runtime exposes one backend for persistent and ramfs-only global sync")
     require(runtime, "state.persistence.check()", "fsck validates the committed journal generation")
     require(runtime, "ZigOs persistent storage:", "shutdown reports persistent generation and device accounting")
     require(runtime, "persistence_clean", "release gate requires a valid committed journal")
@@ -141,6 +142,13 @@ def main() -> int:
     require(persist_source, "device.write(slot, self.sector[0..block_size], true)", "the generation header is committed with FUA")
     require(persist_source, "gpt.crc32(next_payload", "journal scratch payloads are checksummed before commit")
     require(persist_source, "next_payload: [maximum_payload_bytes]u8", "global and file-scoped commits use a separate transactional payload")
+    require(persist_source, "fn planWritableMounts", "global sync validates every active writable mount before I/O")
+    require(persist_source, "if (!mount_entry.used or mount_entry.readonly) continue", "global sync skips only unused or explicitly read-only mounts")
+    require(persist_source, ".ramfs => plan.immediate_mounts", "memory-backed writable mounts are acknowledged as immediately synchronized")
+    require(persist_source, ".boot_fat, .procfs, .devfs, .netfs => return Error.UnsupportedOperation", "unknown writable backend policies fail rather than being silently skipped")
+    require(persist_source, "mount_entry.id != self.mount_id", "global sync rejects unconfigured or duplicate persistent mounts")
+    require(persist_source, 'test "global sync succeeds for a ramfs only writable mount table"', "isolated test proves diskless global sync success")
+    require(persist_source, 'test "global sync covers writable mounts and rejects invalid plans before journal writes"', "isolated test proves complete visitation, read-only skipping and pre-I/O rejection")
     require(persist_source, "pub fn syncFile", "persistent store exposes one-file data-and-metadata snapshot replacement")
     require(persist_source, "pub fn syncFileData", "persistent store exposes data-only one-file snapshot replacement")
     require(persist_source, "committed_mode = record_mode", "fdatasync retains mode from the last committed target record")
@@ -228,7 +236,8 @@ def main() -> int:
     require(kernel, "continuing normal boot with embedded assets and RAM-backed root", "normal boot no longer hard-fails without permanent storage")
     require(runtime, "diskless-ram-root", "normal shutdown distinguishes the diskless recovery profile")
     require(diskless_normal_boot_test, "usb-storage", "diskless gate boots the EFI image from unsupported USB storage")
-    require(diskless_normal_boot_test, "sync: unsupported", "diskless userspace reports persistence unavailability explicitly")
+    require(diskless_normal_boot_test, "writable mounts synchronized", "diskless userspace proves ramfs-only global sync")
+    require(diskless_normal_boot_test, '"sync: unsupported",', "diskless gate forbids regression to persistence-gated global sync")
     require(diskless_normal_boot_test, "storage diskless-ram-root cleanup yes", "diskless QEMU gate requires clean resource reclamation")
     require(runtime, "ZigOs shutdown drain:", "diagnostic shutdown drains and reaps delayed terminal userspace")
     if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 11:
@@ -276,13 +285,15 @@ def main() -> int:
     require(sdk_conformance, "zig-sdk: envp/auxv passed", "SDK conformance validates startup vectors")
     require(normal_boot_test, "persist-sdk alpha beta", "normal QEMU gate proves persistent PATH lookup, argv and inherited envp")
     require(normal_boot_test, "process 4 exited 86", "normal QEMU gate proves spawnv child status")
-    require(executor, "syscallSync", "userspace can commit the persistent VFS through the versioned ABI")
-    require(runtime, "syncPersistentStorage", "sync syscall reaches the crash-safe journal backend")
-    require(sdk_source, "pub fn sync", "SDK exposes persistence sync")
+    require(executor, "syscallSync", "userspace can synchronize every configured writable mount through the versioned ABI")
+    sync_syscall = executor[executor.index("fn syscallSync"):executor.index("fn syscallShutdown", executor.index("fn syscallSync"))]
+    forbid(sync_syscall, "persistent_storage_capability", "global sync must remain available on ramfs-only systems")
+    require(runtime, "syncAllWritableMounts", "sync syscall reaches the validated all-writable-mount backend")
+    require(sdk_source, "pub fn sync", "SDK exposes global writable-mount sync")
     require(sdk_shell, "fn commandCp", "userspace shell copies files through descriptors")
     require(sdk_shell, "fn spawnFromPath", "userspace shell searches multiple PATH directories")
     require(normal_boot_test, "cp /bin/sdk.elf /persist/persist-sdk.elf", "normal profile installs an ELF into the persistent mount")
-    require(normal_boot_test, "persistent storage synchronized", "normal profile commits the installed ELF")
+    require(normal_boot_test, "writable mounts synchronized", "normal profile synchronizes ramfs and the persistent mount")
     require(normal_boot_test, "fs verify-live", "normal profile runs the same-boot baseline verifier without invoking crash-recovery assumptions")
     require(normal_boot_test, "baseline/mode/seek/hard-link/symlink/fallocate/sparse/cleanup passed", "normal profile cleans the baseline filesystem fixture in one boot")
     require(persistence_test, "exec /persist/persist-sdk.elf alpha beta", "boot four executes the restored persistent ELF")
@@ -649,8 +660,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 81:
-        raise SystemExit(f"canonical isolated-test declaration total must be 81, found {declared_tests}")
+    if declared_tests != 83:
+        raise SystemExit(f"canonical isolated-test declaration total must be 83, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -726,9 +737,9 @@ def main() -> int:
         " blocks/bytes/holes ",
         "exec: PID 16 state zombie status 0x56",
         "ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes",
-        "sync complete: ramfs mutations ",
+        "sync complete: writable mounts 2 immediate 1 durable 1; ramfs mutations ",
         "fsck ramfs/persist: clean",
-        "ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 payload/header/flush 1/1/2 NVMe read/write/flush ",
+        "ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 global/mount/immediate/durable/reject 1/2/1/1/0 payload/header/flush 1/1/2 NVMe read/write/flush ",
         " errors 0/0 clean yes",
         "persistent-storage yes canned-results no explicit-shutdown yes",
         "ZigOs permanent userspace: page-limit 4096 used 0",
@@ -750,7 +761,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

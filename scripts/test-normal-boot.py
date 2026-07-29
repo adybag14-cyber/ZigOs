@@ -223,7 +223,7 @@ def main() -> int:
             send(client, process, serial, "rmdir /persist/shell-state", PROMPT_ROOT)
             send(client, process, serial, "run hello", b"process 3 exited 42", 40)
             send(client, process, serial, "cp /bin/sdk.elf /persist/persist-sdk.elf", sdk_copy_marker.encode("ascii"), 40)
-            send(client, process, serial, "sync", b"persistent storage synchronized", 40)
+            send(client, process, serial, "sync", b"writable mounts synchronized", 40)
             send(client, process, serial, "persist-sdk alpha beta", b"process 4 exited 86", 40)
             send(client, process, serial, "fs init", b"process 5 exited 88", 60)
             send(client, process, serial, "fs verify-live", b"process 6 exited 89", 60)
@@ -241,7 +241,7 @@ def main() -> int:
                 "hello from VFS-loaded CPL3 ELF64",
                 "process 3 exited 42",
                 sdk_copy_marker,
-                "persistent storage synchronized",
+                "writable mounts synchronized",
                 "zig-sdk: envp/auxv passed",
                 "zig-sdk: startup/argv/abi/files/vm/errno/fsync/fdatasync/readv/writev passed",
                 "process 4 exited 86",

@@ -137,6 +137,8 @@ ABI 1.10 adds synchronous vectored descriptor I/O without creating a second desc
 
 Persistent `fsync(fd)` and ABI 1.11 `fdatasync(fd)` resolve the exact VFS node and replace only that existing stable file record in a separate scratch payload built from the last committed generation. Both exclude unrelated dirty VFS state and preserve the committed in-memory baseline on device-write failure. `fsync` records current data, logical size, sparse allocation map and mode; `fdatasync` records current data/size/allocation while retaining the mode from the prior committed record. A required four-boot gate creates generation 1, kills QEMU after a generation-2 fsync and a generation-3 fdatasync, then proves full fsync metadata durability, fdatasync dirty-mode exclusion, link-alias recovery and unrelated sparse-state exclusion before generation-4 cleanup. New names and changed rename/link topology still require global `sync`.
 
+Global `sync` now operates over the complete active writable-mount table rather than being hard-wired to `/persist`. The store validates the full plan before device I/O, visits writable mounts in ID order, treats RAM filesystems as immediately synchronized, commits the configured `zigos_persist` mount exactly once, skips read-only mounts and rejects unsupported writable or duplicate persistent backends without advancing the journal. Required diagnostic shutdown reports one RAM and one durable visit; the diskless normal gate proves RAM-root-only sync succeeds with no journal generation.
+
 Still open:
 
 - disk-backed root;
@@ -178,7 +180,7 @@ Still open:
 - packaged/versioned SDK distribution;
 - dynamic linking and `ET_DYN`;
 - broader clocks and complete signal APIs;
-- file-backed mappings and broader filesystem synchronization calls.
+- file-backed mappings, page-cache writeback and asynchronous filesystem synchronization.
 
 ### P2-U2: real TTY
 
@@ -254,7 +256,7 @@ Delivered:
 - persistent file mutation, ELF installation and execution with NVMe present;
 - exact cleanup and reclamation;
 - when no usable NVMe or SATA device exists, normal boot continues with embedded assets and a RAM-backed root;
-- a required USB-booted QEMU gate verifies the diskless session, RAM file mutation, C SDK execution, explicit unsupported persistence sync and `storage diskless-ram-root cleanup yes`.
+- a required USB-booted QEMU gate verifies the diskless session, RAM file mutation, C SDK execution, successful RAM-root all-writable-mount sync with zero journal commits and `storage diskless-ram-root cleanup yes`.
 
 Still open:
 

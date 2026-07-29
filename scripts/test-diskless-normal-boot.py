@@ -170,7 +170,7 @@ def main() -> int:
             send(client, process, serial, "write /tmp/recovery.txt diskless recovery", PROMPT_HOME)
             send(client, process, serial, "cat /tmp/recovery.txt", b"diskless recovery")
             send(client, process, serial, "c-sdk alpha beta", b"process 3 exited 87", 50)
-            send(client, process, serial, "sync", b"sync: unsupported")
+            send(client, process, serial, "sync", b"writable mounts synchronized")
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 50)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")
@@ -186,7 +186,7 @@ def main() -> int:
                 "c-sdk: ABI 1.11 discovery passed",
                 "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
                 "process 3 exited 87",
-                "sync: unsupported",
+                "writable mounts synchronized",
                 "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "storage diskless-ram-root clean yes",
@@ -196,7 +196,7 @@ def main() -> int:
                 "STORAGE FAILURE",
                 "NVMe controller active",
                 "NVMe retained for permanent runtime",
-                "persistent storage synchronized",
+                "sync: unsupported",
                 "Kernel heap active:",
                 "Cooperative scheduler active:",
                 "Preemptive scheduler active:",

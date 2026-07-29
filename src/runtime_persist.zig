@@ -75,8 +75,14 @@ pub const Report = struct {
     active_slot: u8,
     record_count: u32,
     payload_bytes: u32,
+    mount_id: u8,
     mounts: u64,
     syncs: u64,
+    global_syncs: u64,
+    writable_mount_syncs: u64,
+    immediate_mount_syncs: u64,
+    durable_mount_syncs: u64,
+    rejected_sync_plans: u64,
     checks: u64,
     recoveries: u64,
     payload_writes: u64,
@@ -89,6 +95,7 @@ pub const Report = struct {
 pub const Store = struct {
     device: ?BlockDevice = null,
     mounted: bool = false,
+    mount_id: u8 = 0,
     generation: u64 = 0,
     active_slot: u8 = 1,
     record_count: u32 = 0,
@@ -102,6 +109,11 @@ pub const Store = struct {
     record_scratch: [maximum_record_data_bytes]u8 = @splat(0),
     mounts: u64 = 0,
     syncs: u64 = 0,
+    global_syncs: u64 = 0,
+    writable_mount_syncs: u64 = 0,
+    immediate_mount_syncs: u64 = 0,
+    durable_mount_syncs: u64 = 0,
+    rejected_sync_plans: u64 = 0,
     checks: u64 = 0,
     recoveries: u64 = 0,
     payload_writes: u64 = 0,
@@ -120,7 +132,7 @@ pub const Store = struct {
         try validateGeometry(device);
         self.device = device;
         _ = vfs.ensureDirectory(0, persist_root, 0o755, tick) catch return Error.InvalidRecord;
-        _ = vfs.mount(0, persist_root, .zigos_persist, false, "nvme-zigos-data") catch return Error.InvalidRecord;
+        self.mount_id = vfs.mount(0, persist_root, .zigos_persist, false, "nvme-zigos-data") catch return Error.InvalidRecord;
 
         const first = try self.readHeader(0);
         const second = try self.readHeader(1);
@@ -153,8 +165,18 @@ pub const Store = struct {
     }
 
     pub fn sync(self: *Store, vfs: *runtime_vfs.Vfs) Error!void {
-        const snapshot = try self.serialize(vfs, &self.next_payload);
-        try self.commitSnapshot(&self.next_payload, snapshot);
+        const plan = self.planWritableMounts(vfs) catch |err| {
+            self.rejected_sync_plans +%= 1;
+            return err;
+        };
+        if (plan.durable_mount_id != 0) {
+            const snapshot = try self.serialize(vfs, &self.next_payload);
+            try self.commitSnapshot(&self.next_payload, snapshot);
+        }
+        self.global_syncs +%= 1;
+        self.writable_mount_syncs +%= plan.writable_mounts;
+        self.immediate_mount_syncs +%= plan.immediate_mounts;
+        if (plan.durable_mount_id != 0) self.durable_mount_syncs +%= 1;
     }
 
     pub fn syncFile(self: *Store, vfs: *runtime_vfs.Vfs, node_index: u16) Error!void {
@@ -339,8 +361,14 @@ pub const Store = struct {
             .active_slot = self.active_slot,
             .record_count = self.record_count,
             .payload_bytes = self.payload_length,
+            .mount_id = self.mount_id,
             .mounts = self.mounts,
             .syncs = self.syncs,
+            .global_syncs = self.global_syncs,
+            .writable_mount_syncs = self.writable_mount_syncs,
+            .immediate_mount_syncs = self.immediate_mount_syncs,
+            .durable_mount_syncs = self.durable_mount_syncs,
+            .rejected_sync_plans = self.rejected_sync_plans,
             .checks = self.checks,
             .recoveries = self.recoveries,
             .payload_writes = self.payload_writes,
@@ -355,6 +383,31 @@ pub const Store = struct {
         payload_length: usize,
         record_count: u32,
     };
+
+    const WritableMountPlan = struct {
+        writable_mounts: u64 = 0,
+        immediate_mounts: u64 = 0,
+        durable_mount_id: u8 = 0,
+    };
+
+    fn planWritableMounts(self: *const Store, vfs: *const runtime_vfs.Vfs) Error!WritableMountPlan {
+        var plan: WritableMountPlan = .{};
+        for (vfs.mountList()) |mount_entry| {
+            if (!mount_entry.used or mount_entry.readonly) continue;
+            plan.writable_mounts +%= 1;
+            switch (mount_entry.kind) {
+                .ramfs => plan.immediate_mounts +%= 1,
+                .zigos_persist => {
+                    if (!self.mounted or self.mount_id == 0 or mount_entry.id != self.mount_id or plan.durable_mount_id != 0)
+                        return Error.NotConfigured;
+                    plan.durable_mount_id = mount_entry.id;
+                },
+                .boot_fat, .procfs, .devfs, .netfs => return Error.UnsupportedOperation,
+            }
+        }
+        if (self.mounted and plan.durable_mount_id == 0) return Error.NotConfigured;
+        return plan;
+    }
 
     const RecordKind = enum(u8) {
         directory = 1,
@@ -760,6 +813,66 @@ const TestDisk = struct {
         };
     }
 };
+
+test "global sync succeeds for a ramfs only writable mount table" {
+    const vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(vfs);
+    vfs.initialize();
+    var store: Store = .{};
+    try store.sync(vfs);
+    const report = store.report();
+    try std.testing.expect(!report.mounted);
+    try std.testing.expectEqual(@as(u64, 1), report.global_syncs);
+    try std.testing.expectEqual(@as(u64, 1), report.writable_mount_syncs);
+    try std.testing.expectEqual(@as(u64, 1), report.immediate_mount_syncs);
+    try std.testing.expectEqual(@as(u64, 0), report.durable_mount_syncs);
+    try std.testing.expectEqual(@as(u64, 0), report.syncs);
+    try std.testing.expectEqual(@as(u64, 0), report.rejected_sync_plans);
+}
+
+test "global sync covers writable mounts and rejects invalid plans before journal writes" {
+    var disk: TestDisk = .{};
+    const vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(vfs);
+    vfs.initialize();
+    var store: Store = .{};
+    try store.mount(vfs, disk.device(), 1);
+    _ = try vfs.ensureDirectory(0, "/scratch", 0o755, 2);
+    _ = try vfs.ensureDirectory(0, "/readonly", 0o755, 3);
+    _ = try vfs.ensureDirectory(0, "/foreign", 0o755, 4);
+    _ = try vfs.mount(0, "/scratch", .ramfs, false, "scratch-ramfs");
+    _ = try vfs.mount(0, "/readonly", .boot_fat, true, "readonly-fat");
+    _ = try vfs.putFile(0, "/persist/value", "stable", 0o640, false, 5);
+    try store.sync(vfs);
+    var report = store.report();
+    try std.testing.expectEqual(@as(u8, 2), report.mount_id);
+    try std.testing.expectEqual(@as(u64, 1), report.global_syncs);
+    try std.testing.expectEqual(@as(u64, 3), report.writable_mount_syncs);
+    try std.testing.expectEqual(@as(u64, 2), report.immediate_mount_syncs);
+    try std.testing.expectEqual(@as(u64, 1), report.durable_mount_syncs);
+    try std.testing.expectEqual(@as(u64, 1), report.syncs);
+    try std.testing.expectEqual(@as(u64, 0), report.rejected_sync_plans);
+
+    const writes_after_commit = disk.writes;
+    const generation_after_commit = report.generation;
+    const unsupported_id = try vfs.mount(0, "/foreign", .boot_fat, false, "writable-fat");
+    _ = try vfs.putFile(0, "/persist/value", "dirty", 0o600, false, 6);
+    try std.testing.expectError(Error.UnsupportedOperation, store.sync(vfs));
+    report = store.report();
+    try std.testing.expectEqual(generation_after_commit, report.generation);
+    try std.testing.expectEqual(writes_after_commit, disk.writes);
+    try std.testing.expectEqual(@as(u64, 1), report.global_syncs);
+    try std.testing.expectEqual(@as(u64, 1), report.rejected_sync_plans);
+
+    try vfs.unmount(unsupported_id);
+    _ = try vfs.mount(0, "/foreign", .zigos_persist, false, "duplicate-persist");
+    try std.testing.expectError(Error.NotConfigured, store.sync(vfs));
+    report = store.report();
+    try std.testing.expectEqual(generation_after_commit, report.generation);
+    try std.testing.expectEqual(writes_after_commit, disk.writes);
+    try std.testing.expectEqual(@as(u64, 1), report.global_syncs);
+    try std.testing.expectEqual(@as(u64, 2), report.rejected_sync_plans);
+}
 
 test "alternating snapshots restore a persistent VFS subtree" {
     var disk: TestDisk = .{};

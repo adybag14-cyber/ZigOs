@@ -65,6 +65,7 @@ The model does not currently defend against malicious kernel code, compromised f
 - Paths are bounded and normalized; traversal, rename cycles and cross-mount rename are rejected.
 - `/persist` uses alternating generations, payload CRCs, payload-before-header ordering, flushes and an FUA commit header.
 - Global sync and stable-path file fsync build in a separate scratch payload; the committed in-memory baseline changes only after payload and FUA header success.
+- Global sync prevalidates every active writable mount before I/O, treats RAM filesystems as immediately synchronized, skips read-only mounts, commits the configured persistent backend once and rejects unsupported or duplicate writable durable backends without advancing the journal.
 - File fsync and fdatasync copy unrelated records from the last committed generation, excluding unrelated dirty VFS state. Full fsync records current mode; fdatasync retains committed mode while advancing data, size and sparse allocation. A forced-termination four-boot test verifies both policies.
 - Mount selects the newest completely valid generation and can fall back from a corrupt newest slot.
 
