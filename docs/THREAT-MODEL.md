@@ -66,6 +66,9 @@ The model does not currently defend against malicious kernel code, compromised f
 - `/persist` uses alternating generations, payload CRCs, payload-before-header ordering, flushes and an FUA commit header.
 - Global sync and stable-path file fsync build in a separate scratch payload; the committed in-memory baseline changes only after payload and FUA header success.
 - Global sync prevalidates every active writable mount before I/O, treats RAM filesystems as immediately synchronized, skips read-only mounts, commits the configured persistent backend once and rejects unsupported or duplicate writable durable backends without advancing the journal.
+- The file-data page cache contains only clean duplicates of authoritative VFS blocks, is bounded to sixteen pages and keys entries by inode generation and logical page so reclaimed node slots cannot reuse stale data.
+- Ordinary reads hold the inode data lock; every data/size/allocation mutation invalidates that inode's cached pages, and shutdown requires the cache lock to have no outstanding ticket.
+- Large cache-array scans use indexed/reference traversal; the source contract rejects by-value iteration that previously created a kernel-stack-sized temporary during QEMU execution.
 - File fsync and fdatasync copy unrelated records from the last committed generation, excluding unrelated dirty VFS state. Full fsync records current mode; fdatasync retains committed mode while advancing data, size and sparse allocation. A forced-termination four-boot test verifies both policies.
 - Mount selects the newest completely valid generation and can fall back from a corrupt newest slot.
 

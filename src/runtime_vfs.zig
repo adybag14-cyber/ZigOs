@@ -4,6 +4,7 @@ const synchronization = @import("synchronization.zig");
 pub const maximum_nodes: usize = 96;
 pub const maximum_dentries: usize = maximum_nodes * 2;
 pub const maximum_dentry_cache_entries: usize = 16;
+pub const maximum_file_page_cache_entries: usize = 16;
 pub const maximum_name_length: usize = 31;
 pub const maximum_path_length: usize = 255;
 pub const maximum_symlink_depth: usize = 8;
@@ -136,6 +137,15 @@ const DataBlock = struct {
     data: [file_block_size]u8 = @splat(0),
 };
 
+const FilePageCacheEntry = struct {
+    used: bool = false,
+    node: u16 = invalid_node,
+    node_generation: u16 = 0,
+    slot: u8 = 0,
+    last_used: u64 = 0,
+    data: [file_block_size]u8 = @splat(0),
+};
+
 const Dentry = struct {
     used: bool = false,
     generation: u16 = 0,
@@ -251,6 +261,14 @@ pub const Report = struct {
     dentry_cache_rejections: u64,
     dentry_cache_acquires: u64,
     dentry_cache_releases: u64,
+    file_page_cache_entries: usize,
+    file_page_cache_hits: u64,
+    file_page_cache_misses: u64,
+    file_page_cache_insertions: u64,
+    file_page_cache_evictions: u64,
+    file_page_cache_invalidations: u64,
+    file_page_cache_lock_tickets: u64,
+    file_page_cache_lock_outstanding: u64,
     data_lock_tickets: u64,
     data_lock_outstanding: u64,
     data_pool_lock_tickets: u64,
@@ -264,6 +282,14 @@ pub const Vfs = struct {
     nodes: [maximum_nodes]Node = @splat(.{}),
     data_blocks: [maximum_data_blocks]DataBlock = @splat(.{}),
     data_pool_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
+    file_page_cache: [maximum_file_page_cache_entries]FilePageCacheEntry = @splat(.{}),
+    file_page_cache_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
+    file_page_cache_clock: u64 = 0,
+    file_page_cache_hits: u64 = 0,
+    file_page_cache_misses: u64 = 0,
+    file_page_cache_insertions: u64 = 0,
+    file_page_cache_evictions: u64 = 0,
+    file_page_cache_invalidations: u64 = 0,
     view_scratch: [maximum_file_size]u8 = @splat(0),
     dentries: [maximum_dentries]Dentry = @splat(.{}),
     dentry_cache: [maximum_dentry_cache_entries]DentryCacheEntry = @splat(.{}),
@@ -475,24 +501,28 @@ pub const Vfs = struct {
 
     pub fn read(self: *Vfs, cwd: u16, path: []const u8, offset: usize, output: []u8) Error!usize {
         const node_index = try self.resolve(cwd, path);
-        const node = &self.nodes[node_index];
+        var node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if ((node.mode & 0o444) == 0) return Error.PermissionDenied;
         if (node.kind == .pseudo) return self.readPseudo(node_index, offset, output);
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
         if (offset > node.size) return Error.InvalidOffset;
         const count = @min(output.len, node.size - offset);
-        self.readFileData(node_index, offset, output[0..count]);
+        self.readFileDataLocked(node_index, offset, output[0..count]);
         return count;
     }
 
     pub fn readOnlyView(self: *Vfs, cwd: u16, path: []const u8) Error![]const u8 {
         const node_index = try self.resolve(cwd, path);
-        const node = &self.nodes[node_index];
+        var node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if ((node.mode & 0o444) == 0) return Error.PermissionDenied;
         if (node.kind != .file) return Error.UnsupportedOperation;
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
         @memset(&self.view_scratch, 0);
-        self.readFileData(node_index, 0, self.view_scratch[0..node.size]);
+        self.readFileDataLocked(node_index, 0, self.view_scratch[0..node.size]);
         return self.view_scratch[0..node.size];
     }
 
@@ -738,16 +768,18 @@ pub const Vfs = struct {
         const index = try self.resolveOpen(owner_pid, handle);
         var open_file = &self.open_files[index];
         if (!open_file.readable) return Error.PermissionDenied;
-        const node = &self.nodes[open_file.node];
+        var node = &self.nodes[open_file.node];
         if (node.kind == .directory) return Error.IsDirectory;
         if (node.kind == .pseudo) {
             const count = try self.readPseudo(open_file.node, open_file.offset, output);
             open_file.offset += count;
             return count;
         }
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
         if (open_file.offset > node.size) return Error.InvalidOffset;
         const count = @min(output.len, node.size - open_file.offset);
-        self.readFileData(open_file.node, open_file.offset, output[0..count]);
+        self.readFileDataLocked(open_file.node, open_file.offset, output[0..count]);
         open_file.offset += count;
         return count;
     }
@@ -936,9 +968,12 @@ pub const Vfs = struct {
         return .{ .size = self.nodes[node_index].size, .allocation_bitmap = bitmap, .allocated_blocks = count };
     }
 
-    pub fn readAllocatedBlockNode(self: *const Vfs, node_index: u16, slot: usize, output: *[file_block_size]u8) Error!bool {
+    pub fn readAllocatedBlockNode(self: *Vfs, node_index: u16, slot: usize, output: *[file_block_size]u8) Error!bool {
         if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].kind != .file or slot >= file_blocks_per_node) return Error.NotFound;
-        const block_index = self.nodes[node_index].file_blocks[slot];
+        var node = &self.nodes[node_index];
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
+        const block_index = node.file_blocks[slot];
         if (block_index == invalid_data_block) {
             @memset(output, 0);
             return false;
@@ -978,12 +1013,14 @@ pub const Vfs = struct {
         node.size = size;
         node.mode = mode & 0o777;
         node.modified_tick = tick;
+        self.invalidateFilePageCacheNode(node_index);
         self.mutations +%= 1;
         return node_index;
     }
 
     pub fn validate(self: *const Vfs) bool {
         if (self.data_pool_lock.next() != self.data_pool_lock.serving()) return false;
+        if (self.file_page_cache_lock.next() != self.file_page_cache_lock.serving()) return false;
         if (!self.nodes[0].used or self.nodes[0].generation == 0 or self.nodes[0].kind != .directory or self.nodes[0].link_count != 1) return false;
         var counted_links: [maximum_nodes]u16 = @splat(0);
         counted_links[0] = 1;
@@ -1046,6 +1083,23 @@ pub const Vfs = struct {
             const block = &self.data_blocks[block_index];
             if (block.used != referenced_blocks[block_index]) return false;
             if (!block.used and (block.owner_node != invalid_node or block.owner_slot != 0)) return false;
+        }
+        for (0..self.file_page_cache.len) |cache_index| {
+            const entry = &self.file_page_cache[cache_index];
+            if (!entry.used) continue;
+            if (entry.node >= self.nodes.len or entry.slot >= file_blocks_per_node or entry.node_generation == 0 or entry.last_used == 0) return false;
+            const node = &self.nodes[entry.node];
+            if (!node.used or node.kind != .file or node.generation != entry.node_generation) return false;
+            const block_index = node.file_blocks[entry.slot];
+            if (block_index == invalid_data_block) {
+                for (entry.data) |byte| if (byte != 0) return false;
+            } else {
+                if (block_index >= self.data_blocks.len or !std.mem.eql(u8, &entry.data, &self.data_blocks[block_index].data)) return false;
+            }
+            for (cache_index + 1..self.file_page_cache.len) |other_index| {
+                const other = &self.file_page_cache[other_index];
+                if (other.used and other.node == entry.node and other.node_generation == entry.node_generation and other.slot == entry.slot) return false;
+            }
         }
         for (self.dentry_cache) |cache_entry| {
             if (!cache_entry.used) continue;
@@ -1112,6 +1166,14 @@ pub const Vfs = struct {
             .dentry_cache_rejections = self.dentry_cache_rejections,
             .dentry_cache_acquires = self.dentry_cache_acquires,
             .dentry_cache_releases = self.dentry_cache_releases,
+            .file_page_cache_entries = 0,
+            .file_page_cache_hits = self.file_page_cache_hits,
+            .file_page_cache_misses = self.file_page_cache_misses,
+            .file_page_cache_insertions = self.file_page_cache_insertions,
+            .file_page_cache_evictions = self.file_page_cache_evictions,
+            .file_page_cache_invalidations = self.file_page_cache_invalidations,
+            .file_page_cache_lock_tickets = self.file_page_cache_lock.next(),
+            .file_page_cache_lock_outstanding = self.file_page_cache_lock.next() -% self.file_page_cache_lock.serving(),
             .data_lock_tickets = 0,
             .data_lock_outstanding = 0,
             .data_pool_lock_tickets = self.data_pool_lock.next(),
@@ -1148,6 +1210,7 @@ pub const Vfs = struct {
         }
         result.allocated_bytes = result.allocated_blocks * file_block_size;
         for (self.dentries) |entry| result.dentries_used += @intFromBool(entry.used);
+        for (0..self.file_page_cache.len) |cache_index| result.file_page_cache_entries += @intFromBool(self.file_page_cache[cache_index].used);
         for (self.dentry_cache) |cache_entry| {
             result.dentry_cache_entries += @intFromBool(cache_entry.used);
             result.dentry_cache_references += cache_entry.references;
@@ -1466,6 +1529,7 @@ pub const Vfs = struct {
         self.copyIntoFileBlocks(node_index, offset, bytes);
         node.size = @max(node.size, offset + bytes.len);
         node.modified_tick = tick;
+        self.invalidateFilePageCacheNode(node_index);
         self.mutations +%= 1;
         return bytes.len;
     }
@@ -1486,6 +1550,7 @@ pub const Vfs = struct {
         }
         node.size = size;
         node.modified_tick = tick;
+        self.invalidateFilePageCacheNode(node_index);
         self.mutations +%= 1;
     }
 
@@ -1504,6 +1569,7 @@ pub const Vfs = struct {
             if (!flags.keep_size) node.size = @max(node.size, offset + length);
         }
         node.modified_tick = tick;
+        self.invalidateFilePageCacheNode(node_index);
         self.mutations +%= 1;
     }
 
@@ -1528,20 +1594,72 @@ pub const Vfs = struct {
         }
     }
 
-    fn readFileData(self: *const Vfs, node_index: u16, offset: usize, output: []u8) void {
+    fn readFileDataLocked(self: *Vfs, node_index: u16, offset: usize, output: []u8) void {
+        _ = self.file_page_cache_lock.acquire();
+        defer self.file_page_cache_lock.release();
         var copied: usize = 0;
         while (copied < output.len) {
             const logical_offset = offset + copied;
             const slot = logical_offset / file_block_size;
             const block_offset = logical_offset % file_block_size;
             const count = @min(output.len - copied, file_block_size - block_offset);
-            const block_index = self.nodes[node_index].file_blocks[slot];
-            if (block_index == invalid_data_block) {
-                @memset(output[copied .. copied + count], 0);
-            } else {
-                @memcpy(output[copied .. copied + count], self.data_blocks[block_index].data[block_offset .. block_offset + count]);
-            }
+            const page = self.cachedFilePageLocked(node_index, slot);
+            @memcpy(output[copied .. copied + count], page.data[block_offset .. block_offset + count]);
             copied += count;
+        }
+    }
+
+    fn cachedFilePageLocked(self: *Vfs, node_index: u16, slot: usize) *const FilePageCacheEntry {
+        self.file_page_cache_clock +%= 1;
+        if (self.file_page_cache_clock == 0) self.file_page_cache_clock = 1;
+        const node_generation = self.nodes[node_index].generation;
+        for (&self.file_page_cache) |*entry| {
+            if (!entry.used or entry.node != node_index or entry.node_generation != node_generation or entry.slot != slot) continue;
+            entry.last_used = self.file_page_cache_clock;
+            self.file_page_cache_hits +%= 1;
+            return entry;
+        }
+        self.file_page_cache_misses +%= 1;
+        var candidate: usize = 0;
+        var oldest: u64 = std.math.maxInt(u64);
+        for (0..self.file_page_cache.len) |index| {
+            const entry = &self.file_page_cache[index];
+            if (!entry.used) {
+                candidate = index;
+                oldest = 0;
+                break;
+            }
+            if (entry.last_used < oldest) {
+                oldest = entry.last_used;
+                candidate = index;
+            }
+        }
+        if (self.file_page_cache[candidate].used) self.file_page_cache_evictions +%= 1;
+        var entry = &self.file_page_cache[candidate];
+        entry.* = .{
+            .used = true,
+            .node = node_index,
+            .node_generation = node_generation,
+            .slot = @intCast(slot),
+            .last_used = self.file_page_cache_clock,
+        };
+        const block_index = self.nodes[node_index].file_blocks[slot];
+        if (block_index == invalid_data_block) {
+            @memset(&entry.data, 0);
+        } else {
+            @memcpy(&entry.data, &self.data_blocks[block_index].data);
+        }
+        self.file_page_cache_insertions +%= 1;
+        return entry;
+    }
+
+    fn invalidateFilePageCacheNode(self: *Vfs, node_index: u16) void {
+        _ = self.file_page_cache_lock.acquire();
+        defer self.file_page_cache_lock.release();
+        for (&self.file_page_cache) |*entry| {
+            if (!entry.used or entry.node != node_index) continue;
+            entry.* = .{};
+            self.file_page_cache_invalidations +%= 1;
         }
     }
 
@@ -1704,6 +1822,7 @@ pub const Vfs = struct {
     }
 
     fn reclaimNode(self: *Vfs, node_index: u16) void {
+        self.invalidateFilePageCacheNode(node_index);
         self.releaseAllFileBlocks(node_index);
         const generation = self.nodes[node_index].generation;
         self.nodes[node_index] = .{ .generation = generation };
@@ -1964,6 +2083,7 @@ test "VFS append writes are atomic across independent concurrent writers" {
         }});
     }
     for (&threads) |*thread| thread.join();
+    const after_appends = fs.report();
 
     const expected_records = workers * 32;
     const expected_bytes = expected_records * 4;
@@ -1984,7 +2104,7 @@ test "VFS append writes are atomic across independent concurrent writers" {
     }
     for (seen) |worker_records| for (worker_records) |present| try std.testing.expect(present);
     const after = fs.report();
-    try std.testing.expectEqual(@as(u64, expected_records), after.data_lock_tickets - before);
+    try std.testing.expectEqual(@as(u64, expected_records), after_appends.data_lock_tickets - before);
     try std.testing.expectEqual(@as(u64, 0), after.data_lock_outstanding);
     for (0..workers) |worker_index| try fs.close(@intCast(worker_index + 1), handles[worker_index]);
     try std.testing.expect(fs.validate());
@@ -2040,6 +2160,56 @@ test "VFS sparse holes allocate punch persist size and reuse bounded blocks" {
     try fs.close(1, handle);
     try fs.close(2, victim);
     try std.testing.expect(fs.validate());
+}
+
+test "VFS bounded clean page cache hits evicts and invalidates mutations" {
+    var fs = Vfs.init();
+    _ = try fs.mkdir(0, "/page-cache", 0o755, 1);
+    var payload: [file_block_size]u8 = undefined;
+    var paths: [maximum_file_page_cache_entries + 1][32]u8 = @splat(@splat(0));
+    var lengths: [maximum_file_page_cache_entries + 1]u8 = @splat(0);
+    for (0..paths.len) |index| {
+        @memset(&payload, @intCast(index + 1));
+        const path = try std.fmt.bufPrint(&paths[index], "/page-cache/f-{d}", .{index});
+        lengths[index] = @intCast(path.len);
+        _ = try fs.putFile(0, path, &payload, 0o600, false, @intCast(index + 2));
+        var byte: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 1), try fs.read(0, path, 0, &byte));
+        try std.testing.expectEqual(@as(u8, @intCast(index + 1)), byte[0]);
+    }
+    var report = fs.report();
+    try std.testing.expectEqual(maximum_file_page_cache_entries, report.file_page_cache_entries);
+    try std.testing.expectEqual(@as(u64, paths.len), report.file_page_cache_misses);
+    try std.testing.expectEqual(@as(u64, paths.len), report.file_page_cache_insertions);
+    try std.testing.expect(report.file_page_cache_evictions > 0);
+
+    const hot_path = paths[paths.len - 1][0..lengths[lengths.len - 1]];
+    var hot: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try fs.read(0, hot_path, 0, &hot));
+    report = fs.report();
+    try std.testing.expect(report.file_page_cache_hits > 0);
+    const invalidations_before = report.file_page_cache_invalidations;
+    try std.testing.expectEqual(@as(usize, 1), try fs.write(0, hot_path, 0, "Z", false, 100));
+    report = fs.report();
+    try std.testing.expect(report.file_page_cache_invalidations > invalidations_before);
+    try std.testing.expectEqual(@as(usize, 1), try fs.read(0, hot_path, 0, &hot));
+    try std.testing.expectEqual(@as(u8, 'Z'), hot[0]);
+
+    const sparse = try fs.open(7, 0, "/page-cache/sparse", .{ .read = true, .write = true, .create = true }, 0o600, 101);
+    _ = try fs.seek(7, sparse, file_block_size, .start);
+    try std.testing.expectEqual(@as(usize, 1), try fs.writeOpen(7, sparse, "Q", 102));
+    _ = try fs.seek(7, sparse, 0, .start);
+    var zero: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try fs.readOpen(7, sparse, &zero));
+    try std.testing.expectEqual(@as(u8, 0), zero[0]);
+    _ = try fs.seek(7, sparse, 0, .start);
+    try std.testing.expectEqual(@as(usize, 1), try fs.writeOpen(7, sparse, "R", 103));
+    _ = try fs.seek(7, sparse, 0, .start);
+    try std.testing.expectEqual(@as(usize, 1), try fs.readOpen(7, sparse, &zero));
+    try std.testing.expectEqual(@as(u8, 'R'), zero[0]);
+    try fs.close(7, sparse);
+    try std.testing.expect(fs.validate());
+    try std.testing.expectEqual(@as(u64, 0), fs.report().file_page_cache_lock_outstanding);
 }
 
 test "VFS sparse restoration applies final nonwritable mode after privileged reconstruction" {

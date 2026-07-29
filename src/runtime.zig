@@ -2345,6 +2345,11 @@ fn finishNormalRuntime() noreturn {
     const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
         fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases and fs_report.dentry_cache_hits > 0 and
         fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0 and
+        fs_report.file_page_cache_entries > 0 and
+        fs_report.file_page_cache_entries <= runtime_vfs.maximum_file_page_cache_entries and
+        fs_report.file_page_cache_hits > 0 and fs_report.file_page_cache_misses > 0 and
+        fs_report.file_page_cache_insertions > 0 and fs_report.file_page_cache_lock_tickets > 0 and
+        fs_report.file_page_cache_lock_outstanding == 0 and
         fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0 and
         fs_report.data_pool_lock_tickets > 0 and fs_report.data_pool_lock_outstanding == 0 and
         fs_report.allocated_blocks > 0 and fs_report.allocated_blocks <= runtime_vfs.maximum_data_blocks and
@@ -2466,6 +2471,11 @@ fn finishDiagnosticRuntime() noreturn {
     const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
         fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases and fs_report.dentry_cache_hits > 0 and
         fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0 and
+        fs_report.file_page_cache_entries > 0 and
+        fs_report.file_page_cache_entries <= runtime_vfs.maximum_file_page_cache_entries and
+        fs_report.file_page_cache_hits > 0 and fs_report.file_page_cache_misses > 0 and
+        fs_report.file_page_cache_insertions > 0 and fs_report.file_page_cache_lock_tickets > 0 and
+        fs_report.file_page_cache_lock_outstanding == 0 and
         fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0 and
         fs_report.data_pool_lock_tickets > 0 and fs_report.data_pool_lock_outstanding == 0 and
         fs_report.allocated_blocks > 0 and fs_report.allocated_blocks <= runtime_vfs.maximum_data_blocks and
@@ -2530,6 +2540,22 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(fs_report.dentry_cache_acquires);
     emit("/");
     emitDecimal(fs_report.dentry_cache_releases);
+    emit(" page-cache entries ");
+    emitDecimal(fs_report.file_page_cache_entries);
+    emit(" hit/miss ");
+    emitDecimal(fs_report.file_page_cache_hits);
+    emit("/");
+    emitDecimal(fs_report.file_page_cache_misses);
+    emit(" insert/evict ");
+    emitDecimal(fs_report.file_page_cache_insertions);
+    emit("/");
+    emitDecimal(fs_report.file_page_cache_evictions);
+    emit(" invalidate ");
+    emitDecimal(fs_report.file_page_cache_invalidations);
+    emit(" lock tickets/outstanding ");
+    emitDecimal(fs_report.file_page_cache_lock_tickets);
+    emit("/");
+    emitDecimal(fs_report.file_page_cache_lock_outstanding);
     emit(" data-lock tickets/outstanding ");
     emitDecimal(fs_report.data_lock_tickets);
     emit("/");

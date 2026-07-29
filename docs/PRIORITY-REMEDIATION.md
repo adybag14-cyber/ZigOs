@@ -139,6 +139,8 @@ Persistent `fsync(fd)` and ABI 1.11 `fdatasync(fd)` resolve the exact VFS node a
 
 Global `sync` now operates over the complete active writable-mount table rather than being hard-wired to `/persist`. The store validates the full plan before device I/O, visits writable mounts in ID order, treats RAM filesystems as immediately synchronized, commits the configured `zigos_persist` mount exactly once, skips read-only mounts and rejects unsupported writable or duplicate persistent backends without advancing the journal. Required diagnostic shutdown reports one RAM and one durable visit; the diskless normal gate proves RAM-root-only sync succeeds with no journal generation.
 
+A separate clean file-data page cache now fronts ordinary reads without replacing the authoritative 256-block file pool. It is fixed at sixteen 4 KiB entries, keys pages by inode slot, inode generation and logical page, caches sparse holes as zero pages and uses LRU replacement. Reads take the inode data lock before cache lookup; writes, truncation, hole punching, sparse restoration and inode reclamation write through to the block pool and invalidate all cached pages for that inode. Normal and diagnostic shutdown require bounded nonzero occupancy, real hit/miss/population activity and zero outstanding cache-lock tickets. An early QEMU run exposed a kernel-stack hazard when a 64 KiB cache scan was iterated by value; all scans now use indices/references and the source contract forbids the unsafe form. This is a clean duplicate cache only: dirty tracking, writeback, pressure reclaim, finer page locking and mmap coherence remain open.
+
 Still open:
 
 - disk-backed root;
@@ -180,7 +182,7 @@ Still open:
 - packaged/versioned SDK distribution;
 - dynamic linking and `ET_DYN`;
 - broader clocks and complete signal APIs;
-- file-backed mappings, page-cache writeback and asynchronous filesystem synchronization.
+- file-backed mappings, dirty-page tracking, page-cache writeback, pressure-driven cache reclaim, page-granular writer locking, mmap/file cache coherence and asynchronous filesystem synchronization.
 
 ### P2-U2: real TTY
 

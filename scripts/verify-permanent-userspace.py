@@ -237,6 +237,7 @@ def main() -> int:
     require(runtime, "diskless-ram-root", "normal shutdown distinguishes the diskless recovery profile")
     require(diskless_normal_boot_test, "usb-storage", "diskless gate boots the EFI image from unsupported USB storage")
     require(diskless_normal_boot_test, "writable mounts synchronized", "diskless userspace proves ramfs-only global sync")
+    require(diskless_normal_boot_test, 'send(client, process, serial, "cat /tmp/recovery.txt", b"diskless recovery")\n            send(client, process, serial, "cat /tmp/recovery.txt", b"diskless recovery")', "diskless QEMU gate repeats one RAM-root file read to prove a real page-cache hit")
     require(diskless_normal_boot_test, '"sync: unsupported",', "diskless gate forbids regression to persistence-gated global sync")
     require(diskless_normal_boot_test, "storage diskless-ram-root cleanup yes", "diskless QEMU gate requires clean resource reclamation")
     require(runtime, "ZigOs shutdown drain:", "diagnostic shutdown drains and reaps delayed terminal userspace")
@@ -338,6 +339,13 @@ def main() -> int:
     require(vfs_source, "const DentryCacheEntry = struct", "VFS separates cached lookup entries from authoritative dentries")
     require(vfs_source, "references: u16 = 0", "dentry cache entries retain explicit reference counts")
     require(vfs_source, "dentry_cache: [maximum_dentry_cache_entries]DentryCacheEntry", "VFS owns a bounded dentry lookup cache")
+    require(vfs_source, "pub const maximum_file_page_cache_entries: usize = 16", "VFS publishes a fixed sixteen-page file-data cache bound")
+    require(vfs_source, "file_page_cache: [maximum_file_page_cache_entries]FilePageCacheEntry", "VFS owns a separate bounded clean file-page cache")
+    require(vfs_source, "fn cachedFilePageLocked", "ordinary file reads load and hit generation-keyed cached pages")
+    require(vfs_source, "entry.node_generation != node_generation", "file-page cache keys include inode generation to reject slot reuse")
+    require(vfs_source, "fn invalidateFilePageCacheNode", "write-through mutations invalidate cached inode pages")
+    forbid(vfs_source, "for (self.file_page_cache", "large file-page cache scans copied the full cache array onto the kernel stack")
+    require(vfs_source, 'test "VFS bounded clean page cache hits evicts and invalidates mutations"', "isolated test proves bounded hits, LRU eviction, sparse-zero caching and mutation invalidation")
     require(vfs_source, "fn acquireDentry", "path traversal pins cache entries during use")
     require(vfs_source, "fn releaseDentryReference", "path traversal releases cache references on every exit path")
     require(vfs_source, "fn invalidateCachedDentry", "namespace mutation invalidates matching cached dentries")
@@ -395,7 +403,11 @@ def main() -> int:
     require(runtime, "canonicalPath(mount_entry.root_node", "mount command reports mounted roots rather than covered nodes")
     require(runtime, "fs_report.dentry_cache_references == 0", "normal and diagnostic release gates require zero live cache references")
     require(runtime, "fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases", "release gates require balanced cache reference accounting")
-    require(runtime, "fs_report.dentry_cache_hits > 0", "release gates require real cache hits")
+    require(runtime, "fs_report.dentry_cache_hits > 0", "release gates require real dentry-cache hits")
+    require(runtime, "fs_report.file_page_cache_entries <= runtime_vfs.maximum_file_page_cache_entries", "release gates enforce bounded file-page cache occupancy")
+    require(runtime, "fs_report.file_page_cache_hits > 0", "release gates require real file-page cache hits")
+    require(runtime, "fs_report.file_page_cache_misses > 0", "release gates require file-page cache population")
+    require(runtime, "fs_report.file_page_cache_lock_outstanding == 0", "release gates require every file-page cache lock ticket to drain")
     require(runtime, "fs_report.data_lock_tickets > 0", "release gates require exercised inode data locks")
     require(runtime, "fs_report.data_lock_outstanding == 0", "release gates require every inode data-lock ticket to drain")
     require(runtime, "fs_report.data_pool_lock_tickets > 0", "release gates require exercised sparse-pool allocation")
@@ -403,11 +415,15 @@ def main() -> int:
     require(runtime, "fs_report.allocated_bytes == fs_report.allocated_blocks * runtime_vfs.file_block_size", "release gates verify resident block accounting")
     require(runtime, "cache entries/refs", "diagnostic shutdown reports cache occupancy and references")
     require(runtime, "acquire/release", "diagnostic shutdown reports cache reference accounting")
+    require(runtime, "page-cache entries", "diagnostic shutdown reports bounded clean file-page cache occupancy and activity")
+    require(runtime, "lock tickets/outstanding", "diagnostic shutdown reports drained file-page cache locking")
     require(runtime, "data-lock tickets/outstanding", "diagnostic shutdown reports inode data-lock accounting")
     require(runtime, "pool-lock tickets/outstanding", "diagnostic shutdown reports sparse-pool lock accounting")
     require(runtime, "blocks/bytes/holes", "diagnostic shutdown distinguishes resident storage from logical holes")
     require(runtime_test, "cache entries/refs ", "required permanent-runtime sessions expose dentry-cache resource state")
-    require(runtime_test, " acquire/release ", "required permanent-runtime sessions expose balanced cache references")
+    require(runtime_test, " acquire/release ", "required permanent-runtime sessions expose balanced dentry-cache references")
+    require(runtime_test, " page-cache entries ", "required permanent-runtime sessions expose file-page cache state")
+    require(runtime_test, " lock tickets/outstanding ", "required permanent-runtime sessions expose drained file-page cache locks")
     require(runtime_test, " data-lock tickets/outstanding ", "required permanent-runtime sessions expose drained inode data locks")
     require(runtime_test, " pool-lock tickets/outstanding ", "required permanent-runtime sessions expose drained sparse-pool locks")
     require(runtime_test, " blocks/bytes/holes ", "required permanent-runtime sessions expose sparse storage accounting")
@@ -660,8 +676,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 83:
-        raise SystemExit(f"canonical isolated-test declaration total must be 83, found {declared_tests}")
+    if declared_tests != 84:
+        raise SystemExit(f"canonical isolated-test declaration total must be 84, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -761,7 +777,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, bounded clean file-page cache, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

@@ -169,6 +169,7 @@ def main() -> int:
             send(client, process, serial, "cat /proc/version", b"ZigOs 19.0.0 x86_64 persistent runtime")
             send(client, process, serial, "write /tmp/recovery.txt diskless recovery", PROMPT_HOME)
             send(client, process, serial, "cat /tmp/recovery.txt", b"diskless recovery")
+            send(client, process, serial, "cat /tmp/recovery.txt", b"diskless recovery")
             send(client, process, serial, "c-sdk alpha beta", b"process 3 exited 87", 50)
             send(client, process, serial, "sync", b"writable mounts synchronized")
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 50)

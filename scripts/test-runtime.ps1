@@ -315,6 +315,8 @@ try {
         'cache entries/refs ',
         ' hit/miss ',
         ' acquire/release ',
+        ' page-cache entries ',
+        ' lock tickets/outstanding ',
         ' data-lock tickets/outstanding ',
         ' pool-lock tickets/outstanding ',
         ' blocks/bytes/holes ',

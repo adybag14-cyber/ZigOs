@@ -18,7 +18,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 83 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe four-boot fsync/fdatasync persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 84 unique isolated-test declarations, the source contract, the 45-command offline runtime, the 47-command live-network runtime, the x86-64 NVMe four-boot fsync/fdatasync persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -26,7 +26,7 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 
 - a dedicated 100 Hz LAPIC timer and interrupt-enabled HLT idle loop;
 - a permanent PID 1 record; in normal boot it runs the directly linked Zig `/bin/init.elf`, launches the interactive Zig PID 2 shell, waits for it and reaps it before final shutdown;
-- a bounded writable VFS with an explicit parent-linked mount tree, six mounted namespaces, and a shared 256-page ordinary-file pool supporting zero-filled sparse holes;
+- a bounded writable VFS with an explicit parent-linked mount tree, six mounted namespaces, a shared 256-page ordinary-file pool supporting zero-filled sparse holes, and a separate 16-page generation-keyed clean file-data LRU cache;
 - a generation-safe 64-slot process table whose ordinary round-robin service path owns foreground, background and fixture CPL3 dispatch without a second job table or direct shell dispatcher;
 - process-local numeric descriptors, shared open-file descriptions and bounded blocking pipes;
 - up to 64 retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 4,096-slot ownership table;
@@ -353,11 +353,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    5,012,480 bytes
-SHA-256: B5B13ECFBA1EB3BA7F19DEC8B2BFAE2BEEAC1A5D9496BA3AF51EF19D483C0994
+Size:    5,085,184 bytes
+SHA-256: 5B07DB2B3124FF89A7885EBD187AC2466F9F15B4CE0743D2A7FEBA1F8606D9B7
 ```
 
-This identity is from the locally validated Windows diagnostic ABI 1.11 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots, per-inode ticket-locked atomic append, a shared sparse-file block pool with persistent allocation maps, failure-atomic bounded `readv`/`writev`, transactional file-scoped `fsync`, data-only `fdatasync` with committed-mode preservation for stable committed paths, and transactional global `sync` that prevalidates and visits every writable mount, treats RAM filesystems as immediately synchronized, commits the configured persistent mount once, skips read-only mounts and rejects unsupported writable backends before journal I/O. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic ABI 1.11 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots, per-inode ticket-locked atomic append, a shared sparse-file block pool with persistent allocation maps, failure-atomic bounded `readv`/`writev`, transactional file-scoped `fsync`, data-only `fdatasync` with committed-mode preservation for stable committed paths, transactional global `sync` that prevalidates and visits every writable mount, treats RAM filesystems as immediately synchronized, commits the configured persistent mount once, skips read-only mounts and rejects unsupported writable backends before journal I/O, and a separate bounded 16-page clean file-data cache keyed by inode generation and logical page, with inode-serialized reads, sparse-zero page caching, LRU replacement, write-through mutation invalidation and zero-outstanding-lock shutdown gates. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
