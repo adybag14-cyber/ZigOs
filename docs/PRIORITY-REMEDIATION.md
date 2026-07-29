@@ -6,12 +6,12 @@ This document records the current disposition of the post-Capstone architecture 
 
 The maintained x86-64 release line now requires:
 
-- 80 unique isolated Zig test declarations;
+- 81 unique isolated Zig test declarations;
 - generated ABI constants checked for staleness;
 - independent Zig and C userspace ELF verification;
 - a 45-command offline permanent-runtime COM1 session;
 - a 47-command live-network permanent-runtime COM1 session;
-- a three-boot NVMe persistence proof with forced termination after file-scoped `fsync`;
+- a four-boot NVMe persistence proof with forced termination after both file-scoped `fsync` and `fdatasync`;
 - a persistent normal userspace PID 1/PID 2 profile;
 - a USB-booted diskless normal RAM-root recovery profile;
 - byte-identical Linux and Windows release artifacts.
@@ -47,7 +47,7 @@ Delivered bounded slice:
 - permanent userspace shutdown with zero outstanding owned pages;
 - 4,096 ownership slots and allocation support preserving low and high firmware extents.
 
-The current permanent-runtime integration proves exact 247/247 offline and 278/278 live-network physical allocations/frees with the ABI 1.10 Zig/C, sparse-filesystem and vectored-I/O fixtures.
+The current permanent-runtime integration proves exact 247/247 offline and 278/278 live-network physical allocations/frees with the ABI 1.11 Zig/C, sparse-filesystem, vectored-I/O and file-sync fixtures.
 
 Still open:
 
@@ -135,7 +135,7 @@ Each inode now owns a portable ticket lock for data and size mutation. Ordinary 
 Ordinary-file bytes now live in a shared pool of 256 page-sized blocks instead of one dense 32 KiB array per node. Each file has eight logical block slots; absent slots read as zero, writes allocate touched slots transactionally, truncate/unlink return blocks, and ABI 1.9 `fallocate` supports bounded preallocation and hole punching. Journal kind 5 preserves logical size and the resident-block bitmap, including executable files whose final mode is `0555`. Required shutdown gates report and drain the pool lock and verify resident block/byte ownership. This remains a bounded 32 KiB-per-file design, not a scalable extent tree.
 ABI 1.10 adds synchronous vectored descriptor I/O without creating a second descriptor path. The kernel copies and validates at most eight 16-byte vector descriptors, validates every nonempty user range and the 1,024-byte aggregate limit before I/O, then performs one existing descriptor write from a gathered buffer or one descriptor read followed by scatter. Invalid later vectors therefore cannot partially mutate a file or consume its shared offset.
 
-Persistent `fsync(fd)` now resolves the exact VFS node and replaces only that existing stable file record in a separate scratch payload built from the last committed generation. Unrelated dirty VFS state is excluded, device-write failure leaves the committed in-memory baseline unchanged, and the shared A/B payload-flush/header-FUA path commits the replacement. A required three-boot gate creates generation 1, fsyncs one target while dirtying an unrelated sparse file, kills QEMU without shutdown, then verifies target data/mode and hard/symbolic aliases while the unrelated file recovers its previous version. New names and changed rename/link topology still require global `sync`; `fdatasync` remains open.
+Persistent `fsync(fd)` and ABI 1.11 `fdatasync(fd)` resolve the exact VFS node and replace only that existing stable file record in a separate scratch payload built from the last committed generation. Both exclude unrelated dirty VFS state and preserve the committed in-memory baseline on device-write failure. `fsync` records current data, logical size, sparse allocation map and mode; `fdatasync` records current data/size/allocation while retaining the mode from the prior committed record. A required four-boot gate creates generation 1, kills QEMU after a generation-2 fsync and a generation-3 fdatasync, then proves full fsync metadata durability, fdatasync dirty-mode exclusion, link-alias recovery and unrelated sparse-state exclusion before generation-4 cleanup. New names and changed rename/link topology still require global `sync`.
 
 Still open:
 
@@ -153,11 +153,11 @@ Still open:
 
 **Verdict: substantially addressed; stable external platform remains open.**
 
-Delivered through ABI 1.10:
+Delivered through ABI 1.11:
 
 - `abi/zigos-abi.json` remains the source of truth;
 - generated matching kernel Zig, NASM, public Zig and C constants/layouts;
-- syscall numbers 64-117 and typed errno values;
+- syscall numbers 64-118 and typed errno values;
 - capability discovery and SysV AMD64 argc/argv/envp/auxv startup;
 - Zig wrappers for process, VM, file, directory, poll and UDP APIs;
 - ABI 1.6 `ioctl`, path `stat`, `openat` and descriptor `fsync`;
@@ -165,11 +165,12 @@ Delivered through ABI 1.10:
 - ABI 1.8 hard-link creation and stat link counts without changing the 32-byte stat layout;
 - ABI 1.9 descriptor `fallocate`, `KEEP_SIZE` preallocation and `PUNCH_HOLE|KEEP_SIZE` sparse-hole release;
 - ABI 1.10 generated 16-byte `IoVector` layouts and descriptor `readv`/`writev`, bounded to eight vectors and 1,024 total bytes;
+- ABI 1.11 descriptor `fdatasync`, sharing the transactional file-record path while preserving previously committed mode metadata;
 - a generated `sdk/c/include/zigos.h` and freestanding C wrapper library;
 - independently linked Zig and C conformance ELFs;
 - userspace DNS codec/resolver, init and shell.
 
-The booted C fixture proves generated layout compatibility, ABI discovery, `/dev/null`, `/dev/zero`, `/dev/console`, TTY ioctl flags, path stat, directory-descriptor and absolute `openat` semantics, `fsync`, symbolic-link creation, `readlink`, traversal, loop rejection, hard-link identity/link counts, sparse preallocation, invalid-mode rejection, hole punching, gathered writes, scattered reads and failure-atomic vector validation from a non-Zig application.
+The booted C fixture proves generated layout compatibility, ABI discovery, `/dev/null`, `/dev/zero`, `/dev/console`, TTY ioctl flags, path stat, directory-descriptor and absolute `openat` semantics, `fsync`, `fdatasync`, symbolic-link creation, `readlink`, traversal, loop rejection, hard-link identity/link counts, sparse preallocation, invalid-mode rejection, hole punching, gathered writes, scattered reads and failure-atomic vector validation from a non-Zig application.
 
 Still open:
 

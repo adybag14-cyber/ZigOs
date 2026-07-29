@@ -176,7 +176,7 @@ var syscall_count: u64 = 0;
 
 pub const ShutdownFn = *const fn (context: ?*anyopaque, process_handle: u64) bool;
 pub const SyncFn = *const fn (context: ?*anyopaque) i64;
-pub const SyncFileFn = *const fn (context: ?*anyopaque, node: u16) i64;
+pub const SyncFileFn = *const fn (context: ?*anyopaque, node: u16, include_metadata: bool) i64;
 pub const ChildSpawnFn = *const fn (parent_handle: u64, child_handle: u64) bool;
 var system_context: ?*anyopaque = null;
 var shutdown_fn: ?ShutdownFn = null;
@@ -613,6 +613,7 @@ pub fn handleSyscall(
         syscall.syscall_stat => return syscallStat(context, frame),
         syscall.syscall_openat => return syscallOpenAt(context, frame),
         syscall.syscall_fsync => return syscallFsync(context, frame, fx_state),
+        syscall.syscall_fdatasync => return syscallFdatasync(context, frame, fx_state),
         syscall.syscall_symlink => return syscallSymlink(context, frame),
         syscall.syscall_readlink => return syscallReadlink(context, frame),
         syscall.syscall_link => return syscallLink(context, frame),
@@ -2795,6 +2796,23 @@ fn syscallFsync(
     frame: *interrupt_context.Frame,
     fx_state: *align(16) interrupt_context.FxState,
 ) u64 {
+    return syscallFileSync(context, frame, fx_state, true);
+}
+
+fn syscallFdatasync(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    return syscallFileSync(context, frame, fx_state, false);
+}
+
+fn syscallFileSync(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+    include_metadata: bool,
+) u64 {
     const fd = runtime_abi.descriptor(frame.rdi) orelse {
         frame.rax = reject(errno_bad_fd);
         return 0;
@@ -2825,7 +2843,7 @@ fn syscallFsync(
         frame.rax = reject(runtime_abi.errno_io);
         return 0;
     }
-    const result = callback(system_context, node);
+    const result = callback(system_context, node, include_metadata);
     if (!paging.activateAddressSpace(user_root)) {
         saveContext(context, frame, fx_state);
         activeProcesses().fault(context.handle, 13, user_root) catch {};

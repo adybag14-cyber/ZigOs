@@ -243,7 +243,7 @@ def main() -> int:
                 sdk_copy_marker,
                 "persistent storage synchronized",
                 "zig-sdk: envp/auxv passed",
-                "zig-sdk: startup/argv/abi/files/vm/errno/readv/writev passed",
+                "zig-sdk: startup/argv/abi/files/vm/errno/fsync/fdatasync/readv/writev passed",
                 "process 4 exited 86",
                 "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/fallocate/sparse/open-unlink/rmdir/sync passed",
                 "process 5 exited 88",

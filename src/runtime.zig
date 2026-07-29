@@ -2257,9 +2257,13 @@ fn syncPersistentStorage(_: ?*anyopaque) i64 {
     return 0;
 }
 
-fn syncPersistentFile(_: ?*anyopaque, node: u16) i64 {
+fn syncPersistentFile(_: ?*anyopaque, node: u16, include_metadata: bool) i64 {
     state.filesystem_syncs +%= 1;
-    state.persistence.syncFile(&state.vfs, node) catch |err| return runtime_abi.fromError(err);
+    if (include_metadata) {
+        state.persistence.syncFile(&state.vfs, node) catch |err| return runtime_abi.fromError(err);
+    } else {
+        state.persistence.syncFileData(&state.vfs, node) catch |err| return runtime_abi.fromError(err);
+    }
     return 0;
 }
 

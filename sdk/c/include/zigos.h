@@ -7,10 +7,10 @@
 
 #define ZIGOS_ABI_MAGIC UINT32_C(0x4942415A)
 #define ZIGOS_ABI_MAJOR UINT16_C(1)
-#define ZIGOS_ABI_MINOR UINT16_C(10)
+#define ZIGOS_ABI_MINOR UINT16_C(11)
 #define ZIGOS_PAGE_SIZE UINT32_C(4096)
 #define ZIGOS_SYSCALL_BASE UINT16_C(64)
-#define ZIGOS_SYSCALL_COUNT UINT16_C(54)
+#define ZIGOS_SYSCALL_COUNT UINT16_C(55)
 #define ZIGOS_MAX_IOVECS UINT64_C(8)
 
 #define ZIGOS_AUX_NULL UINT64_C(0)
@@ -101,6 +101,7 @@
 #define ZIGOS_SYS_FALLOCATE UINT64_C(115)
 #define ZIGOS_SYS_READV UINT64_C(116)
 #define ZIGOS_SYS_WRITEV UINT64_C(117)
+#define ZIGOS_SYS_FDATASYNC UINT64_C(118)
 
 #define ZIGOS_ERRNO_PERMISSION INT64_C(-1)
 #define ZIGOS_ERRNO_NOT_FOUND INT64_C(-2)
@@ -190,6 +191,7 @@ int64_t zigos_fstat(uint16_t fd, zigos_stat *info);
 int64_t zigos_stat_path(const char *path, zigos_stat *info);
 int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);
 int64_t zigos_fsync(uint16_t fd);
+int64_t zigos_fdatasync(uint16_t fd);
 int64_t zigos_fallocate(uint16_t fd, uint64_t mode, uint64_t offset, uint64_t length);
 int64_t zigos_symlink(const char *target, const char *path);
 int64_t zigos_readlink(const char *path, void *bytes, size_t length);

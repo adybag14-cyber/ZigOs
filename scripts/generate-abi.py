@@ -278,6 +278,7 @@ def generate_c(spec: dict) -> str:
         "int64_t zigos_stat_path(const char *path, zigos_stat *info);\n",
         "int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);\n",
         "int64_t zigos_fsync(uint16_t fd);\n",
+        "int64_t zigos_fdatasync(uint16_t fd);\n",
         "int64_t zigos_fallocate(uint16_t fd, uint64_t mode, uint64_t offset, uint64_t length);\n",
         "int64_t zigos_symlink(const char *target, const char *path);\n",
         "int64_t zigos_readlink(const char *path, void *bytes, size_t length);\n",

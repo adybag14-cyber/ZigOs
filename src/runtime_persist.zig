@@ -158,6 +158,14 @@ pub const Store = struct {
     }
 
     pub fn syncFile(self: *Store, vfs: *runtime_vfs.Vfs, node_index: u16) Error!void {
+        try self.syncFileRecord(vfs, node_index, true);
+    }
+
+    pub fn syncFileData(self: *Store, vfs: *runtime_vfs.Vfs, node_index: u16) Error!void {
+        try self.syncFileRecord(vfs, node_index, false);
+    }
+
+    fn syncFileRecord(self: *Store, vfs: *runtime_vfs.Vfs, node_index: u16, include_metadata: bool) Error!void {
         if (self.device == null or !self.mounted) return Error.NotConfigured;
         if (!(vfs.persistentNode(node_index) catch return Error.InvalidRecord)) return Error.UnsupportedOperation;
         const stat = vfs.statNode(node_index) catch return Error.InvalidRecord;
@@ -179,6 +187,7 @@ pub const Store = struct {
         var output_offset: usize = 4;
         var output_count: u32 = 0;
         var target_found = false;
+        var committed_mode: ?u16 = null;
         var record_index: u32 = 0;
         while (record_index < committed_count) : (record_index += 1) {
             const record_start = input_offset;
@@ -192,6 +201,7 @@ pub const Store = struct {
                 else => return Error.Corrupt,
             };
             const path_length: usize = self.payload[input_offset + 1];
+            const record_mode = read16(&self.payload, input_offset + 2);
             const data_length: usize = read32(&self.payload, input_offset + 4);
             input_offset += 8;
             if (path_length == 0 or input_offset + path_length > committed_length) return Error.Corrupt;
@@ -202,6 +212,7 @@ pub const Store = struct {
             if (std.mem.eql(u8, record_path, relative)) {
                 if (target_found or (kind != .file and kind != .sparse_file)) return Error.UnsupportedOperation;
                 target_found = true;
+                committed_mode = record_mode;
                 continue;
             }
             const record_length = input_offset - record_start;
@@ -212,7 +223,8 @@ pub const Store = struct {
             output_count +%= 1;
         }
         if (input_offset != committed_length) return Error.Corrupt;
-        if (!target_found) return Error.UnsupportedOperation;
+        if (!target_found or committed_mode == null) return Error.UnsupportedOperation;
+        const persisted_mode = if (include_metadata) stat.mode else committed_mode.?;
 
         const sparse = vfs.sparseFileInfoNode(node_index) catch return Error.InvalidRecord;
         self.record_scratch[0] = sparse.allocation_bitmap;
@@ -232,7 +244,7 @@ pub const Store = struct {
             output_offset,
             relative,
             .sparse_file,
-            stat.mode,
+            persisted_mode,
             self.record_scratch[0..data_offset],
         );
         output_count +%= 1;
@@ -832,6 +844,34 @@ test "file sync commits one stable file and excludes unrelated dirty state" {
 
     const new_node = try live_vfs.putFile(0, "/persist/new.txt", "new", 0o644, false, 9);
     try std.testing.expectError(Error.UnsupportedOperation, store.syncFile(live_vfs, new_node));
+}
+
+test "file data sync persists bytes and size without dirty mode metadata" {
+    var disk: TestDisk = .{};
+    const live_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(live_vfs);
+    live_vfs.initialize();
+    var store: Store = .{};
+    try store.mount(live_vfs, disk.device(), 1);
+    const target_node = try live_vfs.putFile(0, "/persist/target.txt", "before", 0o640, false, 2);
+    _ = try live_vfs.putFile(0, "/persist/other.txt", "stable", 0o600, false, 3);
+    try store.sync(live_vfs);
+
+    _ = try live_vfs.putFile(0, "/persist/target.txt", "after-data-and-size", 0o600, false, 4);
+    try live_vfs.chmod(0, "/persist/target.txt", 0o600, 5);
+    _ = try live_vfs.putFile(0, "/persist/other.txt", "dirty", 0o700, false, 6);
+    try store.syncFileData(live_vfs, target_node);
+
+    const recovered_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(recovered_vfs);
+    recovered_vfs.initialize();
+    var recovered: Store = .{};
+    try recovered.mount(recovered_vfs, disk.device(), 7);
+    try std.testing.expectEqualStrings("after-data-and-size", try recovered_vfs.readOnlyView(0, "/persist/target.txt"));
+    try std.testing.expectEqual(@as(u16, 0o640), (try recovered_vfs.stat(0, "/persist/target.txt")).mode);
+    try std.testing.expectEqualStrings("stable", try recovered_vfs.readOnlyView(0, "/persist/other.txt"));
+    try std.testing.expectEqual(@as(u16, 0o600), (try recovered_vfs.stat(0, "/persist/other.txt")).mode);
+    try std.testing.expectEqual(@as(u64, 2), recovered.report().generation);
 }
 
 test "failed file sync preserves the committed baseline for retry" {

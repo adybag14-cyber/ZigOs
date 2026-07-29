@@ -71,7 +71,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.10 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.11 discovery passed\r\n")) {
         return 0xC4;
     }
 
@@ -251,11 +251,11 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
     }
 
     int64_t host_fd = zigos_openat(ZIGOS_AT_CWD, "/etc/hostname", ZIGOS_OPEN_READ, 0);
-    if (host_fd < 0 || zigos_fsync((uint16_t)host_fd) != 0 || zigos_close((uint16_t)host_fd) != 0) {
-        return fail(0xD6, "descriptor fsync");
+    if (host_fd < 0 || zigos_fsync((uint16_t)host_fd) != 0 || zigos_fdatasync((uint16_t)host_fd) != 0 || zigos_close((uint16_t)host_fd) != 0) {
+        return fail(0xD6, "descriptor fsync/fdatasync");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
         return 0xD7;
     }
     return 0x57;

@@ -8,7 +8,7 @@ const argv2_fail_message = "zig-sdk: bad argv2\r\n";
 const argv_message = "zig-sdk: argc/argv passed\r\n";
 const abi_message = "zig-sdk: ABI discovery passed\r\n";
 const startup_vector_message = "zig-sdk: envp/auxv passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/errno/readv/writev passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/errno/fsync/fdatasync/readv/writev passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -139,6 +139,8 @@ fn run() zigos.Error!void {
     if (zigos.writev(vector_fd, &oversized)) |_| return error.InvalidArgument else |err| {
         if (err != error.TooBig) return err;
     }
+    try zigos.fsync(vector_fd);
+    try zigos.fdatasync(vector_fd);
     try zigos.close(vector_fd);
     try zigos.unlink(vector_path);
 

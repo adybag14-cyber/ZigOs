@@ -4,7 +4,7 @@
 
 This document describes the security boundary of the current bounded x86-64 ZigOs runtime. It is a development threat model, not a claim that ZigOs is secure against hostile workloads.
 
-The model covers the post-UEFI kernel, retained CPL3 processes, the bounded RAM VFS, the `/persist` A/B journal, COM1/TTY input, the retained e1000e and NVMe paths, and the generated ABI 1.10 SDK interfaces. The legacy i686 environment is outside this document.
+The model covers the post-UEFI kernel, retained CPL3 processes, the bounded RAM VFS, the `/persist` A/B journal, COM1/TTY input, the retained e1000e and NVMe paths, and the generated ABI 1.11 SDK interfaces. The legacy i686 environment is outside this document.
 
 ## Assets to protect
 
@@ -65,7 +65,7 @@ The model does not currently defend against malicious kernel code, compromised f
 - Paths are bounded and normalized; traversal, rename cycles and cross-mount rename are rejected.
 - `/persist` uses alternating generations, payload CRCs, payload-before-header ordering, flushes and an FUA commit header.
 - Global sync and stable-path file fsync build in a separate scratch payload; the committed in-memory baseline changes only after payload and FUA header success.
-- File fsync copies unrelated records from the last committed generation, excluding unrelated dirty VFS state; a forced-termination three-boot test verifies that isolation.
+- File fsync and fdatasync copy unrelated records from the last committed generation, excluding unrelated dirty VFS state. Full fsync records current mode; fdatasync retains committed mode while advancing data, size and sparse allocation. A forced-termination four-boot test verifies both policies.
 - Mount selects the newest completely valid generation and can fall back from a corrupt newest slot.
 
 ### Devices and networking

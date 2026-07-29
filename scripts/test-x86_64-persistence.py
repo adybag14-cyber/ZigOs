@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove global sync and file-scoped fsync across three independent x86-64 boots."""
+"""Prove global sync, fsync and fdatasync across four independent x86-64 boots."""
 
 from __future__ import annotations
 
@@ -383,55 +383,86 @@ def main() -> int:
             image=image,
             boot_timeout=args.boot_timeout,
             commands=[
-                ("cat /persist/config/message.txt", "survived-generation-one"),
-                ("exec /persist/persist-sdk.elf alpha beta", "exec: PID 3 state zombie status 0x56"),
-                ("append /persist/config/message.txt survived-generation-three", None),
-                ("exec /bin/fs.elf verify", "exec: PID 4 state zombie status 0x59"),
-                ("fsck", "fsck ramfs/persist: clean"),
-                ("cat /persist/config/message.txt", "survived-generation-three"),
-                ("shutdown", "ZigOs persistent storage: mounted yes generation/slot 3/0"),
+                ("exec /bin/fs.elf fdatasync", "exec: PID 3 state zombie status 0x5C"),
             ],
             required_markers=[
-                "survived-generation-one",
-                "survived-generation-three",
-                "zig-sdk: envp/auxv passed",
-                "exec: PID 3 state zombie status 0x56",
-                "fs-api: recovery/file-fsync-isolation/mode/hard-link/symlink/fallocate/sparse/cleanup passed",
-                "exec: PID 4 state zombie status 0x59",
-                "ZigOs persistent storage: mounted yes generation/slot 3/0 records/payload 3/",
-                "errors 0/0 clean yes",
-                "persistent-storage yes canned-results no explicit-shutdown yes",
+                "fs-api: recovered fsync metadata then fdatasync data/size committed dirty mode and unrelated data excluded",
+                "exec: PID 3 state zombie status 0x5C",
             ],
         )
         after_third_hash = sha256(image)
         if after_third_hash == after_second_hash:
-            raise RuntimeError("boot 3 did not commit a new NVMe generation")
+            raise RuntimeError("boot 3 file fdatasync did not commit a new NVMe generation")
+        header_a = parse_header(image, data_first_lba, 0)
+        header_b = parse_header(image, data_first_lba, 1)
+        if header_a is None or header_b is None:
+            raise RuntimeError(f"file fdatasync did not leave both A/B headers committed: A={header_a}, B={header_b}")
+        if (header_a.generation, header_b.generation) != (3, 2):
+            raise RuntimeError(f"unexpected post-fdatasync A/B generations: A={header_a}, B={header_b}")
+        if header_a.record_count != 8 or header_b.record_count != 8:
+            raise RuntimeError(f"file fdatasync changed persistent namespace cardinality: A={header_a}, B={header_b}")
+
+        fourth_text = run_boot(
+            boot_number=4,
+            qemu=qemu,
+            code_source=code_source,
+            vars_source=vars_source,
+            work=work,
+            image=image,
+            boot_timeout=args.boot_timeout,
+            commands=[
+                ("cat /persist/config/message.txt", "survived-generation-one"),
+                ("exec /persist/persist-sdk.elf alpha beta", "exec: PID 3 state zombie status 0x56"),
+                ("append /persist/config/message.txt survived-generation-four", None),
+                ("exec /bin/fs.elf verify", "exec: PID 4 state zombie status 0x59"),
+                ("fsck", "fsck ramfs/persist: clean"),
+                ("cat /persist/config/message.txt", "survived-generation-four"),
+                ("shutdown", "ZigOs persistent storage: mounted yes generation/slot 4/1"),
+            ],
+            required_markers=[
+                "survived-generation-one",
+                "survived-generation-four",
+                "zig-sdk: envp/auxv passed",
+                "exec: PID 3 state zombie status 0x56",
+                "fs-api: recovery/fsync-metadata/fdatasync-data-only/hard-link/symlink/sparse-isolation/cleanup passed",
+                "exec: PID 4 state zombie status 0x59",
+                "ZigOs persistent storage: mounted yes generation/slot 4/1 records/payload 3/",
+                "errors 0/0 clean yes",
+                "persistent-storage yes canned-results no explicit-shutdown yes",
+            ],
+        )
+        after_fourth_hash = sha256(image)
+        if after_fourth_hash == after_third_hash:
+            raise RuntimeError("boot 4 did not commit a new NVMe generation")
         header_a = parse_header(image, data_first_lba, 0)
         header_b = parse_header(image, data_first_lba, 1)
         if header_a is None or header_b is None:
             raise RuntimeError(f"both A/B headers were not committed: A={header_a}, B={header_b}")
-        if (header_a.generation, header_b.generation) != (3, 2):
+        if (header_a.generation, header_b.generation) != (3, 4):
             raise RuntimeError(f"unexpected final A/B generations: A={header_a}, B={header_b}")
-        if header_a.record_count != 3 or header_b.record_count != 8:
+        if header_a.record_count != 8 or header_b.record_count != 3:
             raise RuntimeError(f"unexpected final A/B record counts: A={header_a}, B={header_b}")
 
         summary = {
             "initial_sha256": initial_hash,
             "after_boot1_sha256": after_first_hash,
             "after_boot2_fsync_sha256": after_second_hash,
-            "after_boot3_sha256": after_third_hash,
+            "after_boot3_fdatasync_sha256": after_third_hash,
+            "after_boot4_sha256": after_fourth_hash,
             "slot_a": header_a.__dict__,
             "slot_b": header_b.__dict__,
             "boot1_serial_bytes": len(first_text.encode("utf-8")),
             "boot2_serial_bytes": len(second_text.encode("utf-8")),
             "boot3_serial_bytes": len(third_text.encode("utf-8")),
+            "boot4_serial_bytes": len(fourth_text.encode("utf-8")),
         }
         (work / "result.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8", newline="\n")
-        print("Persistent x86-64 NVMe three-boot fsync session passed.")
-        print(f"  boot 1: slot A generation 1, records 8")
-        print(f"  boot 2 crash: slot B generation 2, records 8 (one-file fsync)")
-        print(f"  boot 3: slot A generation {header_a.generation}, records {header_a.record_count}")
-        print(f"  image SHA-256: {initial_hash[:12]} -> {after_first_hash[:12]} -> {after_second_hash[:12]} -> {after_third_hash[:12]}")
+        print("Persistent x86-64 NVMe four-boot fsync/fdatasync session passed.")
+        print("  boot 1: slot A generation 1, records 8")
+        print("  boot 2 crash: slot B generation 2, records 8 (fsync data and metadata)")
+        print("  boot 3 crash: slot A generation 3, records 8 (fdatasync data only)")
+        print(f"  boot 4: slot B generation {header_b.generation}, records {header_b.record_count}")
+        print(f"  image SHA-256: {initial_hash[:12]} -> {after_first_hash[:12]} -> {after_second_hash[:12]} -> {after_third_hash[:12]} -> {after_fourth_hash[:12]}")
         return 0
     finally:
         try:

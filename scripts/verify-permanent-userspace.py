@@ -141,10 +141,14 @@ def main() -> int:
     require(persist_source, "device.write(slot, self.sector[0..block_size], true)", "the generation header is committed with FUA")
     require(persist_source, "gpt.crc32(next_payload", "journal scratch payloads are checksummed before commit")
     require(persist_source, "next_payload: [maximum_payload_bytes]u8", "global and file-scoped commits use a separate transactional payload")
-    require(persist_source, "pub fn syncFile", "persistent store exposes one-file snapshot replacement")
-    require(persist_source, "fn commitSnapshot", "global sync and file fsync share one ordered A/B commit path")
+    require(persist_source, "pub fn syncFile", "persistent store exposes one-file data-and-metadata snapshot replacement")
+    require(persist_source, "pub fn syncFileData", "persistent store exposes data-only one-file snapshot replacement")
+    require(persist_source, "committed_mode = record_mode", "fdatasync retains mode from the last committed target record")
+    require(persist_source, "const persisted_mode = if (include_metadata) stat.mode else committed_mode.?", "fsync and fdatasync select current or committed metadata explicitly")
+    require(persist_source, "fn commitSnapshot", "global sync, fsync and fdatasync share one ordered A/B commit path")
     require(persist_source, "self.payload[record_start..input_offset]", "file fsync copies unrelated committed records rather than current dirty VFS state")
-    require(persist_source, 'test "file sync commits one stable file and excludes unrelated dirty state"', "isolated test proves one-file durability and unrelated dirty-state exclusion")
+    require(persist_source, 'test "file sync commits one stable file and excludes unrelated dirty state"', "isolated test proves one-file fsync durability and unrelated dirty-state exclusion")
+    require(persist_source, 'test "file data sync persists bytes and size without dirty mode metadata"', "isolated test proves fdatasync advances data and logical size while preserving committed mode")
     require(persist_source, 'test "failed file sync preserves the committed baseline for retry"', "failed file fsync leaves the committed in-memory baseline unchanged")
     require(persist_source, "if (second_valid.?.generation > first_valid.?.generation)", "mount selects the newest fully valid generation")
     require(persist_source, 'test "mount falls back to the previous valid generation"', "corrupt newest generation recovery test")
@@ -152,15 +156,18 @@ def main() -> int:
     require(persist_source, "path_scratch", "journal path construction cannot alias the traversal queue")
     require(qemu_test, "NVMe ZigOs Data Partition", "hosted boot gate verifies data-partition discovery")
     require(qemu_test, "NVMe retained for permanent runtime", "hosted boot gate verifies the polling handoff")
-    require(persistence_test, "Persistent x86-64 NVMe three-boot fsync session passed.", "dedicated persistence gate spans baseline, forced-termination fsync and recovery boots")
+    require(persistence_test, "Persistent x86-64 NVMe four-boot fsync/fdatasync session passed.", "dedicated persistence gate spans baseline, forced-termination fsync, forced-termination fdatasync and recovery boots")
     require(persistence_test, "header_a.generation != 1", "host gate requires slot A generation one")
-    require(persistence_test, "exec /bin/fs.elf fsync", "boot two commits one target file without a global sync")
-    require(persistence_test, "boot 2 crash: slot B generation 2", "boot two is forcibly terminated after the file-scoped generation commits")
-    require(persistence_test, "survived-generation-one", "boot three must read data written by boot one")
+    require(persistence_test, "exec /bin/fs.elf fsync", "boot two commits one target file with data and metadata")
+    require(persistence_test, "boot 2 crash: slot B generation 2", "boot two is forcibly terminated after the fsync generation commits")
+    require(persistence_test, "exec /bin/fs.elf fdatasync", "boot three commits target data without dirty mode metadata")
+    require(persistence_test, "boot 3 crash: slot A generation 3", "boot three is forcibly terminated after the fdatasync generation commits")
+    require(persistence_test, "survived-generation-one", "boot four must read data written by boot one")
     require(persistence_test, "parse_header", "host gate validates on-disk A/B header CRCs")
     require(persistence_test, "after_second_hash == after_first_hash", "host gate requires a physical disk mutation from file fsync")
-    require(persistence_test, "after_third_hash == after_second_hash", "host gate requires the recovery boot to commit its cleanup generation")
-    require(workflow, "test-x86_64-persistence.py", "Windows CI runs the three-boot persistence gate")
+    require(persistence_test, "after_third_hash == after_second_hash", "host gate requires a physical disk mutation from file fdatasync")
+    require(persistence_test, "after_fourth_hash == after_third_hash", "host gate requires the recovery boot to commit its cleanup generation")
+    require(workflow, "test-x86_64-persistence.py", "Windows CI runs the four-boot persistence gate")
     require(workflow, "test-normal-boot.py", "Windows CI runs the normal userspace-shell gate")
     require(workflow, "test-diskless-normal-boot.py", "Windows CI runs the diskless RAM-root recovery gate")
     require(build_graph, '"normal-boot"', "build graph exposes an explicit normal-boot profile")
@@ -224,18 +231,18 @@ def main() -> int:
     require(diskless_normal_boot_test, "sync: unsupported", "diskless userspace reports persistence unavailability explicitly")
     require(diskless_normal_boot_test, "storage diskless-ram-root cleanup yes", "diskless QEMU gate requires clean resource reclamation")
     require(runtime, "ZigOs shutdown drain:", "diagnostic shutdown drains and reaps delayed terminal userspace")
-    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 10:
-        raise SystemExit("permanent-userspace contract missing: ABI version 1.10")
+    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 11:
+        raise SystemExit("permanent-userspace contract missing: ABI version 1.11")
     expected_fs_syscalls = {"lseek": 98, "mkdir": 99, "unlink": 100, "rmdir": 101, "rename": 102, "chmod": 103}
     expected_network_syscalls = {"sendto": 104, "recvfrom": 105, "getpeername": 106, "setnonblock": 107}
-    expected_platform_syscalls = {"ioctl": 108, "stat": 109, "openat": 110, "fsync": 111, "symlink": 112, "readlink": 113, "link": 114, "fallocate": 115, "readv": 116, "writev": 117}
+    expected_platform_syscalls = {"ioctl": 108, "stat": 109, "openat": 110, "fsync": 111, "symlink": 112, "readlink": 113, "link": 114, "fallocate": 115, "readv": 116, "writev": 117, "fdatasync": 118}
     syscall_spec = abi_spec["syscalls"]
     core_numbering_valid = syscall_spec.get("spawnv") == 96 and syscall_spec.get("sync") == 97
     fs_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_fs_syscalls.items())
     network_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_network_syscalls.items())
     platform_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_platform_syscalls.items())
     if not core_numbering_valid or not fs_numbering_valid or not network_numbering_valid or not platform_numbering_valid:
-        raise SystemExit("permanent-userspace contract missing: ABI 1.10 syscall numbering")
+        raise SystemExit("permanent-userspace contract missing: ABI 1.11 syscall numbering")
     if abi_spec.get("message_flags") != {"dontwait": 1}:
         raise SystemExit("permanent-userspace contract missing: bounded MSG_DONTWAIT value")
     if abi_spec.get("fallocate_flags") != {"keep_size": 0, "punch_hole": 1}:
@@ -278,9 +285,9 @@ def main() -> int:
     require(normal_boot_test, "persistent storage synchronized", "normal profile commits the installed ELF")
     require(normal_boot_test, "fs verify-live", "normal profile runs the same-boot baseline verifier without invoking crash-recovery assumptions")
     require(normal_boot_test, "baseline/mode/seek/hard-link/symlink/fallocate/sparse/cleanup passed", "normal profile cleans the baseline filesystem fixture in one boot")
-    require(persistence_test, "exec /persist/persist-sdk.elf alpha beta", "boot three executes the restored persistent ELF")
-    require(persistence_test, "header_a.record_count != 8 or header_b.record_count != 8", "file fsync preserves all committed namespace records")
-    require(persistence_test, "header_a.record_count != 3 or header_b.record_count != 8", "recovery cleanup leaves the prior file-fsync generation intact in the alternate slot")
+    require(persistence_test, "exec /persist/persist-sdk.elf alpha beta", "boot four executes the restored persistent ELF")
+    require(persistence_test, "header_a.record_count != 8 or header_b.record_count != 8", "fsync and fdatasync each preserve all committed namespace records")
+    require(persistence_test, "header_a.record_count != 8 or header_b.record_count != 3", "recovery cleanup leaves the prior fdatasync generation intact in the alternate slot")
     require(executor, "syscallLseek", "ABI exposes descriptor seek without offset truncation")
     require(executor, "syscallMkdir", "ABI exposes userspace directory creation")
     require(executor, "syscallSinglePathMutation", "ABI exposes unlink and rmdir through one checked path")
@@ -406,13 +413,14 @@ def main() -> int:
     require(vfs_source, 'test "VFS unlink detaches names and reclaims after the final open handle"', "deferred unlink is isolated-tested across independent handles")
     require(fd_source, 'test "directory openat and deferred unlink survive descriptor aliases"', "descriptor test combines directory-relative openat with shared-description lifetime")
     require(fd_source, "pub fn statFromVfs", "path stat and descriptor fstat share one descriptor-layer VFS-to-ABI metadata conversion")
-    require(fs_conformance, "recovery/file-fsync-isolation/mode/hard-link/symlink/fallocate/sparse/cleanup passed", "fixture verifies target fsync durability, unrelated sparse-state exclusion and cleanup after forced termination")
+    require(fs_conformance, "recovery/fsync-metadata/fdatasync-data-only/hard-link/symlink/sparse-isolation/cleanup passed", "fixture verifies fsync metadata durability, fdatasync metadata exclusion, unrelated sparse-state exclusion and cleanup after forced termination")
     require(normal_boot_test, "mkdir /persist/shell-state", "normal shell exercises userspace mkdir")
     require(normal_boot_test, "write /persist/shell-state/renamed.txt stale-destination", "normal shell creates an existing rename destination")
     require(normal_boot_test, "chmod 600 /persist/shell-state/renamed.txt", "normal shell exercises replacement rename and chmod")
     require(persistence_test, "exec /bin/fs.elf init", "boot one commits mutations from a CPL3 fixture")
-    require(persistence_test, "exec /bin/fs.elf fsync", "boot two performs file-scoped persistence in CPL3")
-    require(persistence_test, "exec /bin/fs.elf verify", "boot three verifies isolation and removes the restored objects in CPL3")
+    require(persistence_test, "exec /bin/fs.elf fsync", "boot two performs file-scoped fsync in CPL3")
+    require(persistence_test, "exec /bin/fs.elf fdatasync", "boot three performs data-only fdatasync in CPL3")
+    require(persistence_test, "exec /bin/fs.elf verify", "boot four verifies both durability modes and removes the restored objects in CPL3")
     require(persist_source, "symlink = 3", "persistent record model retains symbolic-link identity")
     require(persist_source, "hard_link = 4", "persistent record model retains hard-link aliases")
     require(persist_source, "sparse_file = 5", "persistent record model retains logical size and sparse allocation maps")
@@ -440,13 +448,14 @@ def main() -> int:
     require(build_graph, "sdk/c/conformance.c", "build graph compiles an independent freestanding C conformance program")
     require(build_graph, '"artifacts/c-sdk.elf"', "C SDK conformance is installed as a standalone artifact")
     require(runtime, '"/bin/c-sdk.elf"', "C SDK conformance is installed in the runtime VFS")
-    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(10)", "generated C header publishes ABI 1.10")
+    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(11)", "generated C header publishes ABI 1.11")
     require(c_header, "ZIGOS_MAX_IOVECS UINT64_C(8)", "generated C header publishes the eight-vector bound")
     require(c_header, "typedef struct zigos_iovec", "generated C header publishes the stable iovec layout")
     require(c_header, 'sizeof(zigos_iovec) == 16', "generated C header asserts the iovec binary layout")
     require(c_header, "ZIGOS_IOCTL_TTY_GET_FLAGS", "generated C header publishes terminal ioctl requests")
     require(c_library, "zigos_openat", "C wrapper library exposes openat")
     require(c_library, "zigos_fsync", "C wrapper library exposes descriptor fsync")
+    require(c_library, "zigos_fdatasync", "C wrapper library exposes descriptor fdatasync")
     require(c_library, "zigos_symlink", "C wrapper library exposes symbolic-link creation")
     require(c_library, "zigos_readlink", "C wrapper library exposes link-target reads")
     require(c_library, "zigos_link", "C wrapper library exposes hard-link creation")
@@ -455,7 +464,7 @@ def main() -> int:
     require(c_library, "zigos_writev", "C wrapper library exposes vectored writes")
     require(c_header, "ZIGOS_FALLOCATE_KEEP_SIZE", "generated C header publishes sparse allocation flags")
     require(c_header, "uint8_t link_count", "generated C stat layout exposes namespace link counts")
-    require(c_conformance, "generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed", "booted C fixture covers devices, links, sparse allocation and vectored I/O")
+    require(c_conformance, "generated header/library/device/ioctl/stat/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed", "booted C fixture covers devices, sync variants, links, sparse allocation and vectored I/O")
     require(c_conformance, "invalid_write_vectors", "C fixture proves vector prevalidation prevents partial writes")
     require(c_conformance, "invalid_read_vectors", "C fixture proves vector prevalidation preserves read offsets")
     require(c_conformance, "nondirectory != ZIGOS_ERRNO_NOT_DIRECTORY", "C fixture rejects relative openat on a non-directory descriptor")
@@ -474,10 +483,14 @@ def main() -> int:
     require(executor, "fn syscallIoctl", "kernel exposes descriptor ioctl")
     require(executor, "fn syscallStat", "kernel exposes path-based stat")
     require(executor, "fn syscallOpenAt", "kernel exposes directory-relative openat")
-    require(executor, "fn syscallFsync", "kernel exposes descriptor-targeted persistence sync")
-    require(executor, "persistentSyncNode", "fsync resolves the exact persistent VFS node behind the descriptor")
-    require(executor, "sync_file_fn", "persistent fsync uses a file-scoped backend rather than the global sync callback")
-    require(runtime, "fn syncPersistentFile", "runtime routes file fsync into the persistent store")
+    require(executor, "fn syscallFsync", "kernel exposes descriptor-targeted full file sync")
+    require(executor, "fn syscallFdatasync", "kernel exposes descriptor-targeted data-only sync")
+    require(executor, "fn syscallFileSync", "fsync and fdatasync share descriptor validation and address-space switching")
+    require(executor, "persistentSyncNode", "file sync resolves the exact persistent VFS node behind the descriptor")
+    require(executor, "sync_file_fn", "persistent file sync uses a file-scoped backend rather than the global sync callback")
+    require(executor, "include_metadata", "the file-sync backend receives an explicit metadata policy")
+    require(runtime, "fn syncPersistentFile", "runtime routes fsync and fdatasync into the persistent store")
+    require(runtime, "syncFileData", "runtime routes fdatasync to the data-only persistent-store path")
     require(executor, "fn syscallSymlink", "kernel exposes symbolic-link creation")
     require(executor, "fn syscallReadlink", "kernel exposes non-following link-target reads")
     require(executor, "fn syscallLink", "kernel exposes same-mount hard-link creation")
@@ -496,7 +509,8 @@ def main() -> int:
     require(socket_conformance, "SYS_SETNONBLOCK", "CPL3 socket fixture checks socket-level nonblocking mode")
     require(socket_conformance, "ZIGOS_MSG_DONTWAIT", "CPL3 socket fixture checks per-call nonblocking mode")
     require(runtime_test, "socket-api: sendto/recvfrom/getpeername/nonblocking passed", "required live QEMU session proves ABI 1.6 UDP controls")
-    require(sdk_conformance, "startup/argv/abi/files/vm/errno/readv/writev passed", "Zig conformance binary spans startup, core wrappers and vectored I/O")
+    require(sdk_conformance, "startup/argv/abi/files/vm/errno/fsync/fdatasync/readv/writev passed", "Zig conformance binary spans startup, both sync wrappers and vectored I/O")
+    require(sdk_source, "pub fn fdatasync", "Zig SDK exposes descriptor fdatasync")
     require(sdk_conformance, "invalid_write_vectors", "Zig fixture proves invalid later vectors cause no partial write")
     require(sdk_conformance, "invalid_read_vectors", "Zig fixture proves invalid later destinations do not consume the shared offset")
     require(sdk_conformance, "constants.maximum_iovecs + 1", "Zig fixture proves the generated vector-count bound")
@@ -635,8 +649,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 80:
-        raise SystemExit(f"canonical isolated-test declaration total must be 80, found {declared_tests}")
+    if declared_tests != 81:
+        raise SystemExit(f"canonical isolated-test declaration total must be 81, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -703,9 +717,9 @@ def main() -> int:
         "reclaimed 247 stale-contexts-swept 0 allocator alloc/release/retains 247/247/0",
         "reclaimed 278 stale-contexts-swept 0 allocator alloc/release/retains 278/278/0",
         "tty-api: blocking read/poll/line discipline passed",
-        "zig-sdk: startup/argv/abi/files/vm/errno/readv/writev passed",
-        "c-sdk: ABI 1.10 discovery passed",
-        "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
+        "zig-sdk: startup/argv/abi/files/vm/errno/fsync/fdatasync/readv/writev passed",
+        "c-sdk: ABI 1.11 discovery passed",
+        "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
         "ZigOs shutdown drain:",
         " data-lock tickets/outstanding ",
         " pool-lock tickets/outstanding ",
@@ -736,7 +750,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.10 Zig/C SDKs, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

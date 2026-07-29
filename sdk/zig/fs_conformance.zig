@@ -15,7 +15,9 @@ const loop_b_path = "/persist/abi14/loop-b";
 const sparse_path = "/persist/abi14/sparse.bin";
 const sparse_offset = 2 * zigos.constants.abi_page_size;
 const fsync_payload = "file-fsync-target-v2\n";
+const fdatasync_payload = "file-fdatasync-target-v3-with-new-size\n";
 const unrelated_dirty_payload = "unrelated-dirty-state";
+const unrelated_fdatasync_dirty_payload = "unrelated-fdatasync-dirty-state";
 
 pub export fn zigos_main(
     argc: usize,
@@ -27,9 +29,10 @@ pub export fn zigos_main(
     const mode: [*:0]const u8 = @ptrFromInt(argv[1]);
     if (zigos.stringEqual(mode, "init")) return initialize() catch 0xE1;
     if (zigos.stringEqual(mode, "fsync")) return fileSync() catch 0xE2;
-    if (zigos.stringEqual(mode, "verify-live")) return verifyBaseline() catch 0xE3;
-    if (zigos.stringEqual(mode, "verify")) return verify() catch 0xE4;
-    return 0xE5;
+    if (zigos.stringEqual(mode, "fdatasync")) return fileDataSync() catch 0xE3;
+    if (zigos.stringEqual(mode, "verify-live")) return verifyBaseline() catch 0xE4;
+    if (zigos.stringEqual(mode, "verify")) return verify() catch 0xE5;
+    return 0xE6;
 }
 
 fn initialize() zigos.Error!u32 {
@@ -143,6 +146,58 @@ fn fileSync() zigos.Error!u32 {
     return 0x5B;
 }
 
+fn fileDataSync() zigos.Error!u32 {
+    const recovered = try zigos.open(renamed_path, .{ .read = true }, 0);
+    var recovered_info: zigos.Stat = undefined;
+    try zigos.fstat(recovered, &recovered_info);
+    if (recovered_info.mode != 0o640 or recovered_info.size != fsync_payload.len) return error.InvalidArgument;
+    var recovered_payload: [fsync_payload.len]u8 = undefined;
+    if (try zigos.read(recovered, &recovered_payload) != recovered_payload.len or !equal(&recovered_payload, fsync_payload))
+        return error.InvalidArgument;
+    try zigos.close(recovered);
+
+    var target_stat: zigos.Stat = undefined;
+    var hard_stat: zigos.Stat = undefined;
+    try zigos.stat(renamed_path, &target_stat);
+    try zigos.stat(hard_link_path, &hard_stat);
+    if (target_stat.node != hard_stat.node or target_stat.generation != hard_stat.generation or
+        target_stat.link_count != 2 or hard_stat.link_count != 2) return error.InvalidArgument;
+    const hard_fd = try zigos.open(hard_link_path, .{ .read = true }, 0);
+    var hard_payload: [fsync_payload.len]u8 = undefined;
+    if (try zigos.read(hard_fd, &hard_payload) != hard_payload.len or !equal(&hard_payload, fsync_payload))
+        return error.InvalidArgument;
+    try zigos.close(hard_fd);
+    const linked = try zigos.open(link_path, .{ .read = true }, 0);
+    var linked_payload: [fsync_payload.len]u8 = undefined;
+    if (try zigos.read(linked, &linked_payload) != linked_payload.len or !equal(&linked_payload, fsync_payload))
+        return error.InvalidArgument;
+    try zigos.close(linked);
+
+    const stable_sparse = try zigos.open(sparse_path, .{ .read = true }, 0);
+    var sparse_info: zigos.Stat = undefined;
+    try zigos.fstat(stable_sparse, &sparse_info);
+    if (sparse_info.size != sparse_offset + 4) return error.InvalidArgument;
+    var sparse_prefix: [16]u8 = undefined;
+    if (try zigos.read(stable_sparse, &sparse_prefix) != sparse_prefix.len) return error.InvalidArgument;
+    for (sparse_prefix) |byte| if (byte != 0) return error.InvalidArgument;
+    if (try zigos.lseek(stable_sparse, sparse_offset, .start) != sparse_offset) return error.InvalidArgument;
+    var sparse_tail: [4]u8 = undefined;
+    if (try zigos.read(stable_sparse, &sparse_tail) != sparse_tail.len or !equal(&sparse_tail, "tail"))
+        return error.InvalidArgument;
+    try zigos.close(stable_sparse);
+
+    const target = try zigos.open(renamed_path, .{ .read = true, .write = true, .truncate = true }, 0);
+    try zigos.writeAll(target, fdatasync_payload);
+    try zigos.chmod(renamed_path, 0o600);
+    const unrelated = try zigos.open(sparse_path, .{ .read = true, .write = true, .truncate = true }, 0);
+    try zigos.writeAll(unrelated, unrelated_fdatasync_dirty_payload);
+    try zigos.close(unrelated);
+    try zigos.fdatasync(target);
+    try zigos.close(target);
+    try zigos.writeAll(1, "fs-api: recovered fsync metadata then fdatasync data/size committed dirty mode and unrelated data excluded\r\n");
+    return 0x5C;
+}
+
 fn verifyBaseline() zigos.Error!u32 {
     const fd = try zigos.open(renamed_path, .{ .read = true }, 0);
     var info: zigos.Stat = undefined;
@@ -203,10 +258,10 @@ fn verify() zigos.Error!u32 {
     const fd = try zigos.open(renamed_path, .{ .read = true }, 0);
     var info: zigos.Stat = undefined;
     try zigos.fstat(fd, &info);
-    if (info.mode != 0o640 or info.size != fsync_payload.len) return error.InvalidArgument;
+    if (info.mode != 0o640 or info.size != fdatasync_payload.len) return error.InvalidArgument;
     if (try zigos.lseek(fd, 0, .start) != 0) return error.InvalidArgument;
-    var target_payload: [fsync_payload.len]u8 = undefined;
-    if (try zigos.read(fd, &target_payload) != target_payload.len or !equal(&target_payload, fsync_payload))
+    var target_payload: [fdatasync_payload.len]u8 = undefined;
+    if (try zigos.read(fd, &target_payload) != target_payload.len or !equal(&target_payload, fdatasync_payload))
         return error.InvalidArgument;
     try zigos.close(fd);
     var target_stat: zigos.Stat = undefined;
@@ -216,16 +271,16 @@ fn verify() zigos.Error!u32 {
     if (target_stat.node != hard_stat.node or target_stat.generation != hard_stat.generation or
         target_stat.link_count != 2 or hard_stat.link_count != 2) return error.InvalidArgument;
     const hard_fd = try zigos.open(hard_link_path, .{ .read = true }, 0);
-    var hard_payload: [fsync_payload.len]u8 = undefined;
-    if (try zigos.read(hard_fd, &hard_payload) != hard_payload.len or !equal(&hard_payload, fsync_payload))
+    var hard_payload: [fdatasync_payload.len]u8 = undefined;
+    if (try zigos.read(hard_fd, &hard_payload) != hard_payload.len or !equal(&hard_payload, fdatasync_payload))
         return error.InvalidArgument;
     try zigos.close(hard_fd);
     var stored_target: [32]u8 = undefined;
     const stored_target_length = try zigos.readlink(link_path, &stored_target);
     if (!equal(stored_target[0..stored_target_length], link_target)) return error.InvalidArgument;
     const linked = try zigos.open(link_path, .{ .read = true }, 0);
-    var linked_payload: [fsync_payload.len]u8 = undefined;
-    if (try zigos.read(linked, &linked_payload) != linked_payload.len or !equal(&linked_payload, fsync_payload))
+    var linked_payload: [fdatasync_payload.len]u8 = undefined;
+    if (try zigos.read(linked, &linked_payload) != linked_payload.len or !equal(&linked_payload, fdatasync_payload))
         return error.InvalidArgument;
     try zigos.close(linked);
     const sparse = try zigos.open(sparse_path, .{ .read = true, .write = true }, 0);
@@ -252,7 +307,7 @@ fn verify() zigos.Error!u32 {
     try zigos.unlink(renamed_path);
     try zigos.rmdir(root_path);
     try zigos.sync();
-    try zigos.writeAll(1, "fs-api: recovery/file-fsync-isolation/mode/hard-link/symlink/fallocate/sparse/cleanup passed\r\n");
+    try zigos.writeAll(1, "fs-api: recovery/fsync-metadata/fdatasync-data-only/hard-link/symlink/sparse-isolation/cleanup passed\r\n");
     return 0x59;
 }
 
