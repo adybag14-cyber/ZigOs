@@ -2265,6 +2265,11 @@ fn syncAllWritableMounts(_: ?*anyopaque) i64 {
 
 fn syncPersistentFile(_: ?*anyopaque, node: u16, include_metadata: bool) i64 {
     state.filesystem_syncs +%= 1;
+    const persistent = state.vfs.persistentNode(node) catch |err| return runtime_abi.fromError(err);
+    if (!persistent) {
+        _ = state.vfs.clearDirtyNodePages(node);
+        return 0;
+    }
     if (include_metadata) {
         state.persistence.syncFile(&state.vfs, node) catch |err| return runtime_abi.fromError(err);
     } else {
@@ -2350,6 +2355,9 @@ fn finishNormalRuntime() noreturn {
         fs_report.file_page_cache_hits > 0 and fs_report.file_page_cache_misses > 0 and
         fs_report.file_page_cache_insertions > 0 and fs_report.file_page_cache_lock_tickets > 0 and
         fs_report.file_page_cache_lock_outstanding == 0 and
+        fs_report.file_page_cache_dirty_entries == 0 and fs_report.dirty_file_pages == 0 and
+        fs_report.dirty_file_nodes == 0 and fs_report.dirty_page_marks > 0 and
+        fs_report.dirty_page_sync_clears > 0 and
         fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0 and
         fs_report.data_pool_lock_tickets > 0 and fs_report.data_pool_lock_outstanding == 0 and
         fs_report.allocated_blocks > 0 and fs_report.allocated_blocks <= runtime_vfs.maximum_data_blocks and
@@ -2476,6 +2484,9 @@ fn finishDiagnosticRuntime() noreturn {
         fs_report.file_page_cache_hits > 0 and fs_report.file_page_cache_misses > 0 and
         fs_report.file_page_cache_insertions > 0 and fs_report.file_page_cache_lock_tickets > 0 and
         fs_report.file_page_cache_lock_outstanding == 0 and
+        fs_report.file_page_cache_dirty_entries == 0 and fs_report.dirty_file_pages == 0 and
+        fs_report.dirty_file_nodes == 0 and fs_report.dirty_page_marks > 0 and
+        fs_report.dirty_page_sync_clears > 0 and
         fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0 and
         fs_report.data_pool_lock_tickets > 0 and fs_report.data_pool_lock_outstanding == 0 and
         fs_report.allocated_blocks > 0 and fs_report.allocated_blocks <= runtime_vfs.maximum_data_blocks and
@@ -2542,6 +2553,18 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(fs_report.dentry_cache_releases);
     emit(" page-cache entries ");
     emitDecimal(fs_report.file_page_cache_entries);
+    emit(" dirty/ledger ");
+    emitDecimal(fs_report.file_page_cache_dirty_entries);
+    emit("/");
+    emitDecimal(fs_report.dirty_file_pages);
+    emit("/");
+    emitDecimal(fs_report.dirty_file_nodes);
+    emit(" marks/sync-clear/discard ");
+    emitDecimal(fs_report.dirty_page_marks);
+    emit("/");
+    emitDecimal(fs_report.dirty_page_sync_clears);
+    emit("/");
+    emitDecimal(fs_report.dirty_page_discards);
     emit(" hit/miss ");
     emitDecimal(fs_report.file_page_cache_hits);
     emit("/");

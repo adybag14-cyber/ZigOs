@@ -316,6 +316,8 @@ try {
         ' hit/miss ',
         ' acquire/release ',
         ' page-cache entries ',
+        ' dirty/ledger ',
+        ' marks/sync-clear/discard ',
         ' lock tickets/outstanding ',
         ' data-lock tickets/outstanding ',
         ' pool-lock tickets/outstanding ',

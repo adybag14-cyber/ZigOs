@@ -2813,7 +2813,7 @@ fn syscallFileSync(
         frame.rax = reject(errno_bad_fd);
         return 0;
     };
-    const persistent_node = activeDescriptors().persistentSyncNode(
+    const node = activeDescriptors().syncNode(
         activeVfs(),
         activeProcesses(),
         context.handle,
@@ -2822,14 +2822,6 @@ fn syscallFileSync(
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const node = persistent_node orelse {
-        frame.rax = 0;
-        return 0;
-    };
-    if (!persistent_storage_capability) {
-        frame.rax = reject(runtime_abi.errno_no_syscall);
-        return 0;
-    }
     const callback = sync_file_fn orelse {
         frame.rax = reject(runtime_abi.errno_no_syscall);
         return 0;

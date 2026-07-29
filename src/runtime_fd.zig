@@ -895,6 +895,22 @@ pub const System = struct {
         return vfs.directoryNodeOpen(description.vfs_owner, description.vfs_handle);
     }
 
+    pub fn syncNode(
+        self: *const System,
+        vfs: *const runtime_vfs.Vfs,
+        processes: *const runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+    ) Error!u16 {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        const description = self.open_descriptions[open_index];
+        if (description.kind != .vfs and !(description.kind == .terminal and description.vfs_handle != 0))
+            return Error.InvalidOperation;
+        return vfs.syncOpenNode(description.vfs_owner, description.vfs_handle);
+    }
+
     pub fn persistentSyncNode(
         self: *const System,
         vfs: *const runtime_vfs.Vfs,
@@ -902,13 +918,8 @@ pub const System = struct {
         process_handle: u64,
         fd: u16,
     ) Error!?u16 {
-        _ = try processes.get(process_handle);
-        const namespace_slot = try self.resolveNamespace(process_handle);
-        const open_index = try self.resolveDescriptor(namespace_slot, fd);
-        const description = self.open_descriptions[open_index];
-        if (description.kind != .vfs and !(description.kind == .terminal and description.vfs_handle != 0))
-            return Error.InvalidOperation;
-        return vfs.persistentOpenNode(description.vfs_owner, description.vfs_handle);
+        const node = try self.syncNode(vfs, processes, process_handle, fd);
+        return if (try vfs.persistentNode(node)) node else null;
     }
 
     pub fn persistentSyncRequired(
@@ -1609,6 +1620,36 @@ test "descriptor fallocate preserves size punches holes and enforces writability
     try std.testing.expectError(Error.NotWritable, system.fallocate(&fs, &processes, process, read_only, 0, runtime_vfs.file_block_size, .{}, 7));
     try system.close(&fs, &processes, process, read_only);
     try system.close(&fs, &processes, process, fd);
+    try std.testing.expect(system.validate(&fs, &processes));
+}
+
+test "descriptor file sync routing distinguishes immediate and persistent mounts" {
+    var fs = runtime_vfs.Vfs.init();
+    try initializeTestFilesystem(&fs);
+    _ = try fs.mkdir(0, "/persist", 0o755, 1);
+    _ = try fs.mount(0, "/persist", .zigos_persist, false, "test-persist");
+    var processes = runtime_process.Table.init(0);
+    var system = System.init();
+    const process = processes.initHandle();
+    try system.bindProcess(&processes, process, true);
+
+    const ram_fd = try system.openFile(&fs, &processes, process, "/tmp/ram", .{ .read = true, .write = true, .create = true }, 0o600, 2);
+    _ = try system.write(&fs, &processes, process, ram_fd, "ram", 3);
+    const ram_node = try system.syncNode(&fs, &processes, process, ram_fd);
+    try std.testing.expect(!(try fs.persistentNode(ram_node)));
+    try std.testing.expectEqual(@as(?u16, null), try system.persistentSyncNode(&fs, &processes, process, ram_fd));
+    try std.testing.expect((try fs.dirtyFilePageBitmap(ram_node)) != 0);
+    _ = fs.clearDirtyNodePages(ram_node);
+    try std.testing.expectEqual(@as(u8, 0), try fs.dirtyFilePageBitmap(ram_node));
+
+    const persistent_fd = try system.openFile(&fs, &processes, process, "/persist/value", .{ .read = true, .write = true, .create = true }, 0o600, 4);
+    _ = try system.write(&fs, &processes, process, persistent_fd, "persist", 5);
+    const persistent_node = try system.syncNode(&fs, &processes, process, persistent_fd);
+    try std.testing.expect(try fs.persistentNode(persistent_node));
+    try std.testing.expectEqual(@as(?u16, persistent_node), try system.persistentSyncNode(&fs, &processes, process, persistent_fd));
+
+    const directory_fd = try system.openFile(&fs, &processes, process, "/tmp", .{ .read = true }, 0, 6);
+    try std.testing.expectError(runtime_vfs.Error.UnsupportedOperation, system.syncNode(&fs, &processes, process, directory_fd));
     try std.testing.expect(system.validate(&fs, &processes));
 }
 

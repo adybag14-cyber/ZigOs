@@ -66,10 +66,13 @@ The model does not currently defend against malicious kernel code, compromised f
 - `/persist` uses alternating generations, payload CRCs, payload-before-header ordering, flushes and an FUA commit header.
 - Global sync and stable-path file fsync build in a separate scratch payload; the committed in-memory baseline changes only after payload and FUA header success.
 - Global sync prevalidates every active writable mount before I/O, treats RAM filesystems as immediately synchronized, skips read-only mounts, commits the configured persistent backend once and rejects unsupported or duplicate writable durable backends without advancing the journal.
-- The file-data page cache contains only clean duplicates of authoritative VFS blocks, is bounded to sixteen pages and keys entries by inode generation and logical page so reclaimed node slots cannot reuse stale data.
+- The file-data page cache is bounded to sixteen pages and keys entries by inode generation and logical page so reclaimed node slots cannot reuse stale data; the authoritative block pool remains write-through.
+- An independent one-byte dirty-page bitmap per inode survives cache eviction, while resident entries must mirror the corresponding generation-keyed dirty bit.
+- Successful global sync clears dirty state only after a validated all-writable-mount plan and journal success; RAM-backed regular-file fsync/fdatasync clears only its target immediately, persistent file sync clears only after journal success, and rejected plans or device-write failures preserve dirty bits for retry.
+- Journal restoration and read-only mount adoption establish clean baselines, inode destruction discards obsolete dirty bits, and every release profile requires zero dirty cache entries, pages and nodes at shutdown.
 - Ordinary reads hold the inode data lock; every data/size/allocation mutation invalidates that inode's cached pages, and shutdown requires the cache lock to have no outstanding ticket.
 - Large cache-array scans use indexed/reference traversal; the source contract rejects by-value iteration that previously created a kernel-stack-sized temporary during QEMU execution.
-- File fsync and fdatasync copy unrelated records from the last committed generation, excluding unrelated dirty VFS state. Full fsync records current mode; fdatasync retains committed mode while advancing data, size and sparse allocation. A forced-termination four-boot test verifies both policies.
+- Persistent file fsync and fdatasync copy unrelated records from the last committed generation, excluding unrelated dirty VFS state. Full fsync records current mode; fdatasync retains committed mode while advancing data, size and sparse allocation. A forced-termination four-boot test verifies both policies; nonpersistent regular files use immediate target-only synchronization.
 - Mount selects the newest completely valid generation and can fall back from a corrupt newest slot.
 
 ### Devices and networking

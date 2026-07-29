@@ -142,6 +142,7 @@ const FilePageCacheEntry = struct {
     node: u16 = invalid_node,
     node_generation: u16 = 0,
     slot: u8 = 0,
+    dirty: bool = false,
     last_used: u64 = 0,
     data: [file_block_size]u8 = @splat(0),
 };
@@ -262,6 +263,12 @@ pub const Report = struct {
     dentry_cache_acquires: u64,
     dentry_cache_releases: u64,
     file_page_cache_entries: usize,
+    file_page_cache_dirty_entries: usize,
+    dirty_file_pages: usize,
+    dirty_file_nodes: usize,
+    dirty_page_marks: u64,
+    dirty_page_sync_clears: u64,
+    dirty_page_discards: u64,
     file_page_cache_hits: u64,
     file_page_cache_misses: u64,
     file_page_cache_insertions: u64,
@@ -290,6 +297,10 @@ pub const Vfs = struct {
     file_page_cache_insertions: u64 = 0,
     file_page_cache_evictions: u64 = 0,
     file_page_cache_invalidations: u64 = 0,
+    dirty_file_page_bitmap: [maximum_nodes]u8 = @splat(0),
+    dirty_page_marks: u64 = 0,
+    dirty_page_sync_clears: u64 = 0,
+    dirty_page_discards: u64 = 0,
     view_scratch: [maximum_file_size]u8 = @splat(0),
     dentries: [maximum_dentries]Dentry = @splat(.{}),
     dentry_cache: [maximum_dentry_cache_entries]DentryCacheEntry = @splat(.{}),
@@ -660,6 +671,7 @@ pub const Vfs = struct {
         @memcpy(mount_entry.source[0..source.len], source);
         self.mounts[mount_index] = mount_entry;
         self.migrateMountChildren(mountpoint_node, root_node, mount_id);
+        if (readonly) self.discardDirtyMountPages(mount_id);
         self.mutations +%= 1;
         return mount_id;
     }
@@ -927,9 +939,42 @@ pub const Vfs = struct {
         return mount_index < self.mounts.len and self.mounts[mount_index].used and self.mounts[mount_index].kind == .zigos_persist;
     }
 
-    pub fn persistentOpenNode(self: *const Vfs, owner_pid: u32, handle: u32) Error!?u16 {
+    pub fn dirtyFilePageBitmap(self: *const Vfs, node_index: u16) Error!u8 {
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].kind != .file) return Error.NotFound;
+        return self.dirty_file_page_bitmap[node_index];
+    }
+
+    pub fn clearDirtyNodePages(self: *Vfs, node_index: u16) usize {
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].kind != .file) return 0;
+        var node = &self.nodes[node_index];
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
+        return self.clearDirtyNodePagesLocked(node_index);
+    }
+
+    pub fn clearDirtyWritableMountPages(self: *Vfs) usize {
+        var cleared: usize = 0;
+        for (0..self.nodes.len) |node_index| {
+            var node = &self.nodes[node_index];
+            if (!node.used or node.kind != .file or node.mount_id == 0) continue;
+            const mount_index: usize = node.mount_id - 1;
+            if (mount_index >= self.mounts.len or !self.mounts[mount_index].used or self.mounts[mount_index].readonly) continue;
+            _ = node.data_lock.acquire();
+            cleared += self.clearDirtyNodePagesLocked(@intCast(node_index));
+            node.data_lock.release();
+        }
+        return cleared;
+    }
+
+    pub fn syncOpenNode(self: *const Vfs, owner_pid: u32, handle: u32) Error!u16 {
         const index = try self.resolveOpen(owner_pid, handle);
         const node_index = self.open_files[index].node;
+        if (self.nodes[node_index].kind != .file) return Error.UnsupportedOperation;
+        return node_index;
+    }
+
+    pub fn persistentOpenNode(self: *const Vfs, owner_pid: u32, handle: u32) Error!?u16 {
+        const node_index = try self.syncOpenNode(owner_pid, handle);
         return if (try self.persistentNode(node_index)) node_index else null;
     }
 
@@ -1014,6 +1059,7 @@ pub const Vfs = struct {
         node.mode = mode & 0o777;
         node.modified_tick = tick;
         self.invalidateFilePageCacheNode(node_index);
+        self.discardDirtyFilePagesLocked(node_index, 0xFF);
         self.mutations +%= 1;
         return node_index;
     }
@@ -1043,6 +1089,7 @@ pub const Vfs = struct {
         }
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
+            if ((!node.used or node.kind != .file) and self.dirty_file_page_bitmap[index] != 0) return false;
             if (node.data_lock.next() != node.data_lock.serving()) return false;
             if (node.kind != .file) for (node.file_blocks) |block_index| if (block_index != invalid_data_block) return false;
             if (!node.used) {
@@ -1090,6 +1137,8 @@ pub const Vfs = struct {
             if (entry.node >= self.nodes.len or entry.slot >= file_blocks_per_node or entry.node_generation == 0 or entry.last_used == 0) return false;
             const node = &self.nodes[entry.node];
             if (!node.used or node.kind != .file or node.generation != entry.node_generation) return false;
+            const dirty = (self.dirty_file_page_bitmap[entry.node] & (@as(u8, 1) << @intCast(entry.slot))) != 0;
+            if (entry.dirty != dirty) return false;
             const block_index = node.file_blocks[entry.slot];
             if (block_index == invalid_data_block) {
                 for (entry.data) |byte| if (byte != 0) return false;
@@ -1167,6 +1216,12 @@ pub const Vfs = struct {
             .dentry_cache_acquires = self.dentry_cache_acquires,
             .dentry_cache_releases = self.dentry_cache_releases,
             .file_page_cache_entries = 0,
+            .file_page_cache_dirty_entries = 0,
+            .dirty_file_pages = 0,
+            .dirty_file_nodes = 0,
+            .dirty_page_marks = self.dirty_page_marks,
+            .dirty_page_sync_clears = self.dirty_page_sync_clears,
+            .dirty_page_discards = self.dirty_page_discards,
             .file_page_cache_hits = self.file_page_cache_hits,
             .file_page_cache_misses = self.file_page_cache_misses,
             .file_page_cache_insertions = self.file_page_cache_insertions,
@@ -1189,6 +1244,11 @@ pub const Vfs = struct {
             result.data_lock_tickets += next_ticket;
             result.data_lock_outstanding += next_ticket -% serving_ticket;
             if (!node.used) continue;
+            const dirty_bitmap = self.dirty_file_page_bitmap[node_index];
+            if (dirty_bitmap != 0) {
+                result.dirty_file_nodes += 1;
+                result.dirty_file_pages += @popCount(dirty_bitmap);
+            }
             result.nodes_used += 1;
             result.bytes_used += node.size;
             if (node.kind == .file) {
@@ -1210,7 +1270,11 @@ pub const Vfs = struct {
         }
         result.allocated_bytes = result.allocated_blocks * file_block_size;
         for (self.dentries) |entry| result.dentries_used += @intFromBool(entry.used);
-        for (0..self.file_page_cache.len) |cache_index| result.file_page_cache_entries += @intFromBool(self.file_page_cache[cache_index].used);
+        for (0..self.file_page_cache.len) |cache_index| {
+            const entry = &self.file_page_cache[cache_index];
+            result.file_page_cache_entries += @intFromBool(entry.used);
+            result.file_page_cache_dirty_entries += @intFromBool(entry.used and entry.dirty);
+        }
         for (self.dentry_cache) |cache_entry| {
             result.dentry_cache_entries += @intFromBool(cache_entry.used);
             result.dentry_cache_references += cache_entry.references;
@@ -1525,17 +1589,25 @@ pub const Vfs = struct {
         if (offset > maximum_file_size or bytes.len > maximum_file_size - offset) return Error.FileTooLarge;
         try self.prepareWriteBlocks(node_index, offset, bytes.len, truncate_first);
         var node = &self.nodes[node_index];
-        if (truncate_first) node.size = 0;
+        const previous_size = node.size;
+        if (truncate_first) {
+            node.size = 0;
+            self.discardDirtyFilePagesLocked(node_index, 0xFF);
+        }
         self.copyIntoFileBlocks(node_index, offset, bytes);
         node.size = @max(node.size, offset + bytes.len);
         node.modified_tick = tick;
         self.invalidateFilePageCacheNode(node_index);
+        const dirty_start = if (truncate_first) 0 else @min(offset, previous_size);
+        const dirty_end = offset + bytes.len;
+        if (dirty_end > dirty_start) self.markDirtyFilePagesLocked(node_index, filePageRangeBitmap(dirty_start, dirty_end - dirty_start));
         self.mutations +%= 1;
         return bytes.len;
     }
 
     fn truncateNodeLocked(self: *Vfs, node_index: u16, size: usize, tick: u64) void {
         var node = &self.nodes[node_index];
+        const previous_size = node.size;
         if (size < node.size) {
             _ = self.data_pool_lock.acquire();
             defer self.data_pool_lock.release();
@@ -1551,6 +1623,12 @@ pub const Vfs = struct {
         node.size = size;
         node.modified_tick = tick;
         self.invalidateFilePageCacheNode(node_index);
+        self.trimDirtyFilePagesLocked(node_index);
+        if (size > previous_size) {
+            self.markDirtyFilePagesLocked(node_index, filePageRangeBitmap(previous_size, size - previous_size));
+        } else if (size < previous_size and size != 0 and size % file_block_size != 0) {
+            self.markDirtyFilePagesLocked(node_index, @as(u8, 1) << @intCast(size / file_block_size));
+        }
         self.mutations +%= 1;
     }
 
@@ -1562,6 +1640,7 @@ pub const Vfs = struct {
         var node = &self.nodes[node_index];
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
+        const previous_size = node.size;
         if (flags.punch_hole) {
             self.punchHoleLocked(node_index, offset, length);
         } else {
@@ -1570,6 +1649,10 @@ pub const Vfs = struct {
         }
         node.modified_tick = tick;
         self.invalidateFilePageCacheNode(node_index);
+        const dirty_start = if (!flags.keep_size and offset > previous_size) previous_size else offset;
+        const dirty_end = offset + length;
+        if (dirty_end > dirty_start) self.markDirtyFilePagesLocked(node_index, filePageRangeBitmap(dirty_start, dirty_end - dirty_start));
+        self.trimDirtyFilePagesLocked(node_index);
         self.mutations +%= 1;
     }
 
@@ -1641,6 +1724,7 @@ pub const Vfs = struct {
             .node = node_index,
             .node_generation = node_generation,
             .slot = @intCast(slot),
+            .dirty = (self.dirty_file_page_bitmap[node_index] & (@as(u8, 1) << @intCast(slot))) != 0,
             .last_used = self.file_page_cache_clock,
         };
         const block_index = self.nodes[node_index].file_blocks[slot];
@@ -1651,6 +1735,60 @@ pub const Vfs = struct {
         }
         self.file_page_cache_insertions +%= 1;
         return entry;
+    }
+
+    fn markDirtyFilePagesLocked(self: *Vfs, node_index: u16, bitmap: u8) void {
+        if (bitmap == 0) return;
+        const newly_dirty = bitmap & ~self.dirty_file_page_bitmap[node_index];
+        self.dirty_file_page_bitmap[node_index] |= bitmap;
+        self.dirty_page_marks +%= @as(u64, @popCount(newly_dirty));
+        _ = self.file_page_cache_lock.acquire();
+        defer self.file_page_cache_lock.release();
+        const generation = self.nodes[node_index].generation;
+        for (&self.file_page_cache) |*entry| {
+            if (!entry.used or entry.node != node_index or entry.node_generation != generation) continue;
+            if ((bitmap & (@as(u8, 1) << @intCast(entry.slot))) != 0) entry.dirty = true;
+        }
+    }
+
+    fn clearDirtyNodePagesLocked(self: *Vfs, node_index: u16) usize {
+        const bitmap = self.dirty_file_page_bitmap[node_index];
+        if (bitmap == 0) return 0;
+        const cleared: usize = @popCount(bitmap);
+        self.dirty_file_page_bitmap[node_index] = 0;
+        self.dirty_page_sync_clears +%= @intCast(cleared);
+        _ = self.file_page_cache_lock.acquire();
+        defer self.file_page_cache_lock.release();
+        const generation = self.nodes[node_index].generation;
+        for (&self.file_page_cache) |*entry| {
+            if (entry.used and entry.node == node_index and entry.node_generation == generation) entry.dirty = false;
+        }
+        return cleared;
+    }
+
+    fn discardDirtyFilePagesLocked(self: *Vfs, node_index: u16, bitmap: u8) void {
+        const discarded = self.dirty_file_page_bitmap[node_index] & bitmap;
+        if (discarded == 0) return;
+        self.dirty_file_page_bitmap[node_index] &= ~bitmap;
+        self.dirty_page_discards +%= @as(u64, @popCount(discarded));
+        _ = self.file_page_cache_lock.acquire();
+        defer self.file_page_cache_lock.release();
+        const generation = self.nodes[node_index].generation;
+        for (&self.file_page_cache) |*entry| {
+            if (!entry.used or entry.node != node_index or entry.node_generation != generation) continue;
+            const bit = @as(u8, 1) << @intCast(entry.slot);
+            if ((discarded & bit) != 0) entry.dirty = false;
+        }
+    }
+
+    fn trimDirtyFilePagesLocked(self: *Vfs, node_index: u16) void {
+        var valid: u8 = 0;
+        const node = &self.nodes[node_index];
+        for (0..file_blocks_per_node) |slot| {
+            if (slot * file_block_size < node.size or node.file_blocks[slot] != invalid_data_block)
+                valid |= @as(u8, 1) << @intCast(slot);
+        }
+        self.discardDirtyFilePagesLocked(node_index, self.dirty_file_page_bitmap[node_index] & ~valid);
     }
 
     fn invalidateFilePageCacheNode(self: *Vfs, node_index: u16) void {
@@ -1823,6 +1961,7 @@ pub const Vfs = struct {
 
     fn reclaimNode(self: *Vfs, node_index: u16) void {
         self.invalidateFilePageCacheNode(node_index);
+        self.discardDirtyFilePagesLocked(node_index, 0xFF);
         self.releaseAllFileBlocks(node_index);
         const generation = self.nodes[node_index].generation;
         self.nodes[node_index] = .{ .generation = generation };
@@ -1891,6 +2030,16 @@ pub const Vfs = struct {
         self.nodes[node_index].mount_id = mount_id;
         for (self.dentries) |entry| {
             if (entry.used and entry.parent == node_index) self.assignNodeMountRecursive(entry.node, mount_id);
+        }
+    }
+
+    fn discardDirtyMountPages(self: *Vfs, mount_id: u8) void {
+        for (0..self.nodes.len) |node_index| {
+            var node = &self.nodes[node_index];
+            if (!node.used or node.kind != .file or node.mount_id != mount_id) continue;
+            _ = node.data_lock.acquire();
+            self.discardDirtyFilePagesLocked(@intCast(node_index), 0xFF);
+            node.data_lock.release();
         }
     }
 
@@ -1995,6 +2144,17 @@ const test_pseudo_operations = PseudoOperations{
 };
 
 const test_console_operations = PseudoOperations{ .stream = .console };
+
+fn filePageRangeBitmap(offset: usize, length: usize) u8 {
+    if (length == 0) return 0;
+    const first_slot = offset / file_block_size;
+    const last_slot = (offset + length - 1) / file_block_size;
+    var bitmap: u8 = 0;
+    var slot = first_slot;
+    while (slot <= last_slot and slot < file_blocks_per_node) : (slot += 1)
+        bitmap |= @as(u8, 1) << @intCast(slot);
+    return bitmap;
+}
 
 test "VFS pseudo nodes dispatch independent operations inside read only devfs" {
     var fs = Vfs.init();
@@ -2159,6 +2319,55 @@ test "VFS sparse holes allocate punch persist size and reuse bounded blocks" {
     try std.testing.expectEqual(maximum_data_blocks - file_blocks_per_node + 1, fs.report().allocated_blocks);
     try fs.close(1, handle);
     try fs.close(2, victim);
+    try std.testing.expect(fs.validate());
+}
+
+test "VFS dirty page ledger survives cache eviction and clears on synchronization" {
+    var fs = Vfs.init();
+    _ = try fs.mkdir(0, "/dirty", 0o755, 1);
+    const node = try fs.putFile(0, "/dirty/value", "base", 0o600, false, 2);
+    _ = fs.clearDirtyNodePages(node);
+    try std.testing.expectEqual(@as(u8, 0), try fs.dirtyFilePageBitmap(node));
+
+    try std.testing.expectEqual(@as(usize, 4), try fs.write(0, "/dirty/value", file_block_size - 2, "ABCD", false, 3));
+    try std.testing.expectEqual(@as(u8, 0b00000011), try fs.dirtyFilePageBitmap(node));
+    var boundary: [4]u8 = undefined;
+    try std.testing.expectEqual(boundary.len, try fs.read(0, "/dirty/value", file_block_size - 2, &boundary));
+    try std.testing.expectEqualStrings("ABCD", &boundary);
+    var report = fs.report();
+    try std.testing.expectEqual(@as(usize, 2), report.dirty_file_pages);
+    try std.testing.expectEqual(@as(usize, 1), report.dirty_file_nodes);
+    try std.testing.expectEqual(@as(usize, 2), report.file_page_cache_dirty_entries);
+
+    const payload: [file_block_size]u8 = @splat(0x5A);
+    for (0..maximum_file_page_cache_entries + 2) |index| {
+        var path_buffer: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "/dirty/clean-{d}", .{index});
+        const clean_node = try fs.restoreSparseFile(0, path, 0o600, payload.len, 0x01, &payload, @intCast(index + 4));
+        var one: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 1), try fs.read(0, path, 0, &one));
+        try std.testing.expectEqual(@as(u8, 0x5A), one[0]);
+        try std.testing.expectEqual(@as(u8, 0), try fs.dirtyFilePageBitmap(clean_node));
+    }
+    report = fs.report();
+    try std.testing.expect(report.file_page_cache_evictions > 0);
+    try std.testing.expectEqual(@as(u8, 0b00000011), try fs.dirtyFilePageBitmap(node));
+    try std.testing.expectEqual(@as(usize, 2), fs.clearDirtyNodePages(node));
+    try std.testing.expectEqual(@as(u8, 0), try fs.dirtyFilePageBitmap(node));
+    report = fs.report();
+    try std.testing.expectEqual(@as(usize, 0), report.dirty_file_pages);
+    try std.testing.expectEqual(@as(u64, 3), report.dirty_page_sync_clears);
+
+    try fs.allocate(0, "/dirty/value", 0, file_block_size, .{ .keep_size = true, .punch_hole = true }, 30);
+    try std.testing.expectEqual(@as(u8, 0x01), try fs.dirtyFilePageBitmap(node));
+    var zero: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try fs.read(0, "/dirty/value", 0, &zero));
+    try std.testing.expectEqual(@as(u8, 0), zero[0]);
+    try std.testing.expect(fs.report().file_page_cache_dirty_entries > 0);
+    try fs.unlink(0, "/dirty/value");
+    report = fs.report();
+    try std.testing.expectEqual(@as(usize, 0), report.dirty_file_pages);
+    try std.testing.expect(report.dirty_page_discards > 0);
     try std.testing.expect(fs.validate());
 }
 
@@ -2512,9 +2721,13 @@ test "VFS nested mount roots cross boundaries and unmount child first" {
 test "VFS mount policy protects read only trees" {
     var fs = Vfs.init();
     const boot = try fs.mkdir(0, "/boot", 0o755, 1);
-    _ = try fs.putFile(boot, "kernel.efi", "image", 0o444, false, 2);
+    const kernel = try fs.putFile(boot, "kernel.efi", "image", 0o444, false, 2);
+    try std.testing.expect((try fs.dirtyFilePageBitmap(kernel)) != 0);
+    const discards_before = fs.report().dirty_page_discards;
     const mount_id = try fs.mount(0, "/boot", .boot_fat, true, "nvme0p1");
     try std.testing.expectEqual(@as(u8, 2), mount_id);
+    try std.testing.expectEqual(@as(u8, 0), try fs.dirtyFilePageBitmap(kernel));
+    try std.testing.expect(fs.report().dirty_page_discards > discards_before);
     try std.testing.expectError(Error.ReadOnly, fs.write(0, "/boot/kernel.efi", 0, "x", false, 3));
     try std.testing.expectError(Error.ReadOnly, fs.create(boot, "new", 0o644, 3));
 }

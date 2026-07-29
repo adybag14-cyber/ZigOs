@@ -173,6 +173,7 @@ pub const Store = struct {
             const snapshot = try self.serialize(vfs, &self.next_payload);
             try self.commitSnapshot(&self.next_payload, snapshot);
         }
+        _ = vfs.clearDirtyWritableMountPages();
         self.global_syncs +%= 1;
         self.writable_mount_syncs +%= plan.writable_mounts;
         self.immediate_mount_syncs +%= plan.immediate_mounts;
@@ -275,6 +276,7 @@ pub const Store = struct {
             .payload_length = output_offset,
             .record_count = output_count,
         });
+        _ = vfs.clearDirtyNodePages(node_index);
     }
 
     fn commitSnapshot(self: *Store, next_payload: *const [maximum_payload_bytes]u8, snapshot: Snapshot) Error!void {
@@ -819,7 +821,10 @@ test "global sync succeeds for a ramfs only writable mount table" {
     defer std.testing.allocator.destroy(vfs);
     vfs.initialize();
     var store: Store = .{};
+    const dirty_node = try vfs.putFile(0, "/dirty", "ramfs", 0o600, false, 1);
+    try std.testing.expect((try vfs.dirtyFilePageBitmap(dirty_node)) != 0);
     try store.sync(vfs);
+    try std.testing.expectEqual(@as(u8, 0), try vfs.dirtyFilePageBitmap(dirty_node));
     const report = store.report();
     try std.testing.expect(!report.mounted);
     try std.testing.expectEqual(@as(u64, 1), report.global_syncs);
@@ -842,8 +847,10 @@ test "global sync covers writable mounts and rejects invalid plans before journa
     _ = try vfs.ensureDirectory(0, "/foreign", 0o755, 4);
     _ = try vfs.mount(0, "/scratch", .ramfs, false, "scratch-ramfs");
     _ = try vfs.mount(0, "/readonly", .boot_fat, true, "readonly-fat");
-    _ = try vfs.putFile(0, "/persist/value", "stable", 0o640, false, 5);
+    const value_node = try vfs.putFile(0, "/persist/value", "stable", 0o640, false, 5);
+    try std.testing.expect((try vfs.dirtyFilePageBitmap(value_node)) != 0);
     try store.sync(vfs);
+    try std.testing.expectEqual(@as(u8, 0), try vfs.dirtyFilePageBitmap(value_node));
     var report = store.report();
     try std.testing.expectEqual(@as(u8, 2), report.mount_id);
     try std.testing.expectEqual(@as(u64, 1), report.global_syncs);
@@ -857,7 +864,10 @@ test "global sync covers writable mounts and rejects invalid plans before journa
     const generation_after_commit = report.generation;
     const unsupported_id = try vfs.mount(0, "/foreign", .boot_fat, false, "writable-fat");
     _ = try vfs.putFile(0, "/persist/value", "dirty", 0o600, false, 6);
+    const dirty_after_rejected_plan = try vfs.dirtyFilePageBitmap(value_node);
+    try std.testing.expect(dirty_after_rejected_plan != 0);
     try std.testing.expectError(Error.UnsupportedOperation, store.sync(vfs));
+    try std.testing.expectEqual(dirty_after_rejected_plan, try vfs.dirtyFilePageBitmap(value_node));
     report = store.report();
     try std.testing.expectEqual(generation_after_commit, report.generation);
     try std.testing.expectEqual(writes_after_commit, disk.writes);
@@ -940,9 +950,13 @@ test "file sync commits one stable file and excludes unrelated dirty state" {
 
     _ = try live_vfs.putFile(0, "/persist/target.txt", "target-v2", 0o600, false, 4);
     try live_vfs.chmod(0, "/persist/target.txt", 0o600, 5);
-    _ = try live_vfs.putFile(0, "/persist/other.txt", "other-v2", 0o700, false, 6);
+    const other_node = try live_vfs.putFile(0, "/persist/other.txt", "other-v2", 0o700, false, 6);
     try live_vfs.chmod(0, "/persist/other.txt", 0o700, 7);
+    try std.testing.expect((try live_vfs.dirtyFilePageBitmap(target_node)) != 0);
+    try std.testing.expect((try live_vfs.dirtyFilePageBitmap(other_node)) != 0);
     try store.syncFile(live_vfs, target_node);
+    try std.testing.expectEqual(@as(u8, 0), try live_vfs.dirtyFilePageBitmap(target_node));
+    try std.testing.expect((try live_vfs.dirtyFilePageBitmap(other_node)) != 0);
     try std.testing.expectEqual(@as(u64, 2), store.report().generation);
 
     const recovered_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
@@ -972,8 +986,12 @@ test "file data sync persists bytes and size without dirty mode metadata" {
 
     _ = try live_vfs.putFile(0, "/persist/target.txt", "after-data-and-size", 0o600, false, 4);
     try live_vfs.chmod(0, "/persist/target.txt", 0o600, 5);
-    _ = try live_vfs.putFile(0, "/persist/other.txt", "dirty", 0o700, false, 6);
+    const other_node = try live_vfs.putFile(0, "/persist/other.txt", "dirty", 0o700, false, 6);
+    try std.testing.expect((try live_vfs.dirtyFilePageBitmap(target_node)) != 0);
+    try std.testing.expect((try live_vfs.dirtyFilePageBitmap(other_node)) != 0);
     try store.syncFileData(live_vfs, target_node);
+    try std.testing.expectEqual(@as(u8, 0), try live_vfs.dirtyFilePageBitmap(target_node));
+    try std.testing.expect((try live_vfs.dirtyFilePageBitmap(other_node)) != 0);
 
     const recovered_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
     defer std.testing.allocator.destroy(recovered_vfs);
@@ -1000,8 +1018,11 @@ test "failed file sync preserves the committed baseline for retry" {
     const committed_report = store.report();
 
     _ = try live_vfs.putFile(0, "/persist/target.txt", "after", 0o600, false, 3);
+    const dirty_before_failure = try live_vfs.dirtyFilePageBitmap(target_node);
+    try std.testing.expect(dirty_before_failure != 0);
     disk.fail_write_at = disk.writes;
     try std.testing.expectError(Error.Io, store.syncFile(live_vfs, target_node));
+    try std.testing.expectEqual(dirty_before_failure, try live_vfs.dirtyFilePageBitmap(target_node));
     try std.testing.expectEqual(committed_report.generation, store.report().generation);
     try std.testing.expectEqual(committed_report.active_slot, store.report().active_slot);
     try std.testing.expectEqual(committed_report.record_count, store.report().record_count);
@@ -1009,6 +1030,7 @@ test "failed file sync preserves the committed baseline for retry" {
 
     disk.fail_write_at = null;
     try store.syncFile(live_vfs, target_node);
+    try std.testing.expectEqual(@as(u8, 0), try live_vfs.dirtyFilePageBitmap(target_node));
     const recovered_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
     defer std.testing.allocator.destroy(recovered_vfs);
     recovered_vfs.initialize();

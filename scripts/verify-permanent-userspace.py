@@ -154,6 +154,10 @@ def main() -> int:
     require(persist_source, "committed_mode = record_mode", "fdatasync retains mode from the last committed target record")
     require(persist_source, "const persisted_mode = if (include_metadata) stat.mode else committed_mode.?", "fsync and fdatasync select current or committed metadata explicitly")
     require(persist_source, "fn commitSnapshot", "global sync, fsync and fdatasync share one ordered A/B commit path")
+    require(persist_source, "_ = vfs.clearDirtyWritableMountPages();", "global dirty pages clear only after the validated synchronization plan commits")
+    require(persist_source, "_ = vfs.clearDirtyNodePages(node_index);", "file dirty pages clear only after fsync or fdatasync commit success")
+    require(persist_source, "dirty_after_rejected_plan", "rejected writable-mount plans preserve dirty state")
+    require(persist_source, "dirty_before_failure", "device-write failure preserves the file dirty ledger for retry")
     require(persist_source, "self.payload[record_start..input_offset]", "file fsync copies unrelated committed records rather than current dirty VFS state")
     require(persist_source, 'test "file sync commits one stable file and excludes unrelated dirty state"', "isolated test proves one-file fsync durability and unrelated dirty-state exclusion")
     require(persist_source, 'test "file data sync persists bytes and size without dirty mode metadata"', "isolated test proves fdatasync advances data and logical size while preserving committed mode")
@@ -344,6 +348,14 @@ def main() -> int:
     require(vfs_source, "fn cachedFilePageLocked", "ordinary file reads load and hit generation-keyed cached pages")
     require(vfs_source, "entry.node_generation != node_generation", "file-page cache keys include inode generation to reject slot reuse")
     require(vfs_source, "fn invalidateFilePageCacheNode", "write-through mutations invalidate cached inode pages")
+    require(vfs_source, "dirty_file_page_bitmap: [maximum_nodes]u8", "VFS retains dirty-page state independently of cache residency")
+    require(vfs_source, "dirty: bool = false", "resident file-page entries mirror the authoritative dirty ledger")
+    require(vfs_source, "fn markDirtyFilePagesLocked", "data and allocation mutations mark logical pages dirty")
+    require(vfs_source, "pub fn clearDirtyNodePages", "successful file-scoped synchronization can clear only its target inode")
+    require(vfs_source, "pub fn clearDirtyWritableMountPages", "successful global synchronization can clear all writable mounts")
+    require(vfs_source, "if (readonly) self.discardDirtyMountPages(mount_id);", "read-only mounts adopt pre-seeded backend data as a clean baseline")
+    require(vfs_source, "fn discardDirtyMountPages", "immutable mount adoption clears transient construction dirtiness")
+    require(vfs_source, 'test "VFS dirty page ledger survives cache eviction and clears on synchronization"', "isolated test proves exact dirty bits, eviction survival, synchronization clear and inode-destruction discard")
     forbid(vfs_source, "for (self.file_page_cache", "large file-page cache scans copied the full cache array onto the kernel stack")
     require(vfs_source, 'test "VFS bounded clean page cache hits evicts and invalidates mutations"', "isolated test proves bounded hits, LRU eviction, sparse-zero caching and mutation invalidation")
     require(vfs_source, "fn acquireDentry", "path traversal pins cache entries during use")
@@ -408,6 +420,11 @@ def main() -> int:
     require(runtime, "fs_report.file_page_cache_hits > 0", "release gates require real file-page cache hits")
     require(runtime, "fs_report.file_page_cache_misses > 0", "release gates require file-page cache population")
     require(runtime, "fs_report.file_page_cache_lock_outstanding == 0", "release gates require every file-page cache lock ticket to drain")
+    require(runtime, "fs_report.file_page_cache_dirty_entries == 0", "release gates require no resident dirty cache pages at shutdown")
+    require(runtime, "fs_report.dirty_file_pages == 0", "release gates require the inode dirty-page ledger to drain")
+    require(runtime, "fs_report.dirty_file_nodes == 0", "release gates require no dirty inodes at shutdown")
+    require(runtime, "fs_report.dirty_page_marks > 0", "release gates require real dirty-page mutation activity")
+    require(runtime, "fs_report.dirty_page_sync_clears > 0", "release gates require successful synchronization to clear dirty pages")
     require(runtime, "fs_report.data_lock_tickets > 0", "release gates require exercised inode data locks")
     require(runtime, "fs_report.data_lock_outstanding == 0", "release gates require every inode data-lock ticket to drain")
     require(runtime, "fs_report.data_pool_lock_tickets > 0", "release gates require exercised sparse-pool allocation")
@@ -416,6 +433,8 @@ def main() -> int:
     require(runtime, "cache entries/refs", "diagnostic shutdown reports cache occupancy and references")
     require(runtime, "acquire/release", "diagnostic shutdown reports cache reference accounting")
     require(runtime, "page-cache entries", "diagnostic shutdown reports bounded clean file-page cache occupancy and activity")
+    require(runtime, "dirty/ledger", "diagnostic shutdown reports resident and authoritative dirty-page state")
+    require(runtime, "marks/sync-clear/discard", "diagnostic shutdown reports dirty-page lifecycle counters")
     require(runtime, "lock tickets/outstanding", "diagnostic shutdown reports drained file-page cache locking")
     require(runtime, "data-lock tickets/outstanding", "diagnostic shutdown reports inode data-lock accounting")
     require(runtime, "pool-lock tickets/outstanding", "diagnostic shutdown reports sparse-pool lock accounting")
@@ -423,6 +442,8 @@ def main() -> int:
     require(runtime_test, "cache entries/refs ", "required permanent-runtime sessions expose dentry-cache resource state")
     require(runtime_test, " acquire/release ", "required permanent-runtime sessions expose balanced dentry-cache references")
     require(runtime_test, " page-cache entries ", "required permanent-runtime sessions expose file-page cache state")
+    require(runtime_test, " dirty/ledger ", "required permanent-runtime sessions expose dirty-page state")
+    require(runtime_test, " marks/sync-clear/discard ", "required permanent-runtime sessions expose dirty-page lifecycle accounting")
     require(runtime_test, " lock tickets/outstanding ", "required permanent-runtime sessions expose drained file-page cache locks")
     require(runtime_test, " data-lock tickets/outstanding ", "required permanent-runtime sessions expose drained inode data locks")
     require(runtime_test, " pool-lock tickets/outstanding ", "required permanent-runtime sessions expose drained sparse-pool locks")
@@ -513,10 +534,14 @@ def main() -> int:
     require(executor, "fn syscallFsync", "kernel exposes descriptor-targeted full file sync")
     require(executor, "fn syscallFdatasync", "kernel exposes descriptor-targeted data-only sync")
     require(executor, "fn syscallFileSync", "fsync and fdatasync share descriptor validation and address-space switching")
-    require(executor, "persistentSyncNode", "file sync resolves the exact persistent VFS node behind the descriptor")
-    require(executor, "sync_file_fn", "persistent file sync uses a file-scoped backend rather than the global sync callback")
+    require(executor, "activeDescriptors().syncNode", "fsync and fdatasync resolve every regular VFS file rather than discarding RAM-backed targets")
+    forbid(executor, "const persistent_node = activeDescriptors().persistentSyncNode", "file sync silently treated RAM-backed descriptors as an untracked no-op")
+    require(executor, "sync_file_fn", "file sync uses a file-scoped backend rather than the global sync callback")
+    require(runtime, "if (!persistent)", "RAM-backed regular-file fsync and fdatasync clear their target dirty ledger immediately")
+    require(runtime, "_ = state.vfs.clearDirtyNodePages(node);", "immediate regular-file sync drains only the resolved target")
+    require(fd_source, 'test "descriptor file sync routing distinguishes immediate and persistent mounts"', "descriptor test proves RAM and persistent regular-file routing and directory rejection")
     require(executor, "include_metadata", "the file-sync backend receives an explicit metadata policy")
-    require(runtime, "fn syncPersistentFile", "runtime routes fsync and fdatasync into the persistent store")
+    require(runtime, "fn syncPersistentFile", "runtime routes fsync and fdatasync through one immediate-or-persistent file backend")
     require(runtime, "syncFileData", "runtime routes fdatasync to the data-only persistent-store path")
     require(executor, "fn syscallSymlink", "kernel exposes symbolic-link creation")
     require(executor, "fn syscallReadlink", "kernel exposes non-following link-target reads")
@@ -676,8 +701,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 84:
-        raise SystemExit(f"canonical isolated-test declaration total must be 84, found {declared_tests}")
+    if declared_tests != 86:
+        raise SystemExit(f"canonical isolated-test declaration total must be 86, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -777,7 +802,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, bounded clean file-page cache, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, bounded dirty-page tracking, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 
