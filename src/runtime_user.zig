@@ -77,6 +77,7 @@ pub const Report = struct {
     syscalls: u64,
     reclaimed_pages: u64,
     shared_pages: usize,
+    file_mapping_pages: usize,
     allocator_allocations: u64,
     allocator_releases: u64,
     allocator_retains: u64,
@@ -91,6 +92,7 @@ const MappingKind = enum(u8) {
     stack,
     heap,
     anonymous,
+    file_shared,
 };
 
 const Mapping = struct {
@@ -100,6 +102,9 @@ const Mapping = struct {
     writable: bool = false,
     executable: bool = false,
     kind: MappingKind = .anonymous,
+    file_node: u16 = runtime_vfs.invalid_node,
+    file_generation: u16 = 0,
+    file_slot: u8 = 0,
 };
 
 const PageTable = struct {
@@ -799,8 +804,11 @@ pub fn closeDescriptorFor(handle: u64, fd: u16) !void {
 pub fn report() Report {
     const allocator_report = page_pool.report();
     var live_contexts: usize = 0;
+    var file_mapping_pages: usize = 0;
     for (0..contexts.len) |context_index| if (contexts[context_index].used) {
         live_contexts += 1;
+        for (contexts[context_index].mappings) |mapping|
+            file_mapping_pages += @intFromBool(mapping.used and mapping.kind == .file_shared);
     };
     return .{
         .page_limit = allocator_report.capacity,
@@ -815,6 +823,7 @@ pub fn report() Report {
         .syscalls = syscall_count,
         .reclaimed_pages = allocator_report.frees,
         .shared_pages = allocator_report.shared,
+        .file_mapping_pages = file_mapping_pages,
         .allocator_allocations = allocator_report.allocations,
         .allocator_releases = allocator_report.releases,
         .allocator_retains = allocator_report.retains,
@@ -1723,10 +1732,48 @@ fn syscallMmap(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     };
+    const file_shared = (flags & runtime_abi.map_shared) != 0;
     if ((protection & runtime_abi.protection_read) == 0 or
         (protection & runtime_abi.protection_write) != 0 and (protection & runtime_abi.protection_execute) != 0 or
-        frame.r9 != 0 or (frame.r8 != std.math.maxInt(u64) and frame.r8 != std.math.maxInt(u32)))
+        file_shared and (protection & (runtime_abi.protection_write | runtime_abi.protection_execute)) != 0)
     {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    var file_info: ?runtime_fd.FileMappingInfo = null;
+    var file_offset: usize = 0;
+    if (file_shared) {
+        const fd = runtime_abi.descriptor(frame.r8) orelse {
+            frame.rax = reject(errno_bad_fd);
+            return 0;
+        };
+        file_offset = std.math.cast(usize, frame.r9) orelse {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        };
+        if ((file_offset & (page_bytes - 1)) != 0) {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        }
+        const info = activeDescriptors().fileMappingInfo(
+            activeVfs(),
+            activeProcesses(),
+            context.handle,
+            fd,
+        ) catch |err| {
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        };
+        const requested_end = std.math.add(usize, file_offset, requested_length) catch {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        };
+        if (!info.readable or requested_end > info.size or file_offset / page_bytes + length / page_bytes > runtime_vfs.file_blocks_per_node) {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        }
+        file_info = info;
+    } else if (frame.r9 != 0 or (frame.r8 != std.math.maxInt(u64) and frame.r8 != std.math.maxInt(u32))) {
         frame.rax = reject(errno_invalid);
         return 0;
     }
@@ -1754,21 +1801,36 @@ fn syscallMmap(context: *Context, frame: *interrupt_context.Frame) u64 {
     }
     const writable = (protection & runtime_abi.protection_write) != 0;
     const executable = (protection & runtime_abi.protection_execute) != 0;
+    const mapping_kind: MappingKind = if (file_shared) .file_shared else .anonymous;
     var virtual = start;
     while (virtual < end) : (virtual += page_bytes) {
-        const physical = allocatePage(context.handle) orelse {
-            rollbackDynamicRange(context, start, virtual, .anonymous);
-            frame.rax = reject(errno_no_memory);
-            return 0;
-        };
-        mapOwned(context, virtual, physical, writable, executable, .anonymous) catch |err| {
-            rollbackDynamicRange(context, start, virtual, .anonymous);
-            frame.rax = reject(runtime_abi.fromError(err));
-            return 0;
-        };
+        if (file_info) |info| {
+            const slot = file_offset / page_bytes + (virtual - start) / page_bytes;
+            const mapped_page = activeVfs().pinFilePage(info.node, info.generation, slot) catch |err| {
+                rollbackDynamicRange(context, start, virtual, mapping_kind);
+                frame.rax = reject(runtime_abi.fromError(err));
+                return 0;
+            };
+            mapBorrowedFilePage(context, virtual, mapped_page) catch |err| {
+                rollbackDynamicRange(context, start, virtual, mapping_kind);
+                frame.rax = reject(runtime_abi.fromError(err));
+                return 0;
+            };
+        } else {
+            const physical = allocatePage(context.handle) orelse {
+                rollbackDynamicRange(context, start, virtual, mapping_kind);
+                frame.rax = reject(errno_no_memory);
+                return 0;
+            };
+            mapOwned(context, virtual, physical, writable, executable, mapping_kind) catch |err| {
+                rollbackDynamicRange(context, start, virtual, mapping_kind);
+                frame.rax = reject(runtime_abi.fromError(err));
+                return 0;
+            };
+        }
     }
     syncMemoryUsage(context) catch |err| {
-        rollbackDynamicRange(context, start, end, .anonymous);
+        rollbackDynamicRange(context, start, end, mapping_kind);
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -1795,7 +1857,7 @@ fn syscallMunmap(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     };
     if (length == 0 or (start & (page_bytes - 1)) != 0 or start < mmap_floor or end > mmap_ceiling or
-        !rangeHasKind(context, start, end, .anonymous))
+        !rangeHasDynamicMappings(context, start, end))
     {
         frame.rax = reject(errno_invalid);
         return 0;
@@ -1852,7 +1914,10 @@ fn syscallMprotect(context: *Context, frame: *interrupt_context.Frame) u64 {
             frame.rax = reject(errno_invalid);
             return 0;
         };
-        if (context.mappings[index].kind == .trampoline) {
+        if (context.mappings[index].kind == .trampoline or
+            context.mappings[index].kind == .file_shared and
+                ((protection & runtime_abi.protection_write) != 0 or (protection & runtime_abi.protection_execute) != 0))
+        {
             frame.rax = reject(runtime_abi.errno_access);
             return 0;
         }
@@ -1979,6 +2044,16 @@ fn rangeHasKind(context: *const Context, start: usize, end: usize, kind: Mapping
     while (virtual < end) : (virtual += page_bytes) {
         const index = findMapping(context, virtual) orelse return false;
         if (context.mappings[index].kind != kind) return false;
+    }
+    return true;
+}
+
+fn rangeHasDynamicMappings(context: *const Context, start: usize, end: usize) bool {
+    var virtual = start;
+    while (virtual < end) : (virtual += page_bytes) {
+        const index = findMapping(context, virtual) orelse return false;
+        const kind = context.mappings[index].kind;
+        if (kind != .anonymous and kind != .file_shared) return false;
     }
     return true;
 }
@@ -2942,6 +3017,33 @@ fn mapOwned(
     context.mapping_count += 1;
 }
 
+fn mapBorrowedFilePage(context: *Context, virtual: usize, page: runtime_vfs.MappedFilePage) !void {
+    const mapping_index = findFreeMapping(context) orelse {
+        activeVfs().unpinFilePage(page.node, page.generation, page.slot) catch {};
+        return error.MappingLimit;
+    };
+    ensurePageTable(context, virtual) catch |err| {
+        activeVfs().unpinFilePage(page.node, page.generation, page.slot) catch {};
+        return err;
+    };
+    if (!paging.mapUserPageInSpace(context.space, virtual, page.address, false, false)) {
+        activeVfs().unpinFilePage(page.node, page.generation, page.slot) catch {};
+        return error.MappingFailure;
+    }
+    context.mappings[mapping_index] = .{
+        .used = true,
+        .virtual_address = virtual,
+        .physical_address = page.address,
+        .writable = false,
+        .executable = false,
+        .kind = .file_shared,
+        .file_node = page.node,
+        .file_generation = page.generation,
+        .file_slot = page.slot,
+    };
+    context.mapping_count += 1;
+}
+
 fn ensurePageTable(context: *Context, virtual: usize) !void {
     if (paging.userPageTableAddressInSpace(context.space, virtual) != null) return;
     if (context.page_table_count >= context.page_tables.len) return error.MappingLimit;
@@ -2983,7 +3085,10 @@ fn unmapOwned(context: *Context, mapping_index: usize) !void {
     if (!paging.unmapUserPageInSpace(context.space, mapping.virtual_address, mapping.physical_address)) {
         return error.MappingFailure;
     }
-    releasePage(mapping.physical_address, context.handle);
+    if (mapping.kind == .file_shared)
+        try activeVfs().unpinFilePage(mapping.file_node, mapping.file_generation, mapping.file_slot)
+    else
+        releasePage(mapping.physical_address, context.handle);
     context.mappings[mapping_index] = .{};
     context.mapping_count -= 1;
 }
@@ -3098,7 +3203,11 @@ fn releaseMappings(index: usize) bool {
     for (&context.mappings) |*mapping| {
         if (!mapping.used) continue;
         if (!paging.unmapUserPageInSpace(context.space, mapping.virtual_address, mapping.physical_address)) return false;
-        releasePage(mapping.physical_address, context.handle);
+        if (mapping.kind == .file_shared) {
+            activeVfs().unpinFilePage(mapping.file_node, mapping.file_generation, mapping.file_slot) catch return false;
+        } else {
+            releasePage(mapping.physical_address, context.handle);
+        }
         mapping.* = .{};
     }
     context.mapping_count = 0;

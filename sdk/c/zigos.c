@@ -68,6 +68,14 @@ int64_t zigos_fallocate(uint16_t fd, uint64_t mode, uint64_t offset, uint64_t le
     return (int64_t)zigos_syscall6(ZIGOS_SYS_FALLOCATE, fd, mode, offset, length, 0, 0);
 }
 
+int64_t zigos_mmap_file(uint64_t address, size_t length, uint64_t protection, uint64_t flags, uint16_t fd, uint64_t offset) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_MMAP, address, length, protection, flags, fd, offset);
+}
+
+int64_t zigos_munmap(const void *address, size_t length) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_MUNMAP, pointer_value(address), length, 0, 0, 0, 0);
+}
+
 int64_t zigos_symlink(const char *target, const char *path) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_SYMLINK, pointer_value(target), pointer_value(path), 0, 0, 0, 0);
 }

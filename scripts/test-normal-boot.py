@@ -243,7 +243,7 @@ def main() -> int:
                 sdk_copy_marker,
                 "writable mounts synchronized",
                 "zig-sdk: envp/auxv passed",
-                "zig-sdk: startup/argv/abi/files/vm/errno/fsync/fdatasync/readv/writev passed",
+                "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev passed",
                 "process 4 exited 86",
                 "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/fallocate/sparse/open-unlink/rmdir/sync passed",
                 "process 5 exited 88",
@@ -252,7 +252,7 @@ def main() -> int:
                 "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 127/127 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 129/129 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

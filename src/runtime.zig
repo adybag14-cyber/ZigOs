@@ -2483,6 +2483,9 @@ fn finishNormalRuntime() noreturn {
         fs_report.file_page_cache_lock_outstanding == 0 and fs_report.file_page_cache_pressure_checks > 0 and
         fs_report.file_page_cache_allocation_failures == 0 and fs_report.file_page_cache_release_failures == 0 and
         fs_report.file_page_cache_allocations == fs_report.file_page_cache_releases + fs_report.file_page_cache_entries and
+        fs_report.file_page_cache_mapping_references == 0 and
+        fs_report.file_page_cache_mapping_pins == fs_report.file_page_cache_mapping_unpins and
+        fs_report.file_page_cache_mapping_pin_failures == 0 and
         released_cache_pages > 0 and final_fs_report.file_page_cache_entries == 0 and
         final_fs_report.file_page_cache_allocations == final_fs_report.file_page_cache_releases and
         final_fs_report.file_page_cache_release_failures == 0 and
@@ -2501,7 +2504,8 @@ fn finishNormalRuntime() noreturn {
         tty_report.foreground_process_group == 2 and tty_report.buffered_bytes == 0 and tty_report.edited_bytes == 0 and
         tty_report.bytes_submitted == tty_report.bytes_read and tty_report.blocked_reads >= 1 and tty_report.reader_wakeups >= 1 and
         persistence_clean and
-        userspace_report.used_pages == 0 and userspace_report.live_contexts == 0 and userspace_report.launches >= 3 and
+        userspace_report.used_pages == 0 and userspace_report.live_contexts == 0 and userspace_report.file_mapping_pages == 0 and
+        userspace_report.launches >= 3 and
         userspace_report.exits >= 3 and userspace_report.allocator_allocations == userspace_report.allocator_releases and
         userspace_report.allocator_out_of_memory == 0 and userspace_report.allocator_rejections == 0 and
         physical_report.clean and physical_report.allocated_pages == 0 and physical_report.allocations == physical_report.frees and
@@ -2587,7 +2591,7 @@ fn finishDiagnosticRuntime() noreturn {
     const physical_rejections = physical_report.invalid_frees + physical_report.double_frees + physical_report.metadata_failures;
     const physical_clean = physical_report.clean and physical_report.failed_allocations == 0 and physical_rejections == 0;
     const userspace_clean = userspace_report.used_pages == 0 and
-        userspace_report.live_contexts == 0 and userspace_report.launches >= 10 and
+        userspace_report.live_contexts == 0 and userspace_report.file_mapping_pages == 0 and userspace_report.launches >= 10 and
         userspace_report.exits >= 8 and userspace_report.faults >= 1 and
         userspace_report.preemptions >= 1 and userspace_report.blocking_returns >= 5 and
         userspace_report.syscalls >= 30 and userspace_report.reclaimed_pages > 0 and
@@ -2623,6 +2627,10 @@ fn finishDiagnosticRuntime() noreturn {
         fs_report.file_page_cache_lock_outstanding == 0 and fs_report.file_page_cache_pressure_checks > 0 and
         fs_report.file_page_cache_allocation_failures == 0 and fs_report.file_page_cache_release_failures == 0 and
         fs_report.file_page_cache_allocations == fs_report.file_page_cache_releases + fs_report.file_page_cache_entries and
+        fs_report.file_page_cache_mapping_references == 0 and
+        fs_report.file_page_cache_mapping_pins == fs_report.file_page_cache_mapping_unpins and
+        fs_report.file_page_cache_mapping_pins > 0 and fs_report.file_page_cache_mapping_refreshes > 0 and
+        fs_report.file_page_cache_mapping_pin_failures == 0 and
         released_cache_pages > 0 and final_fs_report.file_page_cache_entries == 0 and
         final_fs_report.file_page_cache_allocations == final_fs_report.file_page_cache_releases and
         final_fs_report.file_page_cache_release_failures == 0 and
@@ -2734,6 +2742,16 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(final_fs_report.file_page_cache_pressure_evictions);
     emit(" shutdown-release ");
     emitDecimal(released_cache_pages);
+    emit(" mapped refs/pin/unpin/refresh/fail ");
+    emitDecimal(final_fs_report.file_page_cache_mapping_references);
+    emit("/");
+    emitDecimal(final_fs_report.file_page_cache_mapping_pins);
+    emit("/");
+    emitDecimal(final_fs_report.file_page_cache_mapping_unpins);
+    emit("/");
+    emitDecimal(final_fs_report.file_page_cache_mapping_refreshes);
+    emit("/");
+    emitDecimal(final_fs_report.file_page_cache_mapping_pin_failures);
     emit(" lock tickets/outstanding ");
     emitDecimal(fs_report.file_page_cache_lock_tickets);
     emit("/");
@@ -2944,6 +2962,8 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(userspace_report.peak_pages);
     emit(" contexts ");
     emitDecimal(userspace_report.live_contexts);
+    emit(" file-mappings ");
+    emitDecimal(userspace_report.file_mapping_pages);
     emit(" launches/exits/faults ");
     emitDecimal(userspace_report.launches);
     emit("/");

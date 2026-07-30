@@ -90,6 +90,14 @@ pub const Error = error{
     NotSymlink,
 };
 
+pub const MappedFilePage = struct {
+    address: usize,
+    node: u16,
+    generation: u16,
+    slot: u8,
+    valid_bytes: usize,
+};
+
 pub const Stat = struct {
     node: u16,
     generation: u16,
@@ -126,6 +134,7 @@ const Node = struct {
     generation: u16 = 0,
     kind: Kind = .file,
     link_count: u16 = 0,
+    mapping_references: u16 = 0,
     size: usize = 0,
     file_blocks: [file_blocks_per_node]u16 = @splat(invalid_data_block),
     symlink_data: [maximum_symlink_target_length]u8 = @splat(0),
@@ -152,6 +161,7 @@ const FilePageCacheEntry = struct {
     node_generation: u16 = 0,
     slot: u8 = 0,
     dirty: bool = false,
+    mapping_references: u16 = 0,
     last_used: u64 = 0,
     address: usize = 0,
 };
@@ -290,6 +300,11 @@ pub const Report = struct {
     file_page_cache_pressure_checks: u64,
     file_page_cache_pressure_events: u64,
     file_page_cache_pressure_evictions: u64,
+    file_page_cache_mapping_references: usize,
+    file_page_cache_mapping_pins: u64,
+    file_page_cache_mapping_unpins: u64,
+    file_page_cache_mapping_refreshes: u64,
+    file_page_cache_mapping_pin_failures: u64,
     file_page_cache_lock_tickets: u64,
     file_page_cache_lock_outstanding: u64,
     data_lock_tickets: u64,
@@ -327,6 +342,10 @@ pub const Vfs = struct {
     file_page_cache_pressure_checks: u64 = 0,
     file_page_cache_pressure_events: u64 = 0,
     file_page_cache_pressure_evictions: u64 = 0,
+    file_page_cache_mapping_pins: u64 = 0,
+    file_page_cache_mapping_unpins: u64 = 0,
+    file_page_cache_mapping_refreshes: u64 = 0,
+    file_page_cache_mapping_pin_failures: u64 = 0,
     dirty_file_page_bitmap: [maximum_nodes]u8 = @splat(0),
     dirty_page_marks: u64 = 0,
     dirty_page_sync_clears: u64 = 0,
@@ -594,7 +613,7 @@ pub const Vfs = struct {
 
     pub fn allocate(self: *Vfs, cwd: u16, path: []const u8, offset: usize, length: usize, flags: AllocationFlags, tick: u64) Error!void {
         const node_index = try self.resolve(cwd, path);
-        try self.allocateNode(node_index, offset, length, flags, tick);
+        try self.allocateNode(node_index, offset, length, flags, tick, true);
     }
 
     pub fn unlink(self: *Vfs, cwd: u16, path: []const u8) Error!void {
@@ -875,7 +894,7 @@ pub const Vfs = struct {
             return written;
         }
         if (open_file.append) {
-            try self.requireWritableFile(open_file.node);
+            try self.requireMutableFile(open_file.node);
             var node = &self.nodes[open_file.node];
             _ = node.data_lock.acquire();
             defer node.data_lock.release();
@@ -884,7 +903,11 @@ pub const Vfs = struct {
             open_file.offset = offset + written;
             return written;
         }
-        const written = try self.writeNode(open_file.node, open_file.offset, bytes, false, tick);
+        try self.requireMutableFile(open_file.node);
+        var node = &self.nodes[open_file.node];
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
+        const written = try self.writeNodeLocked(open_file.node, open_file.offset, bytes, false, tick);
         open_file.offset += written;
         return written;
     }
@@ -981,6 +1004,66 @@ pub const Vfs = struct {
         self.file_page_cache_allocator = allocator;
     }
 
+    pub fn pinFilePage(self: *Vfs, node_index: u16, generation: u16, slot: usize) Error!MappedFilePage {
+        if (node_index >= self.nodes.len or slot >= file_blocks_per_node) return Error.NotFound;
+        var node = &self.nodes[node_index];
+        if (!node.used or node.generation != generation or node.kind != .file) return Error.NotFound;
+        if (slot * file_block_size >= node.size) return Error.InvalidOffset;
+        _ = node.data_lock.acquire();
+        defer node.data_lock.release();
+        _ = self.file_page_cache_lock.acquire();
+        defer self.file_page_cache_lock.release();
+        _ = self.cachedFilePageLocked(node_index, slot) orelse {
+            self.file_page_cache_mapping_pin_failures +%= 1;
+            return Error.NoSpace;
+        };
+        for (&self.file_page_cache) |*entry| {
+            if (!entry.used or entry.node != node_index or entry.node_generation != generation or entry.slot != slot) continue;
+            if (entry.mapping_references == std.math.maxInt(u16) or node.mapping_references == std.math.maxInt(u16)) {
+                self.file_page_cache_mapping_pin_failures +%= 1;
+                return Error.NoSpace;
+            }
+            entry.mapping_references += 1;
+            node.mapping_references += 1;
+            self.file_page_cache_mapping_pins +%= 1;
+            return .{
+                .address = entry.address,
+                .node = node_index,
+                .generation = generation,
+                .slot = @intCast(slot),
+                .valid_bytes = @min(file_block_size, node.size - slot * file_block_size),
+            };
+        }
+        self.file_page_cache_mapping_pin_failures +%= 1;
+        return Error.InvalidHandle;
+    }
+
+    pub fn unpinFilePage(self: *Vfs, node_index: u16, generation: u16, slot: usize) Error!void {
+        if (node_index >= self.nodes.len or slot >= file_blocks_per_node) return Error.NotFound;
+        var node = &self.nodes[node_index];
+        if (!node.used or node.generation != generation or node.kind != .file) return Error.NotFound;
+        _ = node.data_lock.acquire();
+        _ = self.file_page_cache_lock.acquire();
+        var found = false;
+        for (&self.file_page_cache) |*entry| {
+            if (!entry.used or entry.node != node_index or entry.node_generation != generation or entry.slot != slot) continue;
+            if (entry.mapping_references == 0 or node.mapping_references == 0) {
+                self.file_page_cache_lock.release();
+                node.data_lock.release();
+                return Error.InvalidHandle;
+            }
+            entry.mapping_references -= 1;
+            node.mapping_references -= 1;
+            self.file_page_cache_mapping_unpins +%= 1;
+            found = true;
+            break;
+        }
+        self.file_page_cache_lock.release();
+        node.data_lock.release();
+        if (!found) return Error.NotFound;
+        self.maybeReclaimUnlinked(node_index);
+    }
+
     pub fn reclaimCleanFilePageCacheUnderPressure(
         self: *Vfs,
         free_pages: u64,
@@ -1001,7 +1084,7 @@ pub const Vfs = struct {
             var oldest: u64 = std.math.maxInt(u64);
             for (0..self.file_page_cache.len) |index| {
                 const entry = &self.file_page_cache[index];
-                if (!entry.used or entry.dirty or entry.last_used >= oldest) continue;
+                if (!entry.used or entry.dirty or entry.mapping_references != 0 or entry.last_used >= oldest) continue;
                 oldest = entry.last_used;
                 candidate = index;
             }
@@ -1022,7 +1105,7 @@ pub const Vfs = struct {
         var released: usize = 0;
         for (0..self.file_page_cache.len) |index| {
             const entry = &self.file_page_cache[index];
-            if (!entry.used or entry.dirty) continue;
+            if (!entry.used or entry.dirty or entry.mapping_references != 0) continue;
             released += @intFromBool(self.releaseFilePageCacheEntryLocked(index));
         }
         return released;
@@ -1071,7 +1154,7 @@ pub const Vfs = struct {
         const index = try self.resolveOpen(owner_pid, handle);
         const node_index = self.open_files[index].node;
         if (!self.open_files[index].writable) return Error.PermissionDenied;
-        try self.requireWritableFile(node_index);
+        try self.requireMutableFile(node_index);
         var node = &self.nodes[node_index];
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
@@ -1081,7 +1164,7 @@ pub const Vfs = struct {
     pub fn allocateOpen(self: *Vfs, owner_pid: u32, handle: u32, offset: usize, length: usize, flags: AllocationFlags, tick: u64) Error!void {
         const index = try self.resolveOpen(owner_pid, handle);
         if (!self.open_files[index].writable) return Error.PermissionDenied;
-        try self.allocateNode(self.open_files[index].node, offset, length, flags, tick);
+        try self.allocateNode(self.open_files[index].node, offset, length, flags, tick, false);
     }
 
     pub fn sparseFileInfoNode(self: *const Vfs, node_index: u16) Error!SparseFileInfo {
@@ -1173,6 +1256,16 @@ pub const Vfs = struct {
                 if (std.ascii.eqlIgnoreCase(other.nameSlice(), entry.nameSlice())) return false;
             }
         }
+        var counted_mapping_references: [maximum_nodes]u16 = @splat(0);
+        for (&self.file_page_cache) |*entry| {
+            if (!entry.used or entry.mapping_references == 0) continue;
+            if (entry.node >= self.nodes.len) return false;
+            counted_mapping_references[entry.node] = std.math.add(
+                u16,
+                counted_mapping_references[entry.node],
+                entry.mapping_references,
+            ) catch return false;
+        }
         for (0..self.nodes.len) |index| {
             const node = &self.nodes[index];
             if ((!node.used or node.kind != .file) and self.dirty_file_page_bitmap[index] != 0) return false;
@@ -1180,10 +1273,11 @@ pub const Vfs = struct {
             for (&node.page_write_locks) |*page_lock| if (page_lock.next() != page_lock.serving()) return false;
             if (node.kind != .file) for (node.file_blocks) |block_index| if (block_index != invalid_data_block) return false;
             if (!node.used) {
-                if (counted_links[index] != 0) return false;
+                if (counted_links[index] != 0 or node.mapping_references != 0 or counted_mapping_references[index] != 0) return false;
                 continue;
             }
-            if (node.generation == 0 or node.size > maximum_file_size or node.link_count != counted_links[index]) return false;
+            if (node.generation == 0 or node.size > maximum_file_size or node.link_count != counted_links[index] or
+                node.mapping_references != counted_mapping_references[index]) return false;
             if (node.kind == .pseudo and node.pseudo_operations == null) return false;
             if (node.kind == .symlink and (node.size == 0 or node.size > maximum_symlink_target_length)) return false;
             if (index != 0 and node.link_count == 0) {
@@ -1221,7 +1315,7 @@ pub const Vfs = struct {
         for (0..self.file_page_cache.len) |cache_index| {
             const entry = &self.file_page_cache[cache_index];
             if (!entry.used) {
-                if (entry.address != 0) return false;
+                if (entry.address != 0 or entry.mapping_references != 0) return false;
                 continue;
             }
             if (self.file_page_cache_allocator == null or entry.address == 0 or entry.node >= self.nodes.len or entry.slot >= file_blocks_per_node or entry.node_generation == 0 or entry.last_used == 0) return false;
@@ -1325,6 +1419,11 @@ pub const Vfs = struct {
             .file_page_cache_pressure_checks = self.file_page_cache_pressure_checks,
             .file_page_cache_pressure_events = self.file_page_cache_pressure_events,
             .file_page_cache_pressure_evictions = self.file_page_cache_pressure_evictions,
+            .file_page_cache_mapping_references = 0,
+            .file_page_cache_mapping_pins = self.file_page_cache_mapping_pins,
+            .file_page_cache_mapping_unpins = self.file_page_cache_mapping_unpins,
+            .file_page_cache_mapping_refreshes = self.file_page_cache_mapping_refreshes,
+            .file_page_cache_mapping_pin_failures = self.file_page_cache_mapping_pin_failures,
             .file_page_cache_lock_tickets = self.file_page_cache_lock.next(),
             .file_page_cache_lock_outstanding = self.file_page_cache_lock.next() -% self.file_page_cache_lock.serving(),
             .data_lock_tickets = 0,
@@ -1380,6 +1479,7 @@ pub const Vfs = struct {
             const entry = &self.file_page_cache[cache_index];
             result.file_page_cache_entries += @intFromBool(entry.used);
             result.file_page_cache_dirty_entries += @intFromBool(entry.used and entry.dirty);
+            result.file_page_cache_mapping_references += entry.mapping_references;
         }
         for (self.dentry_cache) |cache_entry| {
             result.dentry_cache_entries += @intFromBool(cache_entry.used);
@@ -1775,11 +1875,14 @@ pub const Vfs = struct {
         self.mutations +%= 1;
     }
 
-    fn allocateNode(self: *Vfs, node_index: u16, offset: usize, length: usize, flags: AllocationFlags, tick: u64) Error!void {
+    fn allocateNode(self: *Vfs, node_index: u16, offset: usize, length: usize, flags: AllocationFlags, tick: u64, enforce_mode: bool) Error!void {
         if (length == 0) return Error.InvalidOffset;
         if (offset > maximum_file_size or length > maximum_file_size - offset) return Error.FileTooLarge;
         if (flags.punch_hole and !flags.keep_size) return Error.InvalidOffset;
-        try self.requireWritableFile(node_index);
+        if (enforce_mode)
+            try self.requireWritableFile(node_index)
+        else
+            try self.requireMutableFile(node_index);
         var node = &self.nodes[node_index];
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
@@ -1857,7 +1960,7 @@ pub const Vfs = struct {
         }
         self.file_page_cache_misses +%= 1;
         const allocator = self.file_page_cache_allocator orelse return null;
-        var candidate: usize = 0;
+        var candidate: ?usize = null;
         var oldest: u64 = std.math.maxInt(u64);
         for (0..self.file_page_cache.len) |index| {
             const entry = &self.file_page_cache[index];
@@ -1866,13 +1969,14 @@ pub const Vfs = struct {
                 oldest = 0;
                 break;
             }
-            if (entry.last_used < oldest) {
+            if (entry.mapping_references == 0 and entry.last_used < oldest) {
                 oldest = entry.last_used;
                 candidate = index;
             }
         }
-        if (self.file_page_cache[candidate].used) {
-            _ = self.releaseFilePageCacheEntryLocked(candidate);
+        const candidate_index = candidate orelse return null;
+        if (self.file_page_cache[candidate_index].used) {
+            _ = self.releaseFilePageCacheEntryLocked(candidate_index);
             self.file_page_cache_evictions +%= 1;
         }
         const address = allocator.allocate(allocator.context) orelse {
@@ -1884,7 +1988,7 @@ pub const Vfs = struct {
             return null;
         }
         self.file_page_cache_allocations +%= 1;
-        const entry = &self.file_page_cache[candidate];
+        const entry = &self.file_page_cache[candidate_index];
         entry.* = .{
             .used = true,
             .node = node_index,
@@ -1907,6 +2011,7 @@ pub const Vfs = struct {
     fn releaseFilePageCacheEntryLocked(self: *Vfs, index: usize) bool {
         const entry = &self.file_page_cache[index];
         if (!entry.used) return true;
+        if (entry.mapping_references != 0) return false;
         const allocator = self.file_page_cache_allocator orelse {
             self.file_page_cache_release_failures +%= 1;
             entry.* = .{};
@@ -1983,8 +2088,19 @@ pub const Vfs = struct {
         for (0..self.file_page_cache.len) |index| {
             const entry = &self.file_page_cache[index];
             if (!entry.used or entry.node != node_index) continue;
-            _ = self.releaseFilePageCacheEntryLocked(index);
-            self.file_page_cache_invalidations +%= 1;
+            if (entry.mapping_references != 0 and entry.node_generation == self.nodes[node_index].generation) {
+                const page = filePageBytes(entry.address);
+                const block_index = self.nodes[node_index].file_blocks[entry.slot];
+                if (block_index == invalid_data_block)
+                    @memset(page, 0)
+                else
+                    @memcpy(page, &self.data_blocks[block_index].data);
+                entry.dirty = (self.dirty_file_page_bitmap[node_index] & (@as(u8, 1) << @intCast(entry.slot))) != 0;
+                self.file_page_cache_mapping_refreshes +%= 1;
+            } else {
+                _ = self.releaseFilePageCacheEntryLocked(index);
+                self.file_page_cache_invalidations +%= 1;
+            }
         }
     }
 
@@ -2069,12 +2185,16 @@ pub const Vfs = struct {
         return count;
     }
 
-    fn requireWritableFile(self: *const Vfs, node_index: u16) Error!void {
+    fn requireMutableFile(self: *const Vfs, node_index: u16) Error!void {
         if (node_index >= self.nodes.len or !self.nodes[node_index].used) return Error.NotFound;
         const node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if (node.kind == .pseudo or node.kind == .symlink or node.readonly or self.mountReadonly(node.mount_id)) return Error.ReadOnly;
-        if ((node.mode & 0o222) == 0) return Error.PermissionDenied;
+    }
+
+    fn requireWritableFile(self: *const Vfs, node_index: u16) Error!void {
+        try self.requireMutableFile(node_index);
+        if ((self.nodes[node_index].mode & 0o222) == 0) return Error.PermissionDenied;
     }
 
     fn unlinkEntry(self: *Vfs, entry_index: u16) Error!void {
@@ -2135,6 +2255,7 @@ pub const Vfs = struct {
     }
 
     fn hasOpenReferences(self: *const Vfs, node_index: u16) bool {
+        if (self.nodes[node_index].mapping_references != 0) return true;
         for (self.open_files) |open_file| {
             if (open_file.used and open_file.node == node_index and open_file.node_generation == self.nodes[node_index].generation) return true;
         }
@@ -2732,6 +2853,51 @@ test "VFS bounded clean page cache hits evicts and invalidates mutations" {
     try std.testing.expectEqual(@as(usize, 0), page_allocator.active());
     try std.testing.expect(fs.validate());
     try std.testing.expectEqual(@as(u64, 0), fs.report().file_page_cache_lock_outstanding);
+}
+
+test "VFS pinned file page resists pressure refreshes writes and retains unlinked lifetime" {
+    var fs = Vfs.init();
+    var page_allocator = TestFilePageAllocator{};
+    try fs.setFilePageAllocator(page_allocator.interface());
+    _ = try fs.mkdir(0, "/mapped", 0o755, 1);
+    const original: [file_block_size]u8 = @splat(0x21);
+    const node = try fs.putFile(0, "/mapped/shared", &original, 0o600, false, 2);
+    _ = fs.clearDirtyNodePages(node);
+    const stat = try fs.statNode(node);
+    const mapped = try fs.pinFilePage(node, stat.generation, 0);
+    const page = filePageBytes(mapped.address);
+    try std.testing.expectEqual(@as(usize, file_block_size), mapped.valid_bytes);
+    try std.testing.expectEqualSlices(u8, &original, page);
+    var report = fs.report();
+    try std.testing.expectEqual(@as(usize, 1), report.file_page_cache_entries);
+    try std.testing.expectEqual(@as(usize, 1), report.file_page_cache_mapping_references);
+    try std.testing.expectEqual(@as(u64, 1), report.file_page_cache_mapping_pins);
+    try std.testing.expectEqual(@as(usize, 0), fs.reclaimCleanFilePageCacheUnderPressure(1, 2, 0));
+    try std.testing.expectEqual(@as(usize, 1), page_allocator.active());
+
+    const replacement: [64]u8 = @splat(0x7A);
+    try std.testing.expectEqual(replacement.len, try fs.write(0, "/mapped/shared", 128, &replacement, false, 3));
+    try std.testing.expectEqualSlices(u8, &replacement, page[128 .. 128 + replacement.len]);
+    var readback: [64]u8 = undefined;
+    try std.testing.expectEqual(readback.len, try fs.read(0, "/mapped/shared", 128, &readback));
+    try std.testing.expectEqualSlices(u8, &replacement, &readback);
+    report = fs.report();
+    try std.testing.expectEqual(@as(u64, 1), report.file_page_cache_mapping_refreshes);
+
+    try fs.unlink(0, "/mapped/shared");
+    try std.testing.expectEqual(@as(u16, 0), (try fs.statNode(node)).link_count);
+    try std.testing.expectEqual(@as(usize, 0), fs.reclaimCleanFilePageCacheUnderPressure(1, 2, 0));
+    try std.testing.expectEqualSlices(u8, &replacement, page[128 .. 128 + replacement.len]);
+    try fs.unpinFilePage(node, stat.generation, 0);
+    try std.testing.expectError(Error.NotFound, fs.statNode(node));
+    try std.testing.expectEqual(@as(usize, 0), page_allocator.active());
+    report = fs.report();
+    try std.testing.expectEqual(@as(usize, 0), report.file_page_cache_mapping_references);
+    try std.testing.expectEqual(@as(u64, 1), report.file_page_cache_mapping_pins);
+    try std.testing.expectEqual(@as(u64, 1), report.file_page_cache_mapping_unpins);
+    try std.testing.expectEqual(report.file_page_cache_allocations, report.file_page_cache_releases);
+    try std.testing.expectEqual(@as(u64, 0), report.file_page_cache_mapping_pin_failures);
+    try std.testing.expect(fs.validate());
 }
 
 test "VFS pressure reclaim releases clean cache pages and retains dirty pages" {

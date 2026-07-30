@@ -81,7 +81,8 @@ pub const MapFlags = packed struct(u8) {
     anonymous: bool = true,
     fixed: bool = false,
     fixed_no_replace: bool = false,
-    reserved: u4 = 0,
+    shared: bool = false,
+    reserved: u3 = 0,
 
     pub fn bits(self: MapFlags) u64 {
         return @as(u8, @bitCast(self));
@@ -271,7 +272,21 @@ pub fn mmap(address: ?*anyopaque, length: usize, protection: Protection, flags: 
     return @as([*]u8, @ptrFromInt(raw))[0..length];
 }
 
-pub fn munmap(bytes: []u8) Error!void {
+pub fn mmapFile(address: ?*anyopaque, length: usize, protection: Protection, fd: u16, offset: usize) Error![]const u8 {
+    const flags = MapFlags{ .private = false, .anonymous = false, .shared = true };
+    const raw = try result(zigos_syscall6(
+        abi.syscall_mmap,
+        if (address) |pointer| ptrValue(pointer) else 0,
+        length,
+        protection.bits(),
+        flags.bits(),
+        fd,
+        offset,
+    ));
+    return @as([*]const u8, @ptrFromInt(raw))[0..length];
+}
+
+pub fn munmap(bytes: []const u8) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_munmap, ptrValue(bytes.ptr), bytes.len, 0, 0, 0, 0));
 }
 

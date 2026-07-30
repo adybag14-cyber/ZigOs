@@ -112,6 +112,14 @@ const Pipe = struct {
     writers: u16 = 0,
 };
 
+pub const FileMappingInfo = struct {
+    node: u16,
+    generation: u16,
+    size: usize,
+    readable: bool,
+    writable: bool,
+};
+
 pub const DescriptorInfo = struct {
     fd: u16,
     kind: DescriptionKind,
@@ -895,6 +903,30 @@ pub const System = struct {
         return vfs.directoryNodeOpen(description.vfs_owner, description.vfs_handle);
     }
 
+    pub fn fileMappingInfo(
+        self: *const System,
+        vfs: *const runtime_vfs.Vfs,
+        processes: *const runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+    ) Error!FileMappingInfo {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        const description = self.open_descriptions[open_index];
+        if (description.kind != .vfs) return Error.InvalidOperation;
+        const open_info = try vfs.openInfo(description.vfs_owner, description.vfs_handle);
+        const node_stat = try vfs.statNode(open_info.node);
+        if (node_stat.kind != .file or node_stat.generation != open_info.node_generation) return Error.InvalidOperation;
+        return .{
+            .node = node_stat.node,
+            .generation = node_stat.generation,
+            .size = node_stat.size,
+            .readable = description.readable and open_info.readable,
+            .writable = description.writable and open_info.writable,
+        };
+    }
+
     pub fn syncNode(
         self: *const System,
         vfs: *const runtime_vfs.Vfs,
@@ -1378,6 +1410,28 @@ test "VFS console opens as a terminal and supports ioctl state" {
     try std.testing.expectEqual(runtime_abi.constants.tty_echo, tty.modeFlags());
     try std.testing.expectEqual(@as(usize, 7), (try system.write(&fs, &processes, process, fd, "console", 0)).count);
     try system.close(&fs, &processes, process, fd);
+    try std.testing.expect(system.validate(&fs, &processes));
+}
+
+test "regular descriptors expose generation safe file mapping metadata" {
+    var fs = runtime_vfs.Vfs.init();
+    try initializeTestFilesystem(&fs);
+    _ = try fs.putFile(0, "/tmp/mapped", "mapped-data", 0o640, false, 1);
+    var processes = runtime_process.Table.init(0);
+    var system = System.init();
+    const handle = processes.initHandle();
+    try system.bindProcess(&processes, handle, true);
+    const fd = try system.openFile(&fs, &processes, handle, "/tmp/mapped", .{ .read = true, .write = true }, 0, 2);
+    try fs.chmod(0, "/tmp/mapped", 0, 3);
+    const info = try system.fileMappingInfo(&fs, &processes, handle, fd);
+    const node_stat = try fs.stat(0, "/tmp/mapped");
+    try std.testing.expectEqual(node_stat.node, info.node);
+    try std.testing.expectEqual(node_stat.generation, info.generation);
+    try std.testing.expectEqual(node_stat.size, info.size);
+    try std.testing.expect(info.readable);
+    try std.testing.expect(info.writable);
+    try std.testing.expectEqual(@as(usize, 1), (try system.write(&fs, &processes, handle, fd, "!", 4)).count);
+    try system.close(&fs, &processes, handle, fd);
     try std.testing.expect(system.validate(&fs, &processes));
 }
 

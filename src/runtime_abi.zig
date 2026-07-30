@@ -54,7 +54,8 @@ pub const map_private: u64 = 1 << 0;
 pub const map_anonymous: u64 = 1 << 1;
 pub const map_fixed: u64 = 1 << 2;
 pub const map_fixed_no_replace: u64 = 1 << 3;
-pub const map_allowed: u64 = map_private | map_anonymous | map_fixed | map_fixed_no_replace;
+pub const map_shared: u64 = 1 << 4;
+pub const map_allowed: u64 = map_private | map_anonymous | map_fixed | map_fixed_no_replace | map_shared;
 
 pub const message_dontwait: u64 = constants.message_dontwait;
 pub const message_allowed: u64 = message_dontwait;
@@ -210,7 +211,10 @@ pub fn protectionBits(value: u64) ?u8 {
 pub fn mapFlagBits(value: u64) ?u8 {
     if ((value & ~map_allowed) != 0) return null;
     const bits: u8 = @intCast(value);
-    if ((bits & map_private) == 0 or (bits & map_anonymous) == 0) return null;
+    const private = (bits & map_private) != 0;
+    const anonymous = (bits & map_anonymous) != 0;
+    const shared = (bits & map_shared) != 0;
+    if (private == shared or private != anonymous) return null;
     if ((bits & map_fixed) != 0 and (bits & map_fixed_no_replace) != 0) return null;
     return bits;
 }
@@ -297,7 +301,11 @@ test "open protection map and message flags reject unknown or contradictory bits
     try std.testing.expectEqual(@as(?u8, protection_read | protection_write), protectionBits(protection_read | protection_write));
     try std.testing.expect(protectionBits(8) == null);
     try std.testing.expectEqual(@as(?u8, map_private | map_anonymous), mapFlagBits(map_private | map_anonymous));
+    try std.testing.expectEqual(@as(?u8, map_shared), mapFlagBits(map_shared));
+    try std.testing.expect(mapFlagBits(map_private) == null);
     try std.testing.expect(mapFlagBits(map_anonymous) == null);
+    try std.testing.expect(mapFlagBits(map_shared | map_anonymous) == null);
+    try std.testing.expect(mapFlagBits(map_private | map_shared | map_anonymous) == null);
     try std.testing.expect(mapFlagBits(map_private | map_anonymous | map_fixed | map_fixed_no_replace) == null);
     try std.testing.expectEqual(@as(?u8, @intCast(message_dontwait)), messageFlagBits(message_dontwait));
     try std.testing.expect(messageFlagBits(message_dontwait << 1) == null);

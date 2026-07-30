@@ -7,7 +7,7 @@
 
 #define ZIGOS_ABI_MAGIC UINT32_C(0x4942415A)
 #define ZIGOS_ABI_MAJOR UINT16_C(1)
-#define ZIGOS_ABI_MINOR UINT16_C(11)
+#define ZIGOS_ABI_MINOR UINT16_C(12)
 #define ZIGOS_PAGE_SIZE UINT32_C(4096)
 #define ZIGOS_SYSCALL_BASE UINT16_C(64)
 #define ZIGOS_SYSCALL_COUNT UINT16_C(55)
@@ -144,6 +144,14 @@
 #define ZIGOS_OPEN_TRUNCATE (UINT64_C(1) << 3)
 #define ZIGOS_OPEN_APPEND (UINT64_C(1) << 4)
 #define ZIGOS_OPEN_CLOSE_ON_EXEC (UINT64_C(1) << 5)
+#define ZIGOS_PROT_READ (UINT64_C(1) << 0)
+#define ZIGOS_PROT_WRITE (UINT64_C(1) << 1)
+#define ZIGOS_PROT_EXECUTE (UINT64_C(1) << 2)
+#define ZIGOS_MAP_PRIVATE (UINT64_C(1) << 0)
+#define ZIGOS_MAP_ANONYMOUS (UINT64_C(1) << 1)
+#define ZIGOS_MAP_FIXED (UINT64_C(1) << 2)
+#define ZIGOS_MAP_FIXED_NO_REPLACE (UINT64_C(1) << 3)
+#define ZIGOS_MAP_SHARED (UINT64_C(1) << 4)
 #define ZIGOS_POLL_READABLE (UINT16_C(1) << 0)
 #define ZIGOS_POLL_WRITABLE (UINT16_C(1) << 1)
 #define ZIGOS_POLL_ERROR (UINT16_C(1) << 2)
@@ -193,6 +201,8 @@ int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);
 int64_t zigos_fsync(uint16_t fd);
 int64_t zigos_fdatasync(uint16_t fd);
 int64_t zigos_fallocate(uint16_t fd, uint64_t mode, uint64_t offset, uint64_t length);
+int64_t zigos_mmap_file(uint64_t address, size_t length, uint64_t protection, uint64_t flags, uint16_t fd, uint64_t offset);
+int64_t zigos_munmap(const void *address, size_t length);
 int64_t zigos_symlink(const char *target, const char *path);
 int64_t zigos_readlink(const char *path, void *bytes, size_t length);
 int64_t zigos_link(const char *old_path, const char *new_path);

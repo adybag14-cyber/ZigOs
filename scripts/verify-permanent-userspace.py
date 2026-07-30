@@ -241,7 +241,7 @@ def main() -> int:
     require(normal_boot_test, "ZigOs userspace init PID 1", "normal QEMU gate requires a real CPL3 PID 1")
     require(normal_boot_test, "userspace init reaped shell PID 2 status 0", "normal QEMU gate requires PID 1 supervision and reap")
     require(normal_boot_test, "process 3 exited 42", "normal QEMU gate proves userspace shell spawn/wait")
-    require(normal_boot_test, "alloc/free 127/127 cache-released 13 storage persistent clean yes", "normal QEMU gate requires exact physical reclamation and persistent mode")
+    require(normal_boot_test, "alloc/free 129/129 cache-released 13 storage persistent clean yes", "normal QEMU gate requires exact physical reclamation and persistent mode")
     require(normal_boot_test, "forbidden", "normal QEMU gate rejects diagnostic proof markers")
     require(kernel, "continuing normal boot with embedded assets and RAM-backed root", "normal boot no longer hard-fails without permanent storage")
     require(runtime, "diskless-ram-root", "normal shutdown distinguishes the diskless recovery profile")
@@ -251,8 +251,8 @@ def main() -> int:
     require(diskless_normal_boot_test, '"sync: unsupported",', "diskless gate forbids regression to persistence-gated global sync")
     require(diskless_normal_boot_test, "storage diskless-ram-root cleanup yes", "diskless QEMU gate requires clean resource reclamation")
     require(runtime, "ZigOs shutdown drain:", "diagnostic shutdown drains and reaps delayed terminal userspace")
-    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 11:
-        raise SystemExit("permanent-userspace contract missing: ABI version 1.11")
+    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 12:
+        raise SystemExit("permanent-userspace contract missing: ABI version 1.12")
     expected_fs_syscalls = {"lseek": 98, "mkdir": 99, "unlink": 100, "rmdir": 101, "rename": 102, "chmod": 103}
     expected_network_syscalls = {"sendto": 104, "recvfrom": 105, "getpeername": 106, "setnonblock": 107}
     expected_platform_syscalls = {"ioctl": 108, "stat": 109, "openat": 110, "fsync": 111, "symlink": 112, "readlink": 113, "link": 114, "fallocate": 115, "readv": 116, "writev": 117, "fdatasync": 118}
@@ -262,7 +262,7 @@ def main() -> int:
     network_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_network_syscalls.items())
     platform_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_platform_syscalls.items())
     if not core_numbering_valid or not fs_numbering_valid or not network_numbering_valid or not platform_numbering_valid:
-        raise SystemExit("permanent-userspace contract missing: ABI 1.11 syscall numbering")
+        raise SystemExit("permanent-userspace contract missing: ABI 1.12 syscall numbering")
     if abi_spec.get("message_flags") != {"dontwait": 1}:
         raise SystemExit("permanent-userspace contract missing: bounded MSG_DONTWAIT value")
     if abi_spec.get("fallocate_flags") != {"keep_size": 0, "punch_hole": 1}:
@@ -368,9 +368,17 @@ def main() -> int:
     forbid(vfs_source, "for (self.file_page_cache", "large file-page cache scans copied the full cache array onto the kernel stack")
     require(vfs_source, 'test "VFS bounded clean page cache hits evicts and invalidates mutations"', "isolated test proves bounded hits, LRU eviction, sparse-zero caching and mutation invalidation")
     require(vfs_source, "pub fn reclaimCleanFilePageCacheUnderPressure", "VFS exposes bounded low-watermark clean-page reclaim")
-    require(vfs_source, "if (!entry.used or entry.dirty or entry.last_used >= oldest) continue", "pressure reclaim skips every dirty resident page and chooses clean LRU victims")
+    require(vfs_source, "if (!entry.used or entry.dirty or entry.mapping_references != 0 or entry.last_used >= oldest) continue", "pressure reclaim skips dirty and mapped resident pages while choosing clean unpinned LRU victims")
     require(vfs_source, "pub fn releaseFilePageCache", "shutdown can return every remaining clean cache page to its backing allocator")
     require(vfs_source, 'test "VFS pressure reclaim releases clean cache pages and retains dirty pages"', "isolated test proves real backing release, clean-only LRU reclaim and dirty-ledger retention")
+    require(vfs_source, "pub const MappedFilePage = struct", "VFS publishes generation-tagged borrowed file-page metadata")
+    require(vfs_source, "pub fn pinFilePage", "shared file mappings pin one generation-safe cache page")
+    require(vfs_source, "pub fn unpinFilePage", "unmap and process teardown release exact mapped page pins")
+    require(vfs_source, "fn requireMutableFile", "already-open writable descriptions preserve mutation authority after pathname mode changes")
+    require(vfs_source, "mapping_references: u16 = 0", "inode and cache entries retain explicit file-mapping references")
+    require(vfs_source, "entry.mapping_references != 0 and entry.node_generation", "ordinary file writes refresh pinned mapped pages instead of invalidating them")
+    require(vfs_source, "if (self.nodes[node_index].mapping_references != 0) return true", "mapped unlinked files retain inode lifetime")
+    require(vfs_source, 'test "VFS pinned file page resists pressure refreshes writes and retains unlinked lifetime"', "isolated test proves pressure resistance, file-to-map coherence, unlink lifetime and final reclamation")
     require(vfs_source, "fn acquireDentry", "path traversal pins cache entries during use")
     require(vfs_source, "fn releaseDentryReference", "path traversal releases cache references on every exit path")
     require(vfs_source, "fn invalidateCachedDentry", "namespace mutation invalidates matching cached dentries")
@@ -444,6 +452,10 @@ def main() -> int:
     require(runtime, "fn commandCachePressure", "diagnostic shell can force a measured pressure crossing")
     require(runtime, "released_cache_pages = state.vfs.releaseFilePageCache()", "shutdown releases remaining cache backing before physical-memory accounting")
     require(runtime, "final_fs_report.file_page_cache_allocations == final_fs_report.file_page_cache_releases", "release gates require balanced cache-page allocation and release")
+    require(runtime, "fs_report.file_page_cache_mapping_references == 0", "release gates require no live borrowed file-page references")
+    require(runtime, "fs_report.file_page_cache_mapping_pins == fs_report.file_page_cache_mapping_unpins", "release gates conserve mapped page pins and unpins")
+    require(runtime, "fs_report.file_page_cache_mapping_refreshes > 0", "diagnostic profiles require real file-write to mapped-read refresh activity")
+    require(runtime, "userspace_report.file_mapping_pages == 0", "all mapped file pages must leave process address spaces before shutdown")
     require(runtime, "fs_report.file_page_cache_dirty_entries == 0", "release gates require no resident dirty cache pages at shutdown")
     require(runtime, "fs_report.dirty_file_pages == 0", "release gates require the inode dirty-page ledger to drain")
     require(runtime, "fs_report.dirty_file_nodes == 0", "release gates require no dirty inodes at shutdown")
@@ -466,6 +478,8 @@ def main() -> int:
     require(runtime, "backing alloc/release/fail", "diagnostic shutdown reports PMM-backed cache lifecycle accounting")
     require(runtime, "pressure checks/events/evictions", "diagnostic shutdown reports pressure-policy activity")
     require(runtime, "shutdown-release", "diagnostic shutdown reports final cache-page return")
+    require(runtime, "mapped refs/pin/unpin/refresh/fail", "diagnostic shutdown reports borrowed file-page lifecycle conservation")
+    require(runtime, "file-mappings", "diagnostic userspace report exposes active borrowed file-page mappings")
     require(runtime, "lock tickets/outstanding", "diagnostic shutdown reports drained file-page cache locking")
     require(runtime, "data-lock tickets/outstanding", "diagnostic shutdown reports inode data-lock accounting")
     require(runtime, "pool-lock tickets/outstanding", "diagnostic shutdown reports sparse-pool lock accounting")
@@ -527,7 +541,11 @@ def main() -> int:
     require(build_graph, "sdk/c/conformance.c", "build graph compiles an independent freestanding C conformance program")
     require(build_graph, '"artifacts/c-sdk.elf"', "C SDK conformance is installed as a standalone artifact")
     require(runtime, '"/bin/c-sdk.elf"', "C SDK conformance is installed in the runtime VFS")
-    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(11)", "generated C header publishes ABI 1.11")
+    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(12)", "generated C header publishes ABI 1.12")
+    require(c_header, "ZIGOS_MAP_SHARED", "generated C header publishes shared file-mapping flags")
+    require(c_header, "zigos_mmap_file", "generated C header declares file-backed mmap")
+    require(c_library, "zigos_mmap_file", "C wrapper library exposes file-backed mmap")
+    require(c_library, "zigos_munmap", "C wrapper library exposes mapping teardown")
     require(c_header, "ZIGOS_MAX_IOVECS UINT64_C(8)", "generated C header publishes the eight-vector bound")
     require(c_header, "typedef struct zigos_iovec", "generated C header publishes the stable iovec layout")
     require(c_header, 'sizeof(zigos_iovec) == 16', "generated C header asserts the iovec binary layout")
@@ -552,7 +570,8 @@ def main() -> int:
     require(sdk_startup, "lea rsi, [r12 + 8]", "SDK startup derives argv from the canonical initial stack")
     require(sdk_startup, "zigos_syscall6:", "SDK supplies the six-register int 0x80 bridge")
     require(sdk_source, "pub fn queryAbi", "SDK exposes typed ABI discovery")
-    require(sdk_source, "pub fn mmap", "SDK exposes typed virtual-memory wrappers")
+    require(sdk_source, "pub fn mmap", "SDK exposes typed anonymous virtual-memory wrappers")
+    require(sdk_source, "pub fn mmapFile", "SDK exposes typed read-only shared file mappings")
     require(sdk_source, "pub fn socket", "SDK exposes typed UDP socket wrappers")
     require(runtime_abi, "pub fn messageFlagBits", "ABI rejects unknown full-width message flags before narrowing")
     require(executor, "fn syscallSendTo", "kernel exposes unconnected UDP datagram transmission")
@@ -603,7 +622,10 @@ def main() -> int:
     require(socket_conformance, "SYS_SETNONBLOCK", "CPL3 socket fixture checks socket-level nonblocking mode")
     require(socket_conformance, "ZIGOS_MSG_DONTWAIT", "CPL3 socket fixture checks per-call nonblocking mode")
     require(runtime_test, "socket-api: sendto/recvfrom/getpeername/nonblocking passed", "required live QEMU session proves ABI 1.6 UDP controls")
-    require(sdk_conformance, "startup/argv/abi/files/vm/errno/fsync/fdatasync/readv/writev passed", "Zig conformance binary spans startup, both sync wrappers and vectored I/O")
+    require(sdk_conformance, "shared file mmap coherence passed", "Zig conformance binary proves ordinary writes immediately refresh mapped reads after close and unlink")
+    require(sdk_conformance, "try zigos.chmod(mapping_path, 0);", "CPL3 fixture maps through a descriptor opened before pathname permissions are removed")
+    require(sdk_conformance, "null,\n        13,", "CPL3 fixture exercises a partial final file page rather than a preallocated full page")
+    require(sdk_conformance, "startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev passed", "Zig conformance binary spans startup, shared file mappings, both sync wrappers and vectored I/O")
     require(sdk_source, "pub fn fdatasync", "Zig SDK exposes descriptor fdatasync")
     require(sdk_conformance, "invalid_write_vectors", "Zig fixture proves invalid later vectors cause no partial write")
     require(sdk_conformance, "invalid_read_vectors", "Zig fixture proves invalid later destinations do not consume the shared offset")
@@ -626,7 +648,19 @@ def main() -> int:
     require(executor, "releasePage(physical, context.handle);", "failed owned mappings release their owned page")
     require(executor, "paging.userAddressSpaceEmpty", "teardown requires an empty private page table")
     require(executor, "syscall.syscall_abi_query", "versioned ABI discovery syscall")
-    require(executor, "syscall.syscall_mmap", "anonymous process mappings")
+    require(executor, "syscall.syscall_mmap", "anonymous and shared-file process mappings")
+    require(executor, "const file_shared = (flags & runtime_abi.map_shared) != 0", "mmap distinguishes private-anonymous and shared-file modes")
+    require(executor, "activeDescriptors().fileMappingInfo", "file mappings resolve generation-safe regular descriptor metadata")
+    require(executor, "activeVfs().pinFilePage", "file mappings borrow VFS cache pages rather than copying data")
+    require(executor, "fn mapBorrowedFilePage", "borrowed cache pages enter userspace without page-pool ownership")
+    require(executor, "activeVfs().unpinFilePage", "unmap, rollback and process teardown release VFS page pins")
+    require(executor, "mapping.kind == .file_shared", "file mapping teardown distinguishes borrowed from owned physical pages")
+    require(executor, "context.mappings[index].kind == .file_shared", "mprotect rejects writable or executable upgrades for shared file mappings")
+    require(fd_source, "pub const FileMappingInfo = struct", "descriptor layer publishes generation-safe regular file mapping metadata")
+    require(fd_source, "pub fn fileMappingInfo", "descriptor layer resolves mmap fd ownership and access mode")
+    require(fd_source, 'test "regular descriptors expose generation safe file mapping metadata"', "descriptor test proves node generation, size and read/write access mapping metadata")
+    require(fd_source, 'try fs.chmod(0, "/tmp/mapped", 0, 3);', "descriptor test removes pathname mode bits after opening the file")
+    require(fd_source, '(try system.write(&fs, &processes, handle, fd, "!", 4)).count', "descriptor test proves retained writable-open authority after chmod")
     require(executor, "syscall.syscall_munmap", "process mapping release")
     require(executor, "syscall.syscall_mprotect", "process mapping protection transitions")
     require(executor, "syscall.syscall_brk", "process heap-break management")
@@ -743,8 +777,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 89:
-        raise SystemExit(f"canonical isolated-test declaration total must be 89, found {declared_tests}")
+    if declared_tests != 91:
+        raise SystemExit(f"canonical isolated-test declaration total must be 91, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -806,19 +840,20 @@ def main() -> int:
         "ZigOs post-bootstrap physical memory: total ",
         "entries before/after 15/11 reclaimed 4 dirty retained 11",
         "entries before/after 16/12 reclaimed 4 dirty retained 12",
-        "backing alloc/release/fail 49/49/0/0",
-        "backing alloc/release/fail 54/54/0/0",
+        "backing alloc/release/fail 50/50/0/0",
+        "backing alloc/release/fail 55/55/0/0",
         "/1/4 shutdown-release 11",
         "/1/4 shutdown-release 12",
-        "alloc/free 296/296 failed/rejected 0/0 clean yes",
-        "alloc/free 332/332 failed/rejected 0/0 clean yes",
+        "alloc/free 298/298 failed/rejected 0/0 clean yes",
+        "alloc/free 334/334 failed/rejected 0/0 clean yes",
         "launches/exits/faults 15/13/1",
         "launches/exits/faults 17/15/1",
-        "reclaimed 247 stale-contexts-swept 0 allocator alloc/release/retains 247/247/0",
-        "reclaimed 278 stale-contexts-swept 0 allocator alloc/release/retains 278/278/0",
+        "reclaimed 248 stale-contexts-swept 0 allocator alloc/release/retains 248/248/0",
+        "reclaimed 279 stale-contexts-swept 0 allocator alloc/release/retains 279/279/0",
         "tty-api: blocking read/poll/line discipline passed",
-        "zig-sdk: startup/argv/abi/files/vm/errno/fsync/fdatasync/readv/writev passed",
-        "c-sdk: ABI 1.11 discovery passed",
+        "zig-sdk: shared file mmap coherence passed",
+        "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev passed",
+        "c-sdk: ABI 1.12 discovery passed",
         "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
         "ZigOs shutdown drain:",
         " data-lock tickets/outstanding ",
@@ -855,7 +890,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.12 Zig/C SDKs, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

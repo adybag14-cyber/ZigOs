@@ -8,7 +8,8 @@ const argv2_fail_message = "zig-sdk: bad argv2\r\n";
 const argv_message = "zig-sdk: argc/argv passed\r\n";
 const abi_message = "zig-sdk: ABI discovery passed\r\n";
 const startup_vector_message = "zig-sdk: envp/auxv passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/errno/fsync/fdatasync/readv/writev passed\r\n";
+const mmap_file_message = "zig-sdk: shared file mmap coherence passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -151,6 +152,41 @@ fn run() zigos.Error!void {
     try zigos.mprotect(mapping, .{ .read = true, .write = true });
     if (mapping[0] != 0x5A or mapping[mapping.len - 1] != 0xA5) return error.InvalidArgument;
     try zigos.munmap(mapping);
+
+    const mapping_path = "/tmp/zig-sdk-mapped";
+    zigos.unlink(mapping_path) catch {};
+    const mapping_fd = try zigos.open(
+        mapping_path,
+        .{ .read = true, .write = true, .create = true, .truncate = true },
+        0o600,
+    );
+    try zigos.writeAll(mapping_fd, "mapped-before");
+    try zigos.chmod(mapping_path, 0);
+    const file_mapping = zigos.mmapFile(
+        null,
+        13,
+        .{ .read = true },
+        mapping_fd,
+        0,
+    ) catch |err| {
+        zigos.writeAll(2, "zig-sdk: shared file mmap call failed\r\n") catch {};
+        return err;
+    };
+    if (!equal(file_mapping[0..13], "mapped-before")) {
+        zigos.writeAll(2, "zig-sdk: shared file mmap initial bytes failed\r\n") catch {};
+        return error.InvalidArgument;
+    }
+    if (try zigos.lseek(mapping_fd, 0, .start) != 0) return error.InvalidArgument;
+    try zigos.writeAll(mapping_fd, "mapped-after!");
+    if (!equal(file_mapping[0..13], "mapped-after!")) return error.InvalidArgument;
+    var mapped_readback: [13]u8 = undefined;
+    if (try zigos.lseek(mapping_fd, 0, .start) != 0 or try zigos.read(mapping_fd, &mapped_readback) != mapped_readback.len or
+        !equal(&mapped_readback, file_mapping[0..13])) return error.InvalidArgument;
+    try zigos.close(mapping_fd);
+    try zigos.unlink(mapping_path);
+    if (!equal(file_mapping[0..13], "mapped-after!")) return error.InvalidArgument;
+    try zigos.munmap(file_mapping);
+    try zigos.writeAll(1, mmap_file_message);
 
     _ = zigos.open("/definitely/missing", .{ .read = true }, 0) catch |err| {
         if (err != error.NotFound) return err;
