@@ -151,6 +151,12 @@ def main() -> int:
     require(persist_source, 'test "global sync covers writable mounts and rejects invalid plans before journal writes"', "isolated test proves complete visitation, read-only skipping and pre-I/O rejection")
     require(persist_source, "pub fn syncFile", "persistent store exposes one-file data-and-metadata snapshot replacement")
     require(persist_source, "pub fn syncFileData", "persistent store exposes data-only one-file snapshot replacement")
+    require(persist_source, "pub fn requestWriteback", "dirty file writeback is explicitly scheduled without clearing the ledger")
+    require(persist_source, "pub fn serviceWriteback", "one bounded background service pass processes a scheduled dirty inode")
+    require(persist_source, "if (self.writeback_active) return Error.Busy", "only one generation-tagged writeback request can be active")
+    require(persist_source, "stat.generation != generation", "background writeback rejects stale inode-slot reuse")
+    require(persist_source, "self.syncFileData(vfs, node_index)", "persistent background writeback reuses data-only journal semantics")
+    require(persist_source, 'test "bounded asynchronous writeback services immediate durable unsupported failed and stale requests"', "isolated test proves request/service separation and every bounded writeback outcome")
     require(persist_source, "committed_mode = record_mode", "fdatasync retains mode from the last committed target record")
     require(persist_source, "const persisted_mode = if (include_metadata) stat.mode else committed_mode.?", "fsync and fdatasync select current or committed metadata explicitly")
     require(persist_source, "fn commitSnapshot", "global sync, fsync and fdatasync share one ordered A/B commit path")
@@ -543,6 +549,17 @@ def main() -> int:
     require(executor, "include_metadata", "the file-sync backend receives an explicit metadata policy")
     require(runtime, "fn syncPersistentFile", "runtime routes fsync and fdatasync through one immediate-or-persistent file backend")
     require(runtime, "syncFileData", "runtime routes fdatasync to the data-only persistent-store path")
+    require(runtime, "state.persistence.serviceWriteback(&state.vfs)", "timer-driven runtime service processes at most one active writeback request per pass")
+    require(runtime, "fn commandWriteback", "diagnostic shell schedules and reports asynchronous writeback")
+    require(runtime, "fn writebackStateClean", "all runtime profiles accept a conserved idle worker or fully completed healthy requests")
+    require(runtime, "report.writeback_passes == report.writeback_requests", "writeback cleanliness requires every scheduled request to receive one service pass")
+    require(runtime, "report.writeback_completions == successful", "writeback completion accounting equals successful outcomes")
+    require(runtime, "report.writeback_pages_queued == report.writeback_pages_completed", "healthy writeback state conserves scheduled page accounting")
+    require(runtime_test, "writeback /bin/sdk.elf", "QEMU schedules a real three-page RAM-backed ELF for background writeback")
+    require(runtime_test, "sleep 1", "QEMU gives the timer service a background pass after scheduling")
+    require(runtime_test, "writeback status", "QEMU observes completion separately from the scheduling command")
+    require(runtime_test, "requests/completions/passes 1/1/1", "dedicated QEMU runtime requires a nonzero asynchronous request and service completion")
+    require(runtime_test, "pages queued/completed 3/3", "dedicated QEMU runtime requires exact scheduled-page completion")
     require(executor, "fn syscallSymlink", "kernel exposes symbolic-link creation")
     require(executor, "fn syscallReadlink", "kernel exposes non-following link-target reads")
     require(executor, "fn syscallLink", "kernel exposes same-mount hard-link creation")
@@ -701,8 +718,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 86:
-        raise SystemExit(f"canonical isolated-test declaration total must be 86, found {declared_tests}")
+    if declared_tests != 87:
+        raise SystemExit(f"canonical isolated-test declaration total must be 87, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -780,7 +797,7 @@ def main() -> int:
         "ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes",
         "sync complete: writable mounts 2 immediate 1 durable 1; ramfs mutations ",
         "fsck ramfs/persist: clean",
-        "ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 global/mount/immediate/durable/reject 1/2/1/1/0 payload/header/flush 1/1/2 NVMe read/write/flush ",
+        "ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 global/mount/immediate/durable/reject 1/2/1/1/0 writeback active no request/complete/pass 1/1/1 immediate/durable/clean/unsupported/failure/stale 1/0/0/0/0/0 pages queued/completed 3/3 payload/header/flush 1/1/2 NVMe read/write/flush ",
         " errors 0/0 clean yes",
         "persistent-storage yes canned-results no explicit-shutdown yes",
         "ZigOs permanent userspace: page-limit 4096 used 0",
@@ -802,7 +819,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, bounded dirty-page tracking, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

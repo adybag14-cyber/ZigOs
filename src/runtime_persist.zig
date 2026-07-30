@@ -19,6 +19,7 @@ pub const Error = error{
     NoSpace,
     InvalidRecord,
     UnsupportedOperation,
+    Busy,
 };
 
 pub const ReadFn = *const fn (context: ?*anyopaque, lba: u64, output: []u8) bool;
@@ -69,6 +70,23 @@ pub const RestorationFailure = struct {
     vfs_error: runtime_vfs.Error,
 };
 
+pub const WritebackOutcome = enum {
+    idle,
+    clean,
+    immediate,
+    durable,
+    unsupported,
+    failed,
+    stale,
+};
+
+pub const WritebackRequest = struct {
+    node: u16,
+    generation: u16,
+    pages: u8,
+    persistent: bool,
+};
+
 pub const Report = struct {
     mounted: bool,
     generation: u64,
@@ -83,6 +101,18 @@ pub const Report = struct {
     immediate_mount_syncs: u64,
     durable_mount_syncs: u64,
     rejected_sync_plans: u64,
+    writeback_active: bool,
+    writeback_requests: u64,
+    writeback_completions: u64,
+    writeback_passes: u64,
+    writeback_immediate: u64,
+    writeback_durable: u64,
+    writeback_clean: u64,
+    writeback_unsupported: u64,
+    writeback_failures: u64,
+    writeback_stale: u64,
+    writeback_pages_queued: u64,
+    writeback_pages_completed: u64,
     checks: u64,
     recoveries: u64,
     payload_writes: u64,
@@ -114,6 +144,22 @@ pub const Store = struct {
     immediate_mount_syncs: u64 = 0,
     durable_mount_syncs: u64 = 0,
     rejected_sync_plans: u64 = 0,
+    writeback_active: bool = false,
+    writeback_node: u16 = 0,
+    writeback_generation: u16 = 0,
+    writeback_pages: u8 = 0,
+    writeback_persistent: bool = false,
+    writeback_requests: u64 = 0,
+    writeback_completions: u64 = 0,
+    writeback_passes: u64 = 0,
+    writeback_immediate: u64 = 0,
+    writeback_durable: u64 = 0,
+    writeback_clean: u64 = 0,
+    writeback_unsupported: u64 = 0,
+    writeback_failures: u64 = 0,
+    writeback_stale: u64 = 0,
+    writeback_pages_queued: u64 = 0,
+    writeback_pages_completed: u64 = 0,
     checks: u64 = 0,
     recoveries: u64 = 0,
     payload_writes: u64 = 0,
@@ -186,6 +232,85 @@ pub const Store = struct {
 
     pub fn syncFileData(self: *Store, vfs: *runtime_vfs.Vfs, node_index: u16) Error!void {
         try self.syncFileRecord(vfs, node_index, false);
+    }
+
+    pub fn requestWriteback(self: *Store, vfs: *const runtime_vfs.Vfs, node_index: u16) Error!WritebackRequest {
+        if (self.writeback_active) return Error.Busy;
+        const stat = vfs.statNode(node_index) catch return Error.InvalidRecord;
+        if (stat.kind != .file or stat.link_count == 0 or stat.readonly) return Error.UnsupportedOperation;
+        const pages = vfs.dirtyFilePageBitmap(node_index) catch return Error.InvalidRecord;
+        if (pages == 0) return Error.UnsupportedOperation;
+        const persistent = vfs.persistentNode(node_index) catch return Error.InvalidRecord;
+        self.writeback_active = true;
+        self.writeback_node = node_index;
+        self.writeback_generation = stat.generation;
+        self.writeback_pages = pages;
+        self.writeback_persistent = persistent;
+        self.writeback_requests +%= 1;
+        self.writeback_pages_queued +%= @popCount(pages);
+        return .{
+            .node = node_index,
+            .generation = stat.generation,
+            .pages = pages,
+            .persistent = persistent,
+        };
+    }
+
+    pub fn serviceWriteback(self: *Store, vfs: *runtime_vfs.Vfs) WritebackOutcome {
+        if (!self.writeback_active) return .idle;
+        self.writeback_active = false;
+        self.writeback_passes +%= 1;
+        const node_index = self.writeback_node;
+        const generation = self.writeback_generation;
+        const requested_pages: u64 = @popCount(self.writeback_pages);
+        const requested_persistent = self.writeback_persistent;
+        const stat = vfs.statNode(node_index) catch {
+            self.writeback_stale +%= 1;
+            return .stale;
+        };
+        if (stat.kind != .file or stat.generation != generation or stat.link_count == 0) {
+            self.writeback_stale +%= 1;
+            return .stale;
+        }
+        const pages = vfs.dirtyFilePageBitmap(node_index) catch {
+            self.writeback_stale +%= 1;
+            return .stale;
+        };
+        if (pages == 0) {
+            self.writeback_clean +%= 1;
+            self.writeback_completions +%= 1;
+            self.writeback_pages_completed +%= requested_pages;
+            return .clean;
+        }
+        const persistent = vfs.persistentNode(node_index) catch {
+            self.writeback_stale +%= 1;
+            return .stale;
+        };
+        if (persistent != requested_persistent) {
+            self.writeback_stale +%= 1;
+            return .stale;
+        }
+        if (!persistent) {
+            _ = vfs.clearDirtyNodePages(node_index);
+            self.writeback_immediate +%= 1;
+            self.writeback_completions +%= 1;
+            self.writeback_pages_completed +%= requested_pages;
+            return .immediate;
+        }
+        self.syncFileData(vfs, node_index) catch |err| switch (err) {
+            Error.UnsupportedOperation, Error.NotConfigured => {
+                self.writeback_unsupported +%= 1;
+                return .unsupported;
+            },
+            else => {
+                self.writeback_failures +%= 1;
+                return .failed;
+            },
+        };
+        self.writeback_durable +%= 1;
+        self.writeback_completions +%= 1;
+        self.writeback_pages_completed +%= requested_pages;
+        return .durable;
     }
 
     fn syncFileRecord(self: *Store, vfs: *runtime_vfs.Vfs, node_index: u16, include_metadata: bool) Error!void {
@@ -371,6 +496,18 @@ pub const Store = struct {
             .immediate_mount_syncs = self.immediate_mount_syncs,
             .durable_mount_syncs = self.durable_mount_syncs,
             .rejected_sync_plans = self.rejected_sync_plans,
+            .writeback_active = self.writeback_active,
+            .writeback_requests = self.writeback_requests,
+            .writeback_completions = self.writeback_completions,
+            .writeback_passes = self.writeback_passes,
+            .writeback_immediate = self.writeback_immediate,
+            .writeback_durable = self.writeback_durable,
+            .writeback_clean = self.writeback_clean,
+            .writeback_unsupported = self.writeback_unsupported,
+            .writeback_failures = self.writeback_failures,
+            .writeback_stale = self.writeback_stale,
+            .writeback_pages_queued = self.writeback_pages_queued,
+            .writeback_pages_completed = self.writeback_pages_completed,
             .checks = self.checks,
             .recoveries = self.recoveries,
             .payload_writes = self.payload_writes,
@@ -882,6 +1019,78 @@ test "global sync covers writable mounts and rejects invalid plans before journa
     try std.testing.expectEqual(writes_after_commit, disk.writes);
     try std.testing.expectEqual(@as(u64, 1), report.global_syncs);
     try std.testing.expectEqual(@as(u64, 2), report.rejected_sync_plans);
+}
+
+test "bounded asynchronous writeback services immediate durable unsupported failed and stale requests" {
+    const ram_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(ram_vfs);
+    ram_vfs.initialize();
+    var ram_store: Store = .{};
+    const ram_node = try ram_vfs.putFile(0, "/ram", "ram", 0o600, false, 1);
+    const ram_request = try ram_store.requestWriteback(ram_vfs, ram_node);
+    try std.testing.expect(!ram_request.persistent);
+    try std.testing.expectEqual(@as(u8, 0x01), ram_request.pages);
+    try std.testing.expect((try ram_vfs.dirtyFilePageBitmap(ram_node)) != 0);
+    try std.testing.expectError(Error.Busy, ram_store.requestWriteback(ram_vfs, ram_node));
+    try std.testing.expectEqual(WritebackOutcome.immediate, ram_store.serviceWriteback(ram_vfs));
+    try std.testing.expectEqual(@as(u8, 0), try ram_vfs.dirtyFilePageBitmap(ram_node));
+    try std.testing.expectEqual(WritebackOutcome.idle, ram_store.serviceWriteback(ram_vfs));
+
+    const stale_node = try ram_vfs.putFile(0, "/stale", "old", 0o600, false, 2);
+    _ = try ram_store.requestWriteback(ram_vfs, stale_node);
+    try ram_vfs.unlink(0, "/stale");
+    try std.testing.expectEqual(WritebackOutcome.stale, ram_store.serviceWriteback(ram_vfs));
+
+    var disk: TestDisk = .{};
+    const vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(vfs);
+    vfs.initialize();
+    var store: Store = .{};
+    try store.mount(vfs, disk.device(), 1);
+    const stable_node = try vfs.putFile(0, "/persist/stable", "before", 0o640, false, 2);
+    try store.sync(vfs);
+    _ = try vfs.putFile(0, "/persist/stable", "after-data", 0o600, false, 3);
+    const generation_before = store.report().generation;
+    const durable_request = try store.requestWriteback(vfs, stable_node);
+    try std.testing.expect(durable_request.persistent);
+    try std.testing.expect((try vfs.dirtyFilePageBitmap(stable_node)) != 0);
+    try std.testing.expectEqual(generation_before, store.report().generation);
+    try std.testing.expectEqual(WritebackOutcome.durable, store.serviceWriteback(vfs));
+    try std.testing.expectEqual(generation_before + 1, store.report().generation);
+    try std.testing.expectEqual(@as(u8, 0), try vfs.dirtyFilePageBitmap(stable_node));
+
+    const new_node = try vfs.putFile(0, "/persist/new", "new", 0o600, false, 4);
+    _ = try store.requestWriteback(vfs, new_node);
+    try std.testing.expectEqual(WritebackOutcome.unsupported, store.serviceWriteback(vfs));
+    try std.testing.expect((try vfs.dirtyFilePageBitmap(new_node)) != 0);
+
+    _ = try vfs.putFile(0, "/persist/stable", "retry", 0o600, false, 5);
+    const dirty_before_failure = try vfs.dirtyFilePageBitmap(stable_node);
+    disk.fail_write_at = disk.writes;
+    _ = try store.requestWriteback(vfs, stable_node);
+    try std.testing.expectEqual(WritebackOutcome.failed, store.serviceWriteback(vfs));
+    try std.testing.expectEqual(dirty_before_failure, try vfs.dirtyFilePageBitmap(stable_node));
+    disk.fail_write_at = null;
+    _ = try store.requestWriteback(vfs, stable_node);
+    try std.testing.expectEqual(WritebackOutcome.durable, store.serviceWriteback(vfs));
+    try std.testing.expectEqual(@as(u8, 0), try vfs.dirtyFilePageBitmap(stable_node));
+
+    const report = store.report();
+    try std.testing.expect(!report.writeback_active);
+    try std.testing.expectEqual(@as(u64, 4), report.writeback_requests);
+    try std.testing.expectEqual(@as(u64, 2), report.writeback_completions);
+    try std.testing.expectEqual(@as(u64, 4), report.writeback_passes);
+    try std.testing.expectEqual(@as(u64, 0), report.writeback_immediate);
+    try std.testing.expectEqual(@as(u64, 2), report.writeback_durable);
+    try std.testing.expectEqual(@as(u64, 1), report.writeback_unsupported);
+    try std.testing.expectEqual(@as(u64, 1), report.writeback_failures);
+    try std.testing.expectEqual(@as(u64, 0), report.writeback_stale);
+    try std.testing.expectEqual(report.writeback_pages_queued, report.writeback_pages_completed + 2);
+    const ram_report = ram_store.report();
+    try std.testing.expectEqual(@as(u64, 2), ram_report.writeback_requests);
+    try std.testing.expectEqual(@as(u64, 1), ram_report.writeback_completions);
+    try std.testing.expectEqual(@as(u64, 1), ram_report.writeback_immediate);
+    try std.testing.expectEqual(@as(u64, 1), ram_report.writeback_stale);
 }
 
 test "alternating snapshots restore a persistent VFS subtree" {

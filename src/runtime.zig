@@ -469,6 +469,8 @@ fn serviceRuntime() void {
     while (tick <= now) : (tick += 1) {
         _ = state.processes.wakeExpired(tick);
         serviceUserspace(tick);
+        const writeback = state.persistence.serviceWriteback(&state.vfs);
+        if (writeback != .idle) state.filesystem_syncs +%= 1;
         state.device_service_passes +%= 1;
         if (state.config.network_ready) {
             state.network_service_passes +%= 1;
@@ -698,6 +700,7 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
     if (equal(name, "uname")) return output.line("ZigOs 19.0.0 x86_64 freestanding");
     if (equal(name, "clear")) return output.write("\x1B[2J\x1B[H");
     if (equal(name, "sync")) return commandSync(output);
+    if (equal(name, "writeback")) return commandWriteback(stage, output);
     if (equal(name, "fsck")) return commandFsck(output);
     if (equal(name, "hash")) return commandHash(stage, input, output);
     if (equal(name, "hexdump")) return commandHexdump(stage, input, output);
@@ -714,7 +717,7 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
 }
 
 fn commandHelp(output: *Output) void {
-    output.line("Filesystem: pwd cd ls cat cp echo touch mkdir rm rmdir mv write append stat chmod mount df fds fdtest pipex sync fsck");
+    output.line("Filesystem: pwd cd ls cat cp echo touch mkdir rm rmdir mv write append stat chmod mount df fds fdtest pipex sync writeback fsck");
     output.line("Processes: ps jobs spawn kill wait crash sleep uptime elf exec run (real VFS-loaded CPL3; kill defaults to forced signal 9)");
     output.line("Network: ping and dns use retained e1000e packet I/O when available; offline boots report explicit unavailability");
     output.line("Shell: env export unset history clear uname hash hexdump grep wc head shutdown");
@@ -2011,6 +2014,49 @@ fn commandSync(output: *Output) void {
     output.write("\r\n");
 }
 
+fn commandWriteback(stage: *const runtime_command.Stage, output: *Output) void {
+    if (stage.count != 2) return usage("writeback PATH|status", output);
+    if (equal(stage.arguments[1].slice(), "status")) {
+        const report = state.persistence.report();
+        output.write("writeback: active ");
+        output.write(if (report.writeback_active) "yes" else "no");
+        output.write(" requests/completions/passes ");
+        output.decimal(report.writeback_requests);
+        output.write("/");
+        output.decimal(report.writeback_completions);
+        output.write("/");
+        output.decimal(report.writeback_passes);
+        output.write(" immediate/durable/clean/unsupported/failures/stale ");
+        output.decimal(report.writeback_immediate);
+        output.write("/");
+        output.decimal(report.writeback_durable);
+        output.write("/");
+        output.decimal(report.writeback_clean);
+        output.write("/");
+        output.decimal(report.writeback_unsupported);
+        output.write("/");
+        output.decimal(report.writeback_failures);
+        output.write("/");
+        output.decimal(report.writeback_stale);
+        output.write(" pages queued/completed ");
+        output.decimal(report.writeback_pages_queued);
+        output.write("/");
+        output.decimal(report.writeback_pages_completed);
+        output.write("\r\n");
+        return;
+    }
+    const node = state.vfs.resolve(state.cwd, stage.arguments[1].slice()) catch |err| return shellError("writeback", err, output);
+    const request = state.persistence.requestWriteback(&state.vfs, node) catch |err| return shellError("writeback", err, output);
+    output.write("writeback scheduled: node ");
+    output.decimal(request.node);
+    output.write(" generation ");
+    output.decimal(request.generation);
+    output.write(" pages ");
+    output.decimal(@popCount(request.pages));
+    output.write(" persistent ");
+    output.line(if (request.persistent) "yes" else "no");
+}
+
 fn commandFsck(output: *Output) void {
     state.filesystem_checks +%= 1;
     const ramfs_clean = state.vfs.validate();
@@ -2314,6 +2360,15 @@ fn finishRuntime() noreturn {
     finishDiagnosticRuntime();
 }
 
+fn writebackStateClean(report: runtime_persist.Report) bool {
+    const successful = report.writeback_immediate + report.writeback_durable + report.writeback_clean;
+    const serviced = successful + report.writeback_unsupported + report.writeback_failures + report.writeback_stale;
+    return !report.writeback_active and report.writeback_passes == report.writeback_requests and
+        report.writeback_completions == successful and serviced == report.writeback_passes and
+        report.writeback_unsupported == 0 and report.writeback_failures == 0 and report.writeback_stale == 0 and
+        report.writeback_pages_queued == report.writeback_pages_completed;
+}
+
 fn finishNormalRuntime() noreturn {
     apic.setTimerHook(null);
     apic.stopCurrentProcessorTimer(descriptor_tables.persistent_runtime_timer_vector);
@@ -2339,14 +2394,15 @@ fn finishNormalRuntime() noreturn {
             persistence_report.writable_mount_syncs == persistence_report.global_syncs * 2 and
             persistence_report.immediate_mount_syncs == persistence_report.global_syncs and
             persistence_report.durable_mount_syncs == persistence_report.global_syncs and
-            persistence_report.rejected_sync_plans == 0
+            persistence_report.rejected_sync_plans == 0 and writebackStateClean(persistence_report)
     else
         diskless_recovery and persistence_report.mounts == 0 and persistence_report.syncs == 0 and
             persistence_report.global_syncs >= 1 and
             persistence_report.writable_mount_syncs == persistence_report.global_syncs and
             persistence_report.immediate_mount_syncs == persistence_report.global_syncs and
             persistence_report.durable_mount_syncs == 0 and persistence_report.rejected_sync_plans == 0 and
-            persistence_report.io_failures == 0 and persistence_report.corrupt_headers == 0;
+            writebackStateClean(persistence_report) and persistence_report.io_failures == 0 and
+            persistence_report.corrupt_headers == 0;
     const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
         fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases and fs_report.dentry_cache_hits > 0 and
         fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0 and
@@ -2473,7 +2529,8 @@ fn finishDiagnosticRuntime() noreturn {
         persistence_report.writable_mount_syncs == persistence_report.global_syncs * 2 and
         persistence_report.immediate_mount_syncs == persistence_report.global_syncs and
         persistence_report.durable_mount_syncs == persistence_report.global_syncs and
-        persistence_report.rejected_sync_plans == 0 and nvme_controller != null and
+        persistence_report.rejected_sync_plans == 0 and writebackStateClean(persistence_report) and
+        nvme_controller != null and
         nvme_controller.?.write_commands == persistence_report.payload_writes + persistence_report.header_writes and
         nvme_controller.?.flush_commands == persistence_report.flushes;
     const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
@@ -2699,6 +2756,30 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(persistence_report.durable_mount_syncs);
     emit("/");
     emitDecimal(persistence_report.rejected_sync_plans);
+    emit(" writeback active ");
+    emit(if (persistence_report.writeback_active) "yes" else "no");
+    emit(" request/complete/pass ");
+    emitDecimal(persistence_report.writeback_requests);
+    emit("/");
+    emitDecimal(persistence_report.writeback_completions);
+    emit("/");
+    emitDecimal(persistence_report.writeback_passes);
+    emit(" immediate/durable/clean/unsupported/failure/stale ");
+    emitDecimal(persistence_report.writeback_immediate);
+    emit("/");
+    emitDecimal(persistence_report.writeback_durable);
+    emit("/");
+    emitDecimal(persistence_report.writeback_clean);
+    emit("/");
+    emitDecimal(persistence_report.writeback_unsupported);
+    emit("/");
+    emitDecimal(persistence_report.writeback_failures);
+    emit("/");
+    emitDecimal(persistence_report.writeback_stale);
+    emit(" pages queued/completed ");
+    emitDecimal(persistence_report.writeback_pages_queued);
+    emit("/");
+    emitDecimal(persistence_report.writeback_pages_completed);
     emit(" payload/header/flush ");
     emitDecimal(persistence_report.payload_writes);
     emit("/");
