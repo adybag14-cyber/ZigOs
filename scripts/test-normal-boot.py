@@ -253,7 +253,7 @@ def main() -> int:
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 47/0/47 failures 0 lock tickets/outstanding 1/0 clean yes",
+                " metadata/file/block reads 49/0/49 failures 0 clusters claimed/loop/cross/range 10777/0/0/0 lock tickets/outstanding 1/0 clean yes",
                 "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 129/129 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )

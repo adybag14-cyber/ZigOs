@@ -191,7 +191,7 @@ def main() -> int:
                 "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "storage diskless-ram-root clean yes",
-                "ZigOs boot FAT: block-backed no files/directories 0/0 bytes 0 metadata/file/block reads 0/0/0 failures 0 lock tickets/outstanding 0/0 clean yes",
+                "ZigOs boot FAT: block-backed no files/directories 0/0 bytes 0 metadata/file/block reads 0/0/0 failures 0 clusters claimed/loop/cross/range 0/0/0/0 lock tickets/outstanding 0/0 clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage diskless-ram-root cleanup yes",
             )
             forbidden = (

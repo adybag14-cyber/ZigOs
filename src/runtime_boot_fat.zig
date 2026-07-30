@@ -28,6 +28,10 @@ pub const Report = struct {
     file_reads: u64,
     blocks_read: u64,
     failures: u64,
+    claimed_clusters: u32,
+    chain_loops: u64,
+    cross_links: u64,
+    out_of_range_links: u64,
     lock_tickets: u32,
     lock_outstanding: u32,
 };
@@ -40,6 +44,9 @@ pub const Error = runtime_vfs.Error || error{
     CorruptFilesystem,
     IoFailure,
     NamespaceLimit,
+    ChainLoop,
+    CrossLinkedCluster,
+    OutOfRangeCluster,
 };
 
 const DirectoryTask = struct {
@@ -69,6 +76,7 @@ pub const Backend = struct {
     fat_sector_valid: bool = false,
     directory_visited: [visited_bytes]u8 = @splat(0),
     file_visited: [visited_bytes]u8 = @splat(0),
+    claimed_cluster_bitmap: [visited_bytes]u8 = @splat(0),
     io_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
     file_count: usize = 0,
     directory_count: usize = 0,
@@ -77,6 +85,10 @@ pub const Backend = struct {
     file_reads: u64 = 0,
     blocks_read: u64 = 0,
     failures: u64 = 0,
+    claimed_clusters: u32 = 0,
+    chain_loops: u64 = 0,
+    cross_links: u64 = 0,
+    out_of_range_links: u64 = 0,
 
     pub fn init() Backend {
         return .{};
@@ -131,6 +143,10 @@ pub const Backend = struct {
             .file_reads = self.file_reads,
             .blocks_read = self.blocks_read,
             .failures = self.failures,
+            .claimed_clusters = self.claimed_clusters,
+            .chain_loops = self.chain_loops,
+            .cross_links = self.cross_links,
+            .out_of_range_links = self.out_of_range_links,
             .lock_tickets = self.io_lock.next(),
             .lock_outstanding = self.io_lock.next() -% self.io_lock.serving(),
         };
@@ -147,7 +163,8 @@ pub const Backend = struct {
             files += 1;
             bytes += file.size;
         }
-        return files == self.file_count and bytes == self.byte_count;
+        return files == self.file_count and bytes == self.byte_count and self.claimed_clusters <= self.volume.cluster_count and
+            self.chain_loops == 0 and self.cross_links == 0 and self.out_of_range_links == 0;
     }
 
     fn importDirectoryLocked(
@@ -174,15 +191,22 @@ pub const Backend = struct {
         @memset(&self.directory_visited, 0);
         var cluster = task.first_cluster;
         var traversed: u32 = 0;
+        var end_of_directory = false;
         while (traversed < self.volume.cluster_count) : (traversed += 1) {
-            try self.markVisited(&self.directory_visited, cluster);
-            const first_lba = fat.clusterFirstLba(self.volume, cluster) orelse return Error.CorruptFilesystem;
-            var sector_index: u32 = 0;
-            while (sector_index < self.volume.sectors_per_cluster) : (sector_index += 1) {
-                try self.readMetadataBlockLocked(first_lba + sector_index);
-                const decoded = fat.parseDirectorySector(self.sector[0..self.device.block_size]) orelse return Error.CorruptFilesystem;
-                try self.importDirectorySectorLocked(vfs, task, decoded, queue, queue_count, tick);
-                if (decoded.end_of_directory) return;
+            try self.markChainVisitedLocked(&self.directory_visited, cluster);
+            try self.claimClusterLocked(cluster);
+            if (!end_of_directory) {
+                const first_lba = try self.clusterFirstLbaLocked(cluster);
+                var sector_index: u32 = 0;
+                while (sector_index < self.volume.sectors_per_cluster) : (sector_index += 1) {
+                    try self.readMetadataBlockLocked(first_lba + sector_index);
+                    const decoded = fat.parseDirectorySector(self.sector[0..self.device.block_size]) orelse return Error.CorruptFilesystem;
+                    try self.importDirectorySectorLocked(vfs, task, decoded, queue, queue_count, tick);
+                    if (decoded.end_of_directory) {
+                        end_of_directory = true;
+                        break;
+                    }
+                }
             }
             switch (try self.readClusterLinkLocked(cluster)) {
                 .next => |next| cluster = next,
@@ -190,7 +214,8 @@ pub const Backend = struct {
                 .free, .bad => return Error.CorruptFilesystem,
             }
         }
-        return Error.CorruptFilesystem;
+        self.chain_loops +%= 1;
+        return Error.ChainLoop;
     }
 
     fn importDirectorySectorLocked(
@@ -241,24 +266,28 @@ pub const Backend = struct {
     }
 
     fn validateFileChainLocked(self: *Backend, first_cluster: u32, size: u32) Error!void {
-        if (size == 0) {
-            if (first_cluster != 0 and fat.clusterFirstLba(self.volume, first_cluster) == null) return Error.CorruptFilesystem;
-            return;
-        }
-        if (first_cluster < 2) return Error.CorruptFilesystem;
+        if (size == 0 and first_cluster == 0) return;
+        if (first_cluster < 2) return self.outOfRangeCluster();
         const cluster_bytes = @as(u64, self.device.block_size) * self.volume.sectors_per_cluster;
         const required: u32 = @intCast((@as(u64, size) + cluster_bytes - 1) / cluster_bytes);
         @memset(&self.file_visited, 0);
         var cluster = first_cluster;
-        var ordinal: u32 = 0;
-        while (ordinal < required) : (ordinal += 1) {
-            try self.markVisited(&self.file_visited, cluster);
-            if (ordinal + 1 == required) return;
+        var count: u32 = 0;
+        while (count < self.volume.cluster_count) {
+            try self.markChainVisitedLocked(&self.file_visited, cluster);
+            try self.claimClusterLocked(cluster);
+            count += 1;
             switch (try self.readClusterLinkLocked(cluster)) {
                 .next => |next| cluster = next,
-                .end, .free, .bad => return Error.CorruptFilesystem,
+                .end => {
+                    if (count < required) return Error.CorruptFilesystem;
+                    return;
+                },
+                .free, .bad => return Error.CorruptFilesystem,
             }
         }
+        self.chain_loops +%= 1;
+        return Error.ChainLoop;
     }
 
     fn readFile(self: *Backend, file: *FileContext, offset: usize, output: []u8) Error!usize {
@@ -311,13 +340,13 @@ pub const Backend = struct {
     }
 
     fn readClusterLinkLocked(self: *Backend, cluster: u32) Error!fat.ClusterLink {
-        const location = fat.fatEntryLocation(self.volume, cluster) orelse return Error.CorruptFilesystem;
+        const location = fat.fatEntryLocation(self.volume, cluster) orelse return self.outOfRangeCluster();
         if (!self.fat_sector_valid or self.cached_fat_lba != location.lba) {
             try self.readFatBlockLocked(location.lba);
             self.cached_fat_lba = location.lba;
             self.fat_sector_valid = true;
         }
-        return fat.decodeClusterLink(self.volume, cluster, self.fat_sector[0..self.device.block_size]) orelse Error.CorruptFilesystem;
+        return fat.decodeClusterLink(self.volume, cluster, self.fat_sector[0..self.device.block_size]) orelse self.outOfRangeCluster();
     }
 
     fn readFatBlockLocked(self: *Backend, lba: u64) Error!void {
@@ -351,14 +380,40 @@ pub const Backend = struct {
         self.blocks_read +%= 1;
     }
 
-    fn markVisited(self: *Backend, bitmap: *[visited_bytes]u8, cluster: u32) Error!void {
-        _ = self;
-        if (cluster < 2 or cluster >= visited_bytes * 8) return Error.CorruptFilesystem;
+    fn clusterFirstLbaLocked(self: *Backend, cluster: u32) Error!u64 {
+        return fat.clusterFirstLba(self.volume, cluster) orelse self.outOfRangeCluster();
+    }
+
+    fn markChainVisitedLocked(self: *Backend, bitmap: *[visited_bytes]u8, cluster: u32) Error!void {
+        if (cluster < 2 or cluster >= self.volume.cluster_count + 2 or cluster >= visited_bytes * 8)
+            return self.outOfRangeCluster();
         const index: usize = cluster / 8;
         const bit: u3 = @intCast(cluster % 8);
         const mask = @as(u8, 1) << bit;
-        if ((bitmap[index] & mask) != 0) return Error.CorruptFilesystem;
+        if ((bitmap[index] & mask) != 0) {
+            self.chain_loops +%= 1;
+            return Error.ChainLoop;
+        }
         bitmap[index] |= mask;
+    }
+
+    fn claimClusterLocked(self: *Backend, cluster: u32) Error!void {
+        if (cluster < 2 or cluster >= self.volume.cluster_count + 2 or cluster >= visited_bytes * 8)
+            return self.outOfRangeCluster();
+        const index: usize = cluster / 8;
+        const bit: u3 = @intCast(cluster % 8);
+        const mask = @as(u8, 1) << bit;
+        if ((self.claimed_cluster_bitmap[index] & mask) != 0) {
+            self.cross_links +%= 1;
+            return Error.CrossLinkedCluster;
+        }
+        self.claimed_cluster_bitmap[index] |= mask;
+        self.claimed_clusters += 1;
+    }
+
+    fn outOfRangeCluster(self: *Backend) Error {
+        self.out_of_range_links +%= 1;
+        return Error.OutOfRangeCluster;
     }
 };
 
@@ -507,6 +562,10 @@ test "read-only FAT16 backend imports directories and streams large files from b
     try std.testing.expect(report.metadata_reads > 0 and report.metadata_reads < 20);
     try std.testing.expect(report.file_reads >= 3 and report.blocks_read == device_context.reads);
     try std.testing.expectEqual(@as(u64, 0), report.failures);
+    try std.testing.expectEqual(@as(u32, 71), report.claimed_clusters);
+    try std.testing.expectEqual(@as(u64, 0), report.chain_loops);
+    try std.testing.expectEqual(@as(u64, 0), report.cross_links);
+    try std.testing.expectEqual(@as(u64, 0), report.out_of_range_links);
     try std.testing.expect(backend.validate());
     try std.testing.expect(vfs.validate());
 
@@ -516,7 +575,7 @@ test "read-only FAT16 backend imports directories and streams large files from b
     var loop_backend = Backend.init();
     var loop_vfs = runtime_vfs.Vfs.init();
     _ = try loop_vfs.mkdir(0, "/boot", 0o755, 0);
-    try std.testing.expectError(Error.CorruptFilesystem, loop_backend.mount(&loop_vfs, "/boot", "cyclic-fat16", .{
+    try std.testing.expectError(Error.ChainLoop, loop_backend.mount(&loop_vfs, "/boot", "cyclic-fat16", .{
         .context = &loop_device,
         .block_size = block_size,
         .first_lba = 0,
@@ -524,4 +583,37 @@ test "read-only FAT16 backend imports directories and streams large files from b
         .read_fn = testReadBlock,
     }, 1));
     try std.testing.expect(loop_device.reads > 0);
+    try std.testing.expectEqual(@as(u64, 1), loop_backend.report().chain_loops);
+
+    setFat16(fat1, 8, 9);
+    setDirectoryEntry(boot_dir, 0, &"BOOT    CFG".*, 0x20, 7, 20);
+    @memcpy(image[(first_fat + sectors_per_fat) * block_size .. (first_fat + 2 * sectors_per_fat) * block_size], fat1);
+    var cross_device = TestDevice{ .image = image };
+    var cross_backend = Backend.init();
+    var cross_vfs = runtime_vfs.Vfs.init();
+    _ = try cross_vfs.mkdir(0, "/boot", 0o755, 0);
+    try std.testing.expectError(Error.CrossLinkedCluster, cross_backend.mount(&cross_vfs, "/boot", "cross-linked-fat16", .{
+        .context = &cross_device,
+        .block_size = block_size,
+        .first_lba = 0,
+        .sector_count = total_sectors,
+        .read_fn = testReadBlock,
+    }, 1));
+    try std.testing.expectEqual(@as(u64, 1), cross_backend.report().cross_links);
+
+    setDirectoryEntry(boot_dir, 0, &"BOOT    CFG".*, 0x20, 6, 20);
+    setFat16(fat1, 8, 0x7FFF);
+    @memcpy(image[(first_fat + sectors_per_fat) * block_size .. (first_fat + 2 * sectors_per_fat) * block_size], fat1);
+    var range_device = TestDevice{ .image = image };
+    var range_backend = Backend.init();
+    var range_vfs = runtime_vfs.Vfs.init();
+    _ = try range_vfs.mkdir(0, "/boot", 0o755, 0);
+    try std.testing.expectError(Error.OutOfRangeCluster, range_backend.mount(&range_vfs, "/boot", "out-of-range-fat16", .{
+        .context = &range_device,
+        .block_size = block_size,
+        .first_lba = 0,
+        .sector_count = total_sectors,
+        .read_fn = testReadBlock,
+    }, 1));
+    try std.testing.expectEqual(@as(u64, 1), range_backend.report().out_of_range_links);
 }

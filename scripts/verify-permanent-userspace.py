@@ -392,7 +392,12 @@ def main() -> int:
     require(boot_fat_source, "if (self.volume.kind != .fat16)", "runtime boot backend accepts only the verified FAT16 boot-volume format")
     require(boot_fat_source, "fn importDirectoryLocked", "boot FAT recursively imports short-name directory metadata into VFS")
     require(boot_fat_source, "fn validateFileChainLocked", "boot FAT validates every imported file chain before exposure")
-    require(boot_fat_source, "fn markVisited", "FAT directory and file chain traversal rejects loops")
+    require(boot_fat_source, "fn markChainVisitedLocked", "same-chain FAT revisits are classified as loops")
+    require(boot_fat_source, "claimed_cluster_bitmap", "mount-time FAT validation retains one global cluster-ownership bitmap")
+    require(boot_fat_source, "fn claimClusterLocked", "every imported directory and file chain claims all clusters through EOC")
+    require(boot_fat_source, "Error.CrossLinkedCluster", "cross-chain cluster reuse is rejected distinctly")
+    require(boot_fat_source, "Error.OutOfRangeCluster", "invalid current or next clusters are rejected distinctly")
+    require(boot_fat_source, "out_of_range_links +%= 1", "out-of-range FAT references have explicit accounting")
     require(boot_fat_source, "cached_fat_lba", "boot FAT caches the current FAT sector during long chain traversal")
     require(boot_fat_source, "cursor_cluster", "block-backed files retain a sequential cluster cursor for linear reads")
     require(boot_fat_source, "io_lock: synchronization.TicketLock", "one ticket lock protects shared FAT sector buffers and file cursors")
@@ -466,7 +471,10 @@ def main() -> int:
     require(runtime, 'state.boot_fat.mount(&state.vfs, "/boot", "nvme0p1"', "NVMe boots mount the verified EFI partition as the real /boot namespace")
     require(runtime, 'state.vfs.mount(0, "/boot", .boot_fat, true, "embedded-assets")', "diskless recovery preserves an explicit embedded /boot fallback")
     require(runtime, "fn bootFatStateClean", "normal and diagnostic release gates validate block-backed or absent fallback state")
-    require(runtime, "emitBootFatReport", "runtime shutdown reports FAT metadata, file and block I/O conservation")
+    require(runtime, "emitBootFatReport", "runtime shutdown reports FAT metadata, file, block and ownership conservation")
+    require(runtime, "report.claimed_clusters > 0", "real FAT mounts require globally claimed chain ownership")
+    require(runtime, "report.chain_loops == 0 and report.cross_links == 0 and report.out_of_range_links == 0", "release gates reject loop, cross-link and range corruption")
+    require(runtime, "clusters claimed/loop/cross/range", "shutdown exposes FAT ownership and classified corruption telemetry")
     require(nvme_image_builder, 'readme_bytes = b"ZigOs block-backed FAT16 runtime mount', "deterministic NVMe image contains a root FAT file for runtime proof")
     require(nvme_image_builder, 'config_bytes = b"source=nvme0p1', "deterministic NVMe image contains a nested FAT file for runtime proof")
     require(runtime_test, "cat /boot/README.TXT", "diagnostic QEMU reads a root file after NVMe handoff")
@@ -474,8 +482,11 @@ def main() -> int:
     require(runtime_test, "stat /boot/EFI/BOOT/BOOTX64.EFI", "diagnostic QEMU stats the multi-mebibyte boot image without RAM-copying it")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 54 failed 0", "offline diagnostic profile requires the expanded block-backed FAT command matrix")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 56 failed 0", "live diagnostic profile requires the expanded block-backed FAT command matrix")
+    require(runtime_test, "10878/0/0/0 lock tickets/outstanding 5/0 clean yes", "both diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
     require(normal_boot_test, "ZigOs boot FAT: block-backed yes files/directories 3/2", "persistent normal boot requires a clean real block-backed /boot")
+    require(normal_boot_test, "10777/0/0/0 lock tickets/outstanding 1/0 clean yes", "normal QEMU requires exact FAT ownership with zero classified corruption")
     require(diskless_normal_boot_test, "ZigOs boot FAT: block-backed no files/directories 0/0", "diskless normal boot requires an explicitly absent backend and fallback namespace")
+    require(diskless_normal_boot_test, "0/0/0/0 lock tickets/outstanding 0/0 clean yes", "diskless fallback has no FAT ownership or classified corruption state")
     require(runtime, "fs_report.dentry_cache_references == 0", "normal and diagnostic release gates require zero live cache references")
     require(runtime, "fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases", "release gates require balanced cache reference accounting")
     require(runtime, "fs_report.dentry_cache_hits > 0", "release gates require real dentry-cache hits")
@@ -899,7 +910,8 @@ def main() -> int:
         "mode=readonly",
         "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
         " metadata/file/block reads ",
-        " failures 0 lock tickets/outstanding ",
+        " clusters claimed/loop/cross/range ",
+        "/0/0/0 lock tickets/outstanding ",
         "ZigOs shutdown drain:",
         " data-lock tickets/outstanding ",
         " pool-lock tickets/outstanding ",
@@ -935,7 +947,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.12 Zig/C SDKs, retained read-only block-backed FAT16 boot files, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.12 Zig/C SDKs, retained read-only block-backed FAT16 boot files with global chain ownership validation, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 
