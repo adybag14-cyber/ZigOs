@@ -26,6 +26,14 @@ pub const PseudoWriteFn = *const fn (context: ?*anyopaque, node: u16, offset: us
 pub const PseudoPollFn = *const fn (context: ?*anyopaque, node: u16, requested: u16) Error!u16;
 pub const PseudoIoctlFn = *const fn (context: ?*anyopaque, node: u16, request: u64, argument: u64) Error!u64;
 pub const PseudoCloseFn = *const fn (context: ?*anyopaque, node: u16, owner_pid: u32) void;
+pub const FilePageAllocateFn = *const fn (context: ?*anyopaque) ?usize;
+pub const FilePageReleaseFn = *const fn (context: ?*anyopaque, address: usize) bool;
+
+pub const FilePageAllocator = struct {
+    context: ?*anyopaque,
+    allocate: FilePageAllocateFn,
+    release: FilePageReleaseFn,
+};
 
 pub const PseudoStream = enum(u8) {
     console,
@@ -144,7 +152,7 @@ const FilePageCacheEntry = struct {
     slot: u8 = 0,
     dirty: bool = false,
     last_used: u64 = 0,
-    data: [file_block_size]u8 = @splat(0),
+    address: usize = 0,
 };
 
 const Dentry = struct {
@@ -274,6 +282,13 @@ pub const Report = struct {
     file_page_cache_insertions: u64,
     file_page_cache_evictions: u64,
     file_page_cache_invalidations: u64,
+    file_page_cache_allocations: u64,
+    file_page_cache_releases: u64,
+    file_page_cache_allocation_failures: u64,
+    file_page_cache_release_failures: u64,
+    file_page_cache_pressure_checks: u64,
+    file_page_cache_pressure_events: u64,
+    file_page_cache_pressure_evictions: u64,
     file_page_cache_lock_tickets: u64,
     file_page_cache_lock_outstanding: u64,
     data_lock_tickets: u64,
@@ -285,11 +300,16 @@ pub const Report = struct {
     sparse_hole_bytes: usize,
 };
 
+fn filePageBytes(address: usize) []u8 {
+    return @as([*]u8, @ptrFromInt(address))[0..file_block_size];
+}
+
 pub const Vfs = struct {
     nodes: [maximum_nodes]Node = @splat(.{}),
     data_blocks: [maximum_data_blocks]DataBlock = @splat(.{}),
     data_pool_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
     file_page_cache: [maximum_file_page_cache_entries]FilePageCacheEntry = @splat(.{}),
+    file_page_cache_allocator: ?FilePageAllocator = null,
     file_page_cache_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
     file_page_cache_clock: u64 = 0,
     file_page_cache_hits: u64 = 0,
@@ -297,6 +317,13 @@ pub const Vfs = struct {
     file_page_cache_insertions: u64 = 0,
     file_page_cache_evictions: u64 = 0,
     file_page_cache_invalidations: u64 = 0,
+    file_page_cache_allocations: u64 = 0,
+    file_page_cache_releases: u64 = 0,
+    file_page_cache_allocation_failures: u64 = 0,
+    file_page_cache_release_failures: u64 = 0,
+    file_page_cache_pressure_checks: u64 = 0,
+    file_page_cache_pressure_events: u64 = 0,
+    file_page_cache_pressure_evictions: u64 = 0,
     dirty_file_page_bitmap: [maximum_nodes]u8 = @splat(0),
     dirty_page_marks: u64 = 0,
     dirty_page_sync_clears: u64 = 0,
@@ -944,6 +971,60 @@ pub const Vfs = struct {
         return self.dirty_file_page_bitmap[node_index];
     }
 
+    pub fn setFilePageAllocator(self: *Vfs, allocator: FilePageAllocator) Error!void {
+        _ = self.file_page_cache_lock.acquire();
+        defer self.file_page_cache_lock.release();
+        for (&self.file_page_cache) |*entry| if (entry.used) return Error.Busy;
+        self.file_page_cache_allocator = allocator;
+    }
+
+    pub fn reclaimCleanFilePageCacheUnderPressure(
+        self: *Vfs,
+        free_pages: u64,
+        low_watermark: u64,
+        target_entries: usize,
+    ) usize {
+        self.file_page_cache_pressure_checks +%= 1;
+        if (low_watermark == 0 or free_pages >= low_watermark) return 0;
+        _ = self.file_page_cache_lock.acquire();
+        defer self.file_page_cache_lock.release();
+        self.file_page_cache_pressure_events +%= 1;
+        var active: usize = 0;
+        for (&self.file_page_cache) |*entry| active += @intFromBool(entry.used);
+        const target = @min(target_entries, self.file_page_cache.len);
+        var reclaimed: usize = 0;
+        while (active > target) {
+            var candidate: ?usize = null;
+            var oldest: u64 = std.math.maxInt(u64);
+            for (0..self.file_page_cache.len) |index| {
+                const entry = &self.file_page_cache[index];
+                if (!entry.used or entry.dirty or entry.last_used >= oldest) continue;
+                oldest = entry.last_used;
+                candidate = index;
+            }
+            const index = candidate orelse break;
+            const released = self.releaseFilePageCacheEntryLocked(index);
+            active -= 1;
+            if (!released) break;
+            self.file_page_cache_evictions +%= 1;
+            self.file_page_cache_pressure_evictions +%= 1;
+            reclaimed += 1;
+        }
+        return reclaimed;
+    }
+
+    pub fn releaseFilePageCache(self: *Vfs) usize {
+        _ = self.file_page_cache_lock.acquire();
+        defer self.file_page_cache_lock.release();
+        var released: usize = 0;
+        for (0..self.file_page_cache.len) |index| {
+            const entry = &self.file_page_cache[index];
+            if (!entry.used or entry.dirty) continue;
+            released += @intFromBool(self.releaseFilePageCacheEntryLocked(index));
+        }
+        return released;
+    }
+
     pub fn clearDirtyNodePages(self: *Vfs, node_index: u16) usize {
         if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].kind != .file) return 0;
         var node = &self.nodes[node_index];
@@ -1133,17 +1214,21 @@ pub const Vfs = struct {
         }
         for (0..self.file_page_cache.len) |cache_index| {
             const entry = &self.file_page_cache[cache_index];
-            if (!entry.used) continue;
-            if (entry.node >= self.nodes.len or entry.slot >= file_blocks_per_node or entry.node_generation == 0 or entry.last_used == 0) return false;
+            if (!entry.used) {
+                if (entry.address != 0) return false;
+                continue;
+            }
+            if (self.file_page_cache_allocator == null or entry.address == 0 or entry.node >= self.nodes.len or entry.slot >= file_blocks_per_node or entry.node_generation == 0 or entry.last_used == 0) return false;
             const node = &self.nodes[entry.node];
             if (!node.used or node.kind != .file or node.generation != entry.node_generation) return false;
             const dirty = (self.dirty_file_page_bitmap[entry.node] & (@as(u8, 1) << @intCast(entry.slot))) != 0;
             if (entry.dirty != dirty) return false;
+            const page = filePageBytes(entry.address);
             const block_index = node.file_blocks[entry.slot];
             if (block_index == invalid_data_block) {
-                for (entry.data) |byte| if (byte != 0) return false;
+                for (page) |byte| if (byte != 0) return false;
             } else {
-                if (block_index >= self.data_blocks.len or !std.mem.eql(u8, &entry.data, &self.data_blocks[block_index].data)) return false;
+                if (block_index >= self.data_blocks.len or !std.mem.eql(u8, page, &self.data_blocks[block_index].data)) return false;
             }
             for (cache_index + 1..self.file_page_cache.len) |other_index| {
                 const other = &self.file_page_cache[other_index];
@@ -1227,6 +1312,13 @@ pub const Vfs = struct {
             .file_page_cache_insertions = self.file_page_cache_insertions,
             .file_page_cache_evictions = self.file_page_cache_evictions,
             .file_page_cache_invalidations = self.file_page_cache_invalidations,
+            .file_page_cache_allocations = self.file_page_cache_allocations,
+            .file_page_cache_releases = self.file_page_cache_releases,
+            .file_page_cache_allocation_failures = self.file_page_cache_allocation_failures,
+            .file_page_cache_release_failures = self.file_page_cache_release_failures,
+            .file_page_cache_pressure_checks = self.file_page_cache_pressure_checks,
+            .file_page_cache_pressure_events = self.file_page_cache_pressure_events,
+            .file_page_cache_pressure_evictions = self.file_page_cache_pressure_evictions,
             .file_page_cache_lock_tickets = self.file_page_cache_lock.next(),
             .file_page_cache_lock_outstanding = self.file_page_cache_lock.next() -% self.file_page_cache_lock.serving(),
             .data_lock_tickets = 0,
@@ -1686,13 +1778,20 @@ pub const Vfs = struct {
             const slot = logical_offset / file_block_size;
             const block_offset = logical_offset % file_block_size;
             const count = @min(output.len - copied, file_block_size - block_offset);
-            const page = self.cachedFilePageLocked(node_index, slot);
-            @memcpy(output[copied .. copied + count], page.data[block_offset .. block_offset + count]);
+            if (self.cachedFilePageLocked(node_index, slot)) |page| {
+                @memcpy(output[copied .. copied + count], page[block_offset .. block_offset + count]);
+            } else {
+                const block_index = self.nodes[node_index].file_blocks[slot];
+                if (block_index == invalid_data_block)
+                    @memset(output[copied .. copied + count], 0)
+                else
+                    @memcpy(output[copied .. copied + count], self.data_blocks[block_index].data[block_offset .. block_offset + count]);
+            }
             copied += count;
         }
     }
 
-    fn cachedFilePageLocked(self: *Vfs, node_index: u16, slot: usize) *const FilePageCacheEntry {
+    fn cachedFilePageLocked(self: *Vfs, node_index: u16, slot: usize) ?[]const u8 {
         self.file_page_cache_clock +%= 1;
         if (self.file_page_cache_clock == 0) self.file_page_cache_clock = 1;
         const node_generation = self.nodes[node_index].generation;
@@ -1700,9 +1799,10 @@ pub const Vfs = struct {
             if (!entry.used or entry.node != node_index or entry.node_generation != node_generation or entry.slot != slot) continue;
             entry.last_used = self.file_page_cache_clock;
             self.file_page_cache_hits +%= 1;
-            return entry;
+            return filePageBytes(entry.address);
         }
         self.file_page_cache_misses +%= 1;
+        const allocator = self.file_page_cache_allocator orelse return null;
         var candidate: usize = 0;
         var oldest: u64 = std.math.maxInt(u64);
         for (0..self.file_page_cache.len) |index| {
@@ -1717,8 +1817,20 @@ pub const Vfs = struct {
                 candidate = index;
             }
         }
-        if (self.file_page_cache[candidate].used) self.file_page_cache_evictions +%= 1;
-        var entry = &self.file_page_cache[candidate];
+        if (self.file_page_cache[candidate].used) {
+            _ = self.releaseFilePageCacheEntryLocked(candidate);
+            self.file_page_cache_evictions +%= 1;
+        }
+        const address = allocator.allocate(allocator.context) orelse {
+            self.file_page_cache_allocation_failures +%= 1;
+            return null;
+        };
+        if (address == 0) {
+            self.file_page_cache_allocation_failures +%= 1;
+            return null;
+        }
+        self.file_page_cache_allocations +%= 1;
+        const entry = &self.file_page_cache[candidate];
         entry.* = .{
             .used = true,
             .node = node_index,
@@ -1726,15 +1838,35 @@ pub const Vfs = struct {
             .slot = @intCast(slot),
             .dirty = (self.dirty_file_page_bitmap[node_index] & (@as(u8, 1) << @intCast(slot))) != 0,
             .last_used = self.file_page_cache_clock,
+            .address = address,
         };
+        const page = filePageBytes(address);
         const block_index = self.nodes[node_index].file_blocks[slot];
-        if (block_index == invalid_data_block) {
-            @memset(&entry.data, 0);
-        } else {
-            @memcpy(&entry.data, &self.data_blocks[block_index].data);
-        }
+        if (block_index == invalid_data_block)
+            @memset(page, 0)
+        else
+            @memcpy(page, &self.data_blocks[block_index].data);
         self.file_page_cache_insertions +%= 1;
-        return entry;
+        return page;
+    }
+
+    fn releaseFilePageCacheEntryLocked(self: *Vfs, index: usize) bool {
+        const entry = &self.file_page_cache[index];
+        if (!entry.used) return true;
+        const allocator = self.file_page_cache_allocator orelse {
+            self.file_page_cache_release_failures +%= 1;
+            entry.* = .{};
+            return false;
+        };
+        const address = entry.address;
+        const released = address != 0 and allocator.release(allocator.context, address);
+        entry.* = .{};
+        if (!released) {
+            self.file_page_cache_release_failures +%= 1;
+            return false;
+        }
+        self.file_page_cache_releases +%= 1;
+        return true;
     }
 
     fn markDirtyFilePagesLocked(self: *Vfs, node_index: u16, bitmap: u8) void {
@@ -1794,9 +1926,10 @@ pub const Vfs = struct {
     fn invalidateFilePageCacheNode(self: *Vfs, node_index: u16) void {
         _ = self.file_page_cache_lock.acquire();
         defer self.file_page_cache_lock.release();
-        for (&self.file_page_cache) |*entry| {
+        for (0..self.file_page_cache.len) |index| {
+            const entry = &self.file_page_cache[index];
             if (!entry.used or entry.node != node_index) continue;
-            entry.* = .{};
+            _ = self.releaseFilePageCacheEntryLocked(index);
             self.file_page_cache_invalidations +%= 1;
         }
     }
@@ -2108,6 +2241,46 @@ const TestPseudoContext = struct {
     closes: usize = 0,
 };
 
+const TestFilePageAllocator = struct {
+    pages: [maximum_file_page_cache_entries][file_block_size]u8 = @splat(@splat(0)),
+    used: [maximum_file_page_cache_entries]bool = @splat(false),
+    allocations: usize = 0,
+    releases: usize = 0,
+
+    fn interface(self: *TestFilePageAllocator) FilePageAllocator {
+        return .{ .context = self, .allocate = allocate, .release = release };
+    }
+
+    fn active(self: *const TestFilePageAllocator) usize {
+        var count: usize = 0;
+        for (self.used) |used| count += @intFromBool(used);
+        return count;
+    }
+
+    fn allocate(context: ?*anyopaque) ?usize {
+        const self: *TestFilePageAllocator = @ptrCast(@alignCast(context.?));
+        for (&self.used, 0..) |*used, index| {
+            if (used.*) continue;
+            used.* = true;
+            self.allocations += 1;
+            return @intFromPtr(&self.pages[index]);
+        }
+        return null;
+    }
+
+    fn release(context: ?*anyopaque, address: usize) bool {
+        const self: *TestFilePageAllocator = @ptrCast(@alignCast(context.?));
+        for (&self.used, 0..) |*used, index| {
+            if (@intFromPtr(&self.pages[index]) != address or !used.*) continue;
+            used.* = false;
+            @memset(&self.pages[index], 0xA5);
+            self.releases += 1;
+            return true;
+        }
+        return false;
+    }
+};
+
 fn testPseudoRead(_: ?*anyopaque, _: u16, offset: usize, output: []u8) Error!usize {
     const payload = "device";
     if (offset >= payload.len) return 0;
@@ -2324,6 +2497,8 @@ test "VFS sparse holes allocate punch persist size and reuse bounded blocks" {
 
 test "VFS dirty page ledger survives cache eviction and clears on synchronization" {
     var fs = Vfs.init();
+    var page_allocator = TestFilePageAllocator{};
+    try fs.setFilePageAllocator(page_allocator.interface());
     _ = try fs.mkdir(0, "/dirty", 0o755, 1);
     const node = try fs.putFile(0, "/dirty/value", "base", 0o600, false, 2);
     _ = fs.clearDirtyNodePages(node);
@@ -2368,11 +2543,16 @@ test "VFS dirty page ledger survives cache eviction and clears on synchronizatio
     report = fs.report();
     try std.testing.expectEqual(@as(usize, 0), report.dirty_file_pages);
     try std.testing.expect(report.dirty_page_discards > 0);
+    _ = fs.clearDirtyWritableMountPages();
+    try std.testing.expect(fs.releaseFilePageCache() > 0);
+    try std.testing.expectEqual(@as(usize, 0), page_allocator.active());
     try std.testing.expect(fs.validate());
 }
 
 test "VFS bounded clean page cache hits evicts and invalidates mutations" {
     var fs = Vfs.init();
+    var page_allocator = TestFilePageAllocator{};
+    try fs.setFilePageAllocator(page_allocator.interface());
     _ = try fs.mkdir(0, "/page-cache", 0o755, 1);
     var payload: [file_block_size]u8 = undefined;
     var paths: [maximum_file_page_cache_entries + 1][32]u8 = @splat(@splat(0));
@@ -2417,8 +2597,51 @@ test "VFS bounded clean page cache hits evicts and invalidates mutations" {
     try std.testing.expectEqual(@as(usize, 1), try fs.readOpen(7, sparse, &zero));
     try std.testing.expectEqual(@as(u8, 'R'), zero[0]);
     try fs.close(7, sparse);
+    _ = fs.clearDirtyWritableMountPages();
+    try std.testing.expect(fs.releaseFilePageCache() > 0);
+    try std.testing.expectEqual(@as(usize, 0), page_allocator.active());
     try std.testing.expect(fs.validate());
     try std.testing.expectEqual(@as(u64, 0), fs.report().file_page_cache_lock_outstanding);
+}
+
+test "VFS pressure reclaim releases clean cache pages and retains dirty pages" {
+    var fs = Vfs.init();
+    var page_allocator = TestFilePageAllocator{};
+    try fs.setFilePageAllocator(page_allocator.interface());
+    _ = try fs.mkdir(0, "/pressure", 0o755, 1);
+    const payload: [file_block_size]u8 = @splat(0x31);
+    for (0..4) |index| {
+        var path_buffer: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "/pressure/clean-{d}", .{index});
+        const node = try fs.restoreSparseFile(0, path, 0o600, payload.len, 0x01, &payload, @intCast(index + 2));
+        var byte: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 1), try fs.read(0, path, 0, &byte));
+        try std.testing.expectEqual(@as(u8, 0x31), byte[0]);
+        try std.testing.expectEqual(@as(u8, 0), try fs.dirtyFilePageBitmap(node));
+    }
+    const dirty_node = try fs.putFile(0, "/pressure/dirty", "dirty", 0o600, false, 10);
+    var dirty_byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try fs.read(0, "/pressure/dirty", 0, &dirty_byte));
+    var report = fs.report();
+    try std.testing.expectEqual(@as(usize, 5), report.file_page_cache_entries);
+    try std.testing.expectEqual(@as(usize, 1), report.file_page_cache_dirty_entries);
+    try std.testing.expectEqual(@as(usize, 0), fs.reclaimCleanFilePageCacheUnderPressure(100, 100, 1));
+    try std.testing.expectEqual(@as(usize, 4), fs.reclaimCleanFilePageCacheUnderPressure(1, 2, 1));
+    report = fs.report();
+    try std.testing.expectEqual(@as(usize, 1), report.file_page_cache_entries);
+    try std.testing.expectEqual(@as(usize, 1), report.file_page_cache_dirty_entries);
+    try std.testing.expectEqual(@as(u64, 2), report.file_page_cache_pressure_checks);
+    try std.testing.expectEqual(@as(u64, 1), report.file_page_cache_pressure_events);
+    try std.testing.expectEqual(@as(u64, 4), report.file_page_cache_pressure_evictions);
+    try std.testing.expectEqual(@as(usize, 1), page_allocator.active());
+    try std.testing.expect((try fs.dirtyFilePageBitmap(dirty_node)) != 0);
+    try std.testing.expectEqual(@as(usize, 1), fs.clearDirtyNodePages(dirty_node));
+    try std.testing.expectEqual(@as(usize, 1), fs.releaseFilePageCache());
+    try std.testing.expectEqual(@as(usize, 0), page_allocator.active());
+    report = fs.report();
+    try std.testing.expectEqual(report.file_page_cache_allocations, report.file_page_cache_releases);
+    try std.testing.expectEqual(@as(u64, 0), report.file_page_cache_release_failures);
+    try std.testing.expect(fs.validate());
 }
 
 test "VFS sparse restoration applies final nonwritable mode after privileged reconstruction" {

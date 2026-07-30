@@ -18,7 +18,7 @@ ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf
 
 The exact contract and limitations are documented in [`docs/CAPSTONE-19.0.md`](docs/CAPSTONE-19.0.md). Capstone 18's descriptor contract remains an inherited release gate. The broader program remains separately tracked in [`docs/ROADMAP-500.md`](docs/ROADMAP-500.md); granular Capstone proof accounting is not conflated with the broader roadmap. The post-release audit disposition and tiered architecture plan are recorded in [`docs/PRIORITY-REMEDIATION.md`](docs/PRIORITY-REMEDIATION.md).
 
-Local Windows validation is complete for the canonical build, all 87 unique isolated-test declarations, the source contract, the 48-command offline runtime, the 50-command live-network runtime, the x86-64 NVMe four-boot fsync/fdatasync persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
+Local Windows validation is complete for the canonical build, all 88 unique isolated-test declarations, the source contract, the 49-command offline runtime, the 51-command live-network runtime, the x86-64 NVMe four-boot fsync/fdatasync persistence proof, persistent and diskless normal-boot profiles, and the legacy i686 two-boot regression. The required hosted workflow includes these gates plus cross-platform byte comparison.
 
 ## What runs after boot
 
@@ -26,7 +26,7 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 
 - a dedicated 100 Hz LAPIC timer and interrupt-enabled HLT idle loop;
 - a permanent PID 1 record; in normal boot it runs the directly linked Zig `/bin/init.elf`, launches the interactive Zig PID 2 shell, waits for it and reaps it before final shutdown;
-- a bounded writable VFS with an explicit parent-linked mount tree, six mounted namespaces, a shared 256-page ordinary-file pool supporting zero-filled sparse holes, and a separate 16-page generation-keyed file-data LRU cache backed by an eviction-safe per-inode dirty-page ledger and a single-request asynchronous writeback worker;
+- a bounded writable VFS with an explicit parent-linked mount tree, six mounted namespaces, a shared 256-page ordinary-file pool supporting zero-filled sparse holes, and a separate 16-page generation-keyed file-data LRU cache backed by post-bootstrap PMM pages, an eviction-safe per-inode dirty-page ledger, clean-only low-watermark pressure reclaim and a single-request asynchronous writeback worker;
 - a generation-safe 64-slot process table whose ordinary round-robin service path owns foreground, background and fixture CPL3 dispatch without a second job table or direct shell dispatcher;
 - process-local numeric descriptors, shared open-file descriptions and bounded blocking pipes;
 - up to 64 retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 4,096-slot ownership table;
@@ -111,26 +111,26 @@ Representative exact shutdown contracts are:
 
 ```text
 # Offline
-ZigOs persistent runtime shutdown: commands 45 failed 0
+ZigOs persistent runtime shutdown: commands 49 failed 0
 ZigOs persistent VFS: ... data-lock tickets/outstanding 30/0 pool-lock tickets/outstanding 47/0 blocks/bytes/holes 70/286720/0 clean yes
 ZigOs persistent descriptors: ... dup/inherited/cloexec 2/56/1 ... clean yes
 ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
-ZigOs post-bootstrap physical memory: ... peak 48 alloc/free 247/247 failed/rejected 0/0 clean yes
+ZigOs post-bootstrap physical memory: ... alloc/free 296/296 failed/rejected 0/0 clean yes
 ZigOs permanent userspace: page-limit 4096 used 0 peak 48 contexts 0 launches/exits/faults 15/13/1 ... reclaimed 247 stale-contexts-swept 0 allocator alloc/release/retains 247/247/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes
 
 # Live e1000e
-ZigOs persistent runtime shutdown: commands 47 failed 0
+ZigOs persistent runtime shutdown: commands 51 failed 0
 ZigOs persistent VFS: ... data-lock tickets/outstanding 30/0 pool-lock tickets/outstanding 47/0 blocks/bytes/holes 70/286720/0 clean yes
 ZigOs persistent descriptors: ... dup/inherited/cloexec 2/62/1 ... clean yes
 ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
-ZigOs post-bootstrap physical memory: ... peak 48 alloc/free 278/278 failed/rejected 0/0 clean yes
+ZigOs post-bootstrap physical memory: ... alloc/free 332/332 failed/rejected 0/0 clean yes
 ZigOs permanent userspace: page-limit 4096 used 0 peak 48 contexts 0 launches/exits/faults 17/15/1 ... reclaimed 278 stale-contexts-swept 0 allocator alloc/release/retains 278/278/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 
 # Normal userspace-shell profile
 ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes
-ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 101/101 storage persistent clean yes
+ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 127/127 cache-released 13 storage persistent clean yes
 ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes
 
 # Diskless normal RAM-root recovery profile
@@ -306,7 +306,7 @@ zig-out/
     `-- runtime-*.elf
 ```
 
-`zig build test` executes ten canonical host-test roots covering 81 unique `std.testing` declarations across eleven source files, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence, ELF loading and the DNS codec. Imported tests may execute from more than one root, but the source contract counts each declaration once.
+`zig build test` executes ten canonical host-test roots covering 88 unique `std.testing` declarations across eleven source files, including descriptors, commands, processes, TTY, VFS, ABI, page ownership, persistence, ELF loading and the DNS codec. Imported tests may execute from more than one root, but the source contract counts each declaration once.
 
 `zig build check` runs formatting, all isolated tests, the UEFI build and portable PE/COFF verification.
 
@@ -353,11 +353,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    5,090,816 bytes
-SHA-256: 9A1D7F5A988784A97E58CFA7B5AC662742CA2C2A6DDDB49A57BD93DDDBFE55A4
+Size:    5,024,768 bytes
+SHA-256: 5957479B1477696B396F7A2C26C4CDCB95C6762B55B59AD508A4545BF62D0585
 ```
 
-This identity is from the locally validated Windows diagnostic ABI 1.11 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots, per-inode ticket-locked atomic append, a shared sparse-file block pool with persistent allocation maps, failure-atomic bounded `readv`/`writev`, transactional file-scoped `fsync`, data-only `fdatasync` with committed-mode preservation for stable committed paths, transactional global `sync` that prevalidates and visits every writable mount, treats RAM filesystems as immediately synchronized, commits the configured persistent mount once, skips read-only mounts and rejects unsupported writable backends before journal I/O, and a separate bounded 16-page file-data cache keyed by inode generation and logical page, with inode-serialized reads, sparse-zero page caching, LRU replacement, write-through mutation invalidation, an independent one-byte-per-inode dirty-page bitmap that survives cache eviction, target-only fsync/fdatasync clearing, with RAM-backed regular files clearing immediately and persistent files clearing only after journal success; all-writable-mount global clearing after commit success, failure/rejection retention, read-only mount baseline adoption, zero-dirty/zero-outstanding-lock shutdown gates, and an explicit generation-tagged asynchronous writeback request serviced at most once per runtime pass, with scheduling/completion separation, RAM-backed immediate completion, persistent data-only A/B journal commits, busy/stale/unsupported/failure accounting and dirty-state retention on every unsuccessful outcome. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic ABI 1.11 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots, per-inode ticket-locked atomic append, a shared sparse-file block pool with persistent allocation maps, failure-atomic bounded `readv`/`writev`, transactional file-scoped `fsync`, data-only `fdatasync` with committed-mode preservation for stable committed paths, transactional global `sync` that prevalidates and visits every writable mount, treats RAM filesystems as immediately synchronized, commits the configured persistent mount once, skips read-only mounts and rejects unsupported writable backends before journal I/O, and a separate bounded 16-page file-data cache keyed by inode generation and logical page, with inode-serialized reads, sparse-zero page caching, LRU replacement, write-through mutation invalidation, an independent one-byte-per-inode dirty-page bitmap that survives cache eviction, target-only fsync/fdatasync clearing, with RAM-backed regular files clearing immediately and persistent files clearing only after journal success; all-writable-mount global clearing after commit success, failure/rejection retention, read-only mount baseline adoption, zero-dirty/zero-outstanding-lock shutdown gates, and an explicit generation-tagged asynchronous writeback request serviced at most once per runtime pass, with scheduling/completion separation, RAM-backed immediate completion, persistent data-only A/B journal commits, busy/stale/unsupported/failure accounting and dirty-state retention on every unsuccessful outcome. Cache page bytes are independently allocated from the post-bootstrap physical-memory manager rather than embedded in the VFS object; runtime service performs bounded low-watermark checks, evicts only clean LRU entries, retains dirty resident pages and the independent ledger, and releases every remaining clean cache page before final PMM accounting. The required diagnostic sessions force the same reclaim path and prove four physical pages returned while dirty pages remain synchronized only by writeback or sync. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
@@ -394,8 +394,8 @@ Additional switches include `-CpuCount`, `-LegacyPci`, `-NvmeOnly`, `-Nvme4k`, `
 
 The workflow contains two required implementation paths:
 
-- **Portable Linux:** clean bootstrap, asset generation, formatting, 86 unique isolated declarations, directly linked Zig/C SDK, init, shell and DNS verification, x86-64 UEFI build, portable PE verification and artifact upload.
-- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 48-command offline and 50-command live-network permanent COM1 sessions, the x86-64 NVMe four-boot fsync/fdatasync proof, persistent and diskless normal boots, and the legacy i686 build/two-boot regression.
+- **Portable Linux:** clean bootstrap, asset generation, formatting, 88 unique isolated declarations, directly linked Zig/C SDK, init, shell and DNS verification, x86-64 UEFI build, portable PE verification and artifact upload.
+- **Windows integration:** clean build, isolated checks, reduced fallback boot, a uniprocessor serial-only network profile, the 49-command offline and 51-command live-network permanent COM1 sessions, the x86-64 NVMe four-boot fsync/fdatasync proof, persistent and diskless normal boots, and the legacy i686 build/two-boot regression.
 - **Cross-platform identity:** download both artifact sets and require identical relative paths and byte-for-byte contents. Broader SMP, graphics and USB combinations remain extended local gates.
 
 A green badge therefore represents substantially more than the former reduced single-boot profile.

@@ -241,7 +241,7 @@ def main() -> int:
     require(normal_boot_test, "ZigOs userspace init PID 1", "normal QEMU gate requires a real CPL3 PID 1")
     require(normal_boot_test, "userspace init reaped shell PID 2 status 0", "normal QEMU gate requires PID 1 supervision and reap")
     require(normal_boot_test, "process 3 exited 42", "normal QEMU gate proves userspace shell spawn/wait")
-    require(normal_boot_test, "alloc/free 101/101 storage persistent clean yes", "normal QEMU gate requires exact physical reclamation and persistent mode")
+    require(normal_boot_test, "alloc/free 127/127 cache-released 13 storage persistent clean yes", "normal QEMU gate requires exact physical reclamation and persistent mode")
     require(normal_boot_test, "forbidden", "normal QEMU gate rejects diagnostic proof markers")
     require(kernel, "continuing normal boot with embedded assets and RAM-backed root", "normal boot no longer hard-fails without permanent storage")
     require(runtime, "diskless-ram-root", "normal shutdown distinguishes the diskless recovery profile")
@@ -350,7 +350,10 @@ def main() -> int:
     require(vfs_source, "references: u16 = 0", "dentry cache entries retain explicit reference counts")
     require(vfs_source, "dentry_cache: [maximum_dentry_cache_entries]DentryCacheEntry", "VFS owns a bounded dentry lookup cache")
     require(vfs_source, "pub const maximum_file_page_cache_entries: usize = 16", "VFS publishes a fixed sixteen-page file-data cache bound")
-    require(vfs_source, "file_page_cache: [maximum_file_page_cache_entries]FilePageCacheEntry", "VFS owns a separate bounded clean file-page cache")
+    require(vfs_source, "file_page_cache: [maximum_file_page_cache_entries]FilePageCacheEntry", "VFS owns a separate bounded file-page cache index")
+    require(vfs_source, "pub const FilePageAllocator = struct", "file-page cache backing is supplied through explicit allocate/release callbacks")
+    require(vfs_source, "address: usize = 0", "file-page cache entries reference independently allocated page backing")
+    require(vfs_source, "pub fn setFilePageAllocator", "runtime configures cache backing before ordinary file reads")
     require(vfs_source, "fn cachedFilePageLocked", "ordinary file reads load and hit generation-keyed cached pages")
     require(vfs_source, "entry.node_generation != node_generation", "file-page cache keys include inode generation to reject slot reuse")
     require(vfs_source, "fn invalidateFilePageCacheNode", "write-through mutations invalidate cached inode pages")
@@ -364,6 +367,10 @@ def main() -> int:
     require(vfs_source, 'test "VFS dirty page ledger survives cache eviction and clears on synchronization"', "isolated test proves exact dirty bits, eviction survival, synchronization clear and inode-destruction discard")
     forbid(vfs_source, "for (self.file_page_cache", "large file-page cache scans copied the full cache array onto the kernel stack")
     require(vfs_source, 'test "VFS bounded clean page cache hits evicts and invalidates mutations"', "isolated test proves bounded hits, LRU eviction, sparse-zero caching and mutation invalidation")
+    require(vfs_source, "pub fn reclaimCleanFilePageCacheUnderPressure", "VFS exposes bounded low-watermark clean-page reclaim")
+    require(vfs_source, "if (!entry.used or entry.dirty or entry.last_used >= oldest) continue", "pressure reclaim skips every dirty resident page and chooses clean LRU victims")
+    require(vfs_source, "pub fn releaseFilePageCache", "shutdown can return every remaining clean cache page to its backing allocator")
+    require(vfs_source, 'test "VFS pressure reclaim releases clean cache pages and retains dirty pages"', "isolated test proves real backing release, clean-only LRU reclaim and dirty-ledger retention")
     require(vfs_source, "fn acquireDentry", "path traversal pins cache entries during use")
     require(vfs_source, "fn releaseDentryReference", "path traversal releases cache references on every exit path")
     require(vfs_source, "fn invalidateCachedDentry", "namespace mutation invalidates matching cached dentries")
@@ -426,6 +433,12 @@ def main() -> int:
     require(runtime, "fs_report.file_page_cache_hits > 0", "release gates require real file-page cache hits")
     require(runtime, "fs_report.file_page_cache_misses > 0", "release gates require file-page cache population")
     require(runtime, "fs_report.file_page_cache_lock_outstanding == 0", "release gates require every file-page cache lock ticket to drain")
+    require(runtime, "allocateFilePageCachePage", "runtime backs file cache pages with the post-bootstrap physical manager")
+    require(runtime, "releaseFilePageCachePage", "cache eviction returns page backing to the post-bootstrap physical manager")
+    require(runtime, "reclaimCleanFilePageCacheUnderPressure", "runtime service and diagnostic proof use the same low-watermark reclaim path")
+    require(runtime, "fn commandCachePressure", "diagnostic shell can force a measured pressure crossing")
+    require(runtime, "released_cache_pages = state.vfs.releaseFilePageCache()", "shutdown releases remaining cache backing before physical-memory accounting")
+    require(runtime, "final_fs_report.file_page_cache_allocations == final_fs_report.file_page_cache_releases", "release gates require balanced cache-page allocation and release")
     require(runtime, "fs_report.file_page_cache_dirty_entries == 0", "release gates require no resident dirty cache pages at shutdown")
     require(runtime, "fs_report.dirty_file_pages == 0", "release gates require the inode dirty-page ledger to drain")
     require(runtime, "fs_report.dirty_file_nodes == 0", "release gates require no dirty inodes at shutdown")
@@ -441,6 +454,9 @@ def main() -> int:
     require(runtime, "page-cache entries", "diagnostic shutdown reports bounded clean file-page cache occupancy and activity")
     require(runtime, "dirty/ledger", "diagnostic shutdown reports resident and authoritative dirty-page state")
     require(runtime, "marks/sync-clear/discard", "diagnostic shutdown reports dirty-page lifecycle counters")
+    require(runtime, "backing alloc/release/fail", "diagnostic shutdown reports PMM-backed cache lifecycle accounting")
+    require(runtime, "pressure checks/events/evictions", "diagnostic shutdown reports pressure-policy activity")
+    require(runtime, "shutdown-release", "diagnostic shutdown reports final cache-page return")
     require(runtime, "lock tickets/outstanding", "diagnostic shutdown reports drained file-page cache locking")
     require(runtime, "data-lock tickets/outstanding", "diagnostic shutdown reports inode data-lock accounting")
     require(runtime, "pool-lock tickets/outstanding", "diagnostic shutdown reports sparse-pool lock accounting")
@@ -718,8 +734,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 87:
-        raise SystemExit(f"canonical isolated-test declaration total must be 87, found {declared_tests}")
+    if declared_tests != 88:
+        raise SystemExit(f"canonical isolated-test declaration total must be 88, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -779,8 +795,14 @@ def main() -> int:
         "Post-bootstrap physical memory manager active:",
         "bootstrap allocator sealed",
         "ZigOs post-bootstrap physical memory: total ",
-        "peak 48 alloc/free 247/247 failed/rejected 0/0 clean yes",
-        "peak 48 alloc/free 278/278 failed/rejected 0/0 clean yes",
+        "entries before/after 15/11 reclaimed 4 dirty retained 11",
+        "entries before/after 16/12 reclaimed 4 dirty retained 12",
+        "backing alloc/release/fail 49/49/0/0",
+        "backing alloc/release/fail 54/54/0/0",
+        "/1/4 shutdown-release 11",
+        "/1/4 shutdown-release 12",
+        "alloc/free 296/296 failed/rejected 0/0 clean yes",
+        "alloc/free 332/332 failed/rejected 0/0 clean yes",
         "launches/exits/faults 15/13/1",
         "launches/exits/faults 17/15/1",
         "reclaimed 247 stale-contexts-swept 0 allocator alloc/release/retains 247/247/0",
@@ -800,6 +822,11 @@ def main() -> int:
         "ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 global/mount/immediate/durable/reject 1/2/1/1/0 writeback active no request/complete/pass 1/1/1 immediate/durable/clean/unsupported/failure/stale 1/0/0/0/0/0 pages queued/completed 3/3 payload/header/flush 1/1/2 NVMe read/write/flush ",
         " errors 0/0 clean yes",
         "persistent-storage yes canned-results no explicit-shutdown yes",
+        "cache pressure: free before/after ",
+        " pressure checks/events/evictions ",
+        " backing alloc/release ",
+        " backing alloc/release/fail ",
+        " shutdown-release ",
         "ZigOs permanent userspace: page-limit 4096 used 0",
         "ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes",
         "ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes",
@@ -819,7 +846,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, PMM-backed pressure-reclaiming file cache, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

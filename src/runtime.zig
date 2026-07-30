@@ -81,6 +81,8 @@ pub const Configuration = struct {
 };
 
 const maximum_pipeline_bytes: usize = runtime_vfs.maximum_file_size;
+const file_page_cache_low_watermark_pages: u64 = 64;
+const file_page_cache_pressure_target_entries: usize = 4;
 const pipex_writer_gate: u64 = 0x5049_5045_5857_5254;
 
 const Output = struct {
@@ -268,6 +270,11 @@ fn initialize(configuration: Configuration) !void {
     state = undefined;
     state.config = configuration;
     state.vfs.initialize();
+    try state.vfs.setFilePageAllocator(.{
+        .context = configuration.physical_memory,
+        .allocate = allocateFilePageCachePage,
+        .release = releaseFilePageCachePage,
+    });
     state.processes.initialize(0);
     state.descriptors.initialize();
     state.persistence.initialize();
@@ -377,6 +384,19 @@ fn initializePersistentStorage() !void {
     };
 }
 
+fn allocateFilePageCachePage(context: ?*anyopaque) ?usize {
+    const manager: *memory.PhysicalMemoryManager = @ptrCast(@alignCast(context.?));
+    const address = manager.allocateBelow(memory.four_gib) orelse return null;
+    @memset(@as([*]u8, @ptrFromInt(address))[0..runtime_vfs.file_block_size], 0);
+    return address;
+}
+
+fn releaseFilePageCachePage(context: ?*anyopaque, address: usize) bool {
+    const manager: *memory.PhysicalMemoryManager = @ptrCast(@alignCast(context.?));
+    manager.free(address) catch return false;
+    return true;
+}
+
 fn persistentReadBlock(context: ?*anyopaque, lba: u64, output: []u8) bool {
     const controller: *nvme.Controller = @ptrCast(@alignCast(context.?));
     return nvme.readBlock(controller, lba, output);
@@ -471,6 +491,13 @@ fn serviceRuntime() void {
         serviceUserspace(tick);
         const writeback = state.persistence.serviceWriteback(&state.vfs);
         if (writeback != .idle) state.filesystem_syncs +%= 1;
+        const physical = state.config.physical_memory.report();
+        const pressure_watermark = @max(file_page_cache_low_watermark_pages, physical.total_pages / 100);
+        _ = state.vfs.reclaimCleanFilePageCacheUnderPressure(
+            physical.free_pages,
+            pressure_watermark,
+            file_page_cache_pressure_target_entries,
+        );
         state.device_service_passes +%= 1;
         if (state.config.network_ready) {
             state.network_service_passes +%= 1;
@@ -701,6 +728,7 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
     if (equal(name, "clear")) return output.write("\x1B[2J\x1B[H");
     if (equal(name, "sync")) return commandSync(output);
     if (equal(name, "writeback")) return commandWriteback(stage, output);
+    if (equal(name, "cachepressure")) return commandCachePressure(stage, output);
     if (equal(name, "fsck")) return commandFsck(output);
     if (equal(name, "hash")) return commandHash(stage, input, output);
     if (equal(name, "hexdump")) return commandHexdump(stage, input, output);
@@ -717,7 +745,7 @@ fn executeStage(stage: *const runtime_command.Stage, input: []const u8, output: 
 }
 
 fn commandHelp(output: *Output) void {
-    output.line("Filesystem: pwd cd ls cat cp echo touch mkdir rm rmdir mv write append stat chmod mount df fds fdtest pipex sync writeback fsck");
+    output.line("Filesystem: pwd cd ls cat cp echo touch mkdir rm rmdir mv write append stat chmod mount df fds fdtest pipex sync writeback cachepressure fsck");
     output.line("Processes: ps jobs spawn kill wait crash sleep uptime elf exec run (real VFS-loaded CPL3; kill defaults to forced signal 9)");
     output.line("Network: ping and dns use retained e1000e packet I/O when available; offline boots report explicit unavailability");
     output.line("Shell: env export unset history clear uname hash hexdump grep wc head shutdown");
@@ -2057,6 +2085,46 @@ fn commandWriteback(stage: *const runtime_command.Stage, output: *Output) void {
     output.line(if (request.persistent) "yes" else "no");
 }
 
+fn commandCachePressure(stage: *const runtime_command.Stage, output: *Output) void {
+    if (stage.count != 1) return usage("cachepressure", output);
+    const before_memory = state.config.physical_memory.report();
+    const before_cache = state.vfs.report();
+    const forced_watermark = if (before_memory.free_pages == std.math.maxInt(u64))
+        before_memory.free_pages
+    else
+        before_memory.free_pages + 1;
+    const reclaimed = state.vfs.reclaimCleanFilePageCacheUnderPressure(
+        before_memory.free_pages,
+        forced_watermark,
+        0,
+    );
+    const after_memory = state.config.physical_memory.report();
+    const after_cache = state.vfs.report();
+    output.write("cache pressure: free before/after ");
+    output.decimal(before_memory.free_pages);
+    output.write("/");
+    output.decimal(after_memory.free_pages);
+    output.write(" entries before/after ");
+    output.decimal(before_cache.file_page_cache_entries);
+    output.write("/");
+    output.decimal(after_cache.file_page_cache_entries);
+    output.write(" reclaimed ");
+    output.decimal(reclaimed);
+    output.write(" dirty retained ");
+    output.decimal(after_cache.file_page_cache_dirty_entries);
+    output.write(" pressure checks/events/evictions ");
+    output.decimal(after_cache.file_page_cache_pressure_checks);
+    output.write("/");
+    output.decimal(after_cache.file_page_cache_pressure_events);
+    output.write("/");
+    output.decimal(after_cache.file_page_cache_pressure_evictions);
+    output.write(" backing alloc/release ");
+    output.decimal(after_cache.file_page_cache_allocations);
+    output.write("/");
+    output.decimal(after_cache.file_page_cache_releases);
+    output.write("\r\n");
+}
+
 fn commandFsck(output: *Output) void {
     state.filesystem_checks +%= 1;
     const ramfs_clean = state.vfs.validate();
@@ -2385,6 +2453,8 @@ fn finishNormalRuntime() noreturn {
     const tty_report = state.tty.report();
     const persistence_report = state.persistence.report();
     const userspace_report = runtime_user.report();
+    const released_cache_pages = state.vfs.releaseFilePageCache();
+    const final_fs_report = state.vfs.report();
     const physical_report = state.config.physical_memory.report();
     const physical_rejections = physical_report.invalid_frees + physical_report.double_frees + physical_report.metadata_failures;
     const diskless_recovery = !state.config.nvme_ready and !state.config.ahci_ready;
@@ -2410,7 +2480,12 @@ fn finishNormalRuntime() noreturn {
         fs_report.file_page_cache_entries <= runtime_vfs.maximum_file_page_cache_entries and
         fs_report.file_page_cache_hits > 0 and fs_report.file_page_cache_misses > 0 and
         fs_report.file_page_cache_insertions > 0 and fs_report.file_page_cache_lock_tickets > 0 and
-        fs_report.file_page_cache_lock_outstanding == 0 and
+        fs_report.file_page_cache_lock_outstanding == 0 and fs_report.file_page_cache_pressure_checks > 0 and
+        fs_report.file_page_cache_allocation_failures == 0 and fs_report.file_page_cache_release_failures == 0 and
+        fs_report.file_page_cache_allocations == fs_report.file_page_cache_releases + fs_report.file_page_cache_entries and
+        released_cache_pages > 0 and final_fs_report.file_page_cache_entries == 0 and
+        final_fs_report.file_page_cache_allocations == final_fs_report.file_page_cache_releases and
+        final_fs_report.file_page_cache_release_failures == 0 and
         fs_report.file_page_cache_dirty_entries == 0 and fs_report.dirty_file_pages == 0 and
         fs_report.dirty_file_nodes == 0 and fs_report.dirty_page_marks > 0 and
         fs_report.dirty_page_sync_clears > 0 and
@@ -2449,6 +2524,8 @@ fn finishNormalRuntime() noreturn {
     emitDecimal(physical_report.allocations);
     emit("/");
     emitDecimal(physical_report.frees);
+    emit(" cache-released ");
+    emitDecimal(released_cache_pages);
     emit(" storage ");
     emit(if (persistence_report.mounted) "persistent" else if (diskless_recovery) "diskless-ram-root" else "unavailable");
     emit(" clean ");
@@ -2503,6 +2580,8 @@ fn finishDiagnosticRuntime() noreturn {
     const tty_report = state.tty.report();
     const persistence_report = state.persistence.report();
     const userspace_report = runtime_user.report();
+    const released_cache_pages = state.vfs.releaseFilePageCache();
+    const final_fs_report = state.vfs.report();
     const physical_report = state.config.physical_memory.report();
     const physical_rejections = physical_report.invalid_frees + physical_report.double_frees + physical_report.metadata_failures;
     const physical_clean = physical_report.clean and physical_report.failed_allocations == 0 and physical_rejections == 0;
@@ -2540,7 +2619,12 @@ fn finishDiagnosticRuntime() noreturn {
         fs_report.file_page_cache_entries <= runtime_vfs.maximum_file_page_cache_entries and
         fs_report.file_page_cache_hits > 0 and fs_report.file_page_cache_misses > 0 and
         fs_report.file_page_cache_insertions > 0 and fs_report.file_page_cache_lock_tickets > 0 and
-        fs_report.file_page_cache_lock_outstanding == 0 and
+        fs_report.file_page_cache_lock_outstanding == 0 and fs_report.file_page_cache_pressure_checks > 0 and
+        fs_report.file_page_cache_allocation_failures == 0 and fs_report.file_page_cache_release_failures == 0 and
+        fs_report.file_page_cache_allocations == fs_report.file_page_cache_releases + fs_report.file_page_cache_entries and
+        released_cache_pages > 0 and final_fs_report.file_page_cache_entries == 0 and
+        final_fs_report.file_page_cache_allocations == final_fs_report.file_page_cache_releases and
+        final_fs_report.file_page_cache_release_failures == 0 and
         fs_report.file_page_cache_dirty_entries == 0 and fs_report.dirty_file_pages == 0 and
         fs_report.dirty_file_nodes == 0 and fs_report.dirty_page_marks > 0 and
         fs_report.dirty_page_sync_clears > 0 and
@@ -2632,6 +2716,22 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(fs_report.file_page_cache_evictions);
     emit(" invalidate ");
     emitDecimal(fs_report.file_page_cache_invalidations);
+    emit(" backing alloc/release/fail ");
+    emitDecimal(final_fs_report.file_page_cache_allocations);
+    emit("/");
+    emitDecimal(final_fs_report.file_page_cache_releases);
+    emit("/");
+    emitDecimal(final_fs_report.file_page_cache_allocation_failures);
+    emit("/");
+    emitDecimal(final_fs_report.file_page_cache_release_failures);
+    emit(" pressure checks/events/evictions ");
+    emitDecimal(final_fs_report.file_page_cache_pressure_checks);
+    emit("/");
+    emitDecimal(final_fs_report.file_page_cache_pressure_events);
+    emit("/");
+    emitDecimal(final_fs_report.file_page_cache_pressure_evictions);
+    emit(" shutdown-release ");
+    emitDecimal(released_cache_pages);
     emit(" lock tickets/outstanding ");
     emitDecimal(fs_report.file_page_cache_lock_tickets);
     emit("/");
