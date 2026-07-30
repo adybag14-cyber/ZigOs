@@ -42,6 +42,7 @@ def main() -> int:
     e1000e_source = text("src/e1000e.zig")
     page_pool_source = text("src/runtime_page_pool.zig")
     vfs_source = text("src/runtime_vfs.zig")
+    boot_fat_source = text("src/runtime_boot_fat.zig")
     synchronization_source = text("src/synchronization.zig")
     tty_source = text("src/runtime_tty.zig")
     fd_source = text("src/runtime_fd.zig")
@@ -375,10 +376,28 @@ def main() -> int:
     require(vfs_source, "pub fn pinFilePage", "shared file mappings pin one generation-safe cache page")
     require(vfs_source, "pub fn unpinFilePage", "unmap and process teardown release exact mapped page pins")
     require(vfs_source, "fn requireMutableFile", "already-open writable descriptions preserve mutation authority after pathname mode changes")
+    require(vfs_source, "pub fn createBackedFileWithOperations", "VFS exposes sized read-only regular files backed by external block callbacks")
+    require(vfs_source, "backed_files: usize", "VFS reports block-backed files separately from RAM-resident ordinary files")
+    require(vfs_source, "backed_bytes: usize", "VFS reports logical block-backed bytes without charging the RAM-file budget")
+    require(vfs_source, "if (node.kind != .file or node.pseudo_operations != null) return Error.UnsupportedOperation", "whole-file RAM views reject externally backed files")
+    require(vfs_source, "if (node.pseudo_operations != null) return self.readPseudo", "path reads stream backed regular files through their read callback")
+    require(vfs_source, 'test "VFS backed regular files stream beyond the ordinary file-size limit"', "isolated VFS test streams a sized read-only file beyond the 32 KiB RAM-file bound")
     require(vfs_source, "mapping_references: u16 = 0", "inode and cache entries retain explicit file-mapping references")
     require(vfs_source, "entry.mapping_references != 0 and entry.node_generation", "ordinary file writes refresh pinned mapped pages instead of invalidating them")
     require(vfs_source, "if (self.nodes[node_index].mapping_references != 0) return true", "mapped unlinked files retain inode lifetime")
     require(vfs_source, 'test "VFS pinned file page resists pressure refreshes writes and retains unlinked lifetime"', "isolated test proves pressure resistance, file-to-map coherence, unlink lifetime and final reclamation")
+    require(boot_fat_source, "pub const maximum_files: usize = 32", "boot FAT import has a fixed file bound")
+    require(boot_fat_source, "pub const maximum_directories: usize = 24", "boot FAT import has a fixed directory bound")
+    require(boot_fat_source, "pub const maximum_depth: u8 = 8", "boot FAT traversal has a fixed nesting bound")
+    require(boot_fat_source, "if (self.volume.kind != .fat16)", "runtime boot backend accepts only the verified FAT16 boot-volume format")
+    require(boot_fat_source, "fn importDirectoryLocked", "boot FAT recursively imports short-name directory metadata into VFS")
+    require(boot_fat_source, "fn validateFileChainLocked", "boot FAT validates every imported file chain before exposure")
+    require(boot_fat_source, "fn markVisited", "FAT directory and file chain traversal rejects loops")
+    require(boot_fat_source, "cached_fat_lba", "boot FAT caches the current FAT sector during long chain traversal")
+    require(boot_fat_source, "cursor_cluster", "block-backed files retain a sequential cluster cursor for linear reads")
+    require(boot_fat_source, "io_lock: synchronization.TicketLock", "one ticket lock protects shared FAT sector buffers and file cursors")
+    require(boot_fat_source, "read_fn: ReadBlockFn", "boot FAT reads through a generic retained block-device callback")
+    require(boot_fat_source, 'test "read-only FAT16 backend imports directories and streams large files from blocks"', "standalone backend test proves nested metadata, multi-cluster reads and files beyond 32 KiB")
     require(vfs_source, "fn acquireDentry", "path traversal pins cache entries during use")
     require(vfs_source, "fn releaseDentryReference", "path traversal releases cache references on every exit path")
     require(vfs_source, "fn invalidateCachedDentry", "namespace mutation invalidates matching cached dentries")
@@ -439,6 +458,24 @@ def main() -> int:
     require(vfs_source, "const node_index = try self.resolveNoFollow(cwd, old_path);", "hard-link creation does not follow a final symbolic-link source")
     require(runtime, "output.decimal(info.link_count)", "diagnostic shell stat exposes namespace link counts")
     require(runtime, "canonicalPath(mount_entry.root_node", "mount command reports mounted roots rather than covered nodes")
+    require(kernel, "retained_nvme_efi_partition", "kernel retains the verified EFI GPT partition for permanent runtime use")
+    require(kernel, ".nvme_boot_first_lba", "kernel passes the retained EFI partition start into runtime configuration")
+    require(kernel, ".nvme_boot_sector_count", "kernel passes the retained EFI partition extent into runtime configuration")
+    require(runtime, "runtime_boot_fat.Backend", "runtime owns a persistent block-backed boot FAT backend")
+    require(runtime, "fn bootFatReadBlock", "runtime routes FAT reads to the retained NVMe controller")
+    require(runtime, 'state.boot_fat.mount(&state.vfs, "/boot", "nvme0p1"', "NVMe boots mount the verified EFI partition as the real /boot namespace")
+    require(runtime, 'state.vfs.mount(0, "/boot", .boot_fat, true, "embedded-assets")', "diskless recovery preserves an explicit embedded /boot fallback")
+    require(runtime, "fn bootFatStateClean", "normal and diagnostic release gates validate block-backed or absent fallback state")
+    require(runtime, "emitBootFatReport", "runtime shutdown reports FAT metadata, file and block I/O conservation")
+    require(nvme_image_builder, 'readme_bytes = b"ZigOs block-backed FAT16 runtime mount', "deterministic NVMe image contains a root FAT file for runtime proof")
+    require(nvme_image_builder, 'config_bytes = b"source=nvme0p1', "deterministic NVMe image contains a nested FAT file for runtime proof")
+    require(runtime_test, "cat /boot/README.TXT", "diagnostic QEMU reads a root file after NVMe handoff")
+    require(runtime_test, "cat /boot/EFI/BOOT/BOOT.CFG", "diagnostic QEMU reads a nested file after NVMe handoff")
+    require(runtime_test, "stat /boot/EFI/BOOT/BOOTX64.EFI", "diagnostic QEMU stats the multi-mebibyte boot image without RAM-copying it")
+    require(runtime_test, "ZigOs persistent runtime shutdown: commands 54 failed 0", "offline diagnostic profile requires the expanded block-backed FAT command matrix")
+    require(runtime_test, "ZigOs persistent runtime shutdown: commands 56 failed 0", "live diagnostic profile requires the expanded block-backed FAT command matrix")
+    require(normal_boot_test, "ZigOs boot FAT: block-backed yes files/directories 3/2", "persistent normal boot requires a clean real block-backed /boot")
+    require(diskless_normal_boot_test, "ZigOs boot FAT: block-backed no files/directories 0/0", "diskless normal boot requires an explicitly absent backend and fallback namespace")
     require(runtime, "fs_report.dentry_cache_references == 0", "normal and diagnostic release gates require zero live cache references")
     require(runtime, "fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases", "release gates require balanced cache reference accounting")
     require(runtime, "fs_report.dentry_cache_hits > 0", "release gates require real dentry-cache hits")
@@ -466,7 +503,7 @@ def main() -> int:
     require(runtime, "fs_report.page_write_lock_tickets > 0", "release gates require exercised logical-page writer locks")
     require(runtime, "fs_report.page_write_lock_outstanding == 0", "release gates require every logical-page writer ticket to drain")
     require(runtime, "page-write tickets/outstanding", "diagnostic shutdown reports logical-page writer lock conservation")
-    require(runtime_test, "page-write tickets/outstanding 210/0", "both diagnostic QEMU profiles require the measured page-writer ticket total with no outstanding lock")
+    require(runtime_test, "page-write tickets/outstanding 186/0", "both diagnostic QEMU profiles require the measured page-writer ticket total with no outstanding lock")
     require(runtime, "fs_report.data_pool_lock_tickets > 0", "release gates require exercised sparse-pool allocation")
     require(runtime, "fs_report.data_pool_lock_outstanding == 0", "release gates require the sparse-pool lock to drain")
     require(runtime, "fs_report.allocated_bytes == fs_report.allocated_blocks * runtime_vfs.file_block_size", "release gates verify resident block accounting")
@@ -766,6 +803,7 @@ def main() -> int:
         "src/runtime_process.zig",
         "src/runtime_tty.zig",
         "src/runtime_vfs.zig",
+        "src/runtime_boot_fat.zig",
         "src/runtime_abi.zig",
         "src/runtime_page_pool.zig",
         "src/memory.zig",
@@ -777,8 +815,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 91:
-        raise SystemExit(f"canonical isolated-test declaration total must be 91, found {declared_tests}")
+    if declared_tests != 93:
+        raise SystemExit(f"canonical isolated-test declaration total must be 93, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -786,6 +824,7 @@ def main() -> int:
         '"src/runtime_process.zig"',
         '"src/runtime_tty.zig"',
         '"src/runtime_vfs.zig"',
+        '"src/runtime_boot_fat.zig"',
         '"src/runtime_abi.zig"',
         '"src/runtime_page_pool.zig"',
         '"src/runtime_persist.zig"',
@@ -855,6 +894,12 @@ def main() -> int:
         "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev passed",
         "c-sdk: ABI 1.12 discovery passed",
         "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
+        "ZigOs block-backed FAT16 runtime mount",
+        "source=nvme0p1",
+        "mode=readonly",
+        "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
+        " metadata/file/block reads ",
+        " failures 0 lock tickets/outstanding ",
         "ZigOs shutdown drain:",
         " data-lock tickets/outstanding ",
         " pool-lock tickets/outstanding ",
@@ -890,7 +935,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.12 Zig/C SDKs, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.12 Zig/C SDKs, retained read-only block-backed FAT16 boot files, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

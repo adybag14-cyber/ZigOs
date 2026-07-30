@@ -4,7 +4,7 @@
 
 This document describes the security boundary of the current bounded x86-64 ZigOs runtime. It is a development threat model, not a claim that ZigOs is secure against hostile workloads.
 
-The model covers the post-UEFI kernel, retained CPL3 processes, the bounded RAM VFS, the `/persist` A/B journal, COM1/TTY input, the retained e1000e and NVMe paths, and the generated ABI 1.12 SDK interfaces. The legacy i686 environment is outside this document.
+The model covers the post-UEFI kernel, retained CPL3 processes, the bounded RAM VFS, the retained read-only `/boot` FAT volume, the `/persist` A/B journal, COM1/TTY input, the retained e1000e and NVMe paths, and the generated ABI 1.12 SDK interfaces. The legacy i686 environment is outside this document.
 
 ## Assets to protect
 
@@ -37,7 +37,7 @@ A relevant attacker may control an unprivileged CPL3 program and may:
 - consume process, descriptor, socket, mapping and page quotas;
 - fault deliberately, loop indefinitely, block on I/O or race logical lifecycle transitions on the BSP;
 - create malformed paths, rename trees, mutate writable VFS files and provide malformed UDP/DNS data;
-- provide corrupted or stale `/persist` journal sectors between boots;
+- provide malformed FAT boot-volume metadata or cluster chains and corrupted or stale `/persist` journal sectors between boots;
 - send arbitrary serial input to the foreground TTY session.
 
 The model does not currently defend against malicious kernel code, compromised firmware, physical attacks, hostile DMA, speculative-execution attacks, or concurrent malicious execution on several CPUs.
@@ -64,6 +64,7 @@ The model does not currently defend against malicious kernel code, compromised f
 ### Filesystem and persistence
 
 - Paths are bounded and normalized; traversal, rename cycles and cross-mount rename are rejected.
+- The retained EFI partition is mounted read-only through a bounded FAT16 parser: only 8.3 entries are imported, file/directory/depth counts are fixed, LBAs and volume extents are checked, directory and file chains use loop bitmaps, and shared sector buffers are ticket-locked. Backed-file logical sizes are excluded from RAM-resident accounting.
 - `/persist` uses alternating generations, payload CRCs, payload-before-header ordering, flushes and an FUA commit header.
 - Global sync and stable-path file fsync build in a separate scratch payload; the committed in-memory baseline changes only after payload and FUA header success.
 - Global sync prevalidates every active writable mount before I/O, treats RAM filesystems as immediately synchronized, skips read-only mounts, commits the configured persistent backend once and rejects unsupported or duplicate writable durable backends without advancing the journal.

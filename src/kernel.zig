@@ -49,6 +49,8 @@ var normalized_memory_layout: memory.Layout = undefined;
 var physical_memory_manager: memory.PhysicalMemoryManager = undefined;
 var retained_nvme_controller: nvme.Controller = undefined;
 var retained_nvme_controller_ready: bool = false;
+var retained_nvme_efi_partition: gpt.PartitionEntry = undefined;
+var retained_nvme_efi_partition_ready: bool = false;
 var retained_nvme_data_partition: gpt.PartitionEntry = undefined;
 var retained_nvme_data_partition_ready: bool = false;
 var kernel_heap: heap.Heap = undefined;
@@ -319,6 +321,8 @@ fn enterPersistentRuntime(
         .usb_keyboard_ready = usb_keyboard_ready,
         .nvme_ready = nvme_storage_ready,
         .nvme_controller = if (retained_nvme_controller_ready) &retained_nvme_controller else null,
+        .nvme_boot_first_lba = if (retained_nvme_efi_partition_ready) retained_nvme_efi_partition.first_lba else 0,
+        .nvme_boot_sector_count = if (retained_nvme_efi_partition_ready) retained_nvme_efi_partition.sectorCount().? else 0,
         .nvme_data_first_lba = if (retained_nvme_data_partition_ready) retained_nvme_data_partition.first_lba else 0,
         .nvme_data_sector_count = if (retained_nvme_data_partition_ready) retained_nvme_data_partition.sectorCount().? else 0,
         .ahci_ready = ahci_storage_ready,
@@ -13725,9 +13729,13 @@ fn inspectNvme(
         nvmeFailure("NVMe runtime polling handoff failed");
     retained_nvme_controller = controller;
     retained_nvme_controller_ready = true;
+    retained_nvme_efi_partition = efi;
+    retained_nvme_efi_partition_ready = true;
     retained_nvme_data_partition = persistent;
     retained_nvme_data_partition_ready = true;
-    debugWrite("NVMe retained for permanent runtime: polling I/O, data LBA ");
+    debugWrite("NVMe retained for permanent runtime: polling I/O, boot/data LBA ");
+    debugWriteU64Decimal(efi.first_lba);
+    debugWrite("/");
     debugWriteU64Decimal(persistent.first_lba);
     debugWrite(" + ");
     debugWriteU64Decimal(persistent_sector_count);

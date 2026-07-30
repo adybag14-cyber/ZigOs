@@ -7,6 +7,7 @@ const interrupt_context = @import("interrupt_context.zig");
 const memory = @import("memory.zig");
 const nvme = @import("nvme.zig");
 const runtime_abi = @import("runtime_abi.zig");
+const runtime_boot_fat = @import("runtime_boot_fat.zig");
 const runtime_command = @import("runtime_command.zig");
 const runtime_fd = @import("runtime_fd.zig");
 const runtime_process = @import("runtime_process.zig");
@@ -74,6 +75,8 @@ pub const Configuration = struct {
     usb_keyboard_ready: bool,
     nvme_ready: bool,
     nvme_controller: ?*nvme.Controller,
+    nvme_boot_first_lba: u64,
+    nvme_boot_sector_count: u64,
     nvme_data_first_lba: u64,
     nvme_data_sector_count: u64,
     ahci_ready: bool,
@@ -184,6 +187,7 @@ const State = struct {
     processes: runtime_process.Table = undefined,
     descriptors: runtime_fd.System = undefined,
     tty: runtime_tty.Tty = .{},
+    boot_fat: runtime_boot_fat.Backend = .{},
     persistence: runtime_persist.Store = .{},
     environment: runtime_command.Environment = undefined,
     editor: runtime_command.LineEditor = .{},
@@ -277,6 +281,7 @@ fn initialize(configuration: Configuration) !void {
     });
     state.processes.initialize(0);
     state.descriptors.initialize();
+    state.boot_fat = runtime_boot_fat.Backend.init();
     state.persistence.initialize();
     state.environment = runtime_command.Environment.init();
     state.editor = .{};
@@ -397,6 +402,11 @@ fn releaseFilePageCachePage(context: ?*anyopaque, address: usize) bool {
     return true;
 }
 
+fn bootFatReadBlock(context: ?*anyopaque, lba: u64, output: []u8) bool {
+    const controller: *nvme.Controller = @ptrCast(@alignCast(context.?));
+    return nvme.readBlock(controller, lba, output);
+}
+
 fn persistentReadBlock(context: ?*anyopaque, lba: u64, output: []u8) bool {
     const controller: *nvme.Controller = @ptrCast(@alignCast(context.?));
     return nvme.readBlock(controller, lba, output);
@@ -425,9 +435,6 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/etc/motd", "ZigOs persistent x86-64 runtime\n", 0o644, false, 0);
     _ = try state.vfs.putFile(0, "/home/root/readme.txt", "This filesystem remains available after boot validation.\n", 0o644, false, 0);
     _ = try state.vfs.putFile(0, "/var/log/boot.log", "Capstone 16 validation passed; Capstone 19 permanent userspace runtime entered.\n", 0o640, false, 0);
-    _ = try state.vfs.putFile(0, "/boot/service-user.elf", service_elf, 0o555, false, 0);
-    _ = try state.vfs.putFile(0, "/boot/process-user.elf", process_elf, 0o555, false, 0);
-    _ = try state.vfs.putFile(0, "/boot/process-exec.elf", process_exec_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/hello.elf", runtime_hello_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/sleep.elf", runtime_sleep_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/wait-short.elf", runtime_wait_short_elf, 0o555, false, 0);
@@ -459,8 +466,21 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.createPseudoWithOperations(0, "/dev/null", 0o666, 0, &null_pseudo_operations, null);
     _ = try state.vfs.createPseudoWithOperations(0, "/dev/zero", 0o666, 0, &zero_pseudo_operations, null);
 
-    const boot_source = if (state.config.nvme_ready) "nvme0p1" else if (state.config.ahci_ready) "ahci0p1" else "embedded-assets";
-    _ = try state.vfs.mount(0, "/boot", .boot_fat, true, boot_source);
+    if (state.config.nvme_controller != null and state.config.nvme_boot_first_lba != 0 and state.config.nvme_boot_sector_count != 0) {
+        const controller = state.config.nvme_controller.?;
+        _ = try state.boot_fat.mount(&state.vfs, "/boot", "nvme0p1", .{
+            .context = controller,
+            .block_size = controller.logical_block_size,
+            .first_lba = state.config.nvme_boot_first_lba,
+            .sector_count = state.config.nvme_boot_sector_count,
+            .read_fn = bootFatReadBlock,
+        }, 0);
+    } else {
+        _ = try state.vfs.putFile(0, "/boot/service-user.elf", service_elf, 0o555, false, 0);
+        _ = try state.vfs.putFile(0, "/boot/process-user.elf", process_elf, 0o555, false, 0);
+        _ = try state.vfs.putFile(0, "/boot/process-exec.elf", process_exec_elf, 0o555, false, 0);
+        _ = try state.vfs.mount(0, "/boot", .boot_fat, true, "embedded-assets");
+    }
     _ = try state.vfs.mount(0, "/proc", .procfs, true, "process-table");
     _ = try state.vfs.mount(0, "/dev", .devfs, true, "kernel-devices");
     _ = try state.vfs.mount(0, "/net", .netfs, true, "network-state");
@@ -2437,6 +2457,45 @@ fn writebackStateClean(report: runtime_persist.Report) bool {
         report.writeback_pages_queued == report.writeback_pages_completed;
 }
 
+fn bootFatStateClean(report: runtime_boot_fat.Report, require_file_reads: bool) bool {
+    const configured = state.config.nvme_controller != null and state.config.nvme_boot_first_lba != 0 and
+        state.config.nvme_boot_sector_count != 0;
+    if (!configured) {
+        return !report.mounted and report.files == 0 and report.directories == 0 and report.bytes == 0 and
+            report.metadata_reads == 0 and report.file_reads == 0 and report.blocks_read == 0 and report.failures == 0 and
+            report.lock_outstanding == 0;
+    }
+    return report.mounted and state.boot_fat.validate() and report.files >= 3 and report.directories >= 2 and
+        report.bytes > 0 and report.metadata_reads > 0 and (!require_file_reads or report.file_reads >= 2) and
+        report.blocks_read >= report.metadata_reads and report.failures == 0 and report.lock_outstanding == 0;
+}
+
+fn emitBootFatReport(report: runtime_boot_fat.Report, clean: bool) void {
+    emit("ZigOs boot FAT: block-backed ");
+    emit(if (report.mounted) "yes" else "no");
+    emit(" files/directories ");
+    emitDecimal(report.files);
+    emit("/");
+    emitDecimal(report.directories);
+    emit(" bytes ");
+    emitDecimal(report.bytes);
+    emit(" metadata/file/block reads ");
+    emitDecimal(report.metadata_reads);
+    emit("/");
+    emitDecimal(report.file_reads);
+    emit("/");
+    emitDecimal(report.blocks_read);
+    emit(" failures ");
+    emitDecimal(report.failures);
+    emit(" lock tickets/outstanding ");
+    emitDecimal(report.lock_tickets);
+    emit("/");
+    emitDecimal(report.lock_outstanding);
+    emit(" clean ");
+    emit(if (clean) "yes" else "no");
+    emit("\r\n");
+}
+
 fn finishNormalRuntime() noreturn {
     apic.setTimerHook(null);
     apic.stopCurrentProcessorTimer(descriptor_tables.persistent_runtime_timer_vector);
@@ -2452,6 +2511,8 @@ fn finishNormalRuntime() noreturn {
     const descriptor_report = state.descriptors.report();
     const tty_report = state.tty.report();
     const persistence_report = state.persistence.report();
+    const boot_fat_report = state.boot_fat.report();
+    const boot_fat_clean = bootFatStateClean(boot_fat_report, false);
     const userspace_report = runtime_user.report();
     const released_cache_pages = state.vfs.releaseFilePageCache();
     const final_fs_report = state.vfs.report();
@@ -2503,7 +2564,7 @@ fn finishNormalRuntime() noreturn {
         descriptor_report.namespaces == 0 and descriptor_report.descriptors == 0 and descriptor_report.open_descriptions == 0 and
         tty_report.foreground_process_group == 2 and tty_report.buffered_bytes == 0 and tty_report.edited_bytes == 0 and
         tty_report.bytes_submitted == tty_report.bytes_read and tty_report.blocked_reads >= 1 and tty_report.reader_wakeups >= 1 and
-        persistence_clean and
+        persistence_clean and boot_fat_clean and
         userspace_report.used_pages == 0 and userspace_report.live_contexts == 0 and userspace_report.file_mapping_pages == 0 and
         userspace_report.launches >= 3 and
         userspace_report.exits >= 3 and userspace_report.allocator_allocations == userspace_report.allocator_releases and
@@ -2517,7 +2578,9 @@ fn finishNormalRuntime() noreturn {
     emitDecimal(init_process.exit_status);
     emit(" shell PID 2 reaped ");
     emit(if (state.init_reaped_shell) "yes" else "no");
-    emit("\r\nZigOs normal userspace resources: processes ");
+    emit("\r\n");
+    emitBootFatReport(boot_fat_report, boot_fat_clean);
+    emit("ZigOs normal userspace resources: processes ");
     emitDecimal(process_report.live);
     emit(" descriptors ");
     emitDecimal(descriptor_report.descriptors);
@@ -2584,6 +2647,8 @@ fn finishDiagnosticRuntime() noreturn {
     const descriptor_report = state.descriptors.report();
     const tty_report = state.tty.report();
     const persistence_report = state.persistence.report();
+    const boot_fat_report = state.boot_fat.report();
+    const boot_fat_clean = bootFatStateClean(boot_fat_report, true);
     const userspace_report = runtime_user.report();
     const released_cache_pages = state.vfs.releaseFilePageCache();
     const final_fs_report = state.vfs.report();
@@ -2852,6 +2917,7 @@ fn finishDiagnosticRuntime() noreturn {
     emit(" clean ");
     emit(if (tty_clean) "yes" else "no");
     emit("\r\n");
+    emitBootFatReport(boot_fat_report, boot_fat_clean);
     emit("ZigOs persistent storage: mounted ");
     emit(if (persistence_report.mounted) "yes" else "no");
     emit(" generation/slot ");
@@ -3018,7 +3084,7 @@ fn finishDiagnosticRuntime() noreturn {
         emit(if (descriptor_clean) "yes" else "no");
         emit("\r\n");
     }
-    if (state.fd_contract_passed and descriptor_clean and tty_clean and persistence_clean and vfs_clean and userspace_clean and network_clean) {
+    if (state.fd_contract_passed and descriptor_clean and tty_clean and persistence_clean and boot_fat_clean and vfs_clean and userspace_clean and network_clean) {
         emit("ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes\r\n");
     } else {
         emit("ZigOs x86-64 Capstone 19 incomplete: fd-contract ");
@@ -3029,6 +3095,8 @@ fn finishDiagnosticRuntime() noreturn {
         emit(if (tty_clean) "yes" else "no");
         emit(" persistence-clean ");
         emit(if (persistence_clean) "yes" else "no");
+        emit(" boot-fat-clean ");
+        emit(if (boot_fat_clean) "yes" else "no");
         emit(" vfs-clean ");
         emit(if (vfs_clean) "yes" else "no");
         emit(" userspace-clean ");

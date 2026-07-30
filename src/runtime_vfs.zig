@@ -88,6 +88,8 @@ pub const Error = error{
     UnsupportedOperation,
     NotSeekable,
     NotSymlink,
+    InputOutput,
+    CorruptState,
 };
 
 pub const MappedFilePage = struct {
@@ -269,6 +271,8 @@ pub const Report = struct {
     mounts: usize,
     open_files: usize,
     bytes_used: usize,
+    backed_files: usize,
+    backed_bytes: usize,
     mutations: u64,
     rejected_operations: u64,
     dentry_cache_entries: usize,
@@ -532,6 +536,25 @@ pub const Vfs = struct {
         return node_index;
     }
 
+    pub fn createBackedFileWithOperations(
+        self: *Vfs,
+        cwd: u16,
+        path: []const u8,
+        size: usize,
+        mode: u16,
+        tick: u64,
+        operations: *const PseudoOperations,
+        context: ?*anyopaque,
+    ) Error!u16 {
+        if (operations.read == null or operations.write != null or operations.stream != null) return Error.UnsupportedOperation;
+        const parent_name = try self.parentAndName(cwd, path);
+        const node_index = try self.createNode(parent_name.parent, parent_name.name, .file, mode, true, tick);
+        self.nodes[node_index].size = size;
+        self.nodes[node_index].pseudo_operations = operations;
+        self.nodes[node_index].pseudo_context = context;
+        return node_index;
+    }
+
     pub fn ensureDirectory(self: *Vfs, cwd: u16, path: []const u8, mode: u16, tick: u64) Error!u16 {
         return self.resolve(cwd, path) catch |err| switch (err) {
             Error.NotFound => self.mkdir(cwd, path, mode, tick),
@@ -564,7 +587,7 @@ pub const Vfs = struct {
         var node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if ((node.mode & 0o444) == 0) return Error.PermissionDenied;
-        if (node.kind == .pseudo) return self.readPseudo(node_index, offset, output);
+        if (node.pseudo_operations != null) return self.readPseudo(node_index, offset, output);
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
         if (offset > node.size) return Error.InvalidOffset;
@@ -578,7 +601,7 @@ pub const Vfs = struct {
         var node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if ((node.mode & 0o444) == 0) return Error.PermissionDenied;
-        if (node.kind != .file) return Error.UnsupportedOperation;
+        if (node.kind != .file or node.pseudo_operations != null) return Error.UnsupportedOperation;
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
         @memset(&self.view_scratch, 0);
@@ -831,7 +854,7 @@ pub const Vfs = struct {
         if (!open_file.readable) return Error.PermissionDenied;
         var node = &self.nodes[open_file.node];
         if (node.kind == .directory) return Error.IsDirectory;
-        if (node.kind == .pseudo) {
+        if (node.pseudo_operations != null) {
             const count = try self.readPseudo(open_file.node, open_file.offset, output);
             open_file.offset += count;
             return count;
@@ -915,14 +938,16 @@ pub const Vfs = struct {
     pub fn seek(self: *Vfs, owner_pid: u32, handle: u32, offset: i64, whence: enum { start, current, end }) Error!usize {
         const index = try self.resolveOpen(owner_pid, handle);
         var open_file = &self.open_files[index];
-        if (self.nodes[open_file.node].kind == .pseudo) return Error.NotSeekable;
+        const node = &self.nodes[open_file.node];
+        if (node.kind == .pseudo) return Error.NotSeekable;
         const base: i64 = switch (whence) {
             .start => 0,
             .current => @intCast(open_file.offset),
-            .end => @intCast(self.nodes[open_file.node].size),
+            .end => @intCast(node.size),
         };
         const target = std.math.add(i64, base, offset) catch return Error.InvalidOffset;
-        if (target < 0 or target > maximum_file_size) return Error.InvalidOffset;
+        const maximum_offset: usize = if (node.pseudo_operations != null) node.size else maximum_file_size;
+        if (target < 0 or target > maximum_offset) return Error.InvalidOffset;
         open_file.offset = @intCast(target);
         return open_file.offset;
     }
@@ -1007,7 +1032,7 @@ pub const Vfs = struct {
     pub fn pinFilePage(self: *Vfs, node_index: u16, generation: u16, slot: usize) Error!MappedFilePage {
         if (node_index >= self.nodes.len or slot >= file_blocks_per_node) return Error.NotFound;
         var node = &self.nodes[node_index];
-        if (!node.used or node.generation != generation or node.kind != .file) return Error.NotFound;
+        if (!node.used or node.generation != generation or node.kind != .file or node.pseudo_operations != null) return Error.NotFound;
         if (slot * file_block_size >= node.size) return Error.InvalidOffset;
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
@@ -1276,9 +1301,11 @@ pub const Vfs = struct {
                 if (counted_links[index] != 0 or node.mapping_references != 0 or counted_mapping_references[index] != 0) return false;
                 continue;
             }
-            if (node.generation == 0 or node.size > maximum_file_size or node.link_count != counted_links[index] or
+            const backed_file = node.kind == .file and node.pseudo_operations != null;
+            if (node.generation == 0 or (!backed_file and node.size > maximum_file_size) or node.link_count != counted_links[index] or
                 node.mapping_references != counted_mapping_references[index]) return false;
             if (node.kind == .pseudo and node.pseudo_operations == null) return false;
+            if (backed_file and (!node.readonly or self.dirty_file_page_bitmap[index] != 0 or node.mapping_references != 0)) return false;
             if (node.kind == .symlink and (node.size == 0 or node.size > maximum_symlink_target_length)) return false;
             if (index != 0 and node.link_count == 0) {
                 if (node.kind == .directory or !self.hasOpenReferences(@intCast(index))) return false;
@@ -1299,6 +1326,10 @@ pub const Vfs = struct {
         for (0..self.nodes.len) |node_index| {
             const node = &self.nodes[node_index];
             if (!node.used or node.kind != .file) continue;
+            if (node.pseudo_operations != null) {
+                for (node.file_blocks) |block_index| if (block_index != invalid_data_block) return false;
+                continue;
+            }
             for (node.file_blocks, 0..) |block_index, slot| {
                 if (block_index == invalid_data_block) continue;
                 if (block_index >= self.data_blocks.len or referenced_blocks[block_index]) return false;
@@ -1388,6 +1419,8 @@ pub const Vfs = struct {
             .mounts = 0,
             .open_files = 0,
             .bytes_used = 0,
+            .backed_files = 0,
+            .backed_bytes = 0,
             .mutations = self.mutations,
             .rejected_operations = self.rejected_operations,
             .dentry_cache_entries = 0,
@@ -1455,8 +1488,14 @@ pub const Vfs = struct {
                 result.dirty_file_pages += @popCount(dirty_bitmap);
             }
             result.nodes_used += 1;
-            result.bytes_used += node.size;
-            if (node.kind == .file) {
+            const backed_file = node.kind == .file and node.pseudo_operations != null;
+            if (backed_file) {
+                result.backed_files += 1;
+                result.backed_bytes += node.size;
+            } else {
+                result.bytes_used += node.size;
+            }
+            if (node.kind == .file and !backed_file) {
                 const logical_blocks = (node.size + file_block_size - 1) / file_block_size;
                 var slot: usize = 0;
                 while (slot < logical_blocks) : (slot += 1) {
@@ -2492,6 +2531,65 @@ const test_pseudo_operations = PseudoOperations{
 };
 
 const test_console_operations = PseudoOperations{ .stream = .console };
+
+const BackedFileTestContext = struct {
+    bytes: []const u8,
+    reads: usize = 0,
+};
+
+fn readBackedTestFile(context: ?*anyopaque, _: u16, offset: usize, output: []u8) Error!usize {
+    const file: *BackedFileTestContext = @ptrCast(@alignCast(context.?));
+    file.reads += 1;
+    if (offset >= file.bytes.len) return 0;
+    const count = @min(output.len, file.bytes.len - offset);
+    @memcpy(output[0..count], file.bytes[offset .. offset + count]);
+    return count;
+}
+
+const backed_file_test_operations = PseudoOperations{ .read = readBackedTestFile };
+
+test "VFS backed regular files stream beyond the ordinary file-size limit" {
+    var fs = Vfs.init();
+    const boot = try fs.mkdir(0, "/boot", 0o755, 1);
+    var bytes: [maximum_file_size + 17]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @truncate(index * 13 + 7);
+    var context = BackedFileTestContext{ .bytes = &bytes };
+    const node = try fs.createBackedFileWithOperations(
+        boot,
+        "LARGE.BIN",
+        bytes.len,
+        0o444,
+        2,
+        &backed_file_test_operations,
+        &context,
+    );
+    const mount_id = try fs.mount(0, "/boot", .boot_fat, true, "test-block-device");
+    try std.testing.expectEqual(mount_id, (try fs.stat(0, "/boot/LARGE.BIN")).mount_id);
+    const info = try fs.statNode(node);
+    try std.testing.expectEqual(Kind.file, info.kind);
+    try std.testing.expectEqual(bytes.len, info.size);
+    try std.testing.expect(info.readonly);
+
+    var tail: [24]u8 = undefined;
+    const offset = maximum_file_size - 5;
+    const count = try fs.read(0, "/boot/LARGE.BIN", offset, &tail);
+    try std.testing.expectEqual(@as(usize, 22), count);
+    try std.testing.expectEqualSlices(u8, bytes[offset..], tail[0..count]);
+
+    const handle = try fs.open(7, 0, "/boot/LARGE.BIN", .{ .read = true }, 0, 3);
+    try std.testing.expectEqual(maximum_file_size + 3, try fs.seek(7, handle, maximum_file_size + 3, .start));
+    var sample: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 8), try fs.readOpen(7, handle, &sample));
+    try std.testing.expectEqualSlices(u8, bytes[maximum_file_size + 3 .. maximum_file_size + 11], &sample);
+    try fs.close(7, handle);
+    try std.testing.expectError(Error.ReadOnly, fs.open(7, 0, "/boot/LARGE.BIN", .{ .write = true }, 0, 4));
+    try std.testing.expect(context.reads >= 2);
+    const report = fs.report();
+    try std.testing.expectEqual(@as(usize, 1), report.backed_files);
+    try std.testing.expectEqual(bytes.len, report.backed_bytes);
+    try std.testing.expectEqual(@as(usize, 0), report.bytes_used);
+    try std.testing.expect(fs.validate());
+}
 
 fn filePageRangeBitmap(offset: usize, length: usize) u8 {
     if (length == 0) return 0;

@@ -26,7 +26,7 @@ The x86-64 kernel remains alive after validation unless an explicit `shutdown` c
 
 - a dedicated 100 Hz LAPIC timer and interrupt-enabled HLT idle loop;
 - a permanent PID 1 record; in normal boot it runs the directly linked Zig `/bin/init.elf`, launches the interactive Zig PID 2 shell, waits for it and reaps it before final shutdown;
-- a bounded writable VFS with an explicit parent-linked mount tree, six mounted namespaces, a shared 256-page ordinary-file pool supporting zero-filled sparse holes, and a separate 16-page generation-keyed file-data LRU cache backed by post-bootstrap PMM pages, an eviction-safe per-inode dirty-page ledger, clean-only low-watermark pressure reclaim, one ticket lock per logical file page, generation-safe read-only shared-file mapping pins and a single-request asynchronous writeback worker;
+- a bounded writable VFS with an explicit parent-linked mount tree, six mounted namespaces, a retained read-only block-backed FAT16 `/boot`, a shared 256-page ordinary-file pool supporting zero-filled sparse holes, and a separate 16-page generation-keyed file-data LRU cache backed by post-bootstrap PMM pages, an eviction-safe per-inode dirty-page ledger, clean-only low-watermark pressure reclaim, one ticket lock per logical file page, generation-safe read-only shared-file mapping pins and a single-request asynchronous writeback worker;
 - a generation-safe 64-slot process table whose ordinary round-robin service path owns foreground, background and fixture CPL3 dispatch without a second job table or direct shell dispatcher;
 - process-local numeric descriptors, shared open-file descriptions and bounded blocking pipes;
 - up to 64 retained CPL3 executable contexts backed by on-demand pages from a reclaiming post-bootstrap physical-memory manager and a 4,096-slot ownership table;
@@ -105,24 +105,27 @@ Each harness run boots the finished EFI image, waits for the permanent prompt an
 - the normal Zig shell exercising write, append, mkdir, rm, rmdir, mv and chmod without invoking the diagnostic kernel command implementation;
 - real `10.0.2.2` ICMP and `localhost` DNS results in the network profile;
 - explicit unavailable responses in the offline profile;
+- root and nested reads from the retained NVMe FAT16 `/boot`, plus `stat` of the multi-mebibyte `BOOTX64.EFI` without copying its bytes into the RAM-file pool;
 - absence of the former canned DNS and ping strings in permanent-runtime output.
 
 Representative exact shutdown contracts are:
 
 ```text
 # Offline
-ZigOs persistent runtime shutdown: commands 49 failed 0
-ZigOs persistent VFS: ... backing alloc/release/fail 50/50/0/0 ... mapped refs/pin/unpin/refresh/fail 0/1/1/1/0 ... page-write tickets/outstanding 210/0 ... clean yes
+ZigOs persistent runtime shutdown: commands 54 failed 0
+ZigOs persistent VFS: ... backing alloc/release/fail 50/50/0/0 ... mapped refs/pin/unpin/refresh/fail 0/1/1/1/0 ... page-write tickets/outstanding 186/0 ... clean yes
 ZigOs persistent descriptors: ... dup/inherited/cloexec 2/56/1 ... clean yes
+ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5566532 metadata/file/block reads 47/4/49 failures 0 lock tickets/outstanding 5/0 clean yes
 ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
 ZigOs post-bootstrap physical memory: ... alloc/free 298/298 failed/rejected 0/0 clean yes
 ZigOs permanent userspace: page-limit 4096 used 0 peak 48 contexts 0 file-mappings 0 launches/exits/faults 15/13/1 ... reclaimed 248 stale-contexts-swept 0 allocator alloc/release/retains 248/248/0 shared/oom/rejected 0/0/0 clean yes
 ZigOs permanent network: device no ping 0 dns 0 failures 0 clean yes
 
 # Live e1000e
-ZigOs persistent runtime shutdown: commands 51 failed 0
-ZigOs persistent VFS: ... backing alloc/release/fail 55/55/0/0 ... mapped refs/pin/unpin/refresh/fail 0/1/1/1/0 ... page-write tickets/outstanding 210/0 ... clean yes
+ZigOs persistent runtime shutdown: commands 56 failed 0
+ZigOs persistent VFS: ... backing alloc/release/fail 55/55/0/0 ... mapped refs/pin/unpin/refresh/fail 0/1/1/1/0 ... page-write tickets/outstanding 186/0 ... clean yes
 ZigOs persistent descriptors: ... dup/inherited/cloexec 2/62/1 ... clean yes
+ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5566532 metadata/file/block reads 47/4/49 failures 0 lock tickets/outstanding 5/0 clean yes
 ZigOs persistent storage: mounted yes generation/slot 1/0 ... NVMe read/write/flush .../2/2 errors 0/0 clean yes
 ZigOs post-bootstrap physical memory: ... alloc/free 334/334 failed/rejected 0/0 clean yes
 ZigOs permanent userspace: page-limit 4096 used 0 peak 48 contexts 0 file-mappings 0 launches/exits/faults 17/15/1 ... reclaimed 279 stale-contexts-swept 0 allocator alloc/release/retains 279/279/0 shared/oom/rejected 0/0/0 clean yes
@@ -130,6 +133,7 @@ ZigOs permanent network: device yes ping 1 dns 1 failures 0 clean yes
 
 # Normal userspace-shell profile
 ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes
+ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ... metadata/file/block reads 47/0/47 failures 0 lock tickets/outstanding 1/0 clean yes
 ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 129/129 cache-released 13 storage persistent clean yes
 ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes
 
@@ -168,14 +172,14 @@ Mounted namespaces:
 
 ```text
 /       ramfs       writable, lost at reboot
-/boot   boot_fat    read-only verified boot namespace
+/boot   boot_fat    retained NVMe FAT16, read-only; embedded fallback when diskless
 /proc   procfs      runtime process information
 /dev    devfs       retained device information
 /net    netfs       retained network information
 /persist zigos_persist bounded NVMe A/B journal when available
 ```
 
-The general root remains RAM-backed, while `/persist` is a writable NVMe-backed `zigos_persist` mount using alternating checksummed generations. Kernel and userspace `sync` paths write the payload, flush it, commit a FUA generation header and flush again. Regular files—including linked ELF64 programs up to the VFS limit—are restored into `/persist` and can be executed after reboot; `/boot` remains read-only.
+The general root remains RAM-backed, while `/persist` is a writable NVMe-backed `zigos_persist` mount using alternating checksummed generations. Kernel and userspace `sync` paths write the payload, flush it, commit a FUA generation header and flush again. Regular files?including linked ELF64 programs up to the VFS limit?are restored into `/persist` and can be executed after reboot. On NVMe boots, `/boot` is the retained EFI FAT16 partition itself: bounded 8.3 directory metadata is imported into VFS, while file bytes are streamed on demand from the controller and logical backed-file sizes are excluded from RAM-resident byte accounting. Diskless recovery retains the previous embedded read-only `/boot` fallback.
 
 ## Runtime file descriptors and pipes
 
@@ -353,11 +357,11 @@ make clean
 Capstone 19 reference UEFI image:
 
 ```text
-Size:    5,560,832 bytes
-SHA-256: B84DE845D69F15FEA115DEE4FAF39BCFA7DBCEA754478EDAAC4486E6BDDD3352
+Size:    5,566,464 bytes
+SHA-256: 180252FA7A91B12D932E8CF4D5D4327F9AB688C342201D57DFB99DB7EA2E1E41
 ```
 
-This identity is from the locally validated Windows diagnostic ABI 1.12 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots, per-inode ticket-locked atomic append, a shared sparse-file block pool with persistent allocation maps, failure-atomic bounded `readv`/`writev`, transactional file-scoped `fsync`, data-only `fdatasync` with committed-mode preservation for stable committed paths, transactional global `sync` that prevalidates and visits every writable mount, treats RAM filesystems as immediately synchronized, commits the configured persistent mount once, skips read-only mounts and rejects unsupported writable backends before journal I/O, and a separate bounded 16-page file-data cache keyed by inode generation and logical page, with inode-serialized reads, sparse-zero page caching, LRU replacement, write-through mutation invalidation, an independent one-byte-per-inode dirty-page bitmap that survives cache eviction, target-only fsync/fdatasync clearing, with RAM-backed regular files clearing immediately and persistent files clearing only after journal success; all-writable-mount global clearing after commit success, failure/rejection retention, read-only mount baseline adoption, zero-dirty/zero-outstanding-lock shutdown gates, and an explicit generation-tagged asynchronous writeback request serviced at most once per runtime pass, with scheduling/completion separation, RAM-backed immediate completion, persistent data-only A/B journal commits, busy/stale/unsupported/failure accounting and dirty-state retention on every unsuccessful outcome. Cache page bytes are independently allocated from the post-bootstrap physical-memory manager rather than embedded in the VFS object; runtime service performs bounded low-watermark checks, evicts only clean LRU entries, retains dirty resident pages and the independent ledger, and releases every remaining clean cache page before final PMM accounting. The required diagnostic sessions force the same reclaim path and prove four physical pages returned while dirty pages remain synchronized only by writeback or sync. Every inode also owns eight logical-page writer ticket locks. Ordinary writes lock only affected pages; replacement writes conservatively lock all pages; truncate, preallocation, hole punching and sparse restoration lock their affected page sets in ascending order and release in reverse. A four-thread host test performs 128 writes into disjoint regions of one cached page and requires exact 128/128 page/inode lock ticket deltas, intact final regions and zero outstanding locks; QEMU reports 210 page-write tickets and zero outstanding in both diagnostic profiles. The existing whole-inode lock remains outside these page locks for EOF selection, allocation, size and descriptor-offset consistency, so this does not claim concurrent writes to different pages. ABI 1.12 additionally maps readable regular-file descriptors through generation-tagged, read-only `MAP_SHARED` pages borrowed directly from the PMM-backed VFS cache. Open-description access is authoritative: the CPL3 proof opens the descriptor before changing the pathname to mode `000`, then maps a 13-byte partial final page and continues to write through the retained writable descriptor. Mapping pins prevent cache pressure, ordinary LRU replacement and unlink reclamation from releasing the page; ordinary file writes refresh the same physical page, and final unmap balances the pin and permits deferred inode reclamation. The required CPL3 Zig fixture observes initial bytes, an ordinary-write update, file-read equality and post-close/post-unlink lifetime, while both diagnostic profiles report exact mapped refs/pin/unpin/refresh/fail `0/1/1/1/0` and all profiles finish with zero mapped file pages. Writable file mappings, file-backed `MAP_PRIVATE`, `msync` and mapped-write persistence remain open. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
+This identity is from the locally validated Windows diagnostic ABI 1.12 build with the Zig/C SDK, per-node device operations, diskless recovery, directory-relative `openat`, unified `stat`/`fstat` metadata and deferred open-file unlink reclamation, persistent bounded symbolic-link traversal, hard-link identity, reference-counted dentry-cache cleanup, parent-linked nested mount roots, per-inode ticket-locked atomic append, a shared sparse-file block pool with persistent allocation maps, failure-atomic bounded `readv`/`writev`, transactional file-scoped `fsync`, data-only `fdatasync` with committed-mode preservation for stable committed paths, transactional global `sync` that prevalidates and visits every writable mount, treats RAM filesystems as immediately synchronized, commits the configured persistent mount once, skips read-only mounts and rejects unsupported writable backends before journal I/O, and a separate bounded 16-page file-data cache keyed by inode generation and logical page, with inode-serialized reads, sparse-zero page caching, LRU replacement, write-through mutation invalidation, an independent one-byte-per-inode dirty-page bitmap that survives cache eviction, target-only fsync/fdatasync clearing, with RAM-backed regular files clearing immediately and persistent files clearing only after journal success; all-writable-mount global clearing after commit success, failure/rejection retention, read-only mount baseline adoption, zero-dirty/zero-outstanding-lock shutdown gates, and an explicit generation-tagged asynchronous writeback request serviced at most once per runtime pass, with scheduling/completion separation, RAM-backed immediate completion, persistent data-only A/B journal commits, busy/stale/unsupported/failure accounting and dirty-state retention on every unsuccessful outcome. Cache page bytes are independently allocated from the post-bootstrap physical-memory manager rather than embedded in the VFS object; runtime service performs bounded low-watermark checks, evicts only clean LRU entries, retains dirty resident pages and the independent ledger, and releases every remaining clean cache page before final PMM accounting. The required diagnostic sessions force the same reclaim path and prove four physical pages returned while dirty pages remain synchronized only by writeback or sync. Every inode also owns eight logical-page writer ticket locks. Ordinary writes lock only affected pages; replacement writes conservatively lock all pages; truncate, preallocation, hole punching and sparse restoration lock their affected page sets in ascending order and release in reverse. A four-thread host test performs 128 writes into disjoint regions of one cached page and requires exact 128/128 page/inode lock ticket deltas, intact final regions and zero outstanding locks; QEMU reports 186 page-write tickets and zero outstanding in both diagnostic profiles after the three former RAM-copied `/boot` fixtures were replaced by block-backed files. The existing whole-inode lock remains outside these page locks for EOF selection, allocation, size and descriptor-offset consistency, so this does not claim concurrent writes to different pages. The retained EFI GPT partition is now mounted as a real read-only FAT16 backend. It imports bounded short-name metadata (32 files, 24 directories, depth 8), validates cluster chains with loop bitmaps, caches FAT sectors, streams large file data through one ticket-locked block buffer, and reports metadata/file/block reads and failures. The required 54/56-command QEMU profiles read `/README.TXT` and `/EFI/BOOT/BOOT.CFG`, list both directory levels and stat the 5.56 MiB EFI; host tests stream a 33 KiB file across the ordinary VFS limit. Long-file names, FAT writes, mirror verification, cross-link repair and general FAT fsck remain open. ABI 1.12 additionally maps readable regular-file descriptors through generation-tagged, read-only `MAP_SHARED` pages borrowed directly from the PMM-backed VFS cache. Open-description access is authoritative: the CPL3 proof opens the descriptor before changing the pathname to mode `000`, then maps a 13-byte partial final page and continues to write through the retained writable descriptor. Mapping pins prevent cache pressure, ordinary LRU replacement and unlink reclamation from releasing the page; ordinary file writes refresh the same physical page, and final unmap balances the pin and permits deferred inode reclamation. The required CPL3 Zig fixture observes initial bytes, an ordinary-write update, file-read equality and post-close/post-unlink lifetime, while both diagnostic profiles report exact mapped refs/pin/unpin/refresh/fail `0/1/1/1/0` and all profiles finish with zero mapped file pages. Writable file mappings, file-backed `MAP_PRIVATE`, `msync` and mapped-write persistence remain open. Hosted CI now downloads the Linux and Windows artifact sets into one required job and compares every path byte-for-byte.
 
 ## QEMU validation
 
@@ -454,13 +458,13 @@ src/serial.zig                    COM1 transmit and receive
 - Permanent execution accepts only the strict static x86-64 `ET_EXEC` layouts supported by `elf64.zig`; there is no `ET_DYN`, dynamic linker or relocation support.
 - The permanent executor is bounded to 64 contexts, 1,024 mapping records per context, a fixed eight-page stack and bounded output buffers.
 - The shell `exec` command launches a foreground child instead of replacing the shell process image.
-- Fork, copy-on-write, demand paging, file-backed mappings and flexible guard-fault stack growth are not implemented; startup environment and auxiliary vectors are bounded rather than general.
+- Fork, copy-on-write, demand paging, writable/private file mappings and flexible guard-fault stack growth are not implemented; startup environment and auxiliary vectors are bounded rather than general.
 - Shell pipeline stages still exchange bounded kernel buffers; `pipex` is the real executable pipe proof rather than a general process pipeline.
-- The writable x86-64 root filesystem is RAM-backed and does not survive reboot; `/boot` remains read-only.
+- The writable x86-64 root filesystem is RAM-backed and does not survive reboot; `/boot` is read-only FAT16 with bounded 8.3-name import and no LFN, write, mirror-repair or filesystem-checking support.
 - The userspace network ABI is UDP-only, with eight descriptor bookkeeping slots but four active e1000e hardware endpoints and fixed receive queues. It supports connected and unconnected datagrams, source-address receive, peer inspection, poll and socket-level/per-call nonblocking receive, but there is no TCP listen/accept/data API, general socket-option layer, IPv6 or production network stack.
 - Permanent userspace scheduling currently runs on the BSP rather than an SMP scheduler.
 - Hardware support remains strongly aligned with QEMU q35, QEMU NVMe/xHCI and Intel 82574L emulation.
-- ABI version 1.8 provides generated Zig/NASM/C syscall interfaces, bounded startup/spawn vectors, capability discovery and errno conventions, but it is still experimental: there is no formal compatibility guarantee, complete user/group permission model, ASLR, IOMMU DMA isolation or executable-signing policy.
+- ABI version 1.12 provides generated Zig/NASM/C syscall interfaces, bounded startup/spawn vectors, capability discovery and errno conventions, but it is still experimental: there is no formal compatibility guarantee, complete user/group permission model, ASLR, IOMMU DMA isolation or executable-signing policy.
 - ZigOs remains experimental, non-POSIX and not secure against hostile workloads.
 
 ## Design principles

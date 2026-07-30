@@ -231,8 +231,12 @@ def build_image(output: Path, efi_image: Path, block_size: int) -> dict[str, int
     file_clusters = math.ceil(len(efi_bytes) / block_size)
     first_file_cluster = 4
     last_file_cluster = first_file_cluster + file_clusters - 1
-    if last_file_cluster >= layout["cluster_count"] + 2:
-        raise ValueError("EFI image does not fit in FAT16 data area")
+    readme_bytes = b"ZigOs block-backed FAT16 runtime mount\n"
+    config_bytes = b"source=nvme0p1\nmode=readonly\n"
+    readme_cluster = last_file_cluster + 1
+    config_cluster = readme_cluster + 1
+    if config_cluster >= layout["cluster_count"] + 2:
+        raise ValueError("EFI image and runtime FAT fixtures do not fit in FAT16 data area")
 
     fat = bytearray(layout["sectors_per_fat"] * block_size)
     set_fat16_entry(fat, 0, 0xFFF8)
@@ -242,16 +246,20 @@ def build_image(output: Path, efi_image: Path, block_size: int) -> dict[str, int
     for cluster in range(first_file_cluster, last_file_cluster):
         set_fat16_entry(fat, cluster, cluster + 1)
     set_fat16_entry(fat, last_file_cluster, 0xFFFF)
+    set_fat16_entry(fat, readme_cluster, 0xFFFF)
+    set_fat16_entry(fat, config_cluster, 0xFFFF)
 
     root_directory = bytearray(layout["root_directory_sectors"] * block_size)
     set_directory_entry(root_directory, 0, b"EFI        ", 0x10, 2, 0)
-    root_directory[32] = 0
+    set_directory_entry(root_directory, 32, b"README  TXT", 0x21, readme_cluster, len(readme_bytes))
+    root_directory[64] = 0
     efi_directory = bytearray(block_size)
     set_directory_entry(efi_directory, 0, b"BOOT       ", 0x10, 3, 0)
     efi_directory[32] = 0
     boot_directory = bytearray(block_size)
     set_directory_entry(boot_directory, 0, b"BOOTX64 EFI", 0x20, first_file_cluster, len(efi_bytes))
-    boot_directory[32] = 0
+    set_directory_entry(boot_directory, 32, b"BOOT    CFG", 0x21, config_cluster, len(config_bytes))
+    boot_directory[64] = 0
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("wb") as stream:
@@ -272,6 +280,8 @@ def build_image(output: Path, efi_image: Path, block_size: int) -> dict[str, int
         write_lba(layout["first_data_lba"], efi_directory)
         write_lba(layout["first_data_lba"] + 1, boot_directory)
         write_lba(layout["first_data_lba"] + 2, efi_bytes)
+        write_lba(layout["first_data_lba"] + readme_cluster - 2, readme_bytes)
+        write_lba(layout["first_data_lba"] + config_cluster - 2, config_bytes)
 
     metadata: dict[str, int | str] = dict(layout)
     metadata.update(
@@ -285,6 +295,10 @@ def build_image(output: Path, efi_image: Path, block_size: int) -> dict[str, int
             "file_cluster_count": file_clusters,
             "file_first_cluster": first_file_cluster,
             "file_last_cluster": last_file_cluster,
+            "runtime_readme_cluster": readme_cluster,
+            "runtime_readme_size": len(readme_bytes),
+            "runtime_config_cluster": config_cluster,
+            "runtime_config_size": len(config_bytes),
         }
     )
     return metadata
