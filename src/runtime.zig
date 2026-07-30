@@ -468,23 +468,33 @@ fn initializeFilesystem() !void {
 
     if (state.config.nvme_controller != null and state.config.nvme_boot_first_lba != 0 and state.config.nvme_boot_sector_count != 0) {
         const controller = state.config.nvme_controller.?;
-        _ = try state.boot_fat.mount(&state.vfs, "/boot", "nvme0p1", .{
+        if (state.boot_fat.mount(&state.vfs, "/boot", "nvme0p1", .{
             .context = controller,
             .block_size = controller.logical_block_size,
             .first_lba = state.config.nvme_boot_first_lba,
             .sector_count = state.config.nvme_boot_sector_count,
             .read_fn = bootFatReadBlock,
-        }, 0);
+        }, 0)) |_| {} else |err| {
+            if (!state.boot_fat.quarantine(err)) return err;
+            try installEmbeddedBootAssets("embedded-quarantine");
+            emit("ZigOs boot FAT quarantined: ");
+            emit(@tagName(state.boot_fat.report().quarantine_reason));
+            emit("; embedded read-only fallback mounted\r\n");
+        }
     } else {
-        _ = try state.vfs.putFile(0, "/boot/service-user.elf", service_elf, 0o555, false, 0);
-        _ = try state.vfs.putFile(0, "/boot/process-user.elf", process_elf, 0o555, false, 0);
-        _ = try state.vfs.putFile(0, "/boot/process-exec.elf", process_exec_elf, 0o555, false, 0);
-        _ = try state.vfs.mount(0, "/boot", .boot_fat, true, "embedded-assets");
+        try installEmbeddedBootAssets("embedded-assets");
     }
     _ = try state.vfs.mount(0, "/proc", .procfs, true, "process-table");
     _ = try state.vfs.mount(0, "/dev", .devfs, true, "kernel-devices");
     _ = try state.vfs.mount(0, "/net", .netfs, true, "network-state");
     if (!state.vfs.validate()) return runtime_vfs.Error.InvalidPath;
+}
+
+fn installEmbeddedBootAssets(source: []const u8) !void {
+    _ = try state.vfs.putFile(0, "/boot/service-user.elf", service_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/boot/process-user.elf", process_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/boot/process-exec.elf", process_exec_elf, 0o555, false, 0);
+    _ = try state.vfs.mount(0, "/boot", .boot_fat, true, source);
 }
 
 fn currentTick() u64 {
@@ -2460,13 +2470,19 @@ fn writebackStateClean(report: runtime_persist.Report) bool {
 fn bootFatStateClean(report: runtime_boot_fat.Report, require_file_reads: bool) bool {
     const configured = state.config.nvme_controller != null and state.config.nvme_boot_first_lba != 0 and
         state.config.nvme_boot_sector_count != 0;
-    if (!configured) {
-        return !report.mounted and report.files == 0 and report.directories == 0 and report.bytes == 0 and
-            report.metadata_reads == 0 and report.file_reads == 0 and report.blocks_read == 0 and report.failures == 0 and
-            report.claimed_clusters == 0 and report.chain_loops == 0 and report.cross_links == 0 and
-            report.out_of_range_links == 0 and report.lock_outstanding == 0;
+    if (report.quarantined) {
+        return configured and state.boot_fat.validateQuarantine() and !report.mounted and report.files == 0 and
+            report.directories == 0 and report.bytes == 0 and report.file_reads == 0 and report.claimed_clusters == 0 and
+            report.quarantine_events == 1 and report.lock_outstanding == 0;
     }
-    return report.mounted and state.boot_fat.validate() and report.files >= 3 and report.directories >= 2 and
+    if (!configured) {
+        return !report.mounted and !report.quarantined and report.quarantine_reason == .none and report.quarantine_events == 0 and
+            report.files == 0 and report.directories == 0 and report.bytes == 0 and report.metadata_reads == 0 and
+            report.file_reads == 0 and report.blocks_read == 0 and report.failures == 0 and report.claimed_clusters == 0 and
+            report.chain_loops == 0 and report.cross_links == 0 and report.out_of_range_links == 0 and report.lock_outstanding == 0;
+    }
+    return report.mounted and !report.quarantined and report.quarantine_reason == .none and report.quarantine_events == 0 and
+        state.boot_fat.validate() and report.files >= 3 and report.directories >= 2 and
         report.bytes > 0 and report.metadata_reads > 0 and (!require_file_reads or report.file_reads >= 2) and
         report.blocks_read >= report.metadata_reads and report.failures == 0 and report.claimed_clusters > 0 and
         report.chain_loops == 0 and report.cross_links == 0 and report.out_of_range_links == 0 and
@@ -2502,6 +2518,12 @@ fn emitBootFatReport(report: runtime_boot_fat.Report, clean: bool) void {
     emitDecimal(report.lock_tickets);
     emit("/");
     emitDecimal(report.lock_outstanding);
+    emit(" quarantine state/reason/events ");
+    emit(if (report.quarantined) "yes" else "no");
+    emit("/");
+    emit(@tagName(report.quarantine_reason));
+    emit("/");
+    emitDecimal(report.quarantine_events);
     emit(" clean ");
     emit(if (clean) "yes" else "no");
     emit("\r\n");

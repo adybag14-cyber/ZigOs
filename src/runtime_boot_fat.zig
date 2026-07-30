@@ -19,8 +19,19 @@ pub const BlockDevice = struct {
     read_fn: ReadBlockFn,
 };
 
+pub const QuarantineReason = enum(u8) {
+    none,
+    chain_loop,
+    cross_link,
+    out_of_range,
+    corrupt,
+};
+
 pub const Report = struct {
     mounted: bool,
+    quarantined: bool,
+    quarantine_reason: QuarantineReason,
+    quarantine_events: u64,
     files: usize,
     directories: usize,
     bytes: u64,
@@ -49,27 +60,48 @@ pub const Error = runtime_vfs.Error || error{
     OutOfRangeCluster,
 };
 
-const DirectoryTask = struct {
-    parent_node: u16,
-    first_cluster: u32,
-    depth: u8,
+const maximum_short_name_bytes: usize = 12;
+const root_directory_index: u8 = 0;
+
+const StagedDirectory = struct {
+    used: bool = false,
+    parent_index: u8 = root_directory_index,
+    first_cluster: u32 = 0,
+    depth: u8 = 0,
+    name: [maximum_short_name_bytes]u8 = @splat(0),
+    name_length: u8 = 0,
+
+    fn nameSlice(self: *const StagedDirectory) []const u8 {
+        return self.name[0..self.name_length];
+    }
 };
 
 const FileContext = struct {
     used: bool = false,
     backend: ?*Backend = null,
+    parent_directory: u8 = root_directory_index,
+    name: [maximum_short_name_bytes]u8 = @splat(0),
+    name_length: u8 = 0,
     first_cluster: u32 = 0,
     size: u32 = 0,
     cursor_valid: bool = false,
     cursor_cluster: u32 = 0,
     cursor_ordinal: u32 = 0,
+
+    fn nameSlice(self: *const FileContext) []const u8 {
+        return self.name[0..self.name_length];
+    }
 };
 
 pub const Backend = struct {
     mounted: bool = false,
+    quarantined: bool = false,
+    quarantine_reason: QuarantineReason = .none,
+    quarantine_events: u64 = 0,
     device: BlockDevice = undefined,
     volume: fat.Volume = undefined,
     files: [maximum_files]FileContext = @splat(.{}),
+    directories: [maximum_directories]StagedDirectory = @splat(.{}),
     sector: [maximum_sector_bytes]u8 = @splat(0),
     fat_sector: [maximum_sector_bytes]u8 = @splat(0),
     cached_fat_lba: u64 = 0,
@@ -121,21 +153,66 @@ pub const Backend = struct {
 
         const mountpoint = try vfs.resolve(0, mount_path);
         if ((try vfs.statNode(mountpoint)).kind != .directory) return Error.NotDirectory;
-        var queue: [maximum_directories]DirectoryTask = undefined;
+        self.directories[root_directory_index] = .{
+            .used = true,
+            .first_cluster = self.volume.root_cluster,
+            .depth = 0,
+        };
+        var queue: [maximum_directories]u8 = undefined;
         var queue_count: usize = 1;
         var queue_index: usize = 0;
-        queue[0] = .{ .parent_node = mountpoint, .first_cluster = self.volume.root_cluster, .depth = 0 };
+        queue[0] = root_directory_index;
         while (queue_index < queue_count) : (queue_index += 1) {
-            try self.importDirectoryLocked(vfs, queue[queue_index], &queue, &queue_count, tick);
+            try self.scanDirectoryLocked(queue[queue_index], &queue, &queue_count);
         }
+        try self.publishNamespace(vfs, mountpoint, tick);
         const mount_id = try vfs.mount(0, mount_path, .boot_fat, true, source);
         self.mounted = true;
         return mount_id;
     }
 
+    pub fn quarantine(self: *Backend, err: anyerror) bool {
+        const reason: QuarantineReason = switch (err) {
+            error.ChainLoop => .chain_loop,
+            error.CrossLinkedCluster => .cross_link,
+            error.OutOfRangeCluster => .out_of_range,
+            error.CorruptFilesystem => .corrupt,
+            else => return false,
+        };
+        self.mounted = false;
+        self.quarantined = true;
+        self.quarantine_reason = reason;
+        self.quarantine_events +%= 1;
+        self.file_count = 0;
+        self.directory_count = 0;
+        self.byte_count = 0;
+        self.claimed_clusters = 0;
+        self.fat_sector_valid = false;
+        @memset(&self.files, .{});
+        @memset(&self.directories, .{});
+        @memset(&self.claimed_cluster_bitmap, 0);
+        return true;
+    }
+
+    pub fn validateQuarantine(self: *const Backend) bool {
+        if (self.mounted or !self.quarantined or self.quarantine_reason == .none or self.quarantine_events != 1) return false;
+        if (self.file_count != 0 or self.directory_count != 0 or self.byte_count != 0 or self.claimed_clusters != 0) return false;
+        if (self.io_lock.next() != self.io_lock.serving()) return false;
+        return switch (self.quarantine_reason) {
+            .chain_loop => self.chain_loops > 0 and self.cross_links == 0 and self.out_of_range_links == 0,
+            .cross_link => self.cross_links > 0 and self.chain_loops == 0 and self.out_of_range_links == 0,
+            .out_of_range => self.out_of_range_links > 0 and self.chain_loops == 0 and self.cross_links == 0,
+            .corrupt => self.chain_loops == 0 and self.cross_links == 0 and self.out_of_range_links == 0,
+            .none => false,
+        };
+    }
+
     pub fn report(self: *const Backend) Report {
         return .{
             .mounted = self.mounted,
+            .quarantined = self.quarantined,
+            .quarantine_reason = self.quarantine_reason,
+            .quarantine_events = self.quarantine_events,
             .files = self.file_count,
             .directories = self.directory_count,
             .bytes = self.byte_count,
@@ -153,13 +230,25 @@ pub const Backend = struct {
     }
 
     pub fn validate(self: *const Backend) bool {
-        if (!self.mounted or self.file_count > self.files.len or self.directory_count > maximum_directories) return false;
+        if (!self.mounted or self.quarantined or self.quarantine_reason != .none or self.quarantine_events != 0 or
+            self.file_count > self.files.len or self.directory_count >= maximum_directories) return false;
         if (self.io_lock.next() != self.io_lock.serving()) return false;
+        if (!self.directories[root_directory_index].used) return false;
+        var directories: usize = 0;
+        for (self.directories, 0..) |directory, index| {
+            if (!directory.used) continue;
+            if (index == root_directory_index) continue;
+            if (directory.name_length == 0 or directory.name_length > maximum_short_name_bytes or directory.parent_index >= index) return false;
+            directories += 1;
+        }
+        if (directories != self.directory_count) return false;
         var files: usize = 0;
         var bytes: u64 = 0;
         for (&self.files) |*file| {
             if (!file.used) continue;
-            if (file.backend != self or (file.size != 0 and file.first_cluster < 2)) return false;
+            if (file.backend != self or file.name_length == 0 or file.name_length > maximum_short_name_bytes or
+                file.parent_directory >= self.directories.len or !self.directories[file.parent_directory].used or
+                (file.size != 0 and file.first_cluster < 2)) return false;
             files += 1;
             bytes += file.size;
         }
@@ -167,29 +256,29 @@ pub const Backend = struct {
             self.chain_loops == 0 and self.cross_links == 0 and self.out_of_range_links == 0;
     }
 
-    fn importDirectoryLocked(
+    fn scanDirectoryLocked(
         self: *Backend,
-        vfs: *runtime_vfs.Vfs,
-        task: DirectoryTask,
-        queue: *[maximum_directories]DirectoryTask,
+        directory_index: u8,
+        queue: *[maximum_directories]u8,
         queue_count: *usize,
-        tick: u64,
     ) Error!void {
-        if (task.depth > maximum_depth) return Error.NamespaceLimit;
-        if (task.first_cluster == 0) {
+        if (directory_index >= self.directories.len or !self.directories[directory_index].used) return Error.CorruptFilesystem;
+        const directory = self.directories[directory_index];
+        if (directory.depth > maximum_depth) return Error.NamespaceLimit;
+        if (directory.first_cluster == 0) {
             if (self.volume.kind == .fat32) return Error.UnsupportedFat;
             var sector_index: u32 = 0;
             while (sector_index < self.volume.root_directory_sectors) : (sector_index += 1) {
                 try self.readMetadataBlockLocked(self.volume.root_directory_lba + sector_index);
                 const decoded = fat.parseDirectorySector(self.sector[0..self.device.block_size]) orelse return Error.CorruptFilesystem;
-                try self.importDirectorySectorLocked(vfs, task, decoded, queue, queue_count, tick);
+                try self.scanDirectorySectorLocked(directory_index, decoded, queue, queue_count);
                 if (decoded.end_of_directory) return;
             }
             return;
         }
 
         @memset(&self.directory_visited, 0);
-        var cluster = task.first_cluster;
+        var cluster = directory.first_cluster;
         var traversed: u32 = 0;
         var end_of_directory = false;
         while (traversed < self.volume.cluster_count) : (traversed += 1) {
@@ -201,7 +290,7 @@ pub const Backend = struct {
                 while (sector_index < self.volume.sectors_per_cluster) : (sector_index += 1) {
                     try self.readMetadataBlockLocked(first_lba + sector_index);
                     const decoded = fat.parseDirectorySector(self.sector[0..self.device.block_size]) orelse return Error.CorruptFilesystem;
-                    try self.importDirectorySectorLocked(vfs, task, decoded, queue, queue_count, tick);
+                    try self.scanDirectorySectorLocked(directory_index, decoded, queue, queue_count);
                     if (decoded.end_of_directory) {
                         end_of_directory = true;
                         break;
@@ -218,26 +307,30 @@ pub const Backend = struct {
         return Error.ChainLoop;
     }
 
-    fn importDirectorySectorLocked(
+    fn scanDirectorySectorLocked(
         self: *Backend,
-        vfs: *runtime_vfs.Vfs,
-        task: DirectoryTask,
+        directory_index: u8,
         decoded: fat.DirectorySector,
-        queue: *[maximum_directories]DirectoryTask,
+        queue: *[maximum_directories]u8,
         queue_count: *usize,
-        tick: u64,
     ) Error!void {
         for (decoded.entries[0..decoded.count]) |entry| {
             const name = entry.nameSlice();
             if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            if (name.len == 0 or name.len > maximum_short_name_bytes) return Error.CorruptFilesystem;
             if (entry.isDirectory()) {
                 if (entry.first_cluster < 2 or queue_count.* >= queue.len) return Error.NamespaceLimit;
-                const node = try vfs.mkdir(task.parent_node, name, 0o555, tick);
-                queue[queue_count.*] = .{
-                    .parent_node = node,
+                const staged_index: u8 = @intCast(queue_count.*);
+                const staged = &self.directories[staged_index];
+                staged.* = .{
+                    .used = true,
+                    .parent_index = directory_index,
                     .first_cluster = entry.first_cluster,
-                    .depth = task.depth + 1,
+                    .depth = self.directories[directory_index].depth + 1,
+                    .name_length = @intCast(name.len),
                 };
+                @memcpy(staged.name[0..name.len], name);
+                queue[queue_count.*] = staged_index;
                 queue_count.* += 1;
                 self.directory_count += 1;
                 continue;
@@ -248,20 +341,46 @@ pub const Backend = struct {
             file.* = .{
                 .used = true,
                 .backend = self,
+                .parent_directory = directory_index,
+                .name_length = @intCast(name.len),
                 .first_cluster = entry.first_cluster,
                 .size = entry.file_size,
             };
+            @memcpy(file.name[0..name.len], name);
+            self.file_count += 1;
+            self.byte_count += entry.file_size;
+        }
+    }
+
+    fn publishNamespace(self: *Backend, vfs: *runtime_vfs.Vfs, mountpoint: u16, tick: u64) Error!void {
+        var directory_nodes: [maximum_directories]u16 = @splat(runtime_vfs.invalid_node);
+        directory_nodes[root_directory_index] = mountpoint;
+        var index: usize = 1;
+        while (index < self.directories.len) : (index += 1) {
+            const directory = &self.directories[index];
+            if (!directory.used) continue;
+            if (directory.parent_index >= index or directory_nodes[directory.parent_index] == runtime_vfs.invalid_node)
+                return Error.CorruptFilesystem;
+            directory_nodes[index] = try vfs.mkdir(
+                directory_nodes[directory.parent_index],
+                directory.nameSlice(),
+                0o555,
+                tick,
+            );
+        }
+        for (&self.files) |*file| {
+            if (!file.used) continue;
+            if (file.parent_directory >= directory_nodes.len or directory_nodes[file.parent_directory] == runtime_vfs.invalid_node)
+                return Error.CorruptFilesystem;
             _ = try vfs.createBackedFileWithOperations(
-                task.parent_node,
-                name,
-                entry.file_size,
+                directory_nodes[file.parent_directory],
+                file.nameSlice(),
+                file.size,
                 0o444,
                 tick,
                 &file_operations,
                 file,
             );
-            self.file_count += 1;
-            self.byte_count += entry.file_size;
         }
     }
 
@@ -584,6 +703,10 @@ test "read-only FAT16 backend imports directories and streams large files from b
     }, 1));
     try std.testing.expect(loop_device.reads > 0);
     try std.testing.expectEqual(@as(u64, 1), loop_backend.report().chain_loops);
+    try std.testing.expectError(runtime_vfs.Error.NotFound, loop_vfs.stat(0, "/boot/EFI"));
+    try std.testing.expect(loop_backend.quarantine(error.ChainLoop));
+    try std.testing.expectEqual(QuarantineReason.chain_loop, loop_backend.report().quarantine_reason);
+    try std.testing.expect(loop_backend.validateQuarantine());
 
     setFat16(fat1, 8, 9);
     setDirectoryEntry(boot_dir, 0, &"BOOT    CFG".*, 0x20, 7, 20);
@@ -600,6 +723,10 @@ test "read-only FAT16 backend imports directories and streams large files from b
         .read_fn = testReadBlock,
     }, 1));
     try std.testing.expectEqual(@as(u64, 1), cross_backend.report().cross_links);
+    try std.testing.expectError(runtime_vfs.Error.NotFound, cross_vfs.stat(0, "/boot/EFI"));
+    try std.testing.expect(cross_backend.quarantine(error.CrossLinkedCluster));
+    try std.testing.expectEqual(QuarantineReason.cross_link, cross_backend.report().quarantine_reason);
+    try std.testing.expect(cross_backend.validateQuarantine());
 
     setDirectoryEntry(boot_dir, 0, &"BOOT    CFG".*, 0x20, 6, 20);
     setFat16(fat1, 8, 0x7FFF);
@@ -616,4 +743,9 @@ test "read-only FAT16 backend imports directories and streams large files from b
         .read_fn = testReadBlock,
     }, 1));
     try std.testing.expectEqual(@as(u64, 1), range_backend.report().out_of_range_links);
+    try std.testing.expectError(runtime_vfs.Error.NotFound, range_vfs.stat(0, "/boot/EFI"));
+    try std.testing.expect(range_backend.quarantine(error.OutOfRangeCluster));
+    try std.testing.expectEqual(QuarantineReason.out_of_range, range_backend.report().quarantine_reason);
+    try std.testing.expect(range_backend.validateQuarantine());
+    try std.testing.expect(!range_backend.quarantine(error.IoFailure));
 }

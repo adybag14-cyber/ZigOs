@@ -154,7 +154,12 @@ def layout_for(block_size: int) -> dict[str, int]:
     }
 
 
-def build_image(output: Path, efi_image: Path, block_size: int) -> dict[str, int | str]:
+def build_image(
+    output: Path,
+    efi_image: Path,
+    block_size: int,
+    boot_fat_corruption: str = "none",
+) -> dict[str, int | str]:
     layout = layout_for(block_size)
     efi_bytes = efi_image.read_bytes()
 
@@ -258,7 +263,8 @@ def build_image(output: Path, efi_image: Path, block_size: int) -> dict[str, int
     efi_directory[32] = 0
     boot_directory = bytearray(block_size)
     set_directory_entry(boot_directory, 0, b"BOOTX64 EFI", 0x20, first_file_cluster, len(efi_bytes))
-    set_directory_entry(boot_directory, 32, b"BOOT    CFG", 0x21, config_cluster, len(config_bytes))
+    config_directory_cluster = readme_cluster if boot_fat_corruption == "cross-link" else config_cluster
+    set_directory_entry(boot_directory, 32, b"BOOT    CFG", 0x21, config_directory_cluster, len(config_bytes))
     boot_directory[64] = 0
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -298,7 +304,9 @@ def build_image(output: Path, efi_image: Path, block_size: int) -> dict[str, int
             "runtime_readme_cluster": readme_cluster,
             "runtime_readme_size": len(readme_bytes),
             "runtime_config_cluster": config_cluster,
+            "runtime_config_directory_cluster": config_directory_cluster,
             "runtime_config_size": len(config_bytes),
+            "boot_fat_corruption": boot_fat_corruption,
         }
     )
     return metadata
@@ -310,9 +318,10 @@ def main() -> None:
     parser.add_argument("--efi", required=True, type=Path)
     parser.add_argument("--block-size", required=True, type=int, choices=(512, 4096))
     parser.add_argument("--metadata", required=True, type=Path)
+    parser.add_argument("--boot-fat-corruption", choices=("none", "cross-link"), default="none")
     args = parser.parse_args()
 
-    metadata = build_image(args.output, args.efi, args.block_size)
+    metadata = build_image(args.output, args.efi, args.block_size, args.boot_fat_corruption)
     args.metadata.parent.mkdir(parents=True, exist_ok=True)
     args.metadata.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(metadata, sort_keys=True))

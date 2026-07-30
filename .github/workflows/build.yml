@@ -116,6 +116,10 @@ jobs:
         shell: pwsh
         run: python .\scripts\test-normal-boot.py --boot-timeout 240
 
+      - name: Quarantine cross-linked FAT16 boot media
+        shell: pwsh
+        run: python .\scripts\test-boot-fat-quarantine.py --boot-timeout 240
+
       - name: Boot diskless normal RAM-root recovery profile
         shell: pwsh
         run: python .\scripts\test-diskless-normal-boot.py --skip-build --boot-timeout 240

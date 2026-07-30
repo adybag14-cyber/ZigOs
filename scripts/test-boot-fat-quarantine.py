@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Boot the normal x86-64 profile and prove userspace PID 1 supervision of the interactive PID 2 Zig shell."""
+"""Boot a cross-linked FAT16 image and prove classified quarantine with embedded read-only fallback."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import shutil
 import socket
@@ -116,9 +117,9 @@ def main() -> int:
     sdk_copy_marker = f"copied {sdk_elf.stat().st_size} bytes"
 
     (root / "build").mkdir(parents=True, exist_ok=True)
-    work = pathlib.Path(tempfile.mkdtemp(prefix="normal-boot-", dir=root / "build"))
-    image = work / "normal-nvme.img"
-    metadata = work / "normal-nvme.json"
+    work = pathlib.Path(tempfile.mkdtemp(prefix="boot-fat-quarantine-", dir=root / "build"))
+    image = work / "quarantine-nvme.img"
+    metadata = work / "quarantine-nvme.json"
     subprocess.run(
         [
             sys.executable,
@@ -131,11 +132,19 @@ def main() -> int:
             "512",
             "--metadata",
             str(metadata),
+            "--boot-fat-corruption",
+            "cross-link",
         ],
         cwd=root,
         check=True,
         stdout=subprocess.DEVNULL,
     )
+    image_metadata = json.loads(metadata.read_text(encoding="utf-8"))
+    if (
+        image_metadata.get("boot_fat_corruption") != "cross-link"
+        or image_metadata.get("runtime_config_directory_cluster") != image_metadata.get("runtime_readme_cluster")
+    ):
+        raise RuntimeError("quarantine image did not contain the requested non-boot FAT cross-link")
 
     qemu = find_qemu()
     code_source, vars_source = find_firmware(qemu)
@@ -200,7 +209,7 @@ def main() -> int:
                 except OSError:
                     time.sleep(0.1)
             if client is None:
-                raise RuntimeError("normal boot serial connection failed")
+                raise RuntimeError("quarantine boot serial connection failed")
 
             wait_for(client, process, serial, b"ZigOs userspace init PID 1", 0, args.boot_timeout)
             wait_for(client, process, serial, b"ZigOs userspace shell PID 2", 0, 20)
@@ -209,6 +218,8 @@ def main() -> int:
             send(client, process, serial, "pwd", b"\r\n/home/root\r\n")
             send(client, process, serial, "cd /", PROMPT_ROOT)
             send(client, process, serial, "pwd", b"\r\n/\r\n")
+            send(client, process, serial, "ls /boot", b"process-exec.elf")
+            send(client, process, serial, "cat /boot/README.TXT", b"not found")
             send(client, process, serial, "ls /bin", b"sh.elf")
             send(client, process, serial, "cat /proc/version", b"ZigOs 19.0.0 x86_64 persistent runtime")
             send(client, process, serial, "pid", b"\r\n2\r\n")
@@ -252,8 +263,11 @@ def main() -> int:
                 "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
-                "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 49/0/49 failures 0 clusters claimed/loop/cross/range 10781/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                "ZigOs boot FAT quarantined: cross_link; embedded read-only fallback mounted",
+                "process-exec.elf",
+                "cat: not found",
+                "ZigOs boot FAT: block-backed no files/directories 0/0 bytes 0 metadata/file/block reads 48/0/48 failures 0 clusters claimed/loop/cross/range 0/0/1/0 lock tickets/outstanding 1/0 quarantine state/reason/events yes/cross_link/1 clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 129/129 cache-released 13 storage persistent clean yes",
                 "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 129/129 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
@@ -268,12 +282,12 @@ def main() -> int:
             )
             for marker in required:
                 if marker not in text:
-                    raise RuntimeError(f"normal boot missing marker: {marker}")
+                    raise RuntimeError(f"quarantine boot missing marker: {marker}")
             for marker in forbidden:
                 if marker in text:
-                    raise RuntimeError(f"normal boot unexpectedly ran diagnostic marker: {marker}")
+                    raise RuntimeError(f"quarantine boot unexpectedly ran diagnostic marker: {marker}")
             if "ZigOs normal userspace resources:" not in text or "clean yes" not in text:
-                raise RuntimeError("normal boot did not report clean resource reclamation")
+                raise RuntimeError("quarantine boot did not report clean resource reclamation")
         finally:
             if client is not None:
                 client.close()
@@ -281,7 +295,7 @@ def main() -> int:
                 process.kill()
                 process.wait(timeout=10)
 
-    print("Normal x86-64 userspace-shell boot passed.")
+    print("Cross-linked FAT16 quarantine boot passed.")
     print(f"  serial log: {serial_log}")
     return 0
 
