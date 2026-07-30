@@ -134,6 +134,7 @@ const Node = struct {
     mount_id: u8 = 0,
     modified_tick: u64 = 0,
     data_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
+    page_write_locks: [file_blocks_per_node]synchronization.TicketLock = @splat(synchronization.TicketLock.init()),
     pseudo_operations: ?*const PseudoOperations = null,
     pseudo_context: ?*anyopaque = null,
 };
@@ -293,6 +294,8 @@ pub const Report = struct {
     file_page_cache_lock_outstanding: u64,
     data_lock_tickets: u64,
     data_lock_outstanding: u64,
+    page_write_lock_tickets: u64,
+    page_write_lock_outstanding: u64,
     data_pool_lock_tickets: u64,
     data_pool_lock_outstanding: u64,
     allocated_blocks: usize,
@@ -1122,6 +1125,8 @@ pub const Vfs = struct {
         if (node.readonly or self.mountReadonly(node.mount_id)) return Error.ReadOnly;
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
+        self.acquirePageWriteLocks(node, 0xFF);
+        defer self.releasePageWriteLocks(node, 0xFF);
         _ = self.data_pool_lock.acquire();
         defer self.data_pool_lock.release();
         const reusable = self.nodeAllocatedBlockCount(node_index);
@@ -1172,6 +1177,7 @@ pub const Vfs = struct {
             const node = &self.nodes[index];
             if ((!node.used or node.kind != .file) and self.dirty_file_page_bitmap[index] != 0) return false;
             if (node.data_lock.next() != node.data_lock.serving()) return false;
+            for (&node.page_write_locks) |*page_lock| if (page_lock.next() != page_lock.serving()) return false;
             if (node.kind != .file) for (node.file_blocks) |block_index| if (block_index != invalid_data_block) return false;
             if (!node.used) {
                 if (counted_links[index] != 0) return false;
@@ -1323,6 +1329,8 @@ pub const Vfs = struct {
             .file_page_cache_lock_outstanding = self.file_page_cache_lock.next() -% self.file_page_cache_lock.serving(),
             .data_lock_tickets = 0,
             .data_lock_outstanding = 0,
+            .page_write_lock_tickets = 0,
+            .page_write_lock_outstanding = 0,
             .data_pool_lock_tickets = self.data_pool_lock.next(),
             .data_pool_lock_outstanding = self.data_pool_lock.next() -% self.data_pool_lock.serving(),
             .allocated_blocks = 0,
@@ -1335,6 +1343,12 @@ pub const Vfs = struct {
             const serving_ticket = node.data_lock.serving();
             result.data_lock_tickets += next_ticket;
             result.data_lock_outstanding += next_ticket -% serving_ticket;
+            for (&node.page_write_locks) |*page_lock| {
+                const page_next = page_lock.next();
+                const page_serving = page_lock.serving();
+                result.page_write_lock_tickets += page_next;
+                result.page_write_lock_outstanding += page_next -% page_serving;
+            }
             if (!node.used) continue;
             const dirty_bitmap = self.dirty_file_page_bitmap[node_index];
             if (dirty_bitmap != 0) {
@@ -1659,6 +1673,37 @@ pub const Vfs = struct {
         end_offset: usize,
     };
 
+    fn acquirePageWriteLocks(self: *Vfs, node: *Node, bitmap: u8) void {
+        _ = self;
+        for (0..file_blocks_per_node) |slot| {
+            if ((bitmap & (@as(u8, 1) << @intCast(slot))) != 0) _ = node.page_write_locks[slot].acquire();
+        }
+    }
+
+    fn releasePageWriteLocks(self: *Vfs, node: *Node, bitmap: u8) void {
+        _ = self;
+        var slot = file_blocks_per_node;
+        while (slot != 0) {
+            slot -= 1;
+            if ((bitmap & (@as(u8, 1) << @intCast(slot))) != 0) node.page_write_locks[slot].release();
+        }
+    }
+
+    fn truncatePageWriteBitmap(self: *const Vfs, node_index: u16, size: usize) u8 {
+        const node = &self.nodes[node_index];
+        if (size == node.size) return 0;
+        const start = @min(size, node.size);
+        const end = @max(size, node.size);
+        var bitmap = filePageRangeBitmap(start, end - start);
+        if (size < node.size) {
+            const first_released = (size + file_block_size - 1) / file_block_size;
+            for (first_released..file_blocks_per_node) |slot| {
+                if (node.file_blocks[slot] != invalid_data_block) bitmap |= @as(u8, 1) << @intCast(slot);
+            }
+        }
+        return bitmap;
+    }
+
     fn writeNode(self: *Vfs, node_index: u16, offset: usize, bytes: []const u8, truncate_first: bool, tick: u64) Error!usize {
         try self.requireWritableFile(node_index);
         var node = &self.nodes[node_index];
@@ -1679,8 +1724,11 @@ pub const Vfs = struct {
 
     fn writeNodeLocked(self: *Vfs, node_index: u16, offset: usize, bytes: []const u8, truncate_first: bool, tick: u64) Error!usize {
         if (offset > maximum_file_size or bytes.len > maximum_file_size - offset) return Error.FileTooLarge;
-        try self.prepareWriteBlocks(node_index, offset, bytes.len, truncate_first);
         var node = &self.nodes[node_index];
+        const page_bitmap: u8 = if (truncate_first) 0xFF else filePageRangeBitmap(offset, bytes.len);
+        self.acquirePageWriteLocks(node, page_bitmap);
+        defer self.releasePageWriteLocks(node, page_bitmap);
+        try self.prepareWriteBlocks(node_index, offset, bytes.len, truncate_first);
         const previous_size = node.size;
         if (truncate_first) {
             node.size = 0;
@@ -1700,6 +1748,9 @@ pub const Vfs = struct {
     fn truncateNodeLocked(self: *Vfs, node_index: u16, size: usize, tick: u64) void {
         var node = &self.nodes[node_index];
         const previous_size = node.size;
+        const page_bitmap = self.truncatePageWriteBitmap(node_index, size);
+        self.acquirePageWriteLocks(node, page_bitmap);
+        defer self.releasePageWriteLocks(node, page_bitmap);
         if (size < node.size) {
             _ = self.data_pool_lock.acquire();
             defer self.data_pool_lock.release();
@@ -1732,6 +1783,9 @@ pub const Vfs = struct {
         var node = &self.nodes[node_index];
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
+        const page_bitmap = filePageRangeBitmap(offset, length);
+        self.acquirePageWriteLocks(node, page_bitmap);
+        defer self.releasePageWriteLocks(node, page_bitmap);
         const previous_size = node.size;
         if (flags.punch_hole) {
             self.punchHoleLocked(node_index, offset, length);
@@ -2440,6 +2494,82 @@ test "VFS append writes are atomic across independent concurrent writers" {
     try std.testing.expectEqual(@as(u64, expected_records), after_appends.data_lock_tickets - before);
     try std.testing.expectEqual(@as(u64, 0), after.data_lock_outstanding);
     for (0..workers) |worker_index| try fs.close(@intCast(worker_index + 1), handles[worker_index]);
+    try std.testing.expect(fs.validate());
+}
+
+const ConcurrentPageWriteWorker = struct {
+    fs: *Vfs,
+    owner_pid: u32,
+    handle: u32,
+    worker_id: u8,
+
+    fn run(worker: ConcurrentPageWriteWorker) void {
+        const region_size: usize = 32;
+        const region_offset: usize = @as(usize, worker.worker_id) * region_size;
+        var iteration: u8 = 0;
+        while (iteration < 32) : (iteration += 1) {
+            const value: u8 = worker.worker_id * 32 + iteration;
+            const payload: [region_size]u8 = @splat(value);
+            _ = worker.fs.seek(worker.owner_pid, worker.handle, @intCast(region_offset), .start) catch
+                @panic("concurrent page writer seek failed");
+            const written = worker.fs.writeOpen(worker.owner_pid, worker.handle, &payload, iteration) catch
+                @panic("concurrent page write failed");
+            if (written != payload.len) @panic("concurrent page write was partial");
+        }
+    }
+};
+
+test "VFS same cached page writes use page scoped serialization" {
+    var fs = Vfs.init();
+    var page_allocator = TestFilePageAllocator{};
+    try fs.setFilePageAllocator(page_allocator.interface());
+    _ = try fs.mkdir(0, "/tmp", 0o777, 1);
+    const initial: [file_block_size]u8 = @splat(0);
+    const node = try fs.putFile(0, "/tmp/shared-page", &initial, 0o600, false, 2);
+    _ = fs.clearDirtyNodePages(node);
+    var cached_byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try fs.read(0, "/tmp/shared-page", 0, &cached_byte));
+    try std.testing.expectEqual(@as(usize, 1), fs.report().file_page_cache_entries);
+
+    const workers: usize = 4;
+    var handles: [workers]u32 = undefined;
+    var threads: [workers]std.Thread = undefined;
+    for (0..workers) |worker_index| {
+        const owner_pid: u32 = @intCast(worker_index + 1);
+        handles[worker_index] = try fs.open(owner_pid, 0, "/tmp/shared-page", .{ .write = true }, 0, 3);
+    }
+    const before = fs.report();
+    for (0..workers) |worker_index| {
+        threads[worker_index] = try std.Thread.spawn(.{}, ConcurrentPageWriteWorker.run, .{ConcurrentPageWriteWorker{
+            .fs = &fs,
+            .owner_pid = @intCast(worker_index + 1),
+            .handle = handles[worker_index],
+            .worker_id = @intCast(worker_index),
+        }});
+    }
+    for (&threads) |*thread| thread.join();
+    const after_writes = fs.report();
+    const expected_writes = workers * 32;
+    try std.testing.expectEqual(@as(u64, expected_writes), after_writes.page_write_lock_tickets - before.page_write_lock_tickets);
+    try std.testing.expectEqual(@as(u64, expected_writes), after_writes.data_lock_tickets - before.data_lock_tickets);
+    try std.testing.expectEqual(@as(u64, 0), after_writes.page_write_lock_outstanding);
+    try std.testing.expectEqual(@as(u64, 0), after_writes.data_lock_outstanding);
+
+    var contents: [file_block_size]u8 = undefined;
+    try std.testing.expectEqual(contents.len, try fs.read(0, "/tmp/shared-page", 0, &contents));
+    for (0..workers) |worker_index| {
+        const expected: u8 = @intCast(worker_index * 32 + 31);
+        const start = worker_index * 32;
+        for (contents[start .. start + 32]) |byte| try std.testing.expectEqual(expected, byte);
+    }
+    for (workers * 32..contents.len) |index| try std.testing.expectEqual(@as(u8, 0), contents[index]);
+    for (0..workers) |worker_index| try fs.close(@intCast(worker_index + 1), handles[worker_index]);
+    _ = fs.clearDirtyNodePages(node);
+    try std.testing.expectEqual(@as(usize, 1), fs.releaseFilePageCache());
+    try std.testing.expectEqual(@as(usize, 0), page_allocator.active());
+    const final_report = fs.report();
+    try std.testing.expectEqual(final_report.file_page_cache_allocations, final_report.file_page_cache_releases);
+    try std.testing.expectEqual(@as(u64, 0), final_report.page_write_lock_outstanding);
     try std.testing.expect(fs.validate());
 }
 

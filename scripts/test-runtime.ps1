@@ -332,6 +332,7 @@ try {
         $(if ($Network) { '/1/4 shutdown-release 12' } else { '/1/4 shutdown-release 11' }),
         ' lock tickets/outstanding ',
         ' data-lock tickets/outstanding ',
+        ' page-write tickets/outstanding 210/0',
         ' pool-lock tickets/outstanding ',
         ' blocks/bytes/holes ',
         'ZigOs persistent processes:',

@@ -2490,6 +2490,7 @@ fn finishNormalRuntime() noreturn {
         fs_report.dirty_file_nodes == 0 and fs_report.dirty_page_marks > 0 and
         fs_report.dirty_page_sync_clears > 0 and
         fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0 and
+        fs_report.page_write_lock_tickets > 0 and fs_report.page_write_lock_outstanding == 0 and
         fs_report.data_pool_lock_tickets > 0 and fs_report.data_pool_lock_outstanding == 0 and
         fs_report.allocated_blocks > 0 and fs_report.allocated_blocks <= runtime_vfs.maximum_data_blocks and
         fs_report.allocated_bytes == fs_report.allocated_blocks * runtime_vfs.file_block_size;
@@ -2629,6 +2630,7 @@ fn finishDiagnosticRuntime() noreturn {
         fs_report.dirty_file_nodes == 0 and fs_report.dirty_page_marks > 0 and
         fs_report.dirty_page_sync_clears > 0 and
         fs_report.data_lock_tickets > 0 and fs_report.data_lock_outstanding == 0 and
+        fs_report.page_write_lock_tickets > 0 and fs_report.page_write_lock_outstanding == 0 and
         fs_report.data_pool_lock_tickets > 0 and fs_report.data_pool_lock_outstanding == 0 and
         fs_report.allocated_blocks > 0 and fs_report.allocated_blocks <= runtime_vfs.maximum_data_blocks and
         fs_report.allocated_bytes == fs_report.allocated_blocks * runtime_vfs.file_block_size;
@@ -2740,6 +2742,10 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(fs_report.data_lock_tickets);
     emit("/");
     emitDecimal(fs_report.data_lock_outstanding);
+    emit(" page-write tickets/outstanding ");
+    emitDecimal(fs_report.page_write_lock_tickets);
+    emit("/");
+    emitDecimal(fs_report.page_write_lock_outstanding);
     emit(" pool-lock tickets/outstanding ");
     emitDecimal(fs_report.data_pool_lock_tickets);
     emit("/");

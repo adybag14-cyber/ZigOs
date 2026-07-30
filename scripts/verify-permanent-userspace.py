@@ -382,6 +382,11 @@ def main() -> int:
     forbid(synchronization_source, "zigos_cpu_relax", "ticket locks retained a host-incompatible assembly-only relax dependency")
     require(vfs_source, 'const synchronization = @import("synchronization.zig");', "VFS reuses the shared ticket-lock primitive")
     require(vfs_source, "data_lock: synchronization.TicketLock", "each inode owns a data-mutation serialization lock")
+    require(vfs_source, "page_write_locks: [file_blocks_per_node]synchronization.TicketLock", "each inode owns one writer lock per logical file page")
+    require(vfs_source, "fn acquirePageWriteLocks", "multi-page mutations acquire page locks in ascending slot order")
+    require(vfs_source, "fn releasePageWriteLocks", "multi-page mutations release page locks in reverse slot order")
+    require(vfs_source, "const page_bitmap: u8 = if (truncate_first) 0xFF else filePageRangeBitmap", "ordinary and replacement writes lock every affected logical page")
+    require(vfs_source, 'test "VFS same cached page writes use page scoped serialization"', "four host threads prove same-page writer serialization and intact disjoint regions")
     require(vfs_source, "fn appendNode", "append has a dedicated serialized EOF-to-write transaction")
     require(vfs_source, "const offset = node.size;", "append selects EOF while holding the inode data lock")
     require(vfs_source, "const written = try self.writeNodeLocked", "append copies data and updates size inside the same critical section")
@@ -446,6 +451,10 @@ def main() -> int:
     require(runtime, "fs_report.dirty_page_sync_clears > 0", "release gates require successful synchronization to clear dirty pages")
     require(runtime, "fs_report.data_lock_tickets > 0", "release gates require exercised inode data locks")
     require(runtime, "fs_report.data_lock_outstanding == 0", "release gates require every inode data-lock ticket to drain")
+    require(runtime, "fs_report.page_write_lock_tickets > 0", "release gates require exercised logical-page writer locks")
+    require(runtime, "fs_report.page_write_lock_outstanding == 0", "release gates require every logical-page writer ticket to drain")
+    require(runtime, "page-write tickets/outstanding", "diagnostic shutdown reports logical-page writer lock conservation")
+    require(runtime_test, "page-write tickets/outstanding 210/0", "both diagnostic QEMU profiles require the measured page-writer ticket total with no outstanding lock")
     require(runtime, "fs_report.data_pool_lock_tickets > 0", "release gates require exercised sparse-pool allocation")
     require(runtime, "fs_report.data_pool_lock_outstanding == 0", "release gates require the sparse-pool lock to drain")
     require(runtime, "fs_report.allocated_bytes == fs_report.allocated_blocks * runtime_vfs.file_block_size", "release gates verify resident block accounting")
@@ -734,8 +743,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 88:
-        raise SystemExit(f"canonical isolated-test declaration total must be 88, found {declared_tests}")
+    if declared_tests != 89:
+        raise SystemExit(f"canonical isolated-test declaration total must be 89, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -846,7 +855,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, PMM-backed pressure-reclaiming file cache, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.11 Zig/C SDKs, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 
