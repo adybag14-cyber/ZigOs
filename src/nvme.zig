@@ -137,6 +137,12 @@ const CompletionRecord = struct {
     status: u16,
 };
 
+const CompletionDisposition = enum {
+    success,
+    command_mismatch,
+    status_error,
+};
+
 pub const Queue = struct {
     submission_address: usize,
     completion_address: usize,
@@ -179,6 +185,9 @@ pub const Controller = struct {
     read_commands: u64,
     write_commands: u64,
     flush_commands: u64,
+    read_fault_lba: u64,
+    read_fault_armed: bool,
+    injected_read_failures: u64,
     msix_enabled: bool,
     msix_capability_offset: u8,
     msix_table_address: usize,
@@ -360,6 +369,9 @@ pub fn initialize(
         .read_commands = 0,
         .write_commands = 0,
         .flush_commands = 0,
+        .read_fault_lba = std.math.maxInt(u64),
+        .read_fault_armed = false,
+        .injected_read_failures = 0,
         .msix_enabled = false,
         .msix_capability_offset = 0,
         .msix_table_address = 0,
@@ -438,7 +450,10 @@ pub fn readBlock(controller: *Controller, lba: u64, output: []u8) bool {
     last_failure_stage = .io_read;
     if (!validTransfer(controller, lba) or output.len != controller.logical_block_size) return false;
     zeroPage(controller.io_buffer_address);
-    const command = nvmTransferCommand(nvm_read, controller, lba, false);
+    const inject_failure = controller.read_fault_armed and lba == controller.read_fault_lba;
+    if (inject_failure) controller.read_fault_armed = false;
+    const command_lba = if (inject_failure) controller.namespace_size_lbas else lba;
+    const command = nvmTransferCommand(nvm_read, controller, command_lba, false);
     _ = submit(
         controller.reference,
         controller.bar,
@@ -446,12 +461,26 @@ pub fn readBlock(controller: *Controller, lba: u64, output: []u8) bool {
         &controller.next_command_id,
         &controller.io_queue,
         command,
-    ) orelse return false;
+    ) orelse {
+        if (inject_failure) controller.injected_read_failures +%= 1;
+        return false;
+    };
+    if (inject_failure) {
+        controller.injected_read_failures +%= 1;
+        return false;
+    }
     zigos_memory_fence();
     const source: [*]const volatile u8 = @ptrFromInt(controller.io_buffer_address);
     for (output, 0..) |*destination, index| destination.* = source[index];
     controller.read_commands +%= 1;
     last_failure_stage = .none;
+    return true;
+}
+
+pub fn armOneShotReadError(controller: *Controller, lba: u64) bool {
+    if (!validTransfer(controller, lba) or controller.read_fault_armed) return false;
+    controller.read_fault_lba = lba;
+    controller.read_fault_armed = true;
     return true;
 }
 
@@ -749,23 +778,28 @@ fn submit(
         };
         last_completion_command_id = record.command_id;
         last_completion_queue_id = record.submission_queue_id;
-        if (record.command_id != command_id or record.submission_queue_id != queue.queue_id) return null;
-        if ((record.status & 0xFFFE) != 0) return null;
-
-        queue.completion_head += 1;
-        if (queue.completion_head == queue.depth) {
-            queue.completion_head = 0;
-            queue.completion_phase ^= 1;
-        }
+        const disposition = advanceAndClassifyCompletion(queue, record, command_id);
         write32(
             bar,
             doorbell_base_offset + @as(usize, 2 * queue.queue_id + 1) * doorbell_stride,
             queue.completion_head,
         );
         _ = read32(bar, controller_status_offset);
+        if (disposition != .success) return null;
         return record;
     }
     return null;
+}
+
+fn advanceAndClassifyCompletion(queue: *Queue, record: CompletionRecord, command_id: u16) CompletionDisposition {
+    queue.completion_head += 1;
+    if (queue.completion_head == queue.depth) {
+        queue.completion_head = 0;
+        queue.completion_phase ^= 1;
+    }
+    if (record.command_id != command_id or record.submission_queue_id != queue.queue_id) return .command_mismatch;
+    if ((record.status & 0xFFFE) != 0) return .status_error;
+    return .success;
 }
 
 fn enableMsix(controller: *Controller, allocator: *memory.FrameAllocator, target_apic_id: u8) bool {
@@ -1000,6 +1034,39 @@ fn write32(base: usize, offset: usize, value: anytype) void {
 fn write64(base: usize, offset: usize, value: anytype) void {
     const register: *volatile u64 = @ptrFromInt(base + offset);
     register.* = @intCast(value);
+}
+
+test "failed completion advances CQ so the next command can succeed" {
+    var queue = Queue{
+        .submission_address = 0,
+        .completion_address = 0,
+        .depth = 2,
+        .queue_id = 1,
+        .submission_tail = 0,
+        .completion_head = 0,
+        .completion_phase = 1,
+    };
+    const failed = CompletionRecord{
+        .result = 0,
+        .submission_head = 1,
+        .submission_queue_id = 1,
+        .command_id = 7,
+        .status = 0x0003,
+    };
+    try std.testing.expectEqual(CompletionDisposition.status_error, advanceAndClassifyCompletion(&queue, failed, 7));
+    try std.testing.expectEqual(@as(u16, 1), queue.completion_head);
+    try std.testing.expectEqual(@as(u1, 1), queue.completion_phase);
+
+    const succeeded = CompletionRecord{
+        .result = 0,
+        .submission_head = 0,
+        .submission_queue_id = 1,
+        .command_id = 8,
+        .status = 0x0001,
+    };
+    try std.testing.expectEqual(CompletionDisposition.success, advanceAndClassifyCompletion(&queue, succeeded, 8));
+    try std.testing.expectEqual(@as(u16, 0), queue.completion_head);
+    try std.testing.expectEqual(@as(u1, 0), queue.completion_phase);
 }
 
 test "single-block NVM commands encode LBA namespace PRP and FUA" {

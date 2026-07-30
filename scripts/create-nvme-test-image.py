@@ -144,6 +144,7 @@ def layout_for(block_size: int) -> dict[str, int]:
         "partition_first_lba": efi_partition_first_lba,
         "partition_last_lba": efi_partition_last_lba,
         "partition_sectors": efi_partition_sectors,
+        "sectors_per_cluster": 1,
         "sectors_per_fat": sectors_per_fat,
         "root_entry_count": root_entry_count,
         "root_directory_sectors": root_directory_sectors,
@@ -159,6 +160,8 @@ def build_image(
     efi_image: Path,
     block_size: int,
     boot_fat_corruption: str = "none",
+    runtime_file_gap_clusters: int = 0,
+    runtime_file_first_cluster: int | None = None,
 ) -> dict[str, int | str]:
     layout = layout_for(block_size)
     efi_bytes = efi_image.read_bytes()
@@ -238,7 +241,15 @@ def build_image(
     last_file_cluster = first_file_cluster + file_clusters - 1
     readme_bytes = b"ZigOs block-backed FAT16 runtime mount\n"
     config_bytes = b"source=nvme0p1\nmode=readonly\n"
-    readme_cluster = last_file_cluster + 1
+    if runtime_file_gap_clusters < 0:
+        raise ValueError("runtime file gap must be non-negative")
+    readme_cluster = (
+        runtime_file_first_cluster
+        if runtime_file_first_cluster is not None
+        else last_file_cluster + 1 + runtime_file_gap_clusters
+    )
+    if readme_cluster <= last_file_cluster:
+        raise ValueError("runtime FAT fixtures must begin after the EFI chain")
     config_cluster = readme_cluster + 1
     if config_cluster >= layout["cluster_count"] + 2:
         raise ValueError("EFI image and runtime FAT fixtures do not fit in FAT16 data area")
@@ -301,6 +312,8 @@ def build_image(
             "file_cluster_count": file_clusters,
             "file_first_cluster": first_file_cluster,
             "file_last_cluster": last_file_cluster,
+            "runtime_file_gap_clusters": readme_cluster - last_file_cluster - 1,
+            "runtime_file_first_cluster": readme_cluster,
             "runtime_readme_cluster": readme_cluster,
             "runtime_readme_size": len(readme_bytes),
             "runtime_config_cluster": config_cluster,
@@ -319,9 +332,18 @@ def main() -> None:
     parser.add_argument("--block-size", required=True, type=int, choices=(512, 4096))
     parser.add_argument("--metadata", required=True, type=Path)
     parser.add_argument("--boot-fat-corruption", choices=("none", "cross-link"), default="none")
+    parser.add_argument("--runtime-file-gap-clusters", type=int, default=0)
+    parser.add_argument("--runtime-file-first-cluster", type=int)
     args = parser.parse_args()
 
-    metadata = build_image(args.output, args.efi, args.block_size, args.boot_fat_corruption)
+    metadata = build_image(
+        args.output,
+        args.efi,
+        args.block_size,
+        args.boot_fat_corruption,
+        args.runtime_file_gap_clusters,
+        args.runtime_file_first_cluster,
+    )
     args.metadata.parent.mkdir(parents=True, exist_ok=True)
     args.metadata.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(metadata, sort_keys=True))

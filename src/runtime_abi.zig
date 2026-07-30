@@ -332,6 +332,7 @@ test "kernel errors retain distinct userspace errno values" {
     try std.testing.expectEqual(errno_would_block, fromError(error.NoContext));
     try std.testing.expectEqual(errno_no_memory, fromError(error.NoRuntimeFrames));
     try std.testing.expectEqual(errno_system_file_limit, fromError(error.OpenDescriptionLimit));
+    try std.testing.expectEqual(errno_io, fromError(error.InputOutput));
 }
 
 test "spawnv request and startup vector layouts are stable" {

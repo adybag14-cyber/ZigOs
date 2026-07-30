@@ -12,6 +12,11 @@ pub fn build(b: *std.Build) void {
         "normal-boot",
         "Skip the diagnostic proof suite and launch the userspace PID 2 shell",
     ) orelse false;
+    const nvme_read_fault_lba = b.option(
+        u64,
+        "nvme-read-fault-lba",
+        "Replace the first runtime read of this LBA with a one-past-end NVMe command",
+    ) orelse std.math.maxInt(u64);
 
     const python = switch (b.graph.host.result.os.tag) {
         .windows => "python",
@@ -178,6 +183,7 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "normal_boot", normal_boot);
+    build_options.addOption(u64, "nvme_read_fault_lba", nvme_read_fault_lba);
 
     const kernel_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -316,6 +322,17 @@ pub fn build(b: *std.Build) void {
         const run_tests = b.addRunArtifact(tests);
         unit_step.dependOn(&run_tests.step);
     }
+
+    const nvme_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/nvme.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    nvme_tests.step.dependOn(&assets.step);
+    const run_nvme_tests = b.addRunArtifact(nvme_tests);
+    unit_step.dependOn(&run_nvme_tests.step);
 
     const check_step = b.step("check", "Format, unit-test, build, and verify the x86-64 image");
     check_step.dependOn(&fmt.step);

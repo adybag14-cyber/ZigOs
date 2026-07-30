@@ -383,6 +383,7 @@ fn errorName(err: zigos.Error) []const u8 {
         error.NotEmpty => "directory not empty",
         error.CrossDevice => "cross-device operation",
         error.ReadOnly => "read-only filesystem",
+        error.InputOutput => "input/output error",
         else => "operation failed",
     };
 }

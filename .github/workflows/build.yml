@@ -124,6 +124,10 @@ jobs:
         shell: pwsh
         run: python .\scripts\test-diskless-normal-boot.py --skip-build --boot-timeout 240
 
+      - name: Propagate one NVMe read error through FAT to userspace EIO
+        shell: pwsh
+        run: python .\scripts\test-boot-fat-io-error.py --boot-timeout 240
+
   reproducibility:
     name: Cross-platform artifact identity gate
     runs-on: ubuntu-latest

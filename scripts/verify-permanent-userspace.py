@@ -54,6 +54,7 @@ def main() -> int:
     persistence_test = text("scripts/test-x86_64-persistence.py")
     normal_boot_test = text("scripts/test-normal-boot.py")
     quarantine_boot_test = text("scripts/test-boot-fat-quarantine.py")
+    io_error_boot_test = text("scripts/test-boot-fat-io-error.py")
     diskless_normal_boot_test = text("scripts/test-diskless-normal-boot.py")
     c_header = text("sdk/c/include/zigos.h")
     c_library = text("sdk/c/zigos.c")
@@ -131,6 +132,11 @@ def main() -> int:
     require(nvme_source, "pub fn flush", "retained NVMe supports volatile-cache flushes")
     require(nvme_source, "nvm_force_unit_access", "journal commit headers can request force-unit-access")
     require(nvme_source, "pub fn enterRuntimePollingMode", "NVMe interrupts are explicitly handed off to bounded runtime polling")
+    require(nvme_source, "fn advanceAndClassifyCompletion", "phase-valid NVMe completions advance and acknowledge the CQ before error classification")
+    require(nvme_source, "if (disposition != .success) return null", "failed NVMe commands return only after CQ acknowledgement")
+    require(nvme_source, 'test "failed completion advances CQ so the next command can succeed"', "isolated NVMe test proves an error completion cannot wedge the following command")
+    require(nvme_source, "pub fn armOneShotReadError", "test-only one-shot NVMe read-error injection is explicit and bounded")
+    require(nvme_source, "controller.namespace_size_lbas", "fault injection asks the real NVMe device to complete one out-of-range command")
     require(runtime, "initializePersistentStorage", "permanent runtime mounts the retained data partition")
     require(runtime, "runtime_persist.BlockDevice", "persistence is layered over a generic block interface")
     require(runtime, "state.persistence.sync(&state.vfs)", "global sync executes the validated writable-mount plan")
@@ -408,6 +414,16 @@ def main() -> int:
     require(boot_fat_source, "io_lock: synchronization.TicketLock", "one ticket lock protects shared FAT sector buffers and file cursors")
     require(boot_fat_source, "read_fn: ReadBlockFn", "boot FAT reads through a generic retained block-device callback")
     require(boot_fat_source, 'test "read-only FAT16 backend imports directories and streams large files from blocks"', "standalone backend test proves nested metadata, multi-cluster reads and files beyond 32 KiB")
+    require(boot_fat_source, "runtime_vfs.Error.InputOutput", "block-device read failure is translated to the VFS I/O error rather than EOF or corruption")
+    require(boot_fat_source, "(try vfs.openInfo(9, readme_handle)).offset", "failed backed-file reads preserve the open-description offset for retry")
+    require(boot_fat_source, "failed_output", "failed backed-file reads preserve the caller buffer")
+    require(runtime_abi, "fromError(error.InputOutput)", "VFS input/output failures map explicitly to userspace EIO")
+    require(sdk_shell, 'error.InputOutput => "input/output error"', "userspace shell renders EIO distinctly")
+    require(executor, "fn readDescriptorInKernelAddressSpace", "CPL3 read and readv execute descriptor I/O under the kernel address space")
+    require(executor, "paging.activateKernelAddressSpace()", "descriptor reads activate kernel mappings before block-backed MMIO")
+    require(executor, "paging.activateAddressSpace(user_root)", "descriptor reads restore the exact process CR3 before copying results to userspace")
+    if executor.count("readDescriptorInKernelAddressSpace(context, fd") != 2:
+        raise SystemExit("read and readv must both use the kernel-address-space descriptor wrapper")
     require(vfs_source, "fn acquireDentry", "path traversal pins cache entries during use")
     require(vfs_source, "fn releaseDentryReference", "path traversal releases cache references on every exit path")
     require(vfs_source, "fn invalidateCachedDentry", "namespace mutation invalidates matching cached dentries")
@@ -494,14 +510,29 @@ def main() -> int:
     require(quarantine_boot_test, "process-exec.elf", "quarantine QEMU gate proves embedded fallback contents are available")
     require(quarantine_boot_test, "metadata/file/block reads 48/0/48", "quarantine QEMU gate requires exact preflight I/O accounting")
     require(quarantine_boot_test, "0/0/1/0 lock tickets/outstanding 1/0 quarantine state/reason/events yes/cross_link/1 clean yes", "quarantine QEMU gate requires exact classified state and lock conservation")
+    require(build_graph, '"nvme-read-fault-lba"', "build graph exposes the disabled-by-default one-shot NVMe error target")
+    require(kernel, "NVMe one-shot read error armed:", "test build arms the retained controller only after boot-time inspection")
+    require(runtime, "controller.injected_read_failures == 0 and !controller.read_fault_armed", "an unconsumed armed read-error trigger cannot pass the healthy shutdown invariant")
+    require(nvme_image_builder, '"--runtime-file-first-cluster"', "image builder can place the fault target at one deterministic cluster")
+    require(io_error_boot_test, "FAULT_CLUSTER = 15_000", "EIO QEMU gate fixes README.TXT independently of EFI growth")
+    require(io_error_boot_test, "FAULT_LBA = 17_319", "EIO QEMU gate and compiled trigger share one exact LBA")
+    require(io_error_boot_test, '"--prefix"', "specialized fault build installs into a private prefix instead of shared zig-out")
+    require(io_error_boot_test, "acquire_run_lock", "EIO QEMU gate rejects duplicate concurrent runs")
+    require(io_error_boot_test, "remove_stale_workdirs", "EIO QEMU gate removes stale temporary runs before launch")
+    require(io_error_boot_test, "cat: input/output error", "real CPL3 shell observes EIO from the failed block read")
+    if io_error_boot_test.count('send(client, process, serial, "cat /boot/README.TXT"') != 2:
+        raise SystemExit("EIO QEMU gate must perform one failed read and one successful retry")
+    require(io_error_boot_test, "ZigOs NVMe read fault injection: failures 1 armed no clean yes", "QEMU proves one consumed error completion and a disarmed trigger")
+    require(io_error_boot_test, "metadata/file/block reads 50/3/51 failures 1", "QEMU requires exact failed-read and retry accounting")
+    require(io_error_boot_test, "10784/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes", "EIO recovery remains distinct from FAT corruption quarantine")
     require(runtime_test, "cat /boot/README.TXT", "diagnostic QEMU reads a root file after NVMe handoff")
     require(runtime_test, "cat /boot/EFI/BOOT/BOOT.CFG", "diagnostic QEMU reads a nested file after NVMe handoff")
     require(runtime_test, "stat /boot/EFI/BOOT/BOOTX64.EFI", "diagnostic QEMU stats the multi-mebibyte boot image without RAM-copying it")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 54 failed 0", "offline diagnostic profile requires the expanded block-backed FAT command matrix")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 56 failed 0", "live diagnostic profile requires the expanded block-backed FAT command matrix")
-    require(runtime_test, "10881/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
+    require(runtime_test, "10884/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
     require(normal_boot_test, "ZigOs boot FAT: block-backed yes files/directories 3/2", "persistent normal boot requires a clean real block-backed /boot")
-    require(normal_boot_test, "10781/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "normal QEMU requires exact FAT ownership with zero classified corruption")
+    require(normal_boot_test, "10783/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "normal QEMU requires exact FAT ownership with zero classified corruption")
     require(diskless_normal_boot_test, "ZigOs boot FAT: block-backed no files/directories 0/0", "diskless normal boot requires an explicitly absent backend and fallback namespace")
     require(diskless_normal_boot_test, "0/0/0/0 lock tickets/outstanding 0/0 quarantine state/reason/events no/none/0 clean yes", "diskless fallback has no FAT ownership or classified corruption state")
     require(runtime, "fs_report.dentry_cache_references == 0", "normal and diagnostic release gates require zero live cache references")
@@ -832,6 +863,7 @@ def main() -> int:
         "src/runtime_tty.zig",
         "src/runtime_vfs.zig",
         "src/runtime_boot_fat.zig",
+        "src/nvme.zig",
         "src/runtime_abi.zig",
         "src/runtime_page_pool.zig",
         "src/memory.zig",
@@ -843,8 +875,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 93:
-        raise SystemExit(f"canonical isolated-test declaration total must be 93, found {declared_tests}")
+    if declared_tests != 95:
+        raise SystemExit(f"canonical isolated-test declaration total must be 95, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -863,6 +895,8 @@ def main() -> int:
 
     require(workflow, ".\\scripts\\test-runtime.ps1 -TimeoutSeconds 180 -Network", "hosted live permanent-shell network test")
     require(workflow, "test-boot-fat-quarantine.py --boot-timeout 240", "hosted integration runs the corrupted-media quarantine gate")
+    require(build_graph, 'b.path("src/nvme.zig")', "canonical isolated graph includes the dedicated ReleaseSafe NVMe tests")
+    require(workflow, "test-boot-fat-io-error.py --boot-timeout 240", "hosted integration runs the block-read EIO and retry gate")
     require(workflow, "Cross-platform artifact identity gate", "hosted cross-platform reproducibility gate")
     require(workflow, "cmp --", "artifact bytes are compared instead of only printed")
     require(asset_builder, '"schema": 2', "host-independent generated-asset manifest schema")
@@ -965,7 +999,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.12 Zig/C SDKs, retained read-only block-backed FAT16 boot files with staged validation and classified quarantine fallback, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.12 Zig/C SDKs, retained read-only block-backed FAT16 boot files with staged validation, classified quarantine fallback and recoverable block-read EIO propagation, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

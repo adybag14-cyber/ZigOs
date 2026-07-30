@@ -2481,12 +2481,33 @@ fn bootFatStateClean(report: runtime_boot_fat.Report, require_file_reads: bool) 
             report.file_reads == 0 and report.blocks_read == 0 and report.failures == 0 and report.claimed_clusters == 0 and
             report.chain_loops == 0 and report.cross_links == 0 and report.out_of_range_links == 0 and report.lock_outstanding == 0;
     }
+    const injection_disabled = if (state.config.nvme_controller) |controller|
+        controller.injected_read_failures == 0 and !controller.read_fault_armed
+    else
+        true;
+    const recovered_injected_read_error = if (state.config.nvme_controller) |controller|
+        controller.injected_read_failures == 1 and !controller.read_fault_armed and report.failures == 1
+    else
+        false;
     return report.mounted and !report.quarantined and report.quarantine_reason == .none and report.quarantine_events == 0 and
         state.boot_fat.validate() and report.files >= 3 and report.directories >= 2 and
         report.bytes > 0 and report.metadata_reads > 0 and (!require_file_reads or report.file_reads >= 2) and
-        report.blocks_read >= report.metadata_reads and report.failures == 0 and report.claimed_clusters > 0 and
-        report.chain_loops == 0 and report.cross_links == 0 and report.out_of_range_links == 0 and
-        report.lock_outstanding == 0;
+        report.blocks_read >= report.metadata_reads and
+        ((report.failures == 0 and injection_disabled) or recovered_injected_read_error) and
+        report.claimed_clusters > 0 and report.chain_loops == 0 and report.cross_links == 0 and
+        report.out_of_range_links == 0 and report.lock_outstanding == 0;
+}
+
+fn emitNvmeReadFaultReport() void {
+    const controller = state.config.nvme_controller orelse return;
+    if (controller.injected_read_failures == 0 and !controller.read_fault_armed) return;
+    emit("ZigOs NVMe read fault injection: failures ");
+    emitDecimal(controller.injected_read_failures);
+    emit(" armed ");
+    emit(if (controller.read_fault_armed) "yes" else "no");
+    emit(" clean ");
+    emit(if (controller.injected_read_failures == 1 and !controller.read_fault_armed) "yes" else "no");
+    emit("\r\n");
 }
 
 fn emitBootFatReport(report: runtime_boot_fat.Report, clean: bool) void {
@@ -2612,6 +2633,7 @@ fn finishNormalRuntime() noreturn {
     emit(" shell PID 2 reaped ");
     emit(if (state.init_reaped_shell) "yes" else "no");
     emit("\r\n");
+    emitNvmeReadFaultReport();
     emitBootFatReport(boot_fat_report, boot_fat_clean);
     emit("ZigOs normal userspace resources: processes ");
     emitDecimal(process_report.live);
@@ -2950,6 +2972,7 @@ fn finishDiagnosticRuntime() noreturn {
     emit(" clean ");
     emit(if (tty_clean) "yes" else "no");
     emit("\r\n");
+    emitNvmeReadFaultReport();
     emitBootFatReport(boot_fat_report, boot_fat_clean);
     emit("ZigOs persistent storage: mounted ");
     emit(if (persistence_report.mounted) "yes" else "no");

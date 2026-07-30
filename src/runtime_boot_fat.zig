@@ -550,10 +550,17 @@ const file_operations = runtime_vfs.PseudoOperations{ .read = readBackedFile };
 const TestDevice = struct {
     image: []u8,
     reads: usize = 0,
+    fail_lba_once: ?u64 = null,
+    failed_reads: usize = 0,
 };
 
 fn testReadBlock(context: ?*anyopaque, lba: u64, output: []u8) bool {
     const device: *TestDevice = @ptrCast(@alignCast(context.?));
+    if (device.fail_lba_once == lba) {
+        device.fail_lba_once = null;
+        device.failed_reads += 1;
+        return false;
+    }
     const offset = std.math.mul(usize, std.math.cast(usize, lba) orelse return false, output.len) catch return false;
     if (offset > device.image.len or output.len > device.image.len - offset) return false;
     @memcpy(output, device.image[offset .. offset + output.len]);
@@ -673,14 +680,32 @@ test "read-only FAT16 backend imports directories and streams large files from b
     try vfs.close(9, handle);
     try std.testing.expectError(runtime_vfs.Error.ReadOnly, vfs.open(9, 0, "/boot/README.TXT", .{ .write = true }, 0, 3));
 
+    const readme_handle = try vfs.open(9, 0, "/boot/README.TXT", .{ .read = true }, 0, 3);
+    const before_failure = backend.report();
+    device_context.fail_lba_once = data_lba + 2;
+    var failed_output: [32]u8 = @splat(0xA5);
+    try std.testing.expectError(runtime_vfs.Error.InputOutput, vfs.readOpen(9, readme_handle, &failed_output));
+    try std.testing.expectEqual(@as(usize, 0), (try vfs.openInfo(9, readme_handle)).offset);
+    try std.testing.expectEqual(@as(usize, 1), device_context.failed_reads);
+    for (failed_output) |byte| try std.testing.expectEqual(@as(u8, 0xA5), byte);
+    const after_failure = backend.report();
+    try std.testing.expectEqual(before_failure.file_reads + 1, after_failure.file_reads);
+    try std.testing.expectEqual(before_failure.failures + 1, after_failure.failures);
+    try std.testing.expectEqual(before_failure.blocks_read, after_failure.blocks_read);
+    var retry_output: [32]u8 = undefined;
+    try std.testing.expectEqual(retry_output.len, try vfs.readOpen(9, readme_handle, &retry_output));
+    for (retry_output, 0..) |byte, index| try std.testing.expectEqual(@as(u8, @truncate(index * 5 + 1)), byte);
+    try std.testing.expectEqual(retry_output.len, (try vfs.openInfo(9, readme_handle)).offset);
+    try vfs.close(9, readme_handle);
+
     const report = backend.report();
     try std.testing.expect(report.mounted);
     try std.testing.expectEqual(@as(usize, 3), report.files);
     try std.testing.expectEqual(@as(usize, 2), report.directories);
     try std.testing.expectEqual(@as(u64, 33_720), report.bytes);
     try std.testing.expect(report.metadata_reads > 0 and report.metadata_reads < 20);
-    try std.testing.expect(report.file_reads >= 3 and report.blocks_read == device_context.reads);
-    try std.testing.expectEqual(@as(u64, 0), report.failures);
+    try std.testing.expect(report.file_reads >= 5 and report.blocks_read == device_context.reads);
+    try std.testing.expectEqual(@as(u64, 1), report.failures);
     try std.testing.expectEqual(@as(u32, 71), report.claimed_clusters);
     try std.testing.expectEqual(@as(u64, 0), report.chain_loops);
     try std.testing.expectEqual(@as(u64, 0), report.cross_links);

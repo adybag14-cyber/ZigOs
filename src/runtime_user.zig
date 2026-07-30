@@ -2442,6 +2442,34 @@ fn syscallWrite(
     return 0;
 }
 
+const KernelDescriptorRead = union(enum) {
+    complete: runtime_fd.IoResult,
+    descriptor_error: runtime_fd.Error,
+    activation_failure,
+    restore_failure,
+};
+
+fn readDescriptorInKernelAddressSpace(context: *Context, fd: u16, output: []u8) KernelDescriptorRead {
+    const user_root = context.space.pml4_address;
+    if (paging.currentCr3Address() != user_root or !paging.activateKernelAddressSpace()) return .activation_failure;
+
+    var descriptor_error: ?runtime_fd.Error = null;
+    const result = activeDescriptors().read(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        fd,
+        output,
+    ) catch |err| blk: {
+        descriptor_error = err;
+        break :blk runtime_fd.IoResult{ .status = .complete };
+    };
+
+    if (!paging.activateAddressSpace(user_root)) return .restore_failure;
+    if (descriptor_error) |err| return .{ .descriptor_error = err };
+    return .{ .complete = result };
+}
+
 fn syscallRead(
     context: *Context,
     frame: *interrupt_context.Frame,
@@ -2460,15 +2488,22 @@ fn syscallRead(
         return 0;
     };
     var bytes: [maximum_io_bytes]u8 = undefined;
-    const result = activeDescriptors().read(
-        activeVfs(),
-        activeProcesses(),
-        context.handle,
-        fd,
-        bytes[0..length],
-    ) catch |err| {
-        frame.rax = reject(runtime_abi.fromError(err));
-        return 0;
+    const result = switch (readDescriptorInKernelAddressSpace(context, fd, bytes[0..length])) {
+        .complete => |value| value,
+        .descriptor_error => |err| {
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        },
+        .activation_failure => {
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        },
+        .restore_failure => {
+            saveContext(context, frame, fx_state);
+            activeProcesses().fault(context.handle, 13, context.space.pml4_address) catch {};
+            faults +%= 1;
+            return 1;
+        },
     };
     if (result.status == .blocked) return blockAndRetry(context, frame, fx_state);
     if (result.count != 0 and !copyToUser(context, frame.rsi, bytes[0..result.count])) {
@@ -2567,15 +2602,22 @@ fn syscallReadv(
     };
     const plan = loadIoVectorPlan(context, frame.rsi, frame.rdx, true) catch |err| return rejectIoVectorPlan(frame, err);
     var bytes: [maximum_io_bytes]u8 = undefined;
-    const io = activeDescriptors().read(
-        activeVfs(),
-        activeProcesses(),
-        context.handle,
-        fd,
-        bytes[0..plan.total],
-    ) catch |err| {
-        frame.rax = reject(runtime_abi.fromError(err));
-        return 0;
+    const io = switch (readDescriptorInKernelAddressSpace(context, fd, bytes[0..plan.total])) {
+        .complete => |value| value,
+        .descriptor_error => |err| {
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        },
+        .activation_failure => {
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        },
+        .restore_failure => {
+            saveContext(context, frame, fx_state);
+            activeProcesses().fault(context.handle, 13, context.space.pml4_address) catch {};
+            faults +%= 1;
+            return 1;
+        },
     };
     if (io.status == .blocked) return blockAndRetry(context, frame, fx_state);
     var scattered: usize = 0;

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Boot the normal x86-64 profile and prove userspace PID 1 supervision of the interactive PID 2 Zig shell."""
+"""Inject one real NVMe read EIO and prove propagation through FAT, VFS and the userspace ABI."""
 
 from __future__ import annotations
 
 import argparse
+import atexit
+import os
+import json
 import pathlib
 import shutil
 import socket
@@ -14,6 +17,53 @@ import time
 
 PROMPT_HOME = b"root@zigos:/home/root$ "
 PROMPT_ROOT = b"root@zigos:/$ "
+FAULT_CLUSTER = 15_000
+FAULT_LBA = 17_319
+
+
+def process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def acquire_run_lock(lock_path: pathlib.Path) -> None:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                owner = int(lock_path.read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                owner = 0
+            if process_is_running(owner):
+                raise RuntimeError(f"FAT EIO gate is already running as PID {owner}")
+            lock_path.unlink(missing_ok=True)
+            continue
+        with os.fdopen(descriptor, "w", encoding="ascii", newline="\n") as stream:
+            stream.write(f"{os.getpid()}\n")
+        return
+    raise RuntimeError("could not acquire FAT EIO gate lock")
+
+
+def release_run_lock(lock_path: pathlib.Path) -> None:
+    try:
+        owner = int(lock_path.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return
+    if owner == os.getpid():
+        lock_path.unlink(missing_ok=True)
+
+
+def remove_stale_workdirs(build_dir: pathlib.Path) -> None:
+    for path in build_dir.glob("boot-fat-io-error-*"):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def find_qemu() -> pathlib.Path:
@@ -93,32 +143,46 @@ def send(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[1])
-    parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--boot-timeout", type=int, default=220)
     args = parser.parse_args()
 
     root = args.repo_root.resolve()
     version = (root / ".toolchain-version").read_text(encoding="utf-8").strip()
     zig = root / ".toolchains" / "zig-canonical" / f"zig-x86_64-windows-{version}" / "zig.exe"
-    if not args.skip_build:
-        subprocess.run(
-            [str(zig), "build", "-Doptimize=ReleaseSmall", "-Dnormal-boot=true", "--summary", "all"],
-            cwd=root,
-            check=True,
-        )
 
-    efi = root / "zig-out" / "EFI" / "BOOT" / "BOOTX64.EFI"
+    build_dir = root / "build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = build_dir / "test-boot-fat-io-error.lock"
+    acquire_run_lock(lock_path)
+    atexit.register(release_run_lock, lock_path)
+    remove_stale_workdirs(build_dir)
+    work = pathlib.Path(tempfile.mkdtemp(prefix="boot-fat-io-error-", dir=build_dir))
+    install = work / "install"
+    subprocess.run(
+        [
+            str(zig),
+            "build",
+            "-Doptimize=ReleaseSmall",
+            "-Dnormal-boot=true",
+            f"-Dnvme-read-fault-lba={FAULT_LBA}",
+            "--prefix",
+            str(install),
+            "--summary",
+            "all",
+        ],
+        cwd=root,
+        check=True,
+    )
+
+    efi = install / "EFI" / "BOOT" / "BOOTX64.EFI"
     if not efi.is_file():
-        raise RuntimeError("normal profile produced no BOOTX64.EFI")
-    sdk_elf = root / "zig-out" / "artifacts" / "sdk.elf"
+        raise RuntimeError("private normal profile produced no BOOTX64.EFI")
+    sdk_elf = install / "artifacts" / "sdk.elf"
     if not sdk_elf.is_file():
-        raise RuntimeError("normal profile produced no sdk.elf")
+        raise RuntimeError("private normal profile produced no sdk.elf")
     sdk_copy_marker = f"copied {sdk_elf.stat().st_size} bytes"
-
-    (root / "build").mkdir(parents=True, exist_ok=True)
-    work = pathlib.Path(tempfile.mkdtemp(prefix="normal-boot-", dir=root / "build"))
-    image = work / "normal-nvme.img"
-    metadata = work / "normal-nvme.json"
+    image = work / "io-error-nvme.img"
+    metadata = work / "io-error-nvme.json"
     subprocess.run(
         [
             sys.executable,
@@ -131,11 +195,19 @@ def main() -> int:
             "512",
             "--metadata",
             str(metadata),
+            "--runtime-file-first-cluster",
+            str(FAULT_CLUSTER),
         ],
         cwd=root,
         check=True,
         stdout=subprocess.DEVNULL,
     )
+    image_metadata = json.loads(metadata.read_text(encoding="utf-8"))
+    readme_lba = int(image_metadata["first_data_lba"]) + (
+        int(image_metadata["runtime_readme_cluster"]) - 2
+    ) * int(image_metadata["sectors_per_cluster"])
+    if image_metadata.get("runtime_file_first_cluster") != FAULT_CLUSTER or readme_lba != FAULT_LBA:
+        raise RuntimeError("deterministic README.TXT fault target does not match the compiled NVMe trigger")
 
     qemu = find_qemu()
     code_source, vars_source = find_firmware(qemu)
@@ -162,9 +234,9 @@ def main() -> int:
         "-device",
         "qemu-xhci,id=xhci",
         "-drive",
-        f"file={image.as_posix()},if=none,id=nvme0,format=raw,cache=unsafe",
+        f"file={image.name},if=none,id=nvme0,format=raw,cache=unsafe",
         "-device",
-        "nvme,drive=nvme0,serial=ZIGOSNVME,logical_block_size=512,physical_block_size=512",
+        "nvme,drive=nvme0,serial=ZIGOSNVME,logical_block_size=512,physical_block_size=512,bootindex=1",
         "-drive",
         f"if=pflash,format=raw,unit=0,readonly=on,file={code_image.as_posix()}",
         "-drive",
@@ -189,7 +261,7 @@ def main() -> int:
     serial = bytearray()
     client: socket.socket | None = None
     with stdout_log.open("wb") as stdout_stream, stderr_log.open("wb") as stderr_stream:
-        process = subprocess.Popen(command, stdout=stdout_stream, stderr=stderr_stream)
+        process = subprocess.Popen(command, cwd=work, stdout=stdout_stream, stderr=stderr_stream)
         try:
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
@@ -200,7 +272,7 @@ def main() -> int:
                 except OSError:
                     time.sleep(0.1)
             if client is None:
-                raise RuntimeError("normal boot serial connection failed")
+                raise RuntimeError("FAT EIO boot serial connection failed")
 
             wait_for(client, process, serial, b"ZigOs userspace init PID 1", 0, args.boot_timeout)
             wait_for(client, process, serial, b"ZigOs userspace shell PID 2", 0, 20)
@@ -209,6 +281,8 @@ def main() -> int:
             send(client, process, serial, "pwd", b"\r\n/home/root\r\n")
             send(client, process, serial, "cd /", PROMPT_ROOT)
             send(client, process, serial, "pwd", b"\r\n/\r\n")
+            send(client, process, serial, "cat /boot/README.TXT", b"cat: input/output error")
+            send(client, process, serial, "cat /boot/README.TXT", b"ZigOs block-backed FAT16 runtime")
             send(client, process, serial, "ls /bin", b"sh.elf")
             send(client, process, serial, "cat /proc/version", b"ZigOs 19.0.0 x86_64 persistent runtime")
             send(client, process, serial, "pid", b"\r\n2\r\n")
@@ -238,6 +312,7 @@ def main() -> int:
                 "ZigOs userspace init PID 1",
                 "userspace init launched shell PID 2",
                 "ZigOs userspace shell PID 2",
+                f"NVMe one-shot read error armed: requested LBA {FAULT_LBA}, command LBA 32768",
                 "hello from VFS-loaded CPL3 ELF64",
                 "process 3 exited 42",
                 sdk_copy_marker,
@@ -252,8 +327,10 @@ def main() -> int:
                 "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
-                "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 49/0/49 failures 0 clusters claimed/loop/cross/range 10783/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                "cat: input/output error",
+                "ZigOs block-backed FAT16 runtime",
+                "ZigOs NVMe read fault injection: failures 1 armed no clean yes",
+                "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5519428 metadata/file/block reads 50/3/51 failures 1 clusters claimed/loop/cross/range 10784/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 129/129 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
@@ -268,12 +345,12 @@ def main() -> int:
             )
             for marker in required:
                 if marker not in text:
-                    raise RuntimeError(f"normal boot missing marker: {marker}")
+                    raise RuntimeError(f"FAT EIO boot missing marker: {marker}")
             for marker in forbidden:
                 if marker in text:
-                    raise RuntimeError(f"normal boot unexpectedly ran diagnostic marker: {marker}")
+                    raise RuntimeError(f"FAT EIO boot unexpectedly ran diagnostic marker: {marker}")
             if "ZigOs normal userspace resources:" not in text or "clean yes" not in text:
-                raise RuntimeError("normal boot did not report clean resource reclamation")
+                raise RuntimeError("FAT EIO boot did not report clean resource reclamation")
         finally:
             if client is not None:
                 client.close()
@@ -281,7 +358,8 @@ def main() -> int:
                 process.kill()
                 process.wait(timeout=10)
 
-    print("Normal x86-64 userspace-shell boot passed.")
+    print("FAT block-read EIO propagation boot passed.")
+    print(f"  injected README.TXT LBA: {readme_lba}")
     print(f"  serial log: {serial_log}")
     return 0
 
