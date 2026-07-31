@@ -17,6 +17,11 @@ pub fn build(b: *std.Build) void {
         "nvme-read-fault-lba",
         "Replace the first runtime read of this LBA with a one-past-end NVMe command",
     ) orelse std.math.maxInt(u64);
+    const nvme_write_fault_lba = b.option(
+        u64,
+        "nvme-write-fault-lba",
+        "Replace the first runtime write of this LBA with a one-past-end NVMe command",
+    ) orelse std.math.maxInt(u64);
 
     const python = switch (b.graph.host.result.os.tag) {
         .windows => "python",
@@ -184,6 +189,7 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption(bool, "normal_boot", normal_boot);
     build_options.addOption(u64, "nvme_read_fault_lba", nvme_read_fault_lba);
+    build_options.addOption(u64, "nvme_write_fault_lba", nvme_write_fault_lba);
 
     const kernel_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

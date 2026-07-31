@@ -323,6 +323,16 @@ fn enterPersistentRuntime(
         debugWriteU64Decimal(retained_nvme_controller.namespace_size_lbas);
         debugWrite("\r\n");
     }
+    if (build_options.nvme_write_fault_lba != std.math.maxInt(u64)) {
+        if (!retained_nvme_controller_ready or
+            !nvme.armOneShotWriteError(&retained_nvme_controller, build_options.nvme_write_fault_lba))
+            storageFailure("test-only NVMe write-error target could not be armed");
+        debugWrite("NVMe one-shot write error armed: requested LBA ");
+        debugWriteU64Decimal(build_options.nvme_write_fault_lba);
+        debugWrite(", command LBA ");
+        debugWriteU64Decimal(retained_nvme_controller.namespace_size_lbas);
+        debugWrite("\r\n");
+    }
     runtime.run(.{
         .profile = profile,
         .physical_memory = &physical_memory_manager,

@@ -128,6 +128,10 @@ jobs:
         shell: pwsh
         run: python .\scripts\test-boot-fat-io-error.py --boot-timeout 240
 
+      - name: Remount damaged persistent storage read-only
+        shell: pwsh
+        run: python .\scripts\test-persistent-readonly-remount.py --boot-timeout 240
+
   reproducibility:
     name: Cross-platform artifact identity gate
     runs-on: ubuntu-latest

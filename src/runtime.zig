@@ -2510,6 +2510,71 @@ fn emitNvmeReadFaultReport() void {
     emit("\r\n");
 }
 
+fn nvmeWriteFaultStateClean(report: runtime_persist.Report) bool {
+    const controller = state.config.nvme_controller orelse return true;
+    if (controller.write_fault_armed or controller.injected_write_failures > 1) return false;
+    if (controller.injected_write_failures == 0) return true;
+    return report.damaged and report.io_failures == 1;
+}
+
+fn persistenceDamageClean(report: runtime_persist.Report, fs_report: runtime_vfs.Report) bool {
+    if (!nvmeWriteFaultStateClean(report)) return false;
+    const mount_readonly = state.vfs.mountReadOnly(report.mount_id) catch false;
+    return report.mounted and report.damaged and report.damage_reason != .none and
+        report.read_only_remounts == 1 and report.read_only_remount_failures == 0 and
+        report.io_failures == 1 and report.corrupt_headers == 0 and
+        report.writable_mount_syncs == report.global_syncs * 2 and
+        report.immediate_mount_syncs == report.global_syncs and
+        report.durable_mount_syncs == report.global_syncs and report.rejected_sync_plans == 0 and
+        writebackStateClean(report) and fs_report.read_only_remounts == 1 and
+        fs_report.read_only_remount_dirty_pages == report.discarded_dirty_pages and mount_readonly;
+}
+
+fn emitNvmeWriteFaultReport() void {
+    const controller = state.config.nvme_controller orelse return;
+    if (controller.injected_write_failures == 0 and !controller.write_fault_armed) return;
+    emit("ZigOs NVMe write fault injection: failures ");
+    emitDecimal(controller.injected_write_failures);
+    emit(" armed ");
+    emit(if (controller.write_fault_armed) "yes" else "no");
+    emit(" clean ");
+    emit(if (controller.injected_write_failures == 1 and !controller.write_fault_armed) "yes" else "no");
+    emit("\r\n");
+}
+
+fn emitPersistenceDamageReport(report: runtime_persist.Report, fs_report: runtime_vfs.Report, clean: bool) void {
+    if (!report.damaged and report.read_only_remounts == 0 and report.read_only_remount_failures == 0) return;
+    const mount_readonly = state.vfs.mountReadOnly(report.mount_id) catch false;
+    emit("ZigOs persistent damage containment: damaged ");
+    emit(if (report.damaged) "yes" else "no");
+    emit(" reason ");
+    emit(@tagName(report.damage_reason));
+    emit(" remounts/failures ");
+    emitDecimal(report.read_only_remounts);
+    emit("/");
+    emitDecimal(report.read_only_remount_failures);
+    emit(" discarded/rejected ");
+    emitDecimal(report.discarded_dirty_pages);
+    emit("/");
+    emitDecimal(report.read_only_rejections);
+    emit(" vfs-remount/discard ");
+    emitDecimal(fs_report.read_only_remounts);
+    emit("/");
+    emitDecimal(fs_report.read_only_remount_dirty_pages);
+    emit(" mount-readonly ");
+    emit(if (mount_readonly) "yes" else "no");
+    emit(" clean ");
+    emit(if (clean) "yes" else "no");
+    emit("\r\n");
+}
+
+fn storageStateLabel(report: runtime_persist.Report, diskless_recovery: bool) []const u8 {
+    if (report.mounted and report.damaged) return "persistent-read-only";
+    if (report.mounted) return "persistent";
+    if (diskless_recovery) return "diskless-ram-root";
+    return "unavailable";
+}
+
 fn emitBootFatReport(report: runtime_boot_fat.Report, clean: bool) void {
     emit("ZigOs boot FAT: block-backed ");
     emit(if (report.mounted) "yes" else "no");
@@ -2573,21 +2638,32 @@ fn finishNormalRuntime() noreturn {
     const physical_report = state.config.physical_memory.report();
     const physical_rejections = physical_report.invalid_frees + physical_report.double_frees + physical_report.metadata_failures;
     const diskless_recovery = !state.config.nvme_ready and !state.config.ahci_ready;
+    const persistence_healthy = persistence_report.mounted and !persistence_report.damaged and
+        persistence_report.damage_reason == .none and persistence_report.read_only_remounts == 0 and
+        persistence_report.read_only_remount_failures == 0 and persistence_report.discarded_dirty_pages == 0 and
+        persistence_report.read_only_rejections == 0 and persistence_report.io_failures == 0 and
+        persistence_report.corrupt_headers == 0 and persistence_report.global_syncs >= 1 and
+        persistence_report.writable_mount_syncs == persistence_report.global_syncs * 2 and
+        persistence_report.immediate_mount_syncs == persistence_report.global_syncs and
+        persistence_report.durable_mount_syncs == persistence_report.global_syncs and
+        persistence_report.rejected_sync_plans == 0 and writebackStateClean(persistence_report) and
+        nvmeWriteFaultStateClean(persistence_report) and fs_report.read_only_remounts == 0 and
+        fs_report.read_only_remount_dirty_pages == 0;
+    const persistence_contained = persistenceDamageClean(persistence_report, fs_report);
     const persistence_clean = if (persistence_report.mounted)
-        persistence_report.io_failures == 0 and persistence_report.corrupt_headers == 0 and
-            persistence_report.global_syncs >= 1 and
-            persistence_report.writable_mount_syncs == persistence_report.global_syncs * 2 and
-            persistence_report.immediate_mount_syncs == persistence_report.global_syncs and
-            persistence_report.durable_mount_syncs == persistence_report.global_syncs and
-            persistence_report.rejected_sync_plans == 0 and writebackStateClean(persistence_report)
+        persistence_healthy or persistence_contained
     else
         diskless_recovery and persistence_report.mounts == 0 and persistence_report.syncs == 0 and
+            !persistence_report.damaged and persistence_report.damage_reason == .none and
+            persistence_report.read_only_remounts == 0 and persistence_report.read_only_remount_failures == 0 and
+            persistence_report.discarded_dirty_pages == 0 and persistence_report.read_only_rejections == 0 and
             persistence_report.global_syncs >= 1 and
             persistence_report.writable_mount_syncs == persistence_report.global_syncs and
             persistence_report.immediate_mount_syncs == persistence_report.global_syncs and
             persistence_report.durable_mount_syncs == 0 and persistence_report.rejected_sync_plans == 0 and
             writebackStateClean(persistence_report) and persistence_report.io_failures == 0 and
-            persistence_report.corrupt_headers == 0;
+            persistence_report.corrupt_headers == 0 and nvmeWriteFaultStateClean(persistence_report) and
+            fs_report.read_only_remounts == 0 and fs_report.read_only_remount_dirty_pages == 0;
     const vfs_clean = state.vfs.validate() and fs_report.dentry_cache_references == 0 and
         fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases and fs_report.dentry_cache_hits > 0 and
         fs_report.dentry_cache_misses > 0 and fs_report.dentry_cache_insertions > 0 and
@@ -2634,6 +2710,8 @@ fn finishNormalRuntime() noreturn {
     emit(if (state.init_reaped_shell) "yes" else "no");
     emit("\r\n");
     emitNvmeReadFaultReport();
+    emitNvmeWriteFaultReport();
+    emitPersistenceDamageReport(persistence_report, fs_report, persistence_contained);
     emitBootFatReport(boot_fat_report, boot_fat_clean);
     emit("ZigOs normal userspace resources: processes ");
     emitDecimal(process_report.live);
@@ -2650,11 +2728,11 @@ fn finishNormalRuntime() noreturn {
     emit(" cache-released ");
     emitDecimal(released_cache_pages);
     emit(" storage ");
-    emit(if (persistence_report.mounted) "persistent" else if (diskless_recovery) "diskless-ram-root" else "unavailable");
+    emit(storageStateLabel(persistence_report, diskless_recovery));
     emit(" clean ");
     emit(if (clean) "yes" else "no");
     emit("\r\nZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage ");
-    emit(if (persistence_report.mounted) "persistent" else if (diskless_recovery) "diskless-ram-root" else "unavailable");
+    emit(storageStateLabel(persistence_report, diskless_recovery));
     emit(" cleanup ");
     emit(if (clean) "yes" else "no");
     emit("\r\n");
@@ -2727,7 +2805,11 @@ fn finishDiagnosticRuntime() noreturn {
         tty_report.bytes_submitted == tty_report.bytes_read and tty_report.blocked_reads >= 1 and
         tty_report.reader_wakeups >= 1 and tty_report.overflow_events == 0;
     const nvme_controller = state.config.nvme_controller;
-    const persistence_clean = persistence_report.mounted and persistence_report.generation >= 1 and
+    const persistence_clean = persistence_report.mounted and !persistence_report.damaged and
+        persistence_report.damage_reason == .none and persistence_report.read_only_remounts == 0 and
+        persistence_report.read_only_remount_failures == 0 and persistence_report.discarded_dirty_pages == 0 and
+        persistence_report.read_only_rejections == 0 and fs_report.read_only_remounts == 0 and
+        fs_report.read_only_remount_dirty_pages == 0 and persistence_report.generation >= 1 and
         persistence_report.syncs >= 1 and persistence_report.checks >= 1 and persistence_report.io_failures == 0 and
         persistence_report.corrupt_headers == 0 and persistence_report.global_syncs >= 1 and
         persistence_report.writable_mount_syncs == persistence_report.global_syncs * 2 and
@@ -2973,6 +3055,8 @@ fn finishDiagnosticRuntime() noreturn {
     emit(if (tty_clean) "yes" else "no");
     emit("\r\n");
     emitNvmeReadFaultReport();
+    emitNvmeWriteFaultReport();
+    emitPersistenceDamageReport(persistence_report, fs_report, false);
     emitBootFatReport(boot_fat_report, boot_fat_clean);
     emit("ZigOs persistent storage: mounted ");
     emit(if (persistence_report.mounted) "yes" else "no");

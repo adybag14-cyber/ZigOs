@@ -19,6 +19,7 @@ pub const Error = error{
     NoSpace,
     InvalidRecord,
     UnsupportedOperation,
+    ReadOnly,
     Busy,
 };
 
@@ -70,6 +71,14 @@ pub const RestorationFailure = struct {
     vfs_error: runtime_vfs.Error,
 };
 
+pub const DamageReason = enum(u8) {
+    none,
+    payload_write,
+    payload_flush,
+    header_write,
+    header_flush,
+};
+
 pub const WritebackOutcome = enum {
     idle,
     clean,
@@ -89,6 +98,12 @@ pub const WritebackRequest = struct {
 
 pub const Report = struct {
     mounted: bool,
+    damaged: bool,
+    damage_reason: DamageReason,
+    read_only_remounts: u64,
+    read_only_remount_failures: u64,
+    discarded_dirty_pages: u64,
+    read_only_rejections: u64,
     generation: u64,
     active_slot: u8,
     record_count: u32,
@@ -125,6 +140,12 @@ pub const Report = struct {
 pub const Store = struct {
     device: ?BlockDevice = null,
     mounted: bool = false,
+    damaged: bool = false,
+    damage_reason: DamageReason = .none,
+    read_only_remounts: u64 = 0,
+    read_only_remount_failures: u64 = 0,
+    discarded_dirty_pages: u64 = 0,
+    read_only_rejections: u64 = 0,
     mount_id: u8 = 0,
     generation: u64 = 0,
     active_slot: u8 = 1,
@@ -211,13 +232,21 @@ pub const Store = struct {
     }
 
     pub fn sync(self: *Store, vfs: *runtime_vfs.Vfs) Error!void {
+        if (self.damaged) {
+            _ = vfs.clearDirtyWritableMountPages();
+            self.read_only_rejections +%= 1;
+            return Error.ReadOnly;
+        }
         const plan = self.planWritableMounts(vfs) catch |err| {
             self.rejected_sync_plans +%= 1;
             return err;
         };
         if (plan.durable_mount_id != 0) {
             const snapshot = try self.serialize(vfs, &self.next_payload);
-            try self.commitSnapshot(&self.next_payload, snapshot);
+            self.commitSnapshot(vfs, &self.next_payload, snapshot) catch |err| {
+                if (self.damaged) _ = vfs.clearDirtyWritableMountPages();
+                return err;
+            };
         }
         _ = vfs.clearDirtyWritableMountPages();
         self.global_syncs +%= 1;
@@ -237,10 +266,14 @@ pub const Store = struct {
     pub fn requestWriteback(self: *Store, vfs: *const runtime_vfs.Vfs, node_index: u16) Error!WritebackRequest {
         if (self.writeback_active) return Error.Busy;
         const stat = vfs.statNode(node_index) catch return Error.InvalidRecord;
+        const persistent = vfs.persistentNode(node_index) catch return Error.InvalidRecord;
+        if (persistent and self.damaged) {
+            self.read_only_rejections +%= 1;
+            return Error.ReadOnly;
+        }
         if (stat.kind != .file or stat.link_count == 0 or stat.readonly) return Error.UnsupportedOperation;
         const pages = vfs.dirtyFilePageBitmap(node_index) catch return Error.InvalidRecord;
         if (pages == 0) return Error.UnsupportedOperation;
-        const persistent = vfs.persistentNode(node_index) catch return Error.InvalidRecord;
         self.writeback_active = true;
         self.writeback_node = node_index;
         self.writeback_generation = stat.generation;
@@ -314,6 +347,10 @@ pub const Store = struct {
     }
 
     fn syncFileRecord(self: *Store, vfs: *runtime_vfs.Vfs, node_index: u16, include_metadata: bool) Error!void {
+        if (self.damaged) {
+            self.read_only_rejections +%= 1;
+            return Error.ReadOnly;
+        }
         if (self.device == null or !self.mounted) return Error.NotConfigured;
         if (!(vfs.persistentNode(node_index) catch return Error.InvalidRecord)) return Error.UnsupportedOperation;
         const stat = vfs.statNode(node_index) catch return Error.InvalidRecord;
@@ -397,14 +434,14 @@ pub const Store = struct {
         );
         output_count +%= 1;
         write32(&self.next_payload, 0, output_count);
-        try self.commitSnapshot(&self.next_payload, .{
+        try self.commitSnapshot(vfs, &self.next_payload, .{
             .payload_length = output_offset,
             .record_count = output_count,
         });
         _ = vfs.clearDirtyNodePages(node_index);
     }
 
-    fn commitSnapshot(self: *Store, next_payload: *const [maximum_payload_bytes]u8, snapshot: Snapshot) Error!void {
+    fn commitSnapshot(self: *Store, vfs: *runtime_vfs.Vfs, next_payload: *const [maximum_payload_bytes]u8, snapshot: Snapshot) Error!void {
         const device = self.device orelse return Error.NotConfigured;
         if (!self.mounted) return Error.NotConfigured;
         const slot: u8 = if (self.active_slot == 0) 1 else 0;
@@ -418,7 +455,7 @@ pub const Store = struct {
             const count = @min(remaining, block_size);
             if (count != 0) @memcpy(self.sector[0..count], next_payload[offset .. offset + count]);
             if (!device.write(slotPayloadStart(device.block_size, slot) + sector_index, self.sector[0..block_size], false)) {
-                self.io_failures +%= 1;
+                self.recordIoDamage(vfs, .payload_write);
                 return Error.Io;
             }
             self.payload_writes +%= 1;
@@ -426,7 +463,7 @@ pub const Store = struct {
             offset += count;
         }
         if (!device.flush()) {
-            self.io_failures +%= 1;
+            self.recordIoDamage(vfs, .payload_flush);
             return Error.Io;
         }
         self.flushes +%= 1;
@@ -441,12 +478,12 @@ pub const Store = struct {
             .record_count = snapshot.record_count,
         });
         if (!device.write(slot, self.sector[0..block_size], true)) {
-            self.io_failures +%= 1;
+            self.recordIoDamage(vfs, .header_write);
             return Error.Io;
         }
         self.header_writes +%= 1;
         if (!device.flush()) {
-            self.io_failures +%= 1;
+            self.recordIoDamage(vfs, .header_flush);
             return Error.Io;
         }
         self.flushes +%= 1;
@@ -457,6 +494,19 @@ pub const Store = struct {
         self.record_count = snapshot.record_count;
         self.payload_length = @intCast(snapshot.payload_length);
         self.syncs +%= 1;
+    }
+
+    fn recordIoDamage(self: *Store, vfs: *runtime_vfs.Vfs, reason: DamageReason) void {
+        self.io_failures +%= 1;
+        if (self.damaged) return;
+        self.damaged = true;
+        self.damage_reason = reason;
+        const discarded = vfs.remountReadOnly(self.mount_id) catch {
+            self.read_only_remount_failures +%= 1;
+            return;
+        };
+        self.read_only_remounts +%= 1;
+        self.discarded_dirty_pages +%= discarded;
     }
 
     pub fn check(self: *Store) Error!void {
@@ -484,6 +534,12 @@ pub const Store = struct {
     pub fn report(self: *const Store) Report {
         return .{
             .mounted = self.mounted,
+            .damaged = self.damaged,
+            .damage_reason = self.damage_reason,
+            .read_only_remounts = self.read_only_remounts,
+            .read_only_remount_failures = self.read_only_remount_failures,
+            .discarded_dirty_pages = self.discarded_dirty_pages,
+            .read_only_rejections = self.read_only_rejections,
             .generation = self.generation,
             .active_slot = self.active_slot,
             .record_count = self.record_count,
@@ -916,6 +972,7 @@ const TestDisk = struct {
     writes: u64 = 0,
     flushes: u64 = 0,
     fail_write_at: ?u64 = null,
+    fail_flush_at: ?u64 = null,
 
     fn read(context: ?*anyopaque, lba: u64, output: []u8) bool {
         const self: *TestDisk = @ptrCast(@alignCast(context.?));
@@ -936,6 +993,7 @@ const TestDisk = struct {
 
     fn flush(context: ?*anyopaque) bool {
         const self: *TestDisk = @ptrCast(@alignCast(context.?));
+        if (self.fail_flush_at != null and self.fail_flush_at.? == self.flushes) return false;
         self.flushes += 1;
         return true;
     }
@@ -1064,24 +1122,27 @@ test "bounded asynchronous writeback services immediate durable unsupported fail
     try std.testing.expectEqual(WritebackOutcome.unsupported, store.serviceWriteback(vfs));
     try std.testing.expect((try vfs.dirtyFilePageBitmap(new_node)) != 0);
 
-    _ = try vfs.putFile(0, "/persist/stable", "retry", 0o600, false, 5);
-    const dirty_before_failure = try vfs.dirtyFilePageBitmap(stable_node);
+    _ = try vfs.putFile(0, "/persist/stable", "damage", 0o600, false, 5);
     disk.fail_write_at = disk.writes;
     _ = try store.requestWriteback(vfs, stable_node);
     try std.testing.expectEqual(WritebackOutcome.failed, store.serviceWriteback(vfs));
-    try std.testing.expectEqual(dirty_before_failure, try vfs.dirtyFilePageBitmap(stable_node));
-    disk.fail_write_at = null;
-    _ = try store.requestWriteback(vfs, stable_node);
-    try std.testing.expectEqual(WritebackOutcome.durable, store.serviceWriteback(vfs));
     try std.testing.expectEqual(@as(u8, 0), try vfs.dirtyFilePageBitmap(stable_node));
+    try std.testing.expect(try vfs.mountReadOnly(store.report().mount_id));
+    try std.testing.expectError(Error.ReadOnly, store.requestWriteback(vfs, stable_node));
 
     const report = store.report();
     try std.testing.expect(!report.writeback_active);
-    try std.testing.expectEqual(@as(u64, 4), report.writeback_requests);
-    try std.testing.expectEqual(@as(u64, 2), report.writeback_completions);
-    try std.testing.expectEqual(@as(u64, 4), report.writeback_passes);
+    try std.testing.expect(report.damaged);
+    try std.testing.expectEqual(DamageReason.payload_write, report.damage_reason);
+    try std.testing.expectEqual(@as(u64, 1), report.read_only_remounts);
+    try std.testing.expectEqual(@as(u64, 0), report.read_only_remount_failures);
+    try std.testing.expectEqual(@as(u64, 2), report.discarded_dirty_pages);
+    try std.testing.expectEqual(@as(u64, 1), report.read_only_rejections);
+    try std.testing.expectEqual(@as(u64, 3), report.writeback_requests);
+    try std.testing.expectEqual(@as(u64, 1), report.writeback_completions);
+    try std.testing.expectEqual(@as(u64, 3), report.writeback_passes);
     try std.testing.expectEqual(@as(u64, 0), report.writeback_immediate);
-    try std.testing.expectEqual(@as(u64, 2), report.writeback_durable);
+    try std.testing.expectEqual(@as(u64, 1), report.writeback_durable);
     try std.testing.expectEqual(@as(u64, 1), report.writeback_unsupported);
     try std.testing.expectEqual(@as(u64, 1), report.writeback_failures);
     try std.testing.expectEqual(@as(u64, 0), report.writeback_stale);
@@ -1214,7 +1275,7 @@ test "file data sync persists bytes and size without dirty mode metadata" {
     try std.testing.expectEqual(@as(u64, 2), recovered.report().generation);
 }
 
-test "failed file sync preserves the committed baseline for retry" {
+test "failed file sync remounts persist read only and preserves the committed baseline" {
     var disk: TestDisk = .{};
     const live_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
     defer std.testing.allocator.destroy(live_vfs);
@@ -1227,26 +1288,130 @@ test "failed file sync preserves the committed baseline for retry" {
     const committed_report = store.report();
 
     _ = try live_vfs.putFile(0, "/persist/target.txt", "after", 0o600, false, 3);
-    const dirty_before_failure = try live_vfs.dirtyFilePageBitmap(target_node);
-    try std.testing.expect(dirty_before_failure != 0);
+    try std.testing.expect((try live_vfs.dirtyFilePageBitmap(target_node)) != 0);
     disk.fail_write_at = disk.writes;
     try std.testing.expectError(Error.Io, store.syncFile(live_vfs, target_node));
-    try std.testing.expectEqual(dirty_before_failure, try live_vfs.dirtyFilePageBitmap(target_node));
-    try std.testing.expectEqual(committed_report.generation, store.report().generation);
-    try std.testing.expectEqual(committed_report.active_slot, store.report().active_slot);
-    try std.testing.expectEqual(committed_report.record_count, store.report().record_count);
+    try std.testing.expectEqual(@as(u8, 0), try live_vfs.dirtyFilePageBitmap(target_node));
+    try std.testing.expect(try live_vfs.mountReadOnly(committed_report.mount_id));
+    try std.testing.expect((try live_vfs.stat(0, "/persist/target.txt")).readonly);
+    try std.testing.expectEqualStrings("after", try live_vfs.readOnlyView(0, "/persist/target.txt"));
+    try std.testing.expectError(runtime_vfs.Error.ReadOnly, live_vfs.write(0, "/persist/target.txt", 0, "blocked", false, 4));
+    try std.testing.expectError(Error.ReadOnly, store.syncFile(live_vfs, target_node));
+    const ram_node = try live_vfs.putFile(0, "/ram-after-damage", "dirty", 0o600, false, 4);
+    try std.testing.expect((try live_vfs.dirtyFilePageBitmap(ram_node)) != 0);
+    try std.testing.expectError(Error.ReadOnly, store.sync(live_vfs));
+    try std.testing.expectEqual(@as(u8, 0), try live_vfs.dirtyFilePageBitmap(ram_node));
+    const damaged_report = store.report();
+    try std.testing.expect(damaged_report.damaged);
+    try std.testing.expectEqual(DamageReason.payload_write, damaged_report.damage_reason);
+    try std.testing.expectEqual(@as(u64, 1), damaged_report.read_only_remounts);
+    try std.testing.expectEqual(@as(u64, 0), damaged_report.read_only_remount_failures);
+    try std.testing.expectEqual(@as(u64, 1), damaged_report.discarded_dirty_pages);
+    try std.testing.expectEqual(@as(u64, 2), damaged_report.read_only_rejections);
+    try std.testing.expectEqual(committed_report.generation, damaged_report.generation);
+    try std.testing.expectEqual(committed_report.active_slot, damaged_report.active_slot);
+    try std.testing.expectEqual(committed_report.record_count, damaged_report.record_count);
     try std.testing.expectEqualSlices(u8, &committed_payload, &store.payload);
 
     disk.fail_write_at = null;
-    try store.syncFile(live_vfs, target_node);
-    try std.testing.expectEqual(@as(u8, 0), try live_vfs.dirtyFilePageBitmap(target_node));
     const recovered_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
     defer std.testing.allocator.destroy(recovered_vfs);
     recovered_vfs.initialize();
     var recovered: Store = .{};
-    try recovered.mount(recovered_vfs, disk.device(), 4);
-    try std.testing.expectEqualStrings("after", try recovered_vfs.readOnlyView(0, "/persist/target.txt"));
-    try std.testing.expectEqual(@as(u64, 2), recovered.report().generation);
+    try recovered.mount(recovered_vfs, disk.device(), 5);
+    try std.testing.expectEqualStrings("before", try recovered_vfs.readOnlyView(0, "/persist/target.txt"));
+    try std.testing.expectEqual(@as(u64, 1), recovered.report().generation);
+}
+
+test "journal write and flush failures classify read only remount stage" {
+    {
+        var disk: TestDisk = .{};
+        const vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+        defer std.testing.allocator.destroy(vfs);
+        vfs.initialize();
+        var store: Store = .{};
+        try store.mount(vfs, disk.device(), 1);
+        _ = try vfs.putFile(0, "/persist/value", "dirty", 0o600, false, 2);
+        disk.fail_flush_at = disk.flushes;
+        try std.testing.expectError(Error.Io, store.sync(vfs));
+        const report = store.report();
+        try std.testing.expect(report.damaged);
+        try std.testing.expectEqual(DamageReason.payload_flush, report.damage_reason);
+        try std.testing.expectEqual(@as(u64, 1), report.read_only_remounts);
+        try std.testing.expectEqual(@as(u64, 1), report.discarded_dirty_pages);
+        try std.testing.expect(try vfs.mountReadOnly(report.mount_id));
+        try std.testing.expectError(runtime_vfs.Error.ReadOnly, vfs.putFile(0, "/persist/value", "blocked", 0o600, false, 3));
+    }
+
+    {
+        var disk: TestDisk = .{};
+        const vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+        defer std.testing.allocator.destroy(vfs);
+        vfs.initialize();
+        var store: Store = .{};
+        try store.mount(vfs, disk.device(), 1);
+        _ = try vfs.putFile(0, "/persist/value", "clean", 0o600, false, 2);
+        try store.sync(vfs);
+        const committed = store.report();
+        const payload_sectors = std.math.divCeil(usize, @intCast(committed.payload_bytes), disk.device().block_size) catch unreachable;
+        const writes_before = disk.writes;
+        const flushes_before = disk.flushes;
+        _ = try vfs.putFile(0, "/persist/value", "dirty", 0o600, false, 3);
+        disk.fail_write_at = disk.writes + payload_sectors;
+        try std.testing.expectError(Error.Io, store.sync(vfs));
+        const report = store.report();
+        try std.testing.expect(report.damaged);
+        try std.testing.expectEqual(DamageReason.header_write, report.damage_reason);
+        try std.testing.expectEqual(@as(u64, 1), report.read_only_remounts);
+        try std.testing.expectEqual(@as(u64, 1), report.discarded_dirty_pages);
+        try std.testing.expect(try vfs.mountReadOnly(report.mount_id));
+        try std.testing.expectEqual(writes_before + payload_sectors, disk.writes);
+        try std.testing.expectEqual(flushes_before + 1, disk.flushes);
+        try std.testing.expectEqual(committed.generation, report.generation);
+        disk.fail_write_at = null;
+        const recovered_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+        defer std.testing.allocator.destroy(recovered_vfs);
+        recovered_vfs.initialize();
+        var recovered: Store = .{};
+        try recovered.mount(recovered_vfs, disk.device(), 4);
+        try std.testing.expectEqual(committed.generation, recovered.report().generation);
+        try std.testing.expectEqualStrings("clean", try recovered_vfs.readOnlyView(0, "/persist/value"));
+    }
+
+    {
+        var disk: TestDisk = .{};
+        const vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+        defer std.testing.allocator.destroy(vfs);
+        vfs.initialize();
+        var store: Store = .{};
+        try store.mount(vfs, disk.device(), 1);
+        _ = try vfs.putFile(0, "/persist/value", "clean", 0o600, false, 2);
+        try store.sync(vfs);
+        const committed = store.report();
+        const payload_sectors = std.math.divCeil(usize, @intCast(committed.payload_bytes), disk.device().block_size) catch unreachable;
+        const writes_before = disk.writes;
+        const flushes_before = disk.flushes;
+        _ = try vfs.putFile(0, "/persist/value", "dirty", 0o600, false, 3);
+        disk.fail_flush_at = disk.flushes + 1;
+        try std.testing.expectError(Error.Io, store.sync(vfs));
+        const report = store.report();
+        try std.testing.expect(report.damaged);
+        try std.testing.expectEqual(DamageReason.header_flush, report.damage_reason);
+        try std.testing.expectEqual(@as(u64, 1), report.read_only_remounts);
+        try std.testing.expectEqual(@as(u64, 1), report.discarded_dirty_pages);
+        try std.testing.expect(try vfs.mountReadOnly(report.mount_id));
+        try std.testing.expectEqual(writes_before + payload_sectors + 1, disk.writes);
+        try std.testing.expectEqual(flushes_before + 1, disk.flushes);
+        try std.testing.expectEqual(committed.generation, report.generation);
+        disk.fail_flush_at = null;
+        const recovered_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+        defer std.testing.allocator.destroy(recovered_vfs);
+        recovered_vfs.initialize();
+        var recovered: Store = .{};
+        try recovered.mount(recovered_vfs, disk.device(), 4);
+        try std.testing.expectEqual(committed.generation + 1, recovered.report().generation);
+        try std.testing.expectEqualStrings("dirty", try recovered_vfs.readOnlyView(0, "/persist/value"));
+    }
 }
 
 test "mount falls back to the previous valid generation" {

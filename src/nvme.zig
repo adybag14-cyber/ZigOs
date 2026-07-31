@@ -188,6 +188,9 @@ pub const Controller = struct {
     read_fault_lba: u64,
     read_fault_armed: bool,
     injected_read_failures: u64,
+    write_fault_lba: u64,
+    write_fault_armed: bool,
+    injected_write_failures: u64,
     msix_enabled: bool,
     msix_capability_offset: u8,
     msix_table_address: usize,
@@ -372,6 +375,9 @@ pub fn initialize(
         .read_fault_lba = std.math.maxInt(u64),
         .read_fault_armed = false,
         .injected_read_failures = 0,
+        .write_fault_lba = std.math.maxInt(u64),
+        .write_fault_armed = false,
+        .injected_write_failures = 0,
         .msix_enabled = false,
         .msix_capability_offset = 0,
         .msix_table_address = 0,
@@ -489,7 +495,10 @@ pub fn writeBlock(controller: *Controller, lba: u64, input: []const u8, force_un
     if (!validTransfer(controller, lba) or input.len != controller.logical_block_size) return false;
     const destination: [*]volatile u8 = @ptrFromInt(controller.io_buffer_address);
     for (input, 0..) |byte, index| destination[index] = byte;
-    var command = nvmTransferCommand(nvm_write, controller, lba, force_unit_access);
+    const inject_failure = controller.write_fault_armed and lba == controller.write_fault_lba;
+    if (inject_failure) controller.write_fault_armed = false;
+    const command_lba = if (inject_failure) controller.namespace_size_lbas else lba;
+    var command = nvmTransferCommand(nvm_write, controller, command_lba, force_unit_access);
     command.prp1 = controller.io_buffer_address;
     _ = submit(
         controller.reference,
@@ -498,10 +507,24 @@ pub fn writeBlock(controller: *Controller, lba: u64, input: []const u8, force_un
         &controller.next_command_id,
         &controller.io_queue,
         command,
-    ) orelse return false;
+    ) orelse {
+        if (inject_failure) controller.injected_write_failures +%= 1;
+        return false;
+    };
+    if (inject_failure) {
+        controller.injected_write_failures +%= 1;
+        return false;
+    }
     zigos_memory_fence();
     controller.write_commands +%= 1;
     last_failure_stage = .none;
+    return true;
+}
+
+pub fn armOneShotWriteError(controller: *Controller, lba: u64) bool {
+    if (!validTransfer(controller, lba) or controller.write_fault_armed) return false;
+    controller.write_fault_lba = lba;
+    controller.write_fault_armed = true;
     return true;
 }
 

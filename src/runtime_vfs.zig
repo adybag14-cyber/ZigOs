@@ -269,6 +269,8 @@ pub const Report = struct {
     directories: usize,
     pseudo_files: usize,
     mounts: usize,
+    read_only_remounts: u64,
+    read_only_remount_dirty_pages: u64,
     open_files: usize,
     bytes_used: usize,
     backed_files: usize,
@@ -358,6 +360,8 @@ pub const Vfs = struct {
     dentries: [maximum_dentries]Dentry = @splat(.{}),
     dentry_cache: [maximum_dentry_cache_entries]DentryCacheEntry = @splat(.{}),
     mounts: [maximum_mounts]Mount = @splat(.{}),
+    read_only_remounts: u64 = 0,
+    read_only_remount_dirty_pages: u64 = 0,
     open_files: [maximum_open_files]OpenFile = @splat(.{}),
     mutations: u64 = 0,
     rejected_operations: u64 = 0,
@@ -743,9 +747,29 @@ pub const Vfs = struct {
         @memcpy(mount_entry.source[0..source.len], source);
         self.mounts[mount_index] = mount_entry;
         self.migrateMountChildren(mountpoint_node, root_node, mount_id);
-        if (readonly) self.discardDirtyMountPages(mount_id);
+        if (readonly) _ = self.discardDirtyMountPages(mount_id);
         self.mutations +%= 1;
         return mount_id;
+    }
+
+    pub fn remountReadOnly(self: *Vfs, mount_id: u8) Error!usize {
+        if (mount_id == 0) return Error.NotFound;
+        const mount_index: usize = mount_id - 1;
+        if (mount_index >= self.mounts.len or !self.mounts[mount_index].used) return Error.NotFound;
+        if (self.mounts[mount_index].readonly) return 0;
+        self.mounts[mount_index].readonly = true;
+        const discarded = self.discardDirtyMountPages(mount_id);
+        self.read_only_remounts +%= 1;
+        self.read_only_remount_dirty_pages +%= discarded;
+        self.mutations +%= 1;
+        return discarded;
+    }
+
+    pub fn mountReadOnly(self: *const Vfs, mount_id: u8) Error!bool {
+        if (mount_id == 0) return Error.NotFound;
+        const mount_index: usize = mount_id - 1;
+        if (mount_index >= self.mounts.len or !self.mounts[mount_index].used) return Error.NotFound;
+        return self.mounts[mount_index].readonly;
     }
 
     pub fn unmount(self: *Vfs, mount_id: u8) Error!void {
@@ -980,7 +1004,7 @@ pub const Vfs = struct {
         if (node.kind != .pseudo) {
             var ready: u16 = 0;
             if (open_file.readable) ready |= 1 << 0;
-            if (open_file.writable) ready |= 1 << 1;
+            if (open_file.writable and !self.nodeReadonly(open_file.node)) ready |= 1 << 1;
             return ready & requested;
         }
         const operations = node.pseudo_operations orelse return Error.UnsupportedOperation;
@@ -1417,6 +1441,8 @@ pub const Vfs = struct {
             .directories = 0,
             .pseudo_files = 0,
             .mounts = 0,
+            .read_only_remounts = self.read_only_remounts,
+            .read_only_remount_dirty_pages = self.read_only_remount_dirty_pages,
             .open_files = 0,
             .bytes_used = 0,
             .backed_files = 0,
@@ -2380,14 +2406,17 @@ pub const Vfs = struct {
         }
     }
 
-    fn discardDirtyMountPages(self: *Vfs, mount_id: u8) void {
+    fn discardDirtyMountPages(self: *Vfs, mount_id: u8) usize {
+        var discarded: usize = 0;
         for (0..self.nodes.len) |node_index| {
             var node = &self.nodes[node_index];
             if (!node.used or node.kind != .file or node.mount_id != mount_id) continue;
             _ = node.data_lock.acquire();
+            discarded += @popCount(self.dirty_file_page_bitmap[node_index]);
             self.discardDirtyFilePagesLocked(@intCast(node_index), 0xFF);
             node.data_lock.release();
         }
+        return discarded;
     }
 
     fn destroyMountNamespace(self: *Vfs, mount_id: u8) void {
@@ -3335,6 +3364,40 @@ test "VFS nested mount roots cross boundaries and unmount child first" {
     try std.testing.expectEqual(@as(usize, 1), fs.report().mounts);
     try std.testing.expect(fs.validate());
 }
+test "VFS read only remount rejects retained and new writes while preserving reads" {
+    var fs = Vfs.init();
+    const persist_point = try fs.mkdir(0, "/persist", 0o755, 1);
+    _ = try fs.putFile(persist_point, "value", "before", 0o644, false, 2);
+    const mount_id = try fs.mount(0, "/persist", .zigos_persist, false, "test-persist");
+    const handle = try fs.open(7, 0, "/persist/value", .{ .read = true, .write = true }, 0, 3);
+    _ = try fs.seek(7, handle, 0, .end);
+    try std.testing.expectEqual(@as(usize, 6), try fs.writeOpen(7, handle, "-dirty", 4));
+    try std.testing.expectEqual(@as(u8, 1), try fs.dirtyFilePageBitmap((try fs.stat(0, "/persist/value")).node));
+
+    const discarded = try fs.remountReadOnly(mount_id);
+    try std.testing.expectEqual(@as(usize, 1), discarded);
+    try std.testing.expect(try fs.mountReadOnly(mount_id));
+    try std.testing.expect((try fs.stat(0, "/persist/value")).readonly);
+    try std.testing.expectEqual(@as(u8, 0), try fs.dirtyFilePageBitmap((try fs.stat(0, "/persist/value")).node));
+    const offset_before = (try fs.openInfo(7, handle)).offset;
+    try std.testing.expectError(Error.ReadOnly, fs.writeOpen(7, handle, "x", 5));
+    try std.testing.expectEqual(offset_before, (try fs.openInfo(7, handle)).offset);
+    try std.testing.expectEqual(@as(u16, 1), try fs.pollOpen(7, handle, 0x3));
+    try std.testing.expectError(Error.ReadOnly, fs.open(8, 0, "/persist/value", .{ .write = true }, 0, 5));
+    try std.testing.expectError(Error.ReadOnly, fs.create(try fs.resolve(0, "/persist"), "new", 0o644, 5));
+    try std.testing.expectError(Error.ReadOnly, fs.unlink(0, "/persist/value"));
+    try std.testing.expectError(Error.ReadOnly, fs.chmod(0, "/persist/value", 0o600, 5));
+    try std.testing.expectEqualStrings("before-dirty", try fs.readOnlyView(0, "/persist/value"));
+    try std.testing.expectEqual(@as(usize, 0), try fs.remountReadOnly(mount_id));
+
+    const report = fs.report();
+    try std.testing.expectEqual(@as(u64, 1), report.read_only_remounts);
+    try std.testing.expectEqual(@as(u64, 1), report.read_only_remount_dirty_pages);
+    try std.testing.expectEqual(@as(usize, 0), report.dirty_file_pages);
+    try std.testing.expect(fs.validate());
+    try fs.close(7, handle);
+}
+
 test "VFS mount policy protects read only trees" {
     var fs = Vfs.init();
     const boot = try fs.mkdir(0, "/boot", 0o755, 1);
