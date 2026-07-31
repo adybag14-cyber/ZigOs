@@ -87,7 +87,7 @@ The model does not currently defend against malicious kernel code, compromised f
 
 ### Devices and networking
 
-- `/dev/null`, `/dev/zero` and `/dev/console` are registered through per-node operation tables instead of a global pseudo-reader shortcut.
+- `/dev/null`, `/dev/zero` and `/dev/console` are published through a fixed-capacity kernel-only live registry and retain independent per-node operation tables. Matching registries publish bounded live `/proc` kernel summaries and `/net` network summaries; withdrawal rejects referenced nodes, ordinary namespace mutation remains read-only, and kernel-owned pseudo mounts cannot be detached through the userspace tmpfs-only unmount ABI.
 - Network receive queues and active driver UDP endpoints are bounded; ABI discovery reports four usable hardware endpoints rather than eight bookkeeping slots.
 - Retained NVMe and e1000e operation is bounded and polling-based during the permanent runtime.
 
@@ -105,7 +105,7 @@ The following are not mitigated and must be treated as open security work:
 - no system-wide cross-resource pressure policy or OOM victim selection;
 - no cryptographic executable, package or persistent-data trust policy;
 - no comprehensive fuzzing corpus for every pointer-bearing syscall and parser;
-- no SMP-safe scheduler, allocator, VFS or device registry;
+- no SMP-safe scheduler, allocator, VFS or device registry; the live pseudo registries are bounded kernel-only publication tables, not a hotplug-safe general registry;
 - no side-channel, speculative-execution or physical-attack defence claim.
 
 ## Security acceptance conditions

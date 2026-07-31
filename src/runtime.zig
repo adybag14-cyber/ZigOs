@@ -11,6 +11,7 @@ const runtime_boot_fat = @import("runtime_boot_fat.zig");
 const runtime_command = @import("runtime_command.zig");
 const runtime_fd = @import("runtime_fd.zig");
 const runtime_process = @import("runtime_process.zig");
+const runtime_pseudo_fs = @import("runtime_pseudo_fs.zig");
 const runtime_persist = @import("runtime_persist.zig");
 const runtime_tty = @import("runtime_tty.zig");
 const runtime_user = @import("runtime_user.zig");
@@ -189,6 +190,9 @@ const State = struct {
     tty: runtime_tty.Tty = .{},
     boot_fat: runtime_boot_fat.Backend = .{},
     persistence: runtime_persist.Store = .{},
+    devfs: runtime_pseudo_fs.Registry = runtime_pseudo_fs.Registry.init(.devfs),
+    procfs: runtime_pseudo_fs.Registry = runtime_pseudo_fs.Registry.init(.procfs),
+    netfs: runtime_pseudo_fs.Registry = runtime_pseudo_fs.Registry.init(.netfs),
     environment: runtime_command.Environment = undefined,
     editor: runtime_command.LineEditor = .{},
     cwd: u16 = 0,
@@ -283,6 +287,9 @@ fn initialize(configuration: Configuration) !void {
     state.descriptors.initialize();
     state.boot_fat = runtime_boot_fat.Backend.init();
     state.persistence.initialize();
+    state.devfs = runtime_pseudo_fs.Registry.init(.devfs);
+    state.procfs = runtime_pseudo_fs.Registry.init(.procfs);
+    state.netfs = runtime_pseudo_fs.Registry.init(.netfs);
     state.environment = runtime_command.Environment.init();
     state.editor = .{};
     state.pipeline_a = @splat(0);
@@ -454,18 +461,6 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/dns.elf", runtime_dns_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/c-sdk.elf", runtime_c_sdk_elf, 0o555, false, 0);
 
-    const generated_pseudo_paths = [_][]const u8{
-        "/proc/version", "/proc/uptime",    "/proc/meminfo", "/proc/processes",
-        "/proc/mounts",  "/net/interfaces", "/net/routes",   "/net/arp",
-        "/net/sockets",
-    };
-    for (generated_pseudo_paths) |path| {
-        _ = try state.vfs.createPseudoWithOperations(0, path, 0o444, 0, &generated_pseudo_operations, null);
-    }
-    _ = try state.vfs.createPseudoWithOperations(0, "/dev/console", 0o666, 0, &console_pseudo_operations, null);
-    _ = try state.vfs.createPseudoWithOperations(0, "/dev/null", 0o666, 0, &null_pseudo_operations, null);
-    _ = try state.vfs.createPseudoWithOperations(0, "/dev/zero", 0o666, 0, &zero_pseudo_operations, null);
-
     if (state.config.nvme_controller != null and state.config.nvme_boot_first_lba != 0 and state.config.nvme_boot_sector_count != 0) {
         const controller = state.config.nvme_controller.?;
         if (state.boot_fat.mount(&state.vfs, "/boot", "nvme0p1", .{
@@ -484,10 +479,19 @@ fn initializeFilesystem() !void {
     } else {
         try installEmbeddedBootAssets("embedded-assets");
     }
-    _ = try state.vfs.mount(0, "/proc", .procfs, true, "process-table");
-    _ = try state.vfs.mount(0, "/dev", .devfs, true, "kernel-devices");
-    _ = try state.vfs.mount(0, "/net", .netfs, true, "network-state");
-    if (!state.vfs.validate()) return runtime_vfs.Error.InvalidPath;
+    _ = try state.procfs.mount(&state.vfs, "/proc", "process-table", 0);
+    inline for (.{ "version", "uptime", "meminfo", "processes", "mounts" }) |name| {
+        _ = try state.procfs.register(&state.vfs, name, 0o444, &generated_pseudo_operations, null, 0);
+    }
+    _ = try state.devfs.mount(&state.vfs, "/dev", "kernel-devices", 0);
+    _ = try state.devfs.register(&state.vfs, "console", 0o666, &console_pseudo_operations, null, 0);
+    _ = try state.devfs.register(&state.vfs, "null", 0o666, &null_pseudo_operations, null, 0);
+    _ = try state.devfs.register(&state.vfs, "zero", 0o666, &zero_pseudo_operations, null, 0);
+    _ = try state.netfs.mount(&state.vfs, "/net", "network-state", 0);
+    inline for (.{ "interfaces", "routes", "arp", "sockets" }) |name| {
+        _ = try state.netfs.register(&state.vfs, name, 0o444, &generated_pseudo_operations, null, 0);
+    }
+    if (!state.vfs.validate() or !livePseudoFilesystemsClean()) return runtime_vfs.Error.InvalidPath;
 }
 
 fn installEmbeddedBootAssets(source: []const u8) !void {
@@ -2575,6 +2579,52 @@ fn storageStateLabel(report: runtime_persist.Report, diskless_recovery: bool) []
     return "unavailable";
 }
 
+fn livePseudoFilesystemsClean() bool {
+    const dev = state.devfs.report();
+    const proc = state.procfs.report();
+    const net = state.netfs.report();
+    return state.devfs.validate(&state.vfs) and state.procfs.validate(&state.vfs) and state.netfs.validate(&state.vfs) and
+        dev.mounted and proc.mounted and net.mounted and dev.mount_id != 0 and proc.mount_id != 0 and net.mount_id != 0 and
+        dev.mount_id != proc.mount_id and dev.mount_id != net.mount_id and proc.mount_id != net.mount_id and
+        dev.registrations == 3 and proc.registrations == 5 and net.registrations == 4 and
+        dev.publications == 3 and proc.publications == 5 and net.publications == 4 and
+        dev.withdrawals == 0 and proc.withdrawals == 0 and net.withdrawals == 0 and
+        dev.failures == 0 and proc.failures == 0 and net.failures == 0;
+}
+
+fn emitLivePseudoFilesystemReport(clean: bool) void {
+    const dev = state.devfs.report();
+    const proc = state.procfs.report();
+    const net = state.netfs.report();
+    emit("ZigOs live pseudo filesystems: dev/proc/net registrations ");
+    emitDecimal(dev.registrations);
+    emit("/");
+    emitDecimal(proc.registrations);
+    emit("/");
+    emitDecimal(net.registrations);
+    emit(" publications ");
+    emitDecimal(dev.publications);
+    emit("/");
+    emitDecimal(proc.publications);
+    emit("/");
+    emitDecimal(net.publications);
+    emit(" withdrawals ");
+    emitDecimal(dev.withdrawals);
+    emit("/");
+    emitDecimal(proc.withdrawals);
+    emit("/");
+    emitDecimal(net.withdrawals);
+    emit(" failures ");
+    emitDecimal(dev.failures);
+    emit("/");
+    emitDecimal(proc.failures);
+    emit("/");
+    emitDecimal(net.failures);
+    emit(" clean ");
+    emit(if (clean) "yes" else "no");
+    emit("\r\n");
+}
+
 fn emitBootFatReport(report: runtime_boot_fat.Report, clean: bool) void {
     emit("ZigOs boot FAT: block-backed ");
     emit(if (report.mounted) "yes" else "no");
@@ -2632,6 +2682,7 @@ fn finishNormalRuntime() noreturn {
     const persistence_report = state.persistence.report();
     const boot_fat_report = state.boot_fat.report();
     const boot_fat_clean = bootFatStateClean(boot_fat_report, false);
+    const pseudo_filesystems_clean = livePseudoFilesystemsClean();
     const userspace_report = runtime_user.report();
     const released_cache_pages = state.vfs.releaseFilePageCache();
     const final_fs_report = state.vfs.report();
@@ -2694,7 +2745,7 @@ fn finishNormalRuntime() noreturn {
         descriptor_report.namespaces == 0 and descriptor_report.descriptors == 0 and descriptor_report.open_descriptions == 0 and
         tty_report.foreground_process_group == 2 and tty_report.buffered_bytes == 0 and tty_report.edited_bytes == 0 and
         tty_report.bytes_submitted == tty_report.bytes_read and tty_report.blocked_reads >= 1 and tty_report.reader_wakeups >= 1 and
-        persistence_clean and boot_fat_clean and
+        persistence_clean and boot_fat_clean and pseudo_filesystems_clean and
         userspace_report.used_pages == 0 and userspace_report.live_contexts == 0 and userspace_report.file_mapping_pages == 0 and
         userspace_report.launches >= 3 and
         userspace_report.exits >= 3 and userspace_report.allocator_allocations == userspace_report.allocator_releases and
@@ -2713,6 +2764,7 @@ fn finishNormalRuntime() noreturn {
     emitNvmeWriteFaultReport();
     emitPersistenceDamageReport(persistence_report, fs_report, persistence_contained);
     emitBootFatReport(boot_fat_report, boot_fat_clean);
+    emitLivePseudoFilesystemReport(pseudo_filesystems_clean);
     emit("ZigOs normal userspace resources: processes ");
     emitDecimal(process_report.live);
     emit(" descriptors ");
@@ -2782,6 +2834,7 @@ fn finishDiagnosticRuntime() noreturn {
     const persistence_report = state.persistence.report();
     const boot_fat_report = state.boot_fat.report();
     const boot_fat_clean = bootFatStateClean(boot_fat_report, true);
+    const pseudo_filesystems_clean = livePseudoFilesystemsClean();
     const userspace_report = runtime_user.report();
     const released_cache_pages = state.vfs.releaseFilePageCache();
     const final_fs_report = state.vfs.report();
@@ -3058,6 +3111,7 @@ fn finishDiagnosticRuntime() noreturn {
     emitNvmeWriteFaultReport();
     emitPersistenceDamageReport(persistence_report, fs_report, false);
     emitBootFatReport(boot_fat_report, boot_fat_clean);
+    emitLivePseudoFilesystemReport(pseudo_filesystems_clean);
     emit("ZigOs persistent storage: mounted ");
     emit(if (persistence_report.mounted) "yes" else "no");
     emit(" generation/slot ");
@@ -3224,7 +3278,7 @@ fn finishDiagnosticRuntime() noreturn {
         emit(if (descriptor_clean) "yes" else "no");
         emit("\r\n");
     }
-    if (state.fd_contract_passed and descriptor_clean and tty_clean and persistence_clean and boot_fat_clean and vfs_clean and userspace_clean and network_clean) {
+    if (state.fd_contract_passed and descriptor_clean and tty_clean and persistence_clean and boot_fat_clean and pseudo_filesystems_clean and vfs_clean and userspace_clean and network_clean) {
         emit("ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes\r\n");
     } else {
         emit("ZigOs x86-64 Capstone 19 incomplete: fd-contract ");
@@ -3237,6 +3291,8 @@ fn finishDiagnosticRuntime() noreturn {
         emit(if (persistence_clean) "yes" else "no");
         emit(" boot-fat-clean ");
         emit(if (boot_fat_clean) "yes" else "no");
+        emit(" pseudo-filesystems-clean ");
+        emit(if (pseudo_filesystems_clean) "yes" else "no");
         emit(" vfs-clean ");
         emit(if (vfs_clean) "yes" else "no");
         emit(" userspace-clean ");

@@ -199,6 +199,9 @@ fn run() zigos.Error!void {
 }
 
 fn testMountSyscalls() zigos.Error!void {
+    if (zigos.umount("/proc", 0)) |_| return error.InvalidArgument else |err| {
+        if (err != error.Unsupported) return err;
+    }
     const mountpoint = "/mnt";
     const underlay = "/mnt/underlay";
     const temporary = "/mnt/sdk-mounted";

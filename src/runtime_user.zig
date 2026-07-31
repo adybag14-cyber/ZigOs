@@ -2856,6 +2856,10 @@ fn syscallUmount(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
+    if ((activeVfs().mountKind(mount_id) catch null) != .tmpfs) {
+        frame.rax = reject(runtime_abi.errno_no_syscall);
+        return 0;
+    }
     for (0..runtime_process.maximum_processes) |slot| {
         const candidate = activeProcesses().processAt(slot) orelse continue;
         if (activeVfs().nodeOnMount(mount_id, candidate.cwd_node)) {

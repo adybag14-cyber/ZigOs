@@ -42,6 +42,7 @@ def main() -> int:
     e1000e_source = text("src/e1000e.zig")
     page_pool_source = text("src/runtime_page_pool.zig")
     vfs_source = text("src/runtime_vfs.zig")
+    pseudo_fs_source = text("src/runtime_pseudo_fs.zig")
     boot_fat_source = text("src/runtime_boot_fat.zig")
     synchronization_source = text("src/synchronization.zig")
     tty_source = text("src/runtime_tty.zig")
@@ -542,7 +543,7 @@ def main() -> int:
         raise SystemExit("EIO QEMU gate must perform one failed read and one successful retry")
     require(io_error_boot_test, "ZigOs NVMe read fault injection: failures 1 armed no clean yes", "QEMU proves one consumed error completion and a disarmed trigger")
     require(io_error_boot_test, "metadata/file/block reads 50/3/51 failures 1", "QEMU requires exact failed-read and retry accounting")
-    require(io_error_boot_test, "10796/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes", "EIO recovery remains distinct from FAT corruption quarantine")
+    require(io_error_boot_test, "10808/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes", "EIO recovery remains distinct from FAT corruption quarantine")
     require(build_graph, '"nvme-write-fault-lba"', "build graph exposes the disabled-by-default persistent write-error target")
     require(kernel, "NVMe one-shot write error armed:", "test build arms persistent write failure only after boot-time inspection")
     require(runtime, "fn persistenceDamageClean", "normal shutdown accepts one classified contained persistent write failure at any prior generation")
@@ -569,11 +570,20 @@ def main() -> int:
     require(runtime_test, "stat /boot/EFI/BOOT/BOOTX64.EFI", "diagnostic QEMU stats the multi-mebibyte boot image without RAM-copying it")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 54 failed 0", "offline diagnostic profile requires the expanded block-backed FAT command matrix")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 56 failed 0", "live diagnostic profile requires the expanded block-backed FAT command matrix")
-    require(runtime_test, "10895/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
+    require(runtime_test, "10908/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
     require(normal_boot_test, "ZigOs boot FAT: block-backed yes files/directories 3/2", "persistent normal boot requires a clean real block-backed /boot")
-    require(normal_boot_test, "10796/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "normal QEMU requires exact FAT ownership with zero classified corruption")
+    require(normal_boot_test, "10807/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "normal QEMU requires exact FAT ownership with zero classified corruption")
     require(diskless_normal_boot_test, "ZigOs boot FAT: block-backed no files/directories 0/0", "diskless normal boot requires an explicitly absent backend and fallback namespace")
     require(diskless_normal_boot_test, "0/0/0/0 lock tickets/outstanding 0/0 quarantine state/reason/events no/none/0 clean yes", "diskless fallback has no FAT ownership or classified corruption state")
+    for script_text, profile in (
+        (runtime_test, "diagnostic"),
+        (normal_boot_test, "normal"),
+        (quarantine_boot_test, "quarantine"),
+        (io_error_boot_test, "read-error"),
+        (readonly_remount_boot_test, "write-error"),
+        (diskless_normal_boot_test, "diskless"),
+    ):
+        require(script_text, "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes", f"{profile} QEMU gate requires exact live pseudo-registry conservation")
     require(runtime, "fs_report.dentry_cache_references == 0", "normal and diagnostic release gates require zero live cache references")
     require(runtime, "fs_report.dentry_cache_acquires == fs_report.dentry_cache_releases", "release gates require balanced cache reference accounting")
     require(runtime, "fs_report.dentry_cache_hits > 0", "release gates require real dentry-cache hits")
@@ -725,6 +735,9 @@ def main() -> int:
     require(executor, "activeVfs().mountEmpty", "userspace mounts require an empty target rather than migrating an existing namespace")
     require(executor, "activeProcesses().processAt(slot)", "unmount scans every occupied process slot for working-directory references")
     require(executor, "activeVfs().nodeOnMount", "unmount rejects a process working directory within the target mount")
+    require(executor, "activeVfs().mountKind(mount_id)", "userspace unmount classifies the exact target mount")
+    require(executor, "!= .tmpfs", "userspace cannot detach kernel-owned procfs, devfs or netfs mounts")
+    require(sdk_conformance, 'zigos.umount("/proc", 0)', "CPL3 conformance proves kernel-owned procfs cannot be detached")
     require(vfs_source, "tmpfs,", "VFS distinguishes tmpfs from the root ramfs mount")
     require(vfs_source, "pub fn mountEmpty", "VFS exposes empty-target mount construction")
     require(vfs_source, "pub fn mountIdAtPath", "unmount resolves only an exact mounted root")
@@ -831,10 +844,25 @@ def main() -> int:
     require(executor, "serviceNetwork", "network ingress wakes blocked socket readers")
     require(vfs_source, "pub const PseudoOperations", "pseudo and device nodes publish per-node operation tables")
     require(vfs_source, "pub fn createPseudoWithOperations", "VFS registers independently operated pseudo/device nodes")
+    require(vfs_source, "pub fn publishPseudoRegistration", "VFS exposes a narrow kernel-only pseudo publication capability")
+    require(vfs_source, "pub fn withdrawPseudoRegistration", "VFS supports busy-safe withdrawal of registered pseudo objects")
+    require(vfs_source, "fn validatePseudoMountRoot", "privileged publication is limited to exact read-only procfs/devfs/netfs roots")
+    require(vfs_source, "pub fn mountKind", "mount identity can be classified without exposing mutable mount internals")
+    require(pseudo_fs_source, "pub const maximum_registrations: usize = 16", "each live pseudo registry has a fixed entry bound")
+    require(pseudo_fs_source, "pub fn register", "live pseudo objects may be registered before or after mount publication")
+    require(pseudo_fs_source, "pub fn unregister", "live pseudo objects have an explicit withdrawal path")
+    require(pseudo_fs_source, "pub fn mount", "registry mounts an empty read-only pseudo filesystem before publication")
+    require(pseudo_fs_source, "pub fn validate", "registry state is checked against the visible VFS namespace")
+    require(pseudo_fs_source, 'test "live pseudo registry publishes after mount and withdraws only when idle"', "isolated registry test proves live publication and EBUSY withdrawal")
+    require(runtime, "runtime_pseudo_fs.Registry.init(.devfs)", "runtime owns a live device registry")
+    require(runtime, "runtime_pseudo_fs.Registry.init(.procfs)", "runtime owns a live kernel-object registry")
+    require(runtime, "runtime_pseudo_fs.Registry.init(.netfs)", "runtime owns a live network-object registry")
+    require(runtime, "livePseudoFilesystemsClean", "all runtime profiles conserve live pseudo registrations")
+    require(runtime, "dev.registrations == 3 and proc.registrations == 5 and net.registrations == 4", "runtime freezes exact device/kernel/network registration counts")
     require(vfs_source, "pub fn ioctlOpen", "VFS dispatches device ioctl through the node operation table")
-    require(runtime, "/dev/null", "runtime registers a writable null device")
-    require(runtime, "/dev/zero", "runtime registers a writable zero device")
-    require(runtime, "/dev/console", "runtime registers an openable console stream")
+    require(runtime, 'state.devfs.register(&state.vfs, "null", 0o666', "runtime publishes a writable null device through the live registry")
+    require(runtime, 'state.devfs.register(&state.vfs, "zero", 0o666', "runtime publishes a writable zero device through the live registry")
+    require(runtime, 'state.devfs.register(&state.vfs, "console", 0o666', "runtime publishes an openable console stream through the live registry")
     forbid(vfs_source, "setPseudoReader", "a global pseudo-reader shortcut returned")
     require(executor, "std.math.add(u64, current_tick, frame.rdi)", "overflow-safe sleep deadlines")
     require(executor, "runtime_abi.descriptor(frame.rdi)", "descriptor registers are range-checked before narrowing")
@@ -922,6 +950,7 @@ def main() -> int:
         "src/runtime_process.zig",
         "src/runtime_tty.zig",
         "src/runtime_vfs.zig",
+        "src/runtime_pseudo_fs.zig",
         "src/runtime_boot_fat.zig",
         "src/nvme.zig",
         "src/runtime_abi.zig",
@@ -935,8 +964,8 @@ def main() -> int:
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 98:
-        raise SystemExit(f"canonical isolated-test declaration total must be 98, found {declared_tests}")
+    if declared_tests != 99:
+        raise SystemExit(f"canonical isolated-test declaration total must be 99, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -944,6 +973,7 @@ def main() -> int:
         '"src/runtime_process.zig"',
         '"src/runtime_tty.zig"',
         '"src/runtime_vfs.zig"',
+        '"src/runtime_pseudo_fs.zig"',
         '"src/runtime_boot_fat.zig"',
         '"src/runtime_abi.zig"',
         '"src/runtime_page_pool.zig"',
@@ -958,26 +988,33 @@ def main() -> int:
     require(build_graph, 'b.path("src/nvme.zig")', "canonical isolated graph includes the dedicated ReleaseSafe NVMe tests")
     require(workflow, "test-boot-fat-io-error.py --boot-timeout 240", "hosted integration runs the block-read EIO and retry gate")
     require(workflow, "test-persistent-readonly-remount.py --boot-timeout 240", "hosted integration runs the persistent fail-stop read-only remount gate")
-    require(readme, "all 98 unique isolated-test declarations", "README carries the canonical isolated-test count")
-    require(readme, "Size:    5,576,192 bytes", "README carries the reproducible ABI 1.13 EFI size")
-    require(readme, "SHA-256: 91228C0AFC835539140BEE09729FBD2128A5EA234FDC0E3B5A2520EA1D471872", "README carries the reproducible ABI 1.13 EFI hash")
+    require(readme, "237/237 canonical host-test executions across all 99 unique isolated-test declarations", "README carries the clean canonical execution and declaration counts")
+    require(readme, "Size:    5,582,848 bytes", "README carries the reproducible ABI 1.13 EFI size")
+    require(readme, "SHA-256: 1CFC9735CDD96520B7AAF115EC2F287D8219B8CB4DA70711221A8A53572F683F", "README carries the reproducible ABI 1.13 EFI hash")
     require(readme, "Persistent NVMe write-error read-only-remount profile", "README documents the required fail-stop profile")
     require(readme, "discarded/rejected 1/1 vfs-remount/discard 1/1 mount-readonly yes clean yes", "README freezes exact G229 containment telemetry")
-    require(priority, "98 unique isolated Zig test declarations", "priority remediation carries the canonical test count")
+    require(priority, "237/237 canonical host-test executions across 99 unique isolated Zig test declarations", "priority remediation carries the canonical execution and declaration counts")
     require(priority, "Persistent journal damage now has a bounded fail-stop policy", "priority remediation distinguishes containment from retry")
     require(threat_model, "remounts the exact `/persist` mount read-only once", "threat model states the fail-stop storage boundary")
     require(readme, "ABI 1.13 root-only `mount`/`umount` for a distinct transient `tmpfs`", "README documents the bounded userspace mount ABI")
     require(readme, "forced/lazy detach, arbitrary filesystem types, device-backed mounts and per-process mount namespaces are not implemented", "README does not overclaim the mount subset")
     require(priority, "ABI 1.13 adds root-gated syscalls 119/120 for an empty-target `tmpfs` subset", "priority remediation records the tmpfs mount boundary")
     require(threat_model, "ABI 1.13 exposes only a root-gated empty-target `tmpfs` mount subset", "threat model records the namespace lifetime policy")
-    require(roadmap, "192 complete, 308 open", "roadmap arithmetic includes G230-G232")
+    require(readme, "kernel-only fixed-capacity live registries", "README documents the G233-G235 implementation boundary")
+    require(readme, "per-PID proc directories, userspace registrars and automatic hotplug discovery remain open", "README does not overclaim live pseudo filesystems")
+    require(priority, "Three fixed-capacity kernel-only live registries", "priority remediation records live devfs/procfs/netfs publication")
+    require(threat_model, "kernel-owned pseudo mounts cannot be detached through the userspace tmpfs-only unmount ABI", "threat model protects live registry lifetime")
+    require(roadmap, "195 complete, 305 open", "roadmap arithmetic includes G233-G235")
     require(roadmap, "- [x] **G229** " + chr(0x2014) + " Remount a damaged writable filesystem read-only.", "roadmap marks G229 complete with the canonical separator")
     require(roadmap, "- [x] **G230** " + chr(0x2014) + " Expose mount and unmount syscalls.", "roadmap marks G230 complete with the canonical separator")
     require(roadmap, "- [x] **G231** " + chr(0x2014) + " Reject unmount while paths or descriptors remain busy.", "roadmap marks G231 complete with the canonical separator")
     require(roadmap, "- [x] **G232** " + chr(0x2014) + " Support a tmpfs mount distinct from the root mount.", "roadmap marks G232 complete with the canonical separator")
+    require(roadmap, "- [x] **G233** " + chr(0x2014) + " Support a devfs backed by live device registrations.", "roadmap marks G233 complete with the canonical separator")
+    require(roadmap, "- [x] **G234** " + chr(0x2014) + " Support a procfs backed by live kernel objects.", "roadmap marks G234 complete with the canonical separator")
+    require(roadmap, "- [x] **G235** " + chr(0x2014) + " Support a netfs backed by live network objects.", "roadmap marks G235 complete with the canonical separator")
     roadmap_items = re.findall(r"^- \[([ x])\] \*\*G\d{3}\*\*", roadmap, flags=re.MULTILINE)
-    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 192:
-        raise SystemExit("roadmap must contain 500 goals with exactly 192 complete after G230-G232")
+    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 195:
+        raise SystemExit("roadmap must contain 500 goals with exactly 195 complete after G233-G235")
     require(workflow, "Cross-platform artifact identity gate", "hosted cross-platform reproducibility gate")
     require(workflow, "cmp --", "artifact bytes are compared instead of only printed")
     require(asset_builder, '"schema": 2', "host-independent generated-asset manifest schema")
@@ -1080,7 +1117,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.13 Zig/C SDKs with root-only tmpfs mount/umount and busy-path protection, retained read-only block-backed FAT16 boot files with staged validation, classified quarantine fallback, recoverable block-read EIO propagation and fail-stop persistent write-error read-only remount, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/degraded/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.13 Zig/C SDKs with root-only tmpfs mount/umount and busy-path protection, fixed live devfs/procfs/netfs registries, retained read-only block-backed FAT16 boot files with staged validation, classified quarantine fallback, recoverable block-read EIO propagation and fail-stop persistent write-error read-only remount, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/degraded/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

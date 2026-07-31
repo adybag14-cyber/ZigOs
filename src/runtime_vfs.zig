@@ -541,6 +541,59 @@ pub const Vfs = struct {
         return node_index;
     }
 
+    /// Publish one kernel-owned pseudo node into an exact read-only procfs,
+    /// devfs or netfs mount root. Ordinary namespace mutation remains subject
+    /// to the mount's read-only policy; this capability is intentionally
+    /// limited to the live pseudo-filesystem registry.
+    pub fn publishPseudoRegistration(
+        self: *Vfs,
+        mount_root: u16,
+        name: []const u8,
+        mode: u16,
+        tick: u64,
+        operations: *const PseudoOperations,
+        context: ?*anyopaque,
+    ) Error!u16 {
+        try self.validatePseudoMountRoot(mount_root);
+        try validateSingleComponent(name);
+        const node_index = try self.createNodeInternal(mount_root, name, .pseudo, mode, false, tick, true);
+        self.nodes[node_index].pseudo_operations = operations;
+        self.nodes[node_index].pseudo_context = context;
+        return node_index;
+    }
+
+    /// Withdraw one registry-owned pseudo node. Open descriptions and mapped
+    /// references retain the node and cause EBUSY rather than allowing a live
+    /// device/kernel/network object to disappear underneath a caller.
+    pub fn withdrawPseudoRegistration(self: *Vfs, mount_root: u16, name: []const u8) Error!void {
+        try self.validatePseudoMountRoot(mount_root);
+        try validateSingleComponent(name);
+        const entry_index = self.findDentry(mount_root, name) orelse return Error.NotFound;
+        const node_index = self.dentries[entry_index].node;
+        if (self.nodes[node_index].kind != .pseudo or self.nodes[node_index].mount_id != self.nodes[mount_root].mount_id)
+            return Error.UnsupportedOperation;
+        if (self.hasOpenReferences(node_index)) return Error.Busy;
+        self.detachOrReclaimEntry(@intCast(entry_index));
+        self.mutations +%= 1;
+    }
+
+    pub fn pseudoRegistrationMatches(
+        self: *Vfs,
+        mount_root: u16,
+        name: []const u8,
+        node_index: u16,
+        operations: *const PseudoOperations,
+        context: ?*anyopaque,
+    ) bool {
+        self.validatePseudoMountRoot(mount_root) catch return false;
+        validateSingleComponent(name) catch return false;
+        const entry_index = self.findDentry(mount_root, name) orelse return false;
+        if (self.dentries[entry_index].node != node_index or node_index >= self.nodes.len) return false;
+        const node = &self.nodes[node_index];
+        return node.used and node.kind == .pseudo and node.mount_id == self.nodes[mount_root].mount_id and
+            node.pseudo_operations == operations and node.pseudo_context == context;
+    }
+
     pub fn createBackedFileWithOperations(
         self: *Vfs,
         cwd: u16,
@@ -785,6 +838,13 @@ pub const Vfs = struct {
         const node_index = try self.resolve(cwd, path);
         const mount_entry = self.mountForRoot(node_index) orelse return Error.NotFound;
         return mount_entry.id;
+    }
+
+    pub fn mountKind(self: *const Vfs, mount_id: u8) Error!MountKind {
+        if (mount_id == 0) return Error.NotFound;
+        const mount_index: usize = mount_id - 1;
+        if (mount_index >= self.mounts.len or !self.mounts[mount_index].used) return Error.NotFound;
+        return self.mounts[mount_index].kind;
     }
 
     pub fn nodeOnMount(self: *const Vfs, mount_id: u8, node_index: u16) bool {
@@ -1800,9 +1860,27 @@ pub const Vfs = struct {
     }
 
     fn createNode(self: *Vfs, parent: u16, name: []const u8, kind: Kind, mode: u16, readonly: bool, tick: u64) Error!u16 {
+        return self.createNodeInternal(parent, name, kind, mode, readonly, tick, false);
+    }
+
+    fn createNodeInternal(
+        self: *Vfs,
+        parent: u16,
+        name: []const u8,
+        kind: Kind,
+        mode: u16,
+        readonly: bool,
+        tick: u64,
+        privileged_pseudo_publication: bool,
+    ) Error!u16 {
         _ = try self.validateDirectory(parent);
         if (self.findDentry(parent, name) != null) return Error.AlreadyExists;
-        if (self.nodes[parent].readonly or self.mountReadonly(self.nodes[parent].mount_id)) return Error.ReadOnly;
+        const parent_readonly = self.nodes[parent].readonly or self.mountReadonly(self.nodes[parent].mount_id);
+        if (parent_readonly and !privileged_pseudo_publication) return Error.ReadOnly;
+        if (privileged_pseudo_publication) {
+            try self.validatePseudoMountRoot(parent);
+            if (kind != .pseudo or readonly) return Error.UnsupportedOperation;
+        }
         var node_index: usize = 1;
         while (node_index < self.nodes.len and self.nodes[node_index].used) : (node_index += 1) {}
         if (node_index >= self.nodes.len) return Error.NoSpace;
@@ -2368,6 +2446,22 @@ pub const Vfs = struct {
             return operations.write == null and operations.stream == null;
         }
         return node.readonly or self.mountReadonly(node.mount_id);
+    }
+
+    fn validatePseudoMountRoot(self: *const Vfs, node_index: u16) Error!void {
+        const mount_entry = self.mountForRoot(node_index) orelse return Error.InvalidPath;
+        if (!mount_entry.readonly) return Error.UnsupportedOperation;
+        switch (mount_entry.kind) {
+            .procfs, .devfs, .netfs => {},
+            else => return Error.UnsupportedOperation,
+        }
+    }
+
+    fn validateSingleComponent(name: []const u8) Error!void {
+        if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..") or
+            std.mem.indexOfScalar(u8, name, '/') != null or std.mem.indexOfScalar(u8, name, 0) != null)
+            return Error.InvalidPath;
+        if (name.len > maximum_name_length) return Error.NameTooLong;
     }
 
     fn mountReadonly(self: *const Vfs, mount_id: u8) bool {
