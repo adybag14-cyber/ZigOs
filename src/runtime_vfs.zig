@@ -59,6 +59,7 @@ pub const Kind = enum(u8) {
 
 pub const MountKind = enum(u8) {
     ramfs,
+    tmpfs,
     boot_fat,
     procfs,
     devfs,
@@ -718,6 +719,14 @@ pub const Vfs = struct {
         return output[0..used];
     }
 
+    pub fn mountEmpty(self: *Vfs, cwd: u16, path: []const u8, kind: MountKind, readonly: bool, source: []const u8) Error!u8 {
+        const mountpoint_entry = try self.entryForPath(cwd, path);
+        const mountpoint_node = self.dentries[mountpoint_entry].node;
+        if (self.nodes[mountpoint_node].kind != .directory) return Error.NotDirectory;
+        if (self.hasChildren(mountpoint_node)) return Error.DirectoryNotEmpty;
+        return self.mount(cwd, path, kind, readonly, source);
+    }
+
     pub fn mount(self: *Vfs, cwd: u16, path: []const u8, kind: MountKind, readonly: bool, source: []const u8) Error!u8 {
         if (source.len > 32) return Error.NameTooLong;
         const mountpoint_entry = try self.entryForPath(cwd, path);
@@ -770,6 +779,18 @@ pub const Vfs = struct {
         const mount_index: usize = mount_id - 1;
         if (mount_index >= self.mounts.len or !self.mounts[mount_index].used) return Error.NotFound;
         return self.mounts[mount_index].readonly;
+    }
+
+    pub fn mountIdAtPath(self: *Vfs, cwd: u16, path: []const u8) Error!u8 {
+        const node_index = try self.resolve(cwd, path);
+        const mount_entry = self.mountForRoot(node_index) orelse return Error.NotFound;
+        return mount_entry.id;
+    }
+
+    pub fn nodeOnMount(self: *const Vfs, mount_id: u8, node_index: u16) bool {
+        if (mount_id == 0 or node_index >= self.nodes.len or !self.nodes[node_index].used) return false;
+        const mount_index: usize = mount_id - 1;
+        return mount_index < self.mounts.len and self.mounts[mount_index].used and self.nodes[node_index].mount_id == mount_id;
     }
 
     pub fn unmount(self: *Vfs, mount_id: u8) Error!void {
@@ -3364,6 +3385,33 @@ test "VFS nested mount roots cross boundaries and unmount child first" {
     try std.testing.expectEqual(@as(usize, 1), fs.report().mounts);
     try std.testing.expect(fs.validate());
 }
+test "VFS empty tmpfs mounts are isolated and resolve exact unmount targets" {
+    var fs = Vfs.init();
+    const mountpoint = try fs.mkdir(0, "/mnt", 0o755, 1);
+    _ = try fs.putFile(mountpoint, "seed", "underlay", 0o644, false, 2);
+    try std.testing.expectError(Error.DirectoryNotEmpty, fs.mountEmpty(0, "/mnt", .tmpfs, false, "userspace-tmpfs"));
+    try fs.unlink(0, "/mnt/seed");
+
+    const mount_id = try fs.mountEmpty(0, "/mnt", .tmpfs, false, "userspace-tmpfs");
+    const mount_root = try fs.resolve(0, "/mnt");
+    try std.testing.expect(mount_root != mountpoint);
+    try std.testing.expect(fs.nodeOnMount(mount_id, mount_root));
+    try std.testing.expectEqual(mount_id, try fs.mountIdAtPath(0, "/mnt"));
+    _ = try fs.putFile(mount_root, "value", "tmpfs-data", 0o600, false, 3);
+    try std.testing.expectEqualStrings("tmpfs-data", try fs.readOnlyView(0, "/mnt/value"));
+    try std.testing.expectError(Error.NotFound, fs.mountIdAtPath(0, "/mnt/value"));
+
+    const handle = try fs.open(7, 0, "/mnt/value", .{ .read = true }, 0, 4);
+    try std.testing.expectError(Error.Busy, fs.unmount(mount_id));
+    try fs.close(7, handle);
+    try fs.unmount(mount_id);
+    try std.testing.expectEqual(mountpoint, try fs.resolve(0, "/mnt"));
+    try std.testing.expectError(Error.NotFound, fs.resolve(0, "/mnt/value"));
+    try std.testing.expectEqual(@as(u8, 1), (try fs.stat(0, "/mnt")).mount_id);
+    try std.testing.expectEqual(@as(usize, 1), fs.report().mounts);
+    try std.testing.expect(fs.validate());
+}
+
 test "VFS read only remount rejects retained and new writes while preserving reads" {
     var fs = Vfs.init();
     const persist_point = try fs.mkdir(0, "/persist", 0o755, 1);

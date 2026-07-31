@@ -619,6 +619,8 @@ pub fn handleSyscall(
         syscall.syscall_openat => return syscallOpenAt(context, frame),
         syscall.syscall_fsync => return syscallFsync(context, frame, fx_state),
         syscall.syscall_fdatasync => return syscallFdatasync(context, frame, fx_state),
+        syscall.syscall_mount => return syscallMount(context, frame),
+        syscall.syscall_umount => return syscallUmount(context, frame),
         syscall.syscall_symlink => return syscallSymlink(context, frame),
         syscall.syscall_readlink => return syscallReadlink(context, frame),
         syscall.syscall_link => return syscallLink(context, frame),
@@ -2777,6 +2779,95 @@ fn syscallOpenAt(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     };
     frame.rax = fd;
+    return 0;
+}
+
+fn syscallMount(context: *Context, frame: *interrupt_context.Frame) u64 {
+    if ((frame.r10 & ~syscall.mount_read_only) != 0 or frame.r8 != 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (process.uid != 0) {
+        frame.rax = reject(runtime_abi.errno_permission);
+        return 0;
+    }
+
+    var target_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const target_length = copyUserString(context, frame.rsi, &target_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    var filesystem_buffer: [17]u8 = @splat(0);
+    const filesystem_length = copyUserString(context, frame.rdx, &filesystem_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    if (!std.mem.eql(u8, filesystem_buffer[0..filesystem_length], "tmpfs")) {
+        frame.rax = reject(runtime_abi.errno_no_syscall);
+        return 0;
+    }
+
+    var source_buffer: [33]u8 = @splat(0);
+    var source: []const u8 = "none";
+    if (frame.rdi != 0) {
+        const source_length = copyUserString(context, frame.rdi, &source_buffer) orelse {
+            frame.rax = reject(errno_fault);
+            return 0;
+        };
+        if (source_length != 0) source = source_buffer[0..source_length];
+    }
+    _ = activeVfs().mountEmpty(
+        process.cwd_node,
+        target_buffer[0..target_length],
+        .tmpfs,
+        (frame.r10 & syscall.mount_read_only) != 0,
+        source,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallUmount(context: *Context, frame: *interrupt_context.Frame) u64 {
+    if (frame.rsi != 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (process.uid != 0) {
+        frame.rax = reject(runtime_abi.errno_permission);
+        return 0;
+    }
+    var target_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const target_length = copyUserString(context, frame.rdi, &target_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    const mount_id = activeVfs().mountIdAtPath(process.cwd_node, target_buffer[0..target_length]) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    for (0..runtime_process.maximum_processes) |slot| {
+        const candidate = activeProcesses().processAt(slot) orelse continue;
+        if (activeVfs().nodeOnMount(mount_id, candidate.cwd_node)) {
+            frame.rax = reject(runtime_abi.errno_busy);
+            return 0;
+        }
+    }
+    activeVfs().unmount(mount_id) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = 0;
     return 0;
 }
 

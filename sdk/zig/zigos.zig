@@ -108,6 +108,15 @@ pub const FallocateFlags = packed struct(u8) {
     }
 };
 
+pub const MountFlags = packed struct(u8) {
+    read_only: bool = false,
+    reserved: u7 = 0,
+
+    pub fn bits(self: MountFlags) u64 {
+        return @as(u8, @bitCast(self));
+    }
+};
+
 fn ptrValue(pointer: anytype) u64 {
     return @intFromPtr(pointer);
 }
@@ -436,6 +445,28 @@ pub fn rename(old_path: [*:0]const u8, new_path: [*:0]const u8) Error!void {
 
 pub fn chmod(path: [*:0]const u8, mode: u16) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_chmod, ptrValue(path), mode, 0, 0, 0, 0));
+}
+
+pub fn mount(
+    source: ?[*:0]const u8,
+    target: [*:0]const u8,
+    filesystem: [*:0]const u8,
+    flags: MountFlags,
+    data: ?*const anyopaque,
+) Error!void {
+    _ = try result(zigos_syscall6(
+        abi.syscall_mount,
+        if (source) |value| ptrValue(value) else 0,
+        ptrValue(target),
+        ptrValue(filesystem),
+        flags.bits(),
+        if (data) |value| ptrValue(value) else 0,
+        0,
+    ));
+}
+
+pub fn umount(target: [*:0]const u8, flags: u64) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_umount, ptrValue(target), flags, 0, 0, 0, 0));
 }
 
 pub fn symlink(target: [*:0]const u8, path: [*:0]const u8) Error!void {

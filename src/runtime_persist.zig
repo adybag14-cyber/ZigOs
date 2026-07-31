@@ -591,7 +591,7 @@ pub const Store = struct {
             if (!mount_entry.used or mount_entry.readonly) continue;
             plan.writable_mounts +%= 1;
             switch (mount_entry.kind) {
-                .ramfs => plan.immediate_mounts +%= 1,
+                .ramfs, .tmpfs => plan.immediate_mounts +%= 1,
                 .zigos_persist => {
                     if (!self.mounted or self.mount_id == 0 or mount_entry.id != self.mount_id or plan.durable_mount_id != 0)
                         return Error.NotConfigured;

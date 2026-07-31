@@ -64,6 +64,22 @@ int64_t zigos_fdatasync(uint16_t fd) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_FDATASYNC, fd, 0, 0, 0, 0, 0);
 }
 
+int64_t zigos_mount(const char *source, const char *target, const char *filesystem, uint64_t flags, const void *data) {
+    return (int64_t)zigos_syscall6(
+        ZIGOS_SYS_MOUNT,
+        pointer_value(source),
+        pointer_value(target),
+        pointer_value(filesystem),
+        flags,
+        pointer_value(data),
+        0
+    );
+}
+
+int64_t zigos_umount(const char *target, uint64_t flags) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_UMOUNT, pointer_value(target), flags, 0, 0, 0, 0);
+}
+
 int64_t zigos_fallocate(uint16_t fd, uint64_t mode, uint64_t offset, uint64_t length) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_FALLOCATE, fd, mode, offset, length, 0, 0);
 }

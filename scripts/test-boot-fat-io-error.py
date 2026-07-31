@@ -318,7 +318,8 @@ def main() -> int:
                 sdk_copy_marker,
                 "writable mounts synchronized",
                 "zig-sdk: envp/auxv passed",
-                "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev passed",
+                "zig-sdk: tmpfs mount/umount isolation and busy policy passed",
+                "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs passed",
                 "process 4 exited 86",
                 "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/fallocate/sparse/open-unlink/rmdir/sync passed",
                 "process 5 exited 88",
@@ -330,8 +331,8 @@ def main() -> int:
                 "cat: input/output error",
                 "ZigOs block-backed FAT16 runtime",
                 "ZigOs NVMe read fault injection: failures 1 armed no clean yes",
-                "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5522500 metadata/file/block reads 50/3/51 failures 1 clusters claimed/loop/cross/range 10790/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 129/129 cache-released 13 storage persistent clean yes",
+                "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5525572 metadata/file/block reads 50/3/51 failures 1 clusters claimed/loop/cross/range 10796/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 132/132 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

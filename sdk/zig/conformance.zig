@@ -9,7 +9,8 @@ const argv_message = "zig-sdk: argc/argv passed\r\n";
 const abi_message = "zig-sdk: ABI discovery passed\r\n";
 const startup_vector_message = "zig-sdk: envp/auxv passed\r\n";
 const mmap_file_message = "zig-sdk: shared file mmap coherence passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev passed\r\n";
+const mount_message = "zig-sdk: tmpfs mount/umount isolation and busy policy passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -187,12 +188,60 @@ fn run() zigos.Error!void {
     if (!equal(file_mapping[0..13], "mapped-after!")) return error.InvalidArgument;
     try zigos.munmap(file_mapping);
     try zigos.writeAll(1, mmap_file_message);
+    try testMountSyscalls();
+    try zigos.writeAll(1, mount_message);
 
     _ = zigos.open("/definitely/missing", .{ .read = true }, 0) catch |err| {
         if (err != error.NotFound) return err;
         return;
     };
     return error.InvalidArgument;
+}
+
+fn testMountSyscalls() zigos.Error!void {
+    const mountpoint = "/mnt";
+    const underlay = "/mnt/underlay";
+    const temporary = "/mnt/sdk-mounted";
+    zigos.unlink(underlay) catch {};
+    const underlay_fd = try zigos.open(underlay, .{ .write = true, .create = true, .truncate = true }, 0o600);
+    try zigos.close(underlay_fd);
+    if (zigos.mount(null, mountpoint, "tmpfs", .{}, null)) |_| return error.InvalidArgument else |err| {
+        if (err != error.NotEmpty) return err;
+    }
+    try zigos.unlink(underlay);
+    if (zigos.mount(null, mountpoint, "unsupported", .{}, null)) |_| return error.InvalidArgument else |err| {
+        if (err != error.Unsupported) return err;
+    }
+
+    try zigos.mount("zig-sdk", mountpoint, "tmpfs", .{}, null);
+    var mounted: zigos.Stat = undefined;
+    try zigos.stat(mountpoint, &mounted);
+    if (mounted.mount_id <= 1 or mounted.readonly != 0 or mounted.kind != 1) return error.InvalidArgument;
+    const mounted_fd = try zigos.open(temporary, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o600);
+    try zigos.writeAll(mounted_fd, "isolated-tmpfs");
+    if (zigos.umount(mountpoint, 0)) |_| return error.InvalidArgument else |err| {
+        if (err != error.Busy) return err;
+    }
+    try zigos.close(mounted_fd);
+    try zigos.chdir(mountpoint);
+    if (zigos.umount(mountpoint, 0)) |_| return error.InvalidArgument else |err| {
+        if (err != error.Busy) return err;
+    }
+    try zigos.chdir("/");
+    try zigos.umount(mountpoint, 0);
+    if (zigos.stat(temporary, &mounted)) |_| return error.InvalidArgument else |err| {
+        if (err != error.NotFound) return err;
+    }
+    try zigos.stat(mountpoint, &mounted);
+    if (mounted.mount_id != 1 or mounted.readonly != 0 or mounted.kind != 1) return error.InvalidArgument;
+
+    try zigos.mount(null, mountpoint, "tmpfs", .{ .read_only = true }, null);
+    try zigos.stat(mountpoint, &mounted);
+    if (mounted.mount_id <= 1 or mounted.readonly != 1) return error.InvalidArgument;
+    if (zigos.open(temporary, .{ .write = true, .create = true }, 0o600)) |_| return error.InvalidArgument else |err| {
+        if (err != error.ReadOnly) return err;
+    }
+    try zigos.umount(mountpoint, 0);
 }
 
 fn contains(haystack: []const u8, needle: []const u8) bool {

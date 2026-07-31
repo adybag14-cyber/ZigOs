@@ -254,7 +254,8 @@ def main() -> int:
                 sdk_copy_marker,
                 "writable mounts synchronized",
                 "zig-sdk: envp/auxv passed",
-                "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev passed",
+                "zig-sdk: tmpfs mount/umount isolation and busy policy passed",
+                "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs passed",
                 "process 4 exited 86",
                 "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/fallocate/sparse/open-unlink/rmdir/sync passed",
                 "process 5 exited 88",
@@ -267,8 +268,8 @@ def main() -> int:
                 "process-exec.elf",
                 "cat: not found",
                 "ZigOs boot FAT: block-backed no files/directories 0/0 bytes 0 metadata/file/block reads 48/0/48 failures 0 clusters claimed/loop/cross/range 0/0/1/0 lock tickets/outstanding 1/0 quarantine state/reason/events yes/cross_link/1 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 129/129 cache-released 13 storage persistent clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 129/129 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 132/132 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 132/132 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

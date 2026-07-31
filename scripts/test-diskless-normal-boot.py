@@ -184,7 +184,7 @@ def main() -> int:
                 "ZigOs normal boot profile: userspace init PID 1 supervises userspace shell PID 2; diagnostic software suite skipped",
                 "ZigOs userspace init PID 1",
                 "ZigOs userspace shell PID 2",
-                "c-sdk: ABI 1.12 discovery passed",
+                "c-sdk: ABI 1.13 discovery passed",
                 "c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
                 "process 3 exited 87",
                 "writable mounts synchronized",

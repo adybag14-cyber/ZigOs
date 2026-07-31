@@ -4,7 +4,7 @@
 
 This document describes the security boundary of the current bounded x86-64 ZigOs runtime. It is a development threat model, not a claim that ZigOs is secure against hostile workloads.
 
-The model covers the post-UEFI kernel, retained CPL3 processes, the bounded RAM VFS, the retained read-only `/boot` FAT volume, the `/persist` A/B journal, COM1/TTY input, the retained e1000e and NVMe paths, and the generated ABI 1.12 SDK interfaces. The legacy i686 environment is outside this document.
+The model covers the post-UEFI kernel, retained CPL3 processes, the bounded RAM VFS, the retained read-only `/boot` FAT volume, the `/persist` A/B journal, COM1/TTY input, the retained e1000e and NVMe paths, and the generated ABI 1.13 SDK interfaces. The legacy i686 environment is outside this document.
 
 ## Assets to protect
 
@@ -68,6 +68,7 @@ The model does not currently defend against malicious kernel code, compromised f
 - `/persist` uses alternating generations, payload CRCs, payload-before-header ordering, flushes and an FUA commit header.
 - Global sync and stable-path file fsync build in a separate scratch payload; the committed in-memory baseline changes only after payload and FUA header success.
 - Global sync prevalidates every active writable mount before I/O, treats RAM filesystems as immediately synchronized, skips read-only mounts, commits the configured persistent backend once and rejects unsupported or duplicate writable durable backends without advancing the journal.
+- ABI 1.13 exposes only a root-gated empty-target `tmpfs` mount subset. It rejects unknown flags, non-null mount data and unsupported filesystem names; unmount requires the exact mounted root and fails while child mounts, retained descriptors, referenced paths or any occupied process working directory remain inside. This is namespace-lifetime protection, not a complete privilege boundary because the current credential/capability model remains incomplete.
 - The file-data page cache is bounded to sixteen pages and keys entries by inode generation and logical page so reclaimed node slots cannot reuse stale data; the authoritative block pool remains write-through.
 - Cache page bytes are allocated independently from the post-bootstrap physical-memory manager; entries carry page addresses, invalidation and eviction return those pages, and shutdown requires cache allocations and releases to balance before final PMM accounting.
 - Runtime service checks a bounded low-watermark policy and evicts only clean LRU entries. Dirty resident pages are never pressure victims, and their independent dirty ledger remains authoritative until successful synchronization.
@@ -78,7 +79,7 @@ The model does not currently defend against malicious kernel code, compromised f
 - Journal restoration and read-only mount adoption establish clean baselines, inode destruction discards obsolete dirty bits, and every release profile requires zero dirty cache entries, pages and nodes at shutdown.
 - Asynchronous writeback permits only one active generation-tagged request; scheduling does not clear dirty state, and one later runtime service pass consumes at most one request.
 - RAM-backed requests complete by clearing only the validated target; stable persistent requests use data-only A/B journal commit ordering. Busy, unsupported and stale outcomes retain dirty pages for retry or global sync; a durable I/O failure enters the same fail-stop read-only containment state instead.
-- Request/completion/pass and queued/completed-page counters are conserved at shutdown; dedicated QEMU requires a nonzero three-page asynchronous proof, while other profiles may remain validly idle.
+- Request/completion/pass and queued/completed-page counters are conserved at shutdown; dedicated QEMU requires a nonzero four-page asynchronous proof, while other profiles may remain validly idle.
 - Ordinary reads hold the inode data lock; every data/size/allocation mutation invalidates that inode's cached pages, and shutdown requires the cache lock to have no outstanding ticket.
 - Large cache-array scans use indexed/reference traversal; the source contract rejects by-value iteration that previously created a kernel-stack-sized temporary during QEMU execution.
 - Persistent file fsync and fdatasync copy unrelated records from the last committed generation, excluding unrelated dirty VFS state. Full fsync records current mode; fdatasync retains committed mode while advancing data, size and sparse allocation. A forced-termination four-boot test verifies both policies; nonpersistent regular files use immediate target-only synchronization.
