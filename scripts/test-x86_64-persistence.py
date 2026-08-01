@@ -21,7 +21,7 @@ HEADER_MAGIC = b"ZIGPERS1"
 HEADER_VERSION = 2
 HEADER_SIZE = 48
 COMMIT_MARKER = 0x434F4D54
-PERSIST_MAX_PAYLOAD_BYTES = 1024 * 1024
+PERSIST_MAX_PAYLOAD_BYTES = 64 * 1024
 PERSIST_PAYLOAD_OFFSET_SECTORS = 2
 RECORD_HEADER_SIZE = 40
 TIMESTAMP_TARGET = "abi14/renamed.txt"
@@ -253,6 +253,8 @@ def parse_header(image: pathlib.Path, first_lba: int, slot: int, block_size: int
     header_size = int.from_bytes(block[12:16], "little")
     generation = int.from_bytes(block[16:24], "little")
     payload_length = int.from_bytes(block[24:28], "little")
+    if payload_length < 4 or payload_length > PERSIST_MAX_PAYLOAD_BYTES:
+        raise RuntimeError(f"slot {slot}: persistence payload length {payload_length} exceeded the 64 KiB journal bound")
     payload_crc32 = int.from_bytes(block[28:32], "little")
     encoded_slot = int.from_bytes(block[32:36], "little")
     record_count = int.from_bytes(block[36:40], "little")
@@ -458,10 +460,13 @@ def main() -> int:
         generation_two_target = timestamp_record(image, data_first_lba, header_b)
         if generation_two_target.created_tick != generation_one_target.created_tick:
             raise RuntimeError("fsync changed file creation timestamp")
-        if generation_two_target.modified_tick <= generation_one_target.modified_tick:
-            raise RuntimeError("fsync did not advance file modification timestamp")
-        if generation_two_target.changed_tick <= generation_one_target.changed_tick:
-            raise RuntimeError("fsync did not advance file change timestamp")
+        # Stored ticks are boot-local runtime ordering values, not a cross-boot epoch.
+        # A reboot resets the runtime tick counter, so only equality/inequality semantics
+        # are meaningful when comparing independent journal generations.
+        if generation_two_target.modified_tick == generation_one_target.modified_tick:
+            raise RuntimeError("fsync did not persist a changed file modification timestamp")
+        if generation_two_target.changed_tick == generation_one_target.changed_tick:
+            raise RuntimeError("fsync did not persist a changed file change timestamp")
         if generation_two_target.accessed_tick != generation_one_target.accessed_tick:
             raise RuntimeError("fsync unexpectedly changed committed file access timestamp")
 
@@ -496,8 +501,8 @@ def main() -> int:
         generation_three_target = timestamp_record(image, data_first_lba, header_a)
         if generation_three_target.created_tick != generation_two_target.created_tick:
             raise RuntimeError("fdatasync changed committed file creation timestamp")
-        if generation_three_target.modified_tick <= generation_two_target.modified_tick:
-            raise RuntimeError("fdatasync did not advance file modification timestamp")
+        if generation_three_target.modified_tick == generation_two_target.modified_tick:
+            raise RuntimeError("fdatasync did not persist a changed file modification timestamp")
         if generation_three_target.changed_tick != generation_two_target.changed_tick:
             raise RuntimeError("fdatasync committed dirty change timestamp metadata")
         if generation_three_target.accessed_tick != generation_two_target.accessed_tick:
