@@ -114,6 +114,19 @@ pub const Stat = extern struct {
     modified_tick: u64,
 };
 
+pub const FilesystemStat = extern struct {
+    block_size: u64,
+    total_blocks: u64,
+    free_blocks: u64,
+    available_blocks: u64,
+    total_nodes: u64,
+    free_nodes: u64,
+    mount_id: u32,
+    filesystem_kind: u16,
+    flags: u16,
+    reserved: u64 = 0,
+};
+
 pub const DirectoryEntry = extern struct {
     node: u32,
     kind: u8,
@@ -337,6 +350,7 @@ test "kernel errors retain distinct userspace errno values" {
 
 test "spawnv request and startup vector layouts are stable" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(IoVector));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(FilesystemStat));
     try std.testing.expectEqual(@as(usize, 8), constants.maximum_iovecs);
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(UserString));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(SpawnRequest));

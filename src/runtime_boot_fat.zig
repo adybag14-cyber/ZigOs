@@ -40,6 +40,7 @@ pub const Report = struct {
     blocks_read: u64,
     failures: u64,
     claimed_clusters: u32,
+    free_clusters: u32,
     chain_loops: u64,
     cross_links: u64,
     out_of_range_links: u64,
@@ -118,6 +119,7 @@ pub const Backend = struct {
     blocks_read: u64 = 0,
     failures: u64 = 0,
     claimed_clusters: u32 = 0,
+    free_clusters: u32 = 0,
     chain_loops: u64 = 0,
     cross_links: u64 = 0,
     out_of_range_links: u64 = 0,
@@ -165,8 +167,16 @@ pub const Backend = struct {
         while (queue_index < queue_count) : (queue_index += 1) {
             try self.scanDirectoryLocked(queue[queue_index], &queue, &queue_count);
         }
+        self.free_clusters = try self.countFreeClustersLocked();
         try self.publishNamespace(vfs, mountpoint, tick);
         const mount_id = try vfs.mount(0, mount_path, .boot_fat, true, source);
+        errdefer vfs.unmount(mount_id) catch {};
+        try vfs.setMountBlockCapacity(
+            mount_id,
+            self.volume.bytes_per_sector * self.volume.sectors_per_cluster,
+            self.volume.cluster_count,
+            self.free_clusters,
+        );
         self.mounted = true;
         return mount_id;
     }
@@ -187,6 +197,7 @@ pub const Backend = struct {
         self.directory_count = 0;
         self.byte_count = 0;
         self.claimed_clusters = 0;
+        self.free_clusters = 0;
         self.fat_sector_valid = false;
         @memset(&self.files, .{});
         @memset(&self.directories, .{});
@@ -196,7 +207,7 @@ pub const Backend = struct {
 
     pub fn validateQuarantine(self: *const Backend) bool {
         if (self.mounted or !self.quarantined or self.quarantine_reason == .none or self.quarantine_events != 1) return false;
-        if (self.file_count != 0 or self.directory_count != 0 or self.byte_count != 0 or self.claimed_clusters != 0) return false;
+        if (self.file_count != 0 or self.directory_count != 0 or self.byte_count != 0 or self.claimed_clusters != 0 or self.free_clusters != 0) return false;
         if (self.io_lock.next() != self.io_lock.serving()) return false;
         return switch (self.quarantine_reason) {
             .chain_loop => self.chain_loops > 0 and self.cross_links == 0 and self.out_of_range_links == 0,
@@ -221,6 +232,7 @@ pub const Backend = struct {
             .blocks_read = self.blocks_read,
             .failures = self.failures,
             .claimed_clusters = self.claimed_clusters,
+            .free_clusters = self.free_clusters,
             .chain_loops = self.chain_loops,
             .cross_links = self.cross_links,
             .out_of_range_links = self.out_of_range_links,
@@ -253,6 +265,7 @@ pub const Backend = struct {
             bytes += file.size;
         }
         return files == self.file_count and bytes == self.byte_count and self.claimed_clusters <= self.volume.cluster_count and
+            self.free_clusters <= self.volume.cluster_count and self.claimed_clusters + self.free_clusters <= self.volume.cluster_count and
             self.chain_loops == 0 and self.cross_links == 0 and self.out_of_range_links == 0;
     }
 
@@ -456,6 +469,19 @@ pub const Backend = struct {
             ordinal += 1;
         }
         return copied;
+    }
+
+    fn countFreeClustersLocked(self: *Backend) Error!u32 {
+        var free_clusters: u32 = 0;
+        var cluster: u32 = 2;
+        const end_cluster = self.volume.cluster_count + 2;
+        while (cluster < end_cluster) : (cluster += 1) {
+            switch (try self.readClusterLinkLocked(cluster)) {
+                .free => free_clusters += 1,
+                .next, .end, .bad => {},
+            }
+        }
+        return free_clusters;
     }
 
     fn readClusterLinkLocked(self: *Backend, cluster: u32) Error!fat.ClusterLink {
@@ -703,10 +729,16 @@ test "read-only FAT16 backend imports directories and streams large files from b
     try std.testing.expectEqual(@as(usize, 3), report.files);
     try std.testing.expectEqual(@as(usize, 2), report.directories);
     try std.testing.expectEqual(@as(u64, 33_720), report.bytes);
-    try std.testing.expect(report.metadata_reads > 0 and report.metadata_reads < 20);
+    try std.testing.expect(report.metadata_reads > sectors_per_fat and report.metadata_reads < 40);
     try std.testing.expect(report.file_reads >= 5 and report.blocks_read == device_context.reads);
     try std.testing.expectEqual(@as(u64, 1), report.failures);
     try std.testing.expectEqual(@as(u32, 71), report.claimed_clusters);
+    try std.testing.expectEqual(@as(u32, 4092), report.free_clusters);
+    const filesystem_stats = try vfs.statFilesystem(0, "/boot/EFI/BOOT/BIG.BIN");
+    try std.testing.expectEqual(@as(u64, block_size), filesystem_stats.block_size);
+    try std.testing.expectEqual(@as(u64, 4163), filesystem_stats.total_blocks);
+    try std.testing.expectEqual(@as(u64, 4092), filesystem_stats.free_blocks);
+    try std.testing.expect(!filesystem_stats.shared_blocks and filesystem_stats.shared_nodes);
     try std.testing.expectEqual(@as(u64, 0), report.chain_loops);
     try std.testing.expectEqual(@as(u64, 0), report.cross_links);
     try std.testing.expectEqual(@as(u64, 0), report.out_of_range_links);

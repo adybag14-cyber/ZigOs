@@ -616,6 +616,7 @@ pub fn handleSyscall(
         syscall.syscall_setnonblock => return syscallSetNonblocking(context, frame),
         syscall.syscall_ioctl => return syscallIoctl(context, frame),
         syscall.syscall_stat => return syscallStat(context, frame),
+        syscall.syscall_statfs => return syscallStatfs(context, frame),
         syscall.syscall_openat => return syscallOpenAt(context, frame),
         syscall.syscall_fsync => return syscallFsync(context, frame, fx_state),
         syscall.syscall_fdatasync => return syscallFdatasync(context, frame, fx_state),
@@ -2712,6 +2713,61 @@ fn syscallStat(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     };
     const result = runtime_fd.statFromVfs(info);
+    if (!copyToUser(context, frame.rsi, std.mem.asBytes(&result))) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = 0;
+    return 0;
+}
+
+fn filesystemStatFromVfs(info: runtime_vfs.FilesystemStats) runtime_abi.FilesystemStat {
+    var flags: u16 = 0;
+    if (info.readonly) flags |= syscall.filesystem_stat_read_only;
+    if (info.shared_blocks) flags |= syscall.filesystem_stat_shared_blocks;
+    if (info.shared_nodes) flags |= syscall.filesystem_stat_shared_nodes;
+    if (info.synthetic) flags |= syscall.filesystem_stat_synthetic;
+    const filesystem_kind: u16 = switch (info.kind) {
+        .ramfs => syscall.filesystem_type_ramfs,
+        .tmpfs => syscall.filesystem_type_tmpfs,
+        .boot_fat => syscall.filesystem_type_boot_fat,
+        .procfs => syscall.filesystem_type_procfs,
+        .devfs => syscall.filesystem_type_devfs,
+        .netfs => syscall.filesystem_type_netfs,
+        .zigos_persist => syscall.filesystem_type_zigos_persist,
+    };
+    return .{
+        .block_size = info.block_size,
+        .total_blocks = info.total_blocks,
+        .free_blocks = info.free_blocks,
+        .available_blocks = info.free_blocks,
+        .total_nodes = info.total_nodes,
+        .free_nodes = info.free_nodes,
+        .mount_id = info.mount_id,
+        .filesystem_kind = filesystem_kind,
+        .flags = flags,
+    };
+}
+
+fn syscallStatfs(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    if (!validateRange(context, frame.rsi, @sizeOf(runtime_abi.FilesystemStat), true)) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const info = activeVfs().statFilesystem(process.cwd_node, path_buffer[0..path_length]) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const result = filesystemStatFromVfs(info);
     if (!copyToUser(context, frame.rsi, std.mem.asBytes(&result))) {
         frame.rax = reject(errno_fault);
         return 0;

@@ -71,8 +71,23 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.13 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.14 discovery passed\r\n")) {
         return 0xC4;
+    }
+
+    zigos_filesystem_stat root_fs = {0};
+    zigos_filesystem_stat dev_fs = {0};
+    if (zigos_statfs("/", &root_fs) != 0 || root_fs.filesystem_kind != ZIGOS_FS_TYPE_RAMFS ||
+        root_fs.block_size != ZIGOS_PAGE_SIZE || root_fs.total_blocks != 256 ||
+        root_fs.free_blocks > root_fs.total_blocks || root_fs.available_blocks != root_fs.free_blocks ||
+        root_fs.total_nodes != 96 || root_fs.free_nodes > root_fs.total_nodes || root_fs.mount_id != 1 ||
+        (root_fs.flags & (ZIGOS_FS_STAT_SHARED_BLOCKS | ZIGOS_FS_STAT_SHARED_NODES)) !=
+            (ZIGOS_FS_STAT_SHARED_BLOCKS | ZIGOS_FS_STAT_SHARED_NODES) ||
+        zigos_statfs("/dev/null", &dev_fs) != 0 || dev_fs.filesystem_kind != ZIGOS_FS_TYPE_DEVFS ||
+        dev_fs.total_blocks != 0 || dev_fs.free_blocks != 0 ||
+        (dev_fs.flags & (ZIGOS_FS_STAT_READ_ONLY | ZIGOS_FS_STAT_SHARED_NODES | ZIGOS_FS_STAT_SYNTHETIC)) !=
+            (ZIGOS_FS_STAT_READ_ONLY | ZIGOS_FS_STAT_SHARED_NODES | ZIGOS_FS_STAT_SYNTHETIC)) {
+        return fail(0xD8, "filesystem statfs");
     }
 
     zigos_stat info = {0};
@@ -255,7 +270,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xD6, "descriptor fsync/fdatasync");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
         return 0xD7;
     }
     return 0x57;

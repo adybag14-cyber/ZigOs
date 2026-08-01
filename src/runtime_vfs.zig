@@ -67,6 +67,20 @@ pub const MountKind = enum(u8) {
     zigos_persist,
 };
 
+pub const FilesystemStats = struct {
+    mount_id: u8,
+    kind: MountKind,
+    readonly: bool,
+    block_size: u64,
+    total_blocks: u64,
+    free_blocks: u64,
+    total_nodes: u64,
+    free_nodes: u64,
+    shared_blocks: bool,
+    shared_nodes: bool,
+    synthetic: bool,
+};
+
 pub const Error = error{
     InvalidPath,
     NameTooLong,
@@ -213,6 +227,10 @@ pub const Mount = struct {
     root_node: u16 = invalid_node,
     kind: MountKind = .ramfs,
     readonly: bool = false,
+    capacity_block_size: u32 = 0,
+    capacity_total_blocks: u64 = 0,
+    capacity_free_blocks: u64 = 0,
+    capacity_configured: bool = false,
     source: [32]u8 = @splat(0),
     source_length: u8 = 0,
 
@@ -845,6 +863,105 @@ pub const Vfs = struct {
         const mount_index: usize = mount_id - 1;
         if (mount_index >= self.mounts.len or !self.mounts[mount_index].used) return Error.NotFound;
         return self.mounts[mount_index].kind;
+    }
+
+    pub fn setMountBlockCapacity(
+        self: *Vfs,
+        mount_id: u8,
+        block_size: u32,
+        total_blocks: u64,
+        free_blocks: u64,
+    ) Error!void {
+        if (mount_id == 0 or block_size == 0 or free_blocks > total_blocks) return Error.InvalidPath;
+        const mount_index: usize = mount_id - 1;
+        if (mount_index >= self.mounts.len or !self.mounts[mount_index].used) return Error.NotFound;
+        const mount_entry = &self.mounts[mount_index];
+        switch (mount_entry.kind) {
+            .boot_fat => {},
+            else => return Error.UnsupportedOperation,
+        }
+        mount_entry.capacity_block_size = block_size;
+        mount_entry.capacity_total_blocks = total_blocks;
+        mount_entry.capacity_free_blocks = free_blocks;
+        mount_entry.capacity_configured = true;
+    }
+
+    pub fn statFilesystem(self: *Vfs, cwd: u16, path: []const u8) Error!FilesystemStats {
+        const node_index = try self.resolve(cwd, path);
+        const mount_id = self.nodes[node_index].mount_id;
+        if (mount_id == 0) return Error.CorruptState;
+        const mount_index: usize = mount_id - 1;
+        if (mount_index >= self.mounts.len or !self.mounts[mount_index].used) return Error.CorruptState;
+        const mount_entry = &self.mounts[mount_index];
+
+        var used_nodes: u64 = 0;
+        for (0..self.nodes.len) |index| used_nodes += @intFromBool(self.nodes[index].used);
+        const free_nodes: u64 = maximum_nodes - used_nodes;
+
+        switch (mount_entry.kind) {
+            .ramfs, .tmpfs, .zigos_persist => {
+                var used_blocks: u64 = 0;
+                for (0..self.data_blocks.len) |index| used_blocks += @intFromBool(self.data_blocks[index].used);
+                return .{
+                    .mount_id = mount_id,
+                    .kind = mount_entry.kind,
+                    .readonly = mount_entry.readonly,
+                    .block_size = file_block_size,
+                    .total_blocks = maximum_data_blocks,
+                    .free_blocks = maximum_data_blocks - used_blocks,
+                    .total_nodes = maximum_nodes,
+                    .free_nodes = free_nodes,
+                    .shared_blocks = true,
+                    .shared_nodes = true,
+                    .synthetic = false,
+                };
+            },
+            .boot_fat => {
+                if (mount_entry.capacity_configured) {
+                    return .{
+                        .mount_id = mount_id,
+                        .kind = mount_entry.kind,
+                        .readonly = mount_entry.readonly,
+                        .block_size = mount_entry.capacity_block_size,
+                        .total_blocks = mount_entry.capacity_total_blocks,
+                        .free_blocks = mount_entry.capacity_free_blocks,
+                        .total_nodes = maximum_nodes,
+                        .free_nodes = free_nodes,
+                        .shared_blocks = false,
+                        .shared_nodes = true,
+                        .synthetic = false,
+                    };
+                }
+                var used_blocks: u64 = 0;
+                for (0..self.data_blocks.len) |index| used_blocks += @intFromBool(self.data_blocks[index].used);
+                return .{
+                    .mount_id = mount_id,
+                    .kind = mount_entry.kind,
+                    .readonly = mount_entry.readonly,
+                    .block_size = file_block_size,
+                    .total_blocks = maximum_data_blocks,
+                    .free_blocks = maximum_data_blocks - used_blocks,
+                    .total_nodes = maximum_nodes,
+                    .free_nodes = free_nodes,
+                    .shared_blocks = true,
+                    .shared_nodes = true,
+                    .synthetic = false,
+                };
+            },
+            .procfs, .devfs, .netfs => return .{
+                .mount_id = mount_id,
+                .kind = mount_entry.kind,
+                .readonly = mount_entry.readonly,
+                .block_size = file_block_size,
+                .total_blocks = 0,
+                .free_blocks = 0,
+                .total_nodes = maximum_nodes,
+                .free_nodes = free_nodes,
+                .shared_blocks = false,
+                .shared_nodes = true,
+                .synthetic = true,
+            },
+        }
     }
 
     pub fn nodeOnMount(self: *const Vfs, mount_id: u8, node_index: u16) bool {
@@ -3503,6 +3620,58 @@ test "VFS empty tmpfs mounts are isolated and resolve exact unmount targets" {
     try std.testing.expectError(Error.NotFound, fs.resolve(0, "/mnt/value"));
     try std.testing.expectEqual(@as(u8, 1), (try fs.stat(0, "/mnt")).mount_id);
     try std.testing.expectEqual(@as(usize, 1), fs.report().mounts);
+    try std.testing.expect(fs.validate());
+}
+
+test "VFS filesystem statistics distinguish shared and backend capacity" {
+    var fs = Vfs.init();
+    _ = try fs.mkdir(0, "/tmp", 0o755, 1);
+    _ = try fs.mkdir(0, "/boot", 0o755, 1);
+    _ = try fs.mkdir(0, "/proc", 0o755, 1);
+    const root_file = try fs.create(0, "/root.bin", 0o644, 2);
+    _ = root_file;
+    const root_handle = try fs.open(1, 0, "/root.bin", .{ .read = true, .write = true }, 0, 3);
+    _ = try fs.writeOpen(1, root_handle, "root", 3);
+    try fs.close(1, root_handle);
+
+    const root_stats = try fs.statFilesystem(0, "/root.bin");
+    try std.testing.expectEqual(@as(u8, 1), root_stats.mount_id);
+    try std.testing.expectEqual(MountKind.ramfs, root_stats.kind);
+    try std.testing.expect(root_stats.shared_blocks and root_stats.shared_nodes and !root_stats.synthetic);
+    try std.testing.expectEqual(@as(u64, maximum_data_blocks), root_stats.total_blocks);
+    try std.testing.expectEqual(@as(u64, maximum_data_blocks - 1), root_stats.free_blocks);
+
+    const tmpfs_id = try fs.mountEmpty(0, "/tmp", .tmpfs, false, "test-tmpfs");
+    _ = try fs.create(0, "/tmp/value", 0o644, 4);
+    const tmp_handle = try fs.open(1, 0, "/tmp/value", .{ .read = true, .write = true }, 0, 4);
+    _ = try fs.writeOpen(1, tmp_handle, "tmp", 4);
+    try fs.close(1, tmp_handle);
+    const tmp_stats = try fs.statFilesystem(0, "/tmp/value");
+    const root_after_tmp = try fs.statFilesystem(0, "/");
+    try std.testing.expectEqual(tmpfs_id, tmp_stats.mount_id);
+    try std.testing.expectEqual(@as(u64, maximum_data_blocks - 2), tmp_stats.free_blocks);
+    try std.testing.expectEqual(tmp_stats.free_blocks, root_after_tmp.free_blocks);
+    try std.testing.expectEqual(tmp_stats.free_nodes, root_after_tmp.free_nodes);
+
+    const boot_id = try fs.mount(0, "/boot", .boot_fat, true, "test-fat");
+    const fallback_boot_stats = try fs.statFilesystem(0, "/boot");
+    try std.testing.expectEqual(@as(u64, file_block_size), fallback_boot_stats.block_size);
+    try std.testing.expectEqual(@as(u64, maximum_data_blocks), fallback_boot_stats.total_blocks);
+    try std.testing.expect(fallback_boot_stats.shared_blocks and fallback_boot_stats.readonly);
+    try fs.setMountBlockCapacity(boot_id, 512, 1234, 321);
+    const boot_stats = try fs.statFilesystem(0, "/boot");
+    try std.testing.expectEqual(@as(u64, 512), boot_stats.block_size);
+    try std.testing.expectEqual(@as(u64, 1234), boot_stats.total_blocks);
+    try std.testing.expectEqual(@as(u64, 321), boot_stats.free_blocks);
+    try std.testing.expect(!boot_stats.shared_blocks and boot_stats.shared_nodes and !boot_stats.synthetic);
+    try std.testing.expect(boot_stats.readonly);
+
+    const proc_id = try fs.mount(0, "/proc", .procfs, true, "kernel-state");
+    const proc_stats = try fs.statFilesystem(0, "/proc");
+    try std.testing.expectEqual(proc_id, proc_stats.mount_id);
+    try std.testing.expectEqual(@as(u64, 0), proc_stats.total_blocks);
+    try std.testing.expectEqual(@as(u64, 0), proc_stats.free_blocks);
+    try std.testing.expect(proc_stats.synthetic and proc_stats.shared_nodes);
     try std.testing.expect(fs.validate());
 }
 

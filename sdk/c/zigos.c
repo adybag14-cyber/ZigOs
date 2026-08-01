@@ -52,6 +52,10 @@ int64_t zigos_stat_path(const char *path, zigos_stat *info) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_STAT, pointer_value(path), pointer_value(info), 0, 0, 0, 0);
 }
 
+int64_t zigos_statfs(const char *path, zigos_filesystem_stat *info) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_STATFS, pointer_value(path), pointer_value(info), 0, 0, 0, 0);
+}
+
 int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_IOCTL, fd, request, argument, 0, 0, 0);
 }

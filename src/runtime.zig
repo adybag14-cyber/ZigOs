@@ -2477,13 +2477,14 @@ fn bootFatStateClean(report: runtime_boot_fat.Report, require_file_reads: bool) 
     if (report.quarantined) {
         return configured and state.boot_fat.validateQuarantine() and !report.mounted and report.files == 0 and
             report.directories == 0 and report.bytes == 0 and report.file_reads == 0 and report.claimed_clusters == 0 and
-            report.quarantine_events == 1 and report.lock_outstanding == 0;
+            report.free_clusters == 0 and report.quarantine_events == 1 and report.lock_outstanding == 0;
     }
     if (!configured) {
         return !report.mounted and !report.quarantined and report.quarantine_reason == .none and report.quarantine_events == 0 and
             report.files == 0 and report.directories == 0 and report.bytes == 0 and report.metadata_reads == 0 and
             report.file_reads == 0 and report.blocks_read == 0 and report.failures == 0 and report.claimed_clusters == 0 and
-            report.chain_loops == 0 and report.cross_links == 0 and report.out_of_range_links == 0 and report.lock_outstanding == 0;
+            report.free_clusters == 0 and report.chain_loops == 0 and report.cross_links == 0 and report.out_of_range_links == 0 and
+            report.lock_outstanding == 0;
     }
     const injection_disabled = if (state.config.nvme_controller) |controller|
         controller.injected_read_failures == 0 and !controller.read_fault_armed
@@ -2498,7 +2499,7 @@ fn bootFatStateClean(report: runtime_boot_fat.Report, require_file_reads: bool) 
         report.bytes > 0 and report.metadata_reads > 0 and (!require_file_reads or report.file_reads >= 2) and
         report.blocks_read >= report.metadata_reads and
         ((report.failures == 0 and injection_disabled) or recovered_injected_read_error) and
-        report.claimed_clusters > 0 and report.chain_loops == 0 and report.cross_links == 0 and
+        report.claimed_clusters > 0 and report.free_clusters > 0 and report.chain_loops == 0 and report.cross_links == 0 and
         report.out_of_range_links == 0 and report.lock_outstanding == 0;
 }
 
@@ -2642,8 +2643,10 @@ fn emitBootFatReport(report: runtime_boot_fat.Report, clean: bool) void {
     emitDecimal(report.blocks_read);
     emit(" failures ");
     emitDecimal(report.failures);
-    emit(" clusters claimed/loop/cross/range ");
+    emit(" clusters claimed/free/loop/cross/range ");
     emitDecimal(report.claimed_clusters);
+    emit("/");
+    emitDecimal(report.free_clusters);
     emit("/");
     emitDecimal(report.chain_loops);
     emit("/");

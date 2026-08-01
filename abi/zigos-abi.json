@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 13,
+    "minor": 14,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -76,7 +76,8 @@
     "writev": 117,
     "fdatasync": 118,
     "mount": 119,
-    "umount": 120
+    "umount": 120,
+    "statfs": 121
   },
   "errno": {
     "permission": -1,
@@ -157,5 +158,20 @@
   },
   "mount_flags": {
     "read_only": 0
+  },
+  "filesystem_types": {
+    "ramfs": 1,
+    "tmpfs": 2,
+    "boot_fat": 3,
+    "procfs": 4,
+    "devfs": 5,
+    "netfs": 6,
+    "zigos_persist": 7
+  },
+  "filesystem_stat_flags": {
+    "read_only": 0,
+    "shared_blocks": 1,
+    "shared_nodes": 2,
+    "synthetic": 3
   }
 }

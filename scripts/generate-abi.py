@@ -72,6 +72,12 @@ def generate(spec: dict) -> tuple[str, str, str]:
     for name, value in spec.get("mount_flags", {}).items():
         zig.append(f"pub const mount_{name}: u64 = @as(u64, 1) << {value};\n")
         nasm.append(f"%define ZIGOS_MOUNT_{name.upper()} (1 << {value})\n")
+    for name, value in spec.get("filesystem_types", {}).items():
+        zig.append(f"pub const filesystem_type_{name}: u16 = {value};\n")
+        nasm.append(f"%define ZIGOS_FS_TYPE_{name.upper()} {value}\n")
+    for name, value in spec.get("filesystem_stat_flags", {}).items():
+        zig.append(f"pub const filesystem_stat_{name}: u16 = @as(u16, 1) << {value};\n")
+        nasm.append(f"%define ZIGOS_FS_STAT_{name.upper()} (1 << {value})\n")
     for group in ("capabilities", "syscalls", "errno"):
         zig.append("\n")
         nasm.append("\n")
@@ -149,6 +155,18 @@ def generate(spec: dict) -> tuple[str, str, str]:
         "    link_count: u8,\n",
         "    size: u64,\n",
         "    modified_tick: u64,\n",
+        "};\n\n",
+        "pub const FilesystemStat = extern struct {\n",
+        "    block_size: u64,\n",
+        "    total_blocks: u64,\n",
+        "    free_blocks: u64,\n",
+        "    available_blocks: u64,\n",
+        "    total_nodes: u64,\n",
+        "    free_nodes: u64,\n",
+        "    mount_id: u32,\n",
+        "    filesystem_kind: u16,\n",
+        "    flags: u16,\n",
+        "    reserved: u64,\n",
         "};\n\n",
         "pub const DirectoryEntry = extern struct {\n",
         "    node: u32,\n",
@@ -229,6 +247,10 @@ def generate_c(spec: dict) -> str:
         lines.append(f"#define ZIGOS_FALLOCATE_{name.upper()} (UINT64_C(1) << {value})\n")
     for name, value in spec.get("mount_flags", {}).items():
         lines.append(f"#define ZIGOS_MOUNT_{name.upper()} (UINT64_C(1) << {value})\n")
+    for name, value in spec.get("filesystem_types", {}).items():
+        lines.append(f"#define ZIGOS_FS_TYPE_{name.upper()} UINT16_C({value})\n")
+    for name, value in spec.get("filesystem_stat_flags", {}).items():
+        lines.append(f"#define ZIGOS_FS_STAT_{name.upper()} (UINT16_C(1) << {value})\n")
     lines.append("\n")
     for name, bit in spec["capabilities"].items():
         lines.append(f"#define ZIGOS_CAP_{name.upper()} (UINT64_C(1) << {bit})\n")
@@ -269,6 +291,10 @@ def generate_c(spec: dict) -> str:
         "    uint32_t node; uint16_t generation; uint8_t kind; uint8_t readonly;\n",
         "    uint16_t mode; uint8_t mount_id; uint8_t link_count; uint64_t size; uint64_t modified_tick;\n",
         "} zigos_stat;\n\n",
+        "typedef struct zigos_filesystem_stat {\n",
+        "    uint64_t block_size; uint64_t total_blocks; uint64_t free_blocks; uint64_t available_blocks;\n",
+        "    uint64_t total_nodes; uint64_t free_nodes; uint32_t mount_id; uint16_t filesystem_kind; uint16_t flags; uint64_t reserved;\n",
+        "} zigos_filesystem_stat;\n\n",
         "typedef struct zigos_poll_descriptor {\n",
         "    uint16_t fd; uint16_t requested; uint16_t returned; uint16_t reserved;\n",
         "} zigos_poll_descriptor;\n\n",
@@ -276,6 +302,7 @@ def generate_c(spec: dict) -> str:
         "typedef struct zigos_auxv_entry { uint64_t kind; uint64_t value; } zigos_auxv_entry;\n\n",
         '_Static_assert(sizeof(zigos_abi_info) == 64, "zigos_abi_info layout");\n',
         '_Static_assert(sizeof(zigos_stat) == 32, "zigos_stat layout");\n',
+        '_Static_assert(sizeof(zigos_filesystem_stat) == 64, "zigos_filesystem_stat layout");\n',
         '_Static_assert(sizeof(zigos_poll_descriptor) == 8, "zigos_poll_descriptor layout");\n',
         '_Static_assert(sizeof(zigos_iovec) == 16, "zigos_iovec layout");\n\n',
         '#ifdef __cplusplus\nextern "C" {\n#endif\n',
@@ -290,6 +317,7 @@ def generate_c(spec: dict) -> str:
         "int64_t zigos_openat(int64_t directory_fd, const char *path, uint64_t flags, uint16_t mode);\n",
         "int64_t zigos_fstat(uint16_t fd, zigos_stat *info);\n",
         "int64_t zigos_stat_path(const char *path, zigos_stat *info);\n",
+        "int64_t zigos_statfs(const char *path, zigos_filesystem_stat *info);\n",
         "int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);\n",
         "int64_t zigos_fsync(uint16_t fd);\n",
         "int64_t zigos_fdatasync(uint16_t fd);\n",

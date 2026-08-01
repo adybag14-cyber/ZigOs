@@ -4,6 +4,7 @@ pub const constants = abi;
 pub const AbiInfo = abi.AbiInfo;
 pub const WaitStatus = abi.WaitStatus;
 pub const Stat = abi.Stat;
+pub const FilesystemStat = abi.FilesystemStat;
 pub const DirectoryEntry = abi.DirectoryEntry;
 pub const PollDescriptor = abi.PollDescriptor;
 pub const IoVector = abi.IoVector;
@@ -313,6 +314,10 @@ pub fn fstat(fd: u16, info: *Stat) Error!void {
 
 pub fn stat(path: [*:0]const u8, info: *Stat) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_stat, ptrValue(path), ptrValue(info), 0, 0, 0, 0));
+}
+
+pub fn statfs(path: [*:0]const u8, info: *FilesystemStat) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_statfs, ptrValue(path), ptrValue(info), 0, 0, 0, 0));
 }
 
 pub fn ioctl(fd: u16, request: u64, argument: u64) Error!u64 {

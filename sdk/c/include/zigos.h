@@ -7,10 +7,10 @@
 
 #define ZIGOS_ABI_MAGIC UINT32_C(0x4942415A)
 #define ZIGOS_ABI_MAJOR UINT16_C(1)
-#define ZIGOS_ABI_MINOR UINT16_C(13)
+#define ZIGOS_ABI_MINOR UINT16_C(14)
 #define ZIGOS_PAGE_SIZE UINT32_C(4096)
 #define ZIGOS_SYSCALL_BASE UINT16_C(64)
-#define ZIGOS_SYSCALL_COUNT UINT16_C(57)
+#define ZIGOS_SYSCALL_COUNT UINT16_C(58)
 #define ZIGOS_MAX_IOVECS UINT64_C(8)
 
 #define ZIGOS_AUX_NULL UINT64_C(0)
@@ -35,6 +35,17 @@
 #define ZIGOS_FALLOCATE_KEEP_SIZE (UINT64_C(1) << 0)
 #define ZIGOS_FALLOCATE_PUNCH_HOLE (UINT64_C(1) << 1)
 #define ZIGOS_MOUNT_READ_ONLY (UINT64_C(1) << 0)
+#define ZIGOS_FS_TYPE_RAMFS UINT16_C(1)
+#define ZIGOS_FS_TYPE_TMPFS UINT16_C(2)
+#define ZIGOS_FS_TYPE_BOOT_FAT UINT16_C(3)
+#define ZIGOS_FS_TYPE_PROCFS UINT16_C(4)
+#define ZIGOS_FS_TYPE_DEVFS UINT16_C(5)
+#define ZIGOS_FS_TYPE_NETFS UINT16_C(6)
+#define ZIGOS_FS_TYPE_ZIGOS_PERSIST UINT16_C(7)
+#define ZIGOS_FS_STAT_READ_ONLY (UINT16_C(1) << 0)
+#define ZIGOS_FS_STAT_SHARED_BLOCKS (UINT16_C(1) << 1)
+#define ZIGOS_FS_STAT_SHARED_NODES (UINT16_C(1) << 2)
+#define ZIGOS_FS_STAT_SYNTHETIC (UINT16_C(1) << 3)
 
 #define ZIGOS_CAP_PROCESS (UINT64_C(1) << 0)
 #define ZIGOS_CAP_DESCRIPTORS (UINT64_C(1) << 1)
@@ -105,6 +116,7 @@
 #define ZIGOS_SYS_FDATASYNC UINT64_C(118)
 #define ZIGOS_SYS_MOUNT UINT64_C(119)
 #define ZIGOS_SYS_UMOUNT UINT64_C(120)
+#define ZIGOS_SYS_STATFS UINT64_C(121)
 
 #define ZIGOS_ERRNO_PERMISSION INT64_C(-1)
 #define ZIGOS_ERRNO_NOT_FOUND INT64_C(-2)
@@ -173,6 +185,11 @@ typedef struct zigos_stat {
     uint16_t mode; uint8_t mount_id; uint8_t link_count; uint64_t size; uint64_t modified_tick;
 } zigos_stat;
 
+typedef struct zigos_filesystem_stat {
+    uint64_t block_size; uint64_t total_blocks; uint64_t free_blocks; uint64_t available_blocks;
+    uint64_t total_nodes; uint64_t free_nodes; uint32_t mount_id; uint16_t filesystem_kind; uint16_t flags; uint64_t reserved;
+} zigos_filesystem_stat;
+
 typedef struct zigos_poll_descriptor {
     uint16_t fd; uint16_t requested; uint16_t returned; uint16_t reserved;
 } zigos_poll_descriptor;
@@ -183,6 +200,7 @@ typedef struct zigos_auxv_entry { uint64_t kind; uint64_t value; } zigos_auxv_en
 
 _Static_assert(sizeof(zigos_abi_info) == 64, "zigos_abi_info layout");
 _Static_assert(sizeof(zigos_stat) == 32, "zigos_stat layout");
+_Static_assert(sizeof(zigos_filesystem_stat) == 64, "zigos_filesystem_stat layout");
 _Static_assert(sizeof(zigos_poll_descriptor) == 8, "zigos_poll_descriptor layout");
 _Static_assert(sizeof(zigos_iovec) == 16, "zigos_iovec layout");
 
@@ -200,6 +218,7 @@ int64_t zigos_open(const char *path, uint64_t flags, uint16_t mode);
 int64_t zigos_openat(int64_t directory_fd, const char *path, uint64_t flags, uint16_t mode);
 int64_t zigos_fstat(uint16_t fd, zigos_stat *info);
 int64_t zigos_stat_path(const char *path, zigos_stat *info);
+int64_t zigos_statfs(const char *path, zigos_filesystem_stat *info);
 int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);
 int64_t zigos_fsync(uint16_t fd);
 int64_t zigos_fdatasync(uint16_t fd);

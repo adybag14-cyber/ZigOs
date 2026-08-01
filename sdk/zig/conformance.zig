@@ -9,8 +9,8 @@ const argv_message = "zig-sdk: argc/argv passed\r\n";
 const abi_message = "zig-sdk: ABI discovery passed\r\n";
 const startup_vector_message = "zig-sdk: envp/auxv passed\r\n";
 const mmap_file_message = "zig-sdk: shared file mmap coherence passed\r\n";
-const mount_message = "zig-sdk: tmpfs mount/umount isolation and busy policy passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs passed\r\n";
+const mount_message = "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -85,6 +85,34 @@ fn run() zigos.Error!void {
         return error.InvalidArgument;
     }
     try zigos.writeAll(1, abi_message);
+
+    var root_fs: zigos.FilesystemStat = undefined;
+    try zigos.statfs("/", &root_fs);
+    if (root_fs.filesystem_kind != zigos.constants.filesystem_type_ramfs or
+        root_fs.block_size != zigos.constants.abi_page_size or root_fs.total_blocks != 256 or
+        root_fs.free_blocks > root_fs.total_blocks or root_fs.available_blocks != root_fs.free_blocks or
+        root_fs.total_nodes != 96 or root_fs.free_nodes > root_fs.total_nodes or root_fs.mount_id != 1 or
+        (root_fs.flags & (zigos.constants.filesystem_stat_shared_blocks | zigos.constants.filesystem_stat_shared_nodes)) !=
+            (zigos.constants.filesystem_stat_shared_blocks | zigos.constants.filesystem_stat_shared_nodes) or
+        (root_fs.flags & (zigos.constants.filesystem_stat_read_only | zigos.constants.filesystem_stat_synthetic)) != 0)
+        return error.InvalidArgument;
+
+    var proc_fs: zigos.FilesystemStat = undefined;
+    try zigos.statfs("/proc/version", &proc_fs);
+    if (proc_fs.filesystem_kind != zigos.constants.filesystem_type_procfs or proc_fs.total_blocks != 0 or proc_fs.free_blocks != 0 or
+        (proc_fs.flags & (zigos.constants.filesystem_stat_read_only | zigos.constants.filesystem_stat_shared_nodes | zigos.constants.filesystem_stat_synthetic)) !=
+            (zigos.constants.filesystem_stat_read_only | zigos.constants.filesystem_stat_shared_nodes | zigos.constants.filesystem_stat_synthetic))
+        return error.InvalidArgument;
+
+    var boot_fs: zigos.FilesystemStat = undefined;
+    try zigos.statfs("/boot", &boot_fs);
+    if (boot_fs.filesystem_kind != zigos.constants.filesystem_type_boot_fat or boot_fs.block_size == 0 or
+        boot_fs.total_blocks == 0 or boot_fs.free_blocks > boot_fs.total_blocks or
+        (boot_fs.flags & zigos.constants.filesystem_stat_read_only) == 0)
+        return error.InvalidArgument;
+    if ((boot_fs.flags & zigos.constants.filesystem_stat_shared_blocks) != 0) {
+        if (boot_fs.block_size != zigos.constants.abi_page_size or boot_fs.total_blocks != 256) return error.InvalidArgument;
+    }
 
     const fd = try zigos.open("/proc/version", .{ .read = true }, 0);
     defer zigos.close(fd) catch {};
@@ -217,6 +245,13 @@ fn testMountSyscalls() zigos.Error!void {
     }
 
     try zigos.mount("zig-sdk", mountpoint, "tmpfs", .{}, null);
+    var mounted_fs: zigos.FilesystemStat = undefined;
+    try zigos.statfs(mountpoint, &mounted_fs);
+    if (mounted_fs.filesystem_kind != zigos.constants.filesystem_type_tmpfs or mounted_fs.mount_id <= 1 or
+        mounted_fs.total_blocks != 256 or mounted_fs.free_blocks > mounted_fs.total_blocks or
+        (mounted_fs.flags & zigos.constants.filesystem_stat_shared_blocks) == 0 or
+        (mounted_fs.flags & zigos.constants.filesystem_stat_read_only) != 0)
+        return error.InvalidArgument;
     var mounted: zigos.Stat = undefined;
     try zigos.stat(mountpoint, &mounted);
     if (mounted.mount_id <= 1 or mounted.readonly != 0 or mounted.kind != 1) return error.InvalidArgument;
