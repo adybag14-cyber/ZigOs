@@ -4,7 +4,10 @@ const runtime_vfs = @import("runtime_vfs.zig");
 
 pub const maximum_payload_bytes: usize = 64 * 1024;
 const magic = "ZIGPERS1".*;
-const version: u32 = 1;
+const version: u32 = 2;
+const legacy_version: u32 = 1;
+const record_header_size_v1: usize = 8;
+const record_header_size_v2: usize = 40;
 const header_size: u32 = 48;
 const commit_marker: u32 = 0x434F_4D54;
 const persist_root = "/persist";
@@ -53,6 +56,7 @@ pub const BlockDevice = struct {
 
 const Candidate = struct {
     slot: u8,
+    format_version: u32,
     generation: u64,
     payload_length: u32,
     payload_crc32: u32,
@@ -151,6 +155,7 @@ pub const Store = struct {
     active_slot: u8 = 1,
     record_count: u32 = 0,
     payload_length: u32 = 0,
+    payload_version: u32 = version,
     payload: [maximum_payload_bytes]u8 = @splat(0),
     next_payload: [maximum_payload_bytes]u8 = @splat(0),
     sector: [4096]u8 = @splat(0),
@@ -219,6 +224,7 @@ pub const Store = struct {
             self.active_slot = candidate.slot;
             self.record_count = candidate.record_count;
             self.payload_length = candidate.payload_length;
+            self.payload_version = candidate.format_version;
             if ((first == .invalid or second == .invalid) or
                 (first_valid != null and second_valid != null and first_valid.?.generation != second_valid.?.generation))
             {
@@ -356,6 +362,7 @@ pub const Store = struct {
         const stat = vfs.statNode(node_index) catch return Error.InvalidRecord;
         if (stat.kind != .file or stat.link_count == 0 or self.generation == 0 or self.payload_length < 4)
             return Error.UnsupportedOperation;
+        if (self.payload_version != version) return Error.UnsupportedOperation;
 
         var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
         const canonical = vfs.canonicalPath(node_index, &path_buffer) catch return Error.UnsupportedOperation;
@@ -373,22 +380,17 @@ pub const Store = struct {
         var output_count: u32 = 0;
         var target_found = false;
         var committed_mode: ?u16 = null;
+        var committed_times: ?runtime_vfs.Timestamps = null;
         var record_index: u32 = 0;
         while (record_index < committed_count) : (record_index += 1) {
             const record_start = input_offset;
-            if (input_offset + 8 > committed_length) return Error.Corrupt;
-            const kind: RecordKind = switch (self.payload[input_offset]) {
-                1 => .directory,
-                2 => .file,
-                3 => .symlink,
-                4 => .hard_link,
-                5 => .sparse_file,
-                else => return Error.Corrupt,
-            };
+            if (input_offset + record_header_size_v2 > committed_length) return Error.Corrupt;
+            const kind = decodeRecordKind(self.payload[input_offset]) orelse return Error.Corrupt;
             const path_length: usize = self.payload[input_offset + 1];
             const record_mode = read16(&self.payload, input_offset + 2);
             const data_length: usize = read32(&self.payload, input_offset + 4);
-            input_offset += 8;
+            const record_times = readRecordTimestamps(&self.payload, input_offset, version, 0) catch return Error.Corrupt;
+            input_offset += record_header_size_v2;
             if (path_length == 0 or input_offset + path_length > committed_length) return Error.Corrupt;
             const record_path = self.payload[input_offset .. input_offset + path_length];
             input_offset += path_length;
@@ -398,6 +400,7 @@ pub const Store = struct {
                 if (target_found or (kind != .file and kind != .sparse_file)) return Error.UnsupportedOperation;
                 target_found = true;
                 committed_mode = record_mode;
+                committed_times = record_times;
                 continue;
             }
             const record_length = input_offset - record_start;
@@ -408,8 +411,16 @@ pub const Store = struct {
             output_count +%= 1;
         }
         if (input_offset != committed_length) return Error.Corrupt;
-        if (!target_found or committed_mode == null) return Error.UnsupportedOperation;
+        if (!target_found or committed_mode == null or committed_times == null) return Error.UnsupportedOperation;
         const persisted_mode = if (include_metadata) stat.mode else committed_mode.?;
+        const current_times = runtime_vfs.Timestamps{
+            .created_tick = stat.created_tick,
+            .modified_tick = stat.modified_tick,
+            .changed_tick = stat.changed_tick,
+            .accessed_tick = stat.accessed_tick,
+        };
+        var persisted_times = if (include_metadata) current_times else committed_times.?;
+        if (!include_metadata) persisted_times.modified_tick = current_times.modified_tick;
 
         const sparse = vfs.sparseFileInfoNode(node_index) catch return Error.InvalidRecord;
         self.record_scratch[0] = sparse.allocation_bitmap;
@@ -430,6 +441,7 @@ pub const Store = struct {
             relative,
             .sparse_file,
             persisted_mode,
+            persisted_times,
             self.record_scratch[0..data_offset],
         );
         output_count +%= 1;
@@ -472,6 +484,7 @@ pub const Store = struct {
         if (generation == 0) return Error.NoSpace;
         self.encodeHeader(.{
             .slot = slot,
+            .format_version = version,
             .generation = generation,
             .payload_length = @intCast(snapshot.payload_length),
             .payload_crc32 = gpt.crc32(next_payload[0..snapshot.payload_length]),
@@ -493,6 +506,7 @@ pub const Store = struct {
         self.active_slot = slot;
         self.record_count = snapshot.record_count;
         self.payload_length = @intCast(snapshot.payload_length);
+        self.payload_version = version;
         self.syncs +%= 1;
     }
 
@@ -523,7 +537,7 @@ pub const Store = struct {
             .valid => |value| value,
             else => return Error.Corrupt,
         };
-        if (candidate.generation != self.generation or !(try self.validatePayload(candidate))) return Error.Corrupt;
+        if (candidate.generation != self.generation or candidate.format_version != self.payload_version or !(try self.validatePayload(candidate))) return Error.Corrupt;
         self.checks +%= 1;
     }
 
@@ -631,7 +645,8 @@ pub const Store = struct {
                 if (record.kind != .directory) continue;
                 const child = try self.buildChildPath(parent, record.nameSlice());
                 const stat = vfs.stat(0, child) catch return Error.InvalidRecord;
-                used = try appendRecord(output, used, child[persist_prefix.len..], .directory, stat.mode, &.{});
+                const relative = child[persist_prefix.len..];
+                used = try appendRecord(output, used, relative, .directory, stat.mode, timestampsFromStat(stat), &.{});
                 records +%= 1;
                 if (tail >= self.path_queue.len) return Error.NoSpace;
                 @memcpy(self.path_queue[tail][0..child.len], child);
@@ -641,12 +656,15 @@ pub const Store = struct {
             for (list.records[0..list.count]) |record| {
                 if (record.kind == .directory or record.kind == .pseudo) continue;
                 const child = try self.buildChildPath(parent, record.nameSlice());
+                const relative = child[persist_prefix.len..];
                 const stat = vfs.statNode(record.node) catch return Error.InvalidRecord;
                 if (record.kind == .file and record.entry != (vfs.canonicalEntryNode(record.node) catch return Error.InvalidRecord)) {
                     var canonical_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
                     const canonical = vfs.canonicalPath(record.node, &canonical_buffer) catch return Error.InvalidRecord;
                     if (!std.mem.startsWith(u8, canonical, persist_prefix)) return Error.InvalidRecord;
-                    used = try appendRecord(output, used, child[persist_prefix.len..], .hard_link, stat.mode, canonical[persist_prefix.len..]);
+                    used = try appendRecord(output, used, relative, .hard_link, stat.mode, timestampsFromStat(stat), canonical[persist_prefix.len..]);
+                    records +%= 1;
+                    continue;
                 } else if (record.kind == .file) {
                     const sparse = vfs.sparseFileInfoNode(record.node) catch return Error.InvalidRecord;
                     self.record_scratch[0] = sparse.allocation_bitmap;
@@ -660,10 +678,10 @@ pub const Store = struct {
                         @memcpy(self.record_scratch[data_offset .. data_offset + block.len], &block);
                         data_offset += block.len;
                     }
-                    used = try appendRecord(output, used, child[persist_prefix.len..], .sparse_file, stat.mode, self.record_scratch[0..data_offset]);
+                    used = try appendRecord(output, used, relative, .sparse_file, stat.mode, timestampsFromStat(stat), self.record_scratch[0..data_offset]);
                 } else {
                     const data = vfs.symlinkTargetNode(record.node) catch return Error.InvalidRecord;
-                    used = try appendRecord(output, used, child[persist_prefix.len..], .symlink, stat.mode, data);
+                    used = try appendRecord(output, used, relative, .symlink, stat.mode, timestampsFromStat(stat), data);
                 }
                 records +%= 1;
             }
@@ -697,19 +715,14 @@ pub const Store = struct {
         var offset: usize = 4;
         var record_index: u32 = 0;
         while (record_index < count) : (record_index += 1) {
-            if (offset + 8 > candidate.payload_length) return Error.Corrupt;
-            const kind: RecordKind = switch (self.payload[offset]) {
-                1 => .directory,
-                2 => .file,
-                3 => .symlink,
-                4 => .hard_link,
-                5 => .sparse_file,
-                else => return Error.Corrupt,
-            };
+            const record_header_size = if (candidate.format_version == legacy_version) record_header_size_v1 else record_header_size_v2;
+            if (offset + record_header_size > candidate.payload_length) return Error.Corrupt;
+            const kind = decodeRecordKind(self.payload[offset]) orelse return Error.Corrupt;
             const path_length: usize = self.payload[offset + 1];
             const mode = read16(&self.payload, offset + 2);
             const data_length: usize = read32(&self.payload, offset + 4);
-            offset += 8;
+            const record_times = readRecordTimestamps(&self.payload, offset, candidate.format_version, tick) catch return Error.Corrupt;
+            offset += record_header_size;
             if (path_length == 0 or offset + path_length > candidate.payload_length) return Error.Corrupt;
             const relative = self.payload[offset .. offset + path_length];
             offset += path_length;
@@ -723,6 +736,7 @@ pub const Store = struct {
                     const target = try absolutePathInto(data, &target_buffer);
                     const path = try self.absolutePath(relative);
                     _ = vfs.link(0, target, path, tick) catch |err| return self.rejectRestoration(record_index, kind, err);
+                    vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
                 }
             } else if (!hard_links_only) {
                 const path = try self.absolutePath(relative);
@@ -730,10 +744,12 @@ pub const Store = struct {
                     .directory => {
                         if (data_length != 0) return Error.Corrupt;
                         _ = vfs.ensureDirectory(0, path, mode, tick) catch |err| return self.rejectRestoration(record_index, kind, err);
+                        vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
                     },
                     .file => {
                         if (data_length > runtime_vfs.maximum_file_size) return Error.Corrupt;
                         _ = vfs.putFile(0, path, data, mode, false, tick) catch |err| return self.rejectRestoration(record_index, kind, err);
+                        vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
                     },
                     .sparse_file => {
                         if (data_length < 5 or data_length > maximum_record_data_bytes) return Error.Corrupt;
@@ -742,10 +758,12 @@ pub const Store = struct {
                         const allocated_count: usize = @popCount(allocation_bitmap);
                         if (logical_size > runtime_vfs.maximum_file_size or data_length != 5 + allocated_count * runtime_vfs.file_block_size) return Error.Corrupt;
                         _ = vfs.restoreSparseFile(0, path, mode, logical_size, allocation_bitmap, data[5..], tick) catch |err| return self.rejectRestoration(record_index, kind, err);
+                        vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
                     },
                     .symlink => {
                         if (data_length == 0 or data_length > runtime_vfs.maximum_symlink_target_length) return Error.Corrupt;
                         _ = vfs.symlink(0, data, path, tick) catch |err| return self.rejectRestoration(record_index, kind, err);
+                        vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
                     },
                     .hard_link => unreachable,
                 }
@@ -792,8 +810,9 @@ pub const Store = struct {
             return Error.Io;
         }
         if (allZero(self.sector[0..block_size])) return .absent;
+        const encoded_version = read32(&self.sector, 8);
         if (!std.mem.eql(u8, self.sector[0..magic.len], &magic) or
-            read32(&self.sector, 8) != version or read32(&self.sector, 12) != header_size or
+            (encoded_version != legacy_version and encoded_version != version) or read32(&self.sector, 12) != header_size or
             read32(&self.sector, 44) != commit_marker)
         {
             self.corrupt_headers +%= 1;
@@ -811,6 +830,7 @@ pub const Store = struct {
         }
         return .{ .valid = .{
             .slot = slot,
+            .format_version = encoded_version,
             .generation = read64(&self.sector, 16),
             .payload_length = payload_length,
             .payload_crc32 = read32(&self.sector, 28),
@@ -868,7 +888,7 @@ pub const Store = struct {
         const block_size: usize = device.block_size;
         @memset(self.sector[0..block_size], 0);
         @memcpy(self.sector[0..magic.len], &magic);
-        write32(&self.sector, 8, version);
+        write32(&self.sector, 8, candidate.format_version);
         write32(&self.sector, 12, header_size);
         write64(&self.sector, 16, candidate.generation);
         write32(&self.sector, 24, candidate.payload_length);
@@ -881,6 +901,17 @@ pub const Store = struct {
     }
 };
 
+fn decodeRecordKind(value: u8) ?Store.RecordKind {
+    return switch (value) {
+        1 => .directory,
+        2 => .file,
+        3 => .symlink,
+        4 => .hard_link,
+        5 => .sparse_file,
+        else => null,
+    };
+}
+
 fn validRelativePath(path: []const u8) bool {
     if (path.len == 0 or path[0] == '/' or std.mem.indexOfScalar(u8, path, 0) != null) return false;
     var components = std.mem.splitScalar(u8, path, '/');
@@ -890,22 +921,54 @@ fn validRelativePath(path: []const u8) bool {
     return true;
 }
 
+fn timestampsFromStat(stat: runtime_vfs.Stat) runtime_vfs.Timestamps {
+    return .{
+        .created_tick = stat.created_tick,
+        .modified_tick = stat.modified_tick,
+        .changed_tick = stat.changed_tick,
+        .accessed_tick = stat.accessed_tick,
+    };
+}
+
+fn readRecordTimestamps(payload: []const u8, offset: usize, format_version: u32, legacy_tick: u64) Error!runtime_vfs.Timestamps {
+    if (format_version == legacy_version) {
+        return .{
+            .created_tick = legacy_tick,
+            .modified_tick = legacy_tick,
+            .changed_tick = legacy_tick,
+            .accessed_tick = legacy_tick,
+        };
+    }
+    if (format_version != version or offset + record_header_size_v2 > payload.len) return Error.Corrupt;
+    return .{
+        .created_tick = read64(payload, offset + 8),
+        .modified_tick = read64(payload, offset + 16),
+        .changed_tick = read64(payload, offset + 24),
+        .accessed_tick = read64(payload, offset + 32),
+    };
+}
+
 fn appendRecord(
     payload: []u8,
     initial_offset: usize,
     relative_path: []const u8,
     kind: Store.RecordKind,
     mode: u16,
+    times: runtime_vfs.Timestamps,
     data: []const u8,
 ) Error!usize {
     if (relative_path.len == 0 or relative_path.len > 255 or data.len > maximum_record_data_bytes) return Error.InvalidRecord;
-    const required = 8 + relative_path.len + data.len;
+    const required = record_header_size_v2 + relative_path.len + data.len;
     if (initial_offset > payload.len or required > payload.len - initial_offset) return Error.NoSpace;
     payload[initial_offset] = @intFromEnum(kind);
     payload[initial_offset + 1] = @intCast(relative_path.len);
     write16(payload, initial_offset + 2, mode);
     write32(payload, initial_offset + 4, @intCast(data.len));
-    var offset = initial_offset + 8;
+    write64(payload, initial_offset + 8, times.created_tick);
+    write64(payload, initial_offset + 16, times.modified_tick);
+    write64(payload, initial_offset + 24, times.changed_tick);
+    write64(payload, initial_offset + 32, times.accessed_tick);
+    var offset = initial_offset + record_header_size_v2;
     @memcpy(payload[offset .. offset + relative_path.len], relative_path);
     offset += relative_path.len;
     @memcpy(payload[offset .. offset + data.len], data);
@@ -1170,6 +1233,12 @@ test "alternating snapshots restore a persistent VFS subtree" {
     _ = try first_vfs.writeOpen(1, sparse_handle, "tail", 7);
     try first_vfs.allocateOpen(1, sparse_handle, 0, runtime_vfs.file_block_size, .{ .keep_size = true }, 8);
     try first_vfs.close(1, sparse_handle);
+    const directory_times = runtime_vfs.Timestamps{ .created_tick = 101, .modified_tick = 102, .changed_tick = 103, .accessed_tick = 104 };
+    const name_times = runtime_vfs.Timestamps{ .created_tick = 201, .modified_tick = 202, .changed_tick = 203, .accessed_tick = 204 };
+    const symlink_times = runtime_vfs.Timestamps{ .created_tick = 301, .modified_tick = 302, .changed_tick = 303, .accessed_tick = 304 };
+    try first_vfs.restoreTimestamps(0, "/persist/config", directory_times);
+    try first_vfs.restoreTimestamps(0, "/persist/config/name.txt", name_times);
+    try first_vfs.restoreTimestamps(0, "/persist/name-link", symlink_times);
     try first_store.sync(first_vfs);
     try std.testing.expectEqual(@as(u64, 1), first_store.report().generation);
     try first_store.check();
@@ -1182,8 +1251,29 @@ test "alternating snapshots restore a persistent VFS subtree" {
     try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/config/name.txt"));
     try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/name-hard"));
     try std.testing.expectEqual((try second_vfs.stat(0, "/persist/config/name.txt")).node, (try second_vfs.stat(0, "/persist/name-hard")).node);
-    try std.testing.expectEqual(@as(u16, 2), (try second_vfs.stat(0, "/persist/name-hard")).link_count);
+    const restored_directory = try second_vfs.stat(0, "/persist/config");
+    try std.testing.expectEqual(directory_times.created_tick, restored_directory.created_tick);
+    try std.testing.expectEqual(directory_times.modified_tick, restored_directory.modified_tick);
+    try std.testing.expectEqual(directory_times.changed_tick, restored_directory.changed_tick);
+    try std.testing.expectEqual(directory_times.accessed_tick, restored_directory.accessed_tick);
+    const restored_name = try second_vfs.stat(0, "/persist/config/name.txt");
+    const restored_hard = try second_vfs.stat(0, "/persist/name-hard");
+    try std.testing.expectEqual(@as(u16, 2), restored_hard.link_count);
+    try std.testing.expectEqual(name_times.created_tick, restored_name.created_tick);
+    try std.testing.expectEqual(name_times.modified_tick, restored_name.modified_tick);
+    try std.testing.expectEqual(name_times.changed_tick, restored_name.changed_tick);
+    try std.testing.expectEqual(name_times.accessed_tick, restored_name.accessed_tick);
+    try std.testing.expectEqual(restored_name.created_tick, restored_hard.created_tick);
+    try std.testing.expectEqual(restored_name.modified_tick, restored_hard.modified_tick);
+    try std.testing.expectEqual(restored_name.changed_tick, restored_hard.changed_tick);
+    try std.testing.expectEqual(restored_name.accessed_tick, restored_hard.accessed_tick);
     try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/name-link"));
+    const restored_symlink_node = try second_vfs.resolveNoFollow(0, "/persist/name-link");
+    const restored_symlink = try second_vfs.statNode(restored_symlink_node);
+    try std.testing.expectEqual(symlink_times.created_tick, restored_symlink.created_tick);
+    try std.testing.expectEqual(symlink_times.modified_tick, restored_symlink.modified_tick);
+    try std.testing.expectEqual(symlink_times.changed_tick, restored_symlink.changed_tick);
+    try std.testing.expectEqual(symlink_times.accessed_tick, restored_symlink.accessed_tick);
     const restored_sparse_node = (try second_vfs.stat(0, "/persist/sparse.bin")).node;
     const restored_sparse = try second_vfs.sparseFileInfoNode(restored_sparse_node);
     try std.testing.expectEqual(@as(usize, 2 * runtime_vfs.file_block_size + 4), restored_sparse.size);
@@ -1220,6 +1310,7 @@ test "file sync commits one stable file and excludes unrelated dirty state" {
 
     _ = try live_vfs.putFile(0, "/persist/target.txt", "target-v2", 0o600, false, 4);
     try live_vfs.chmod(0, "/persist/target.txt", 0o600, 5);
+    const full_sync_times = try live_vfs.stat(0, "/persist/target.txt");
     const other_node = try live_vfs.putFile(0, "/persist/other.txt", "other-v2", 0o700, false, 6);
     try live_vfs.chmod(0, "/persist/other.txt", 0o700, 7);
     try std.testing.expect((try live_vfs.dirtyFilePageBitmap(target_node)) != 0);
@@ -1235,7 +1326,12 @@ test "file sync commits one stable file and excludes unrelated dirty state" {
     var recovered: Store = .{};
     try recovered.mount(recovered_vfs, disk.device(), 8);
     try std.testing.expectEqualStrings("target-v2", try recovered_vfs.readOnlyView(0, "/persist/target.txt"));
-    try std.testing.expectEqual(@as(u16, 0o600), (try recovered_vfs.stat(0, "/persist/target.txt")).mode);
+    const full_sync_restored = try recovered_vfs.stat(0, "/persist/target.txt");
+    try std.testing.expectEqual(@as(u16, 0o600), full_sync_restored.mode);
+    try std.testing.expectEqual(full_sync_times.created_tick, full_sync_restored.created_tick);
+    try std.testing.expectEqual(full_sync_times.modified_tick, full_sync_restored.modified_tick);
+    try std.testing.expectEqual(full_sync_times.changed_tick, full_sync_restored.changed_tick);
+    try std.testing.expectEqual(full_sync_times.accessed_tick, full_sync_restored.accessed_tick);
     try std.testing.expectEqualStrings("other-v1", try recovered_vfs.readOnlyView(0, "/persist/other.txt"));
     try std.testing.expectEqual(@as(u16, 0o600), (try recovered_vfs.stat(0, "/persist/other.txt")).mode);
 
@@ -1253,9 +1349,11 @@ test "file data sync persists bytes and size without dirty mode metadata" {
     const target_node = try live_vfs.putFile(0, "/persist/target.txt", "before", 0o640, false, 2);
     _ = try live_vfs.putFile(0, "/persist/other.txt", "stable", 0o600, false, 3);
     try store.sync(live_vfs);
+    const committed_times = try live_vfs.stat(0, "/persist/target.txt");
 
     _ = try live_vfs.putFile(0, "/persist/target.txt", "after-data-and-size", 0o600, false, 4);
     try live_vfs.chmod(0, "/persist/target.txt", 0o600, 5);
+    const data_dirty_times = try live_vfs.stat(0, "/persist/target.txt");
     const other_node = try live_vfs.putFile(0, "/persist/other.txt", "dirty", 0o700, false, 6);
     try std.testing.expect((try live_vfs.dirtyFilePageBitmap(target_node)) != 0);
     try std.testing.expect((try live_vfs.dirtyFilePageBitmap(other_node)) != 0);
@@ -1269,7 +1367,12 @@ test "file data sync persists bytes and size without dirty mode metadata" {
     var recovered: Store = .{};
     try recovered.mount(recovered_vfs, disk.device(), 7);
     try std.testing.expectEqualStrings("after-data-and-size", try recovered_vfs.readOnlyView(0, "/persist/target.txt"));
-    try std.testing.expectEqual(@as(u16, 0o640), (try recovered_vfs.stat(0, "/persist/target.txt")).mode);
+    const data_sync_restored = try recovered_vfs.stat(0, "/persist/target.txt");
+    try std.testing.expectEqual(@as(u16, 0o640), data_sync_restored.mode);
+    try std.testing.expectEqual(committed_times.created_tick, data_sync_restored.created_tick);
+    try std.testing.expectEqual(data_dirty_times.modified_tick, data_sync_restored.modified_tick);
+    try std.testing.expectEqual(committed_times.changed_tick, data_sync_restored.changed_tick);
+    try std.testing.expectEqual(committed_times.accessed_tick, data_sync_restored.accessed_tick);
     try std.testing.expectEqualStrings("stable", try recovered_vfs.readOnlyView(0, "/persist/other.txt"));
     try std.testing.expectEqual(@as(u16, 0o600), (try recovered_vfs.stat(0, "/persist/other.txt")).mode);
     try std.testing.expectEqual(@as(u64, 2), recovered.report().generation);
@@ -1412,6 +1515,69 @@ test "journal write and flush failures classify read only remount stage" {
         try std.testing.expectEqual(committed.generation + 1, recovered.report().generation);
         try std.testing.expectEqualStrings("dirty", try recovered_vfs.readOnlyView(0, "/persist/value"));
     }
+}
+
+test "legacy version one snapshot restores coherent timestamps and migrates to version two" {
+    var disk: TestDisk = .{};
+    var payload: [512]u8 = @splat(0);
+    const relative = "legacy.txt";
+    const data = "v1";
+    write32(&payload, 0, 1);
+    const record_offset: usize = 4;
+    payload[record_offset] = @intFromEnum(Store.RecordKind.file);
+    payload[record_offset + 1] = @intCast(relative.len);
+    write16(&payload, record_offset + 2, 0o640);
+    write32(&payload, record_offset + 4, data.len);
+    var payload_length = record_offset + record_header_size_v1;
+    @memcpy(payload[payload_length .. payload_length + relative.len], relative);
+    payload_length += relative.len;
+    @memcpy(payload[payload_length .. payload_length + data.len], data);
+    payload_length += data.len;
+
+    // The test block device starts at raw LBA 1. Slot 0's header is relative
+    // LBA 0 (raw block 1), and its payload starts at relative LBA 2 (raw 3).
+    @memcpy(disk.blocks[1 + slotPayloadStart(512, 0)][0..payload_length], payload[0..payload_length]);
+    var encoder: Store = .{};
+    encoder.device = disk.device();
+    encoder.encodeHeader(.{
+        .slot = 0,
+        .format_version = legacy_version,
+        .generation = 7,
+        .payload_length = @intCast(payload_length),
+        .payload_crc32 = gpt.crc32(payload[0..payload_length]),
+        .record_count = 1,
+    });
+    @memcpy(&disk.blocks[1], encoder.sector[0..512]);
+
+    const legacy_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(legacy_vfs);
+    legacy_vfs.initialize();
+    var legacy_store: Store = .{};
+    try legacy_store.mount(legacy_vfs, disk.device(), 77);
+    try std.testing.expectEqual(@as(u64, 7), legacy_store.report().generation);
+    try std.testing.expectEqual(legacy_version, legacy_store.payload_version);
+    try std.testing.expectEqualStrings(data, try legacy_vfs.readOnlyView(0, "/persist/legacy.txt"));
+    const legacy_times = try legacy_vfs.timestamps(0, "/persist/legacy.txt");
+    try std.testing.expectEqual(@as(u64, 77), legacy_times.created_tick);
+    try std.testing.expectEqual(@as(u64, 77), legacy_times.modified_tick);
+    try std.testing.expectEqual(@as(u64, 77), legacy_times.changed_tick);
+    try std.testing.expectEqual(@as(u64, 77), legacy_times.accessed_tick);
+
+    // A global sync rewrites the complete tree using v2 inline timestamps.
+    try legacy_store.sync(legacy_vfs);
+    try std.testing.expectEqual(@as(u64, 8), legacy_store.report().generation);
+    try std.testing.expectEqual(version, legacy_store.payload_version);
+    try std.testing.expectEqual(@as(u32, 1), legacy_store.report().record_count);
+
+    const migrated_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(migrated_vfs);
+    migrated_vfs.initialize();
+    var migrated_store: Store = .{};
+    try migrated_store.mount(migrated_vfs, disk.device(), 99);
+    try std.testing.expectEqual(@as(u64, 8), migrated_store.report().generation);
+    try std.testing.expectEqual(version, migrated_store.payload_version);
+    try std.testing.expectEqualStrings(data, try migrated_vfs.readOnlyView(0, "/persist/legacy.txt"));
+    try std.testing.expectEqual(legacy_times, try migrated_vfs.timestamps(0, "/persist/legacy.txt"));
 }
 
 test "mount falls back to the previous valid generation" {

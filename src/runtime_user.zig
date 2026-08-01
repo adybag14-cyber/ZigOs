@@ -617,6 +617,7 @@ pub fn handleSyscall(
         syscall.syscall_ioctl => return syscallIoctl(context, frame),
         syscall.syscall_stat => return syscallStat(context, frame),
         syscall.syscall_statfs => return syscallStatfs(context, frame),
+        syscall.syscall_stattimes => return syscallStatTimes(context, frame),
         syscall.syscall_openat => return syscallOpenAt(context, frame),
         syscall.syscall_fsync => return syscallFsync(context, frame, fx_state),
         syscall.syscall_fdatasync => return syscallFdatasync(context, frame, fx_state),
@@ -2457,12 +2458,13 @@ fn readDescriptorInKernelAddressSpace(context: *Context, fd: u16, output: []u8) 
     if (paging.currentCr3Address() != user_root or !paging.activateKernelAddressSpace()) return .activation_failure;
 
     var descriptor_error: ?runtime_fd.Error = null;
-    const result = activeDescriptors().read(
+    const result = activeDescriptors().readAtTick(
         activeVfs(),
         activeProcesses(),
         context.handle,
         fd,
         output,
+        current_tick,
     ) catch |err| blk: {
         descriptor_error = err;
         break :blk runtime_fd.IoResult{ .status = .complete };
@@ -2747,6 +2749,38 @@ fn filesystemStatFromVfs(info: runtime_vfs.FilesystemStats) runtime_abi.Filesyst
         .filesystem_kind = filesystem_kind,
         .flags = flags,
     };
+}
+
+fn syscallStatTimes(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    if (!validateRange(context, frame.rsi, @sizeOf(runtime_abi.FileTimes), true)) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const times = activeVfs().timestamps(process.cwd_node, path_buffer[0..path_length]) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const result = runtime_abi.FileTimes{
+        .created_tick = times.created_tick,
+        .modified_tick = times.modified_tick,
+        .changed_tick = times.changed_tick,
+        .accessed_tick = times.accessed_tick,
+    };
+    if (!copyToUser(context, frame.rsi, std.mem.asBytes(&result))) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = 0;
+    return 0;
 }
 
 fn syscallStatfs(context: *Context, frame: *interrupt_context.Frame) u64 {

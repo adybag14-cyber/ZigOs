@@ -18,9 +18,13 @@ from dataclasses import dataclass
 
 PROMPT = b"root@zigos:/home/root# "
 HEADER_MAGIC = b"ZIGPERS1"
-HEADER_VERSION = 1
+HEADER_VERSION = 2
 HEADER_SIZE = 48
 COMMIT_MARKER = 0x434F4D54
+PERSIST_MAX_PAYLOAD_BYTES = 1024 * 1024
+PERSIST_PAYLOAD_OFFSET_SECTORS = 2
+RECORD_HEADER_SIZE = 40
+TIMESTAMP_TARGET = "abi14/renamed.txt"
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,21 @@ class Header:
     payload_length: int
     payload_crc32: int
     record_count: int
+
+
+@dataclass(frozen=True)
+class Record:
+    kind: int
+    path: str
+    mode: int
+    created_tick: int
+    modified_tick: int
+    changed_tick: int
+    accessed_tick: int
+
+    @property
+    def times(self) -> tuple[int, int, int, int]:
+        return (self.created_tick, self.modified_tick, self.changed_tick, self.accessed_tick)
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -250,6 +269,64 @@ def parse_header(image: pathlib.Path, first_lba: int, slot: int, block_size: int
     return Header(slot, generation, payload_length, payload_crc32, record_count)
 
 
+def parse_records(image: pathlib.Path, first_lba: int, header: Header, block_size: int = 512) -> dict[str, Record]:
+    payload_sectors = (PERSIST_MAX_PAYLOAD_BYTES + block_size - 1) // block_size
+    payload_lba = first_lba + PERSIST_PAYLOAD_OFFSET_SECTORS + header.slot * payload_sectors
+    with image.open("rb") as stream:
+        stream.seek(payload_lba * block_size)
+        payload = stream.read(header.payload_length)
+    if len(payload) != header.payload_length:
+        raise RuntimeError(f"slot {header.slot}: persistence payload read was truncated")
+    if (binascii.crc32(payload) & 0xFFFFFFFF) != header.payload_crc32:
+        raise RuntimeError(f"slot {header.slot}: persistence payload CRC mismatch")
+    if len(payload) < 4:
+        raise RuntimeError(f"slot {header.slot}: persistence payload omitted record count")
+    encoded_count = int.from_bytes(payload[:4], "little")
+    if encoded_count != header.record_count:
+        raise RuntimeError(
+            f"slot {header.slot}: payload/header record count mismatch: payload={encoded_count} header={header.record_count}"
+        )
+    records: dict[str, Record] = {}
+    offset = 4
+    for record_index in range(encoded_count):
+        if offset + RECORD_HEADER_SIZE > len(payload):
+            raise RuntimeError(f"slot {header.slot}: record {record_index} header was truncated")
+        kind = payload[offset]
+        path_length = payload[offset + 1]
+        mode = int.from_bytes(payload[offset + 2 : offset + 4], "little")
+        data_length = int.from_bytes(payload[offset + 4 : offset + 8], "little")
+        created_tick = int.from_bytes(payload[offset + 8 : offset + 16], "little")
+        modified_tick = int.from_bytes(payload[offset + 16 : offset + 24], "little")
+        changed_tick = int.from_bytes(payload[offset + 24 : offset + 32], "little")
+        accessed_tick = int.from_bytes(payload[offset + 32 : offset + 40], "little")
+        offset += RECORD_HEADER_SIZE
+        end = offset + path_length + data_length
+        if end > len(payload):
+            raise RuntimeError(f"slot {header.slot}: record {record_index} body was truncated")
+        try:
+            path = payload[offset : offset + path_length].decode("ascii")
+        except UnicodeDecodeError as error:
+            raise RuntimeError(f"slot {header.slot}: record {record_index} path was not ASCII") from error
+        if path in records:
+            raise RuntimeError(f"slot {header.slot}: duplicate persisted path {path!r}")
+        records[path] = Record(kind, path, mode, created_tick, modified_tick, changed_tick, accessed_tick)
+        offset = end
+    if offset != len(payload):
+        raise RuntimeError(f"slot {header.slot}: trailing bytes remained after record parsing")
+    return records
+
+
+def timestamp_record(image: pathlib.Path, first_lba: int, header: Header) -> Record:
+    records = parse_records(image, first_lba, header)
+    try:
+        record = records[TIMESTAMP_TARGET]
+    except KeyError as error:
+        raise RuntimeError(f"generation {header.generation}: missing timestamp target {TIMESTAMP_TARGET}") from error
+    if record.kind not in (2, 5):
+        raise RuntimeError(f"generation {header.generation}: timestamp target has non-file kind {record.kind}")
+    return record
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[1])
@@ -346,6 +423,10 @@ def main() -> int:
         if header_a is None or header_a.generation != 1 or header_a.record_count != 8 or header_b is not None:
             raise RuntimeError(f"unexpected generation-1 headers: A={header_a}, B={header_b}")
 
+        generation_one_target = timestamp_record(image, data_first_lba, header_a)
+        if not all(value > 0 for value in generation_one_target.times):
+            raise RuntimeError(f"generation 1 target timestamps were not initialized: {generation_one_target}")
+
         second_text = run_boot(
             boot_number=2,
             qemu=qemu,
@@ -374,6 +455,16 @@ def main() -> int:
         if header_a.record_count != 8 or header_b.record_count != 8:
             raise RuntimeError(f"file fsync changed persistent namespace cardinality: A={header_a}, B={header_b}")
 
+        generation_two_target = timestamp_record(image, data_first_lba, header_b)
+        if generation_two_target.created_tick != generation_one_target.created_tick:
+            raise RuntimeError("fsync changed file creation timestamp")
+        if generation_two_target.modified_tick <= generation_one_target.modified_tick:
+            raise RuntimeError("fsync did not advance file modification timestamp")
+        if generation_two_target.changed_tick <= generation_one_target.changed_tick:
+            raise RuntimeError("fsync did not advance file change timestamp")
+        if generation_two_target.accessed_tick != generation_one_target.accessed_tick:
+            raise RuntimeError("fsync unexpectedly changed committed file access timestamp")
+
         third_text = run_boot(
             boot_number=3,
             qemu=qemu,
@@ -401,6 +492,16 @@ def main() -> int:
             raise RuntimeError(f"unexpected post-fdatasync A/B generations: A={header_a}, B={header_b}")
         if header_a.record_count != 8 or header_b.record_count != 8:
             raise RuntimeError(f"file fdatasync changed persistent namespace cardinality: A={header_a}, B={header_b}")
+
+        generation_three_target = timestamp_record(image, data_first_lba, header_a)
+        if generation_three_target.created_tick != generation_two_target.created_tick:
+            raise RuntimeError("fdatasync changed committed file creation timestamp")
+        if generation_three_target.modified_tick <= generation_two_target.modified_tick:
+            raise RuntimeError("fdatasync did not advance file modification timestamp")
+        if generation_three_target.changed_tick != generation_two_target.changed_tick:
+            raise RuntimeError("fdatasync committed dirty change timestamp metadata")
+        if generation_three_target.accessed_tick != generation_two_target.accessed_tick:
+            raise RuntimeError("fdatasync committed dirty access timestamp metadata")
 
         fourth_text = run_boot(
             boot_number=4,
@@ -454,6 +555,9 @@ def main() -> int:
             "boot1_serial_bytes": len(first_text.encode("utf-8")),
             "boot2_serial_bytes": len(second_text.encode("utf-8")),
             "boot3_serial_bytes": len(third_text.encode("utf-8")),
+            "generation1_target_times": generation_one_target.times,
+            "generation2_target_times": generation_two_target.times,
+            "generation3_target_times": generation_three_target.times,
             "boot4_serial_bytes": len(fourth_text.encode("utf-8")),
         }
         (work / "result.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8", newline="\n")

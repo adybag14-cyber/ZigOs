@@ -115,6 +115,13 @@ pub const MappedFilePage = struct {
     valid_bytes: usize,
 };
 
+pub const Timestamps = struct {
+    created_tick: u64,
+    modified_tick: u64,
+    changed_tick: u64,
+    accessed_tick: u64,
+};
+
 pub const Stat = struct {
     node: u16,
     generation: u16,
@@ -124,7 +131,10 @@ pub const Stat = struct {
     readonly: bool,
     mount_id: u8,
     link_count: u16,
+    created_tick: u64,
     modified_tick: u64,
+    changed_tick: u64,
+    accessed_tick: u64,
 };
 
 pub const DirectoryRecord = struct {
@@ -158,7 +168,10 @@ const Node = struct {
     mode: u16 = 0o644,
     readonly: bool = false,
     mount_id: u8 = 0,
+    created_tick: u64 = 0,
     modified_tick: u64 = 0,
+    changed_tick: u64 = 0,
+    accessed_tick: u64 = 0,
     data_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
     page_write_locks: [file_blocks_per_node]synchronization.TicketLock = @splat(synchronization.TicketLock.init()),
     pseudo_operations: ?*const PseudoOperations = null,
@@ -452,7 +465,34 @@ pub const Vfs = struct {
             .readonly = self.nodeReadonly(node_index),
             .mount_id = node.mount_id,
             .link_count = node.link_count,
+            .created_tick = node.created_tick,
             .modified_tick = node.modified_tick,
+            .changed_tick = node.changed_tick,
+            .accessed_tick = node.accessed_tick,
+        };
+    }
+
+    pub fn restoreTimestamps(self: *Vfs, cwd: u16, path: []const u8, restored: Timestamps) Error!void {
+        const node_index = try self.resolveNoFollow(cwd, path);
+        var node = &self.nodes[node_index];
+        node.created_tick = restored.created_tick;
+        node.modified_tick = restored.modified_tick;
+        node.changed_tick = restored.changed_tick;
+        node.accessed_tick = restored.accessed_tick;
+    }
+
+    pub fn timestamps(self: *Vfs, cwd: u16, path: []const u8) Error!Timestamps {
+        return self.timestampsNode(try self.resolve(cwd, path));
+    }
+
+    pub fn timestampsNode(self: *const Vfs, node_index: u16) Error!Timestamps {
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used) return Error.NotFound;
+        const node = &self.nodes[node_index];
+        return .{
+            .created_tick = node.created_tick,
+            .modified_tick = node.modified_tick,
+            .changed_tick = node.changed_tick,
+            .accessed_tick = node.accessed_tick,
         };
     }
 
@@ -509,7 +549,7 @@ pub const Vfs = struct {
         const entry_index = self.freeDentry() orelse return Error.NoSpace;
         self.initializeDentry(entry_index, destination.parent, node_index, destination.name);
         self.nodes[node_index].link_count += 1;
-        self.nodes[node_index].modified_tick = tick;
+        self.nodes[node_index].changed_tick = tick;
         self.mutations +%= 1;
         return node_index;
     }
@@ -754,7 +794,7 @@ pub const Vfs = struct {
         const node_index = try self.resolve(cwd, path);
         if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
         self.nodes[node_index].mode = mode & 0o777;
-        self.nodes[node_index].modified_tick = tick;
+        self.nodes[node_index].changed_tick = tick;
         self.mutations +%= 1;
     }
 
@@ -1071,6 +1111,14 @@ pub const Vfs = struct {
     }
 
     pub fn readOpen(self: *Vfs, owner_pid: u32, handle: u32, output: []u8) Error!usize {
+        return self.readOpenInternal(owner_pid, handle, output, null);
+    }
+
+    pub fn readOpenAtTick(self: *Vfs, owner_pid: u32, handle: u32, output: []u8, tick: u64) Error!usize {
+        return self.readOpenInternal(owner_pid, handle, output, tick);
+    }
+
+    fn readOpenInternal(self: *Vfs, owner_pid: u32, handle: u32, output: []u8, access_tick: ?u64) Error!usize {
         const index = try self.resolveOpen(owner_pid, handle);
         var open_file = &self.open_files[index];
         if (!open_file.readable) return Error.PermissionDenied;
@@ -1079,6 +1127,9 @@ pub const Vfs = struct {
         if (node.pseudo_operations != null) {
             const count = try self.readPseudo(open_file.node, open_file.offset, output);
             open_file.offset += count;
+            if (count != 0) {
+                if (access_tick) |tick| node.accessed_tick = tick;
+            }
             return count;
         }
         _ = node.data_lock.acquire();
@@ -1087,6 +1138,9 @@ pub const Vfs = struct {
         const count = @min(output.len, node.size - open_file.offset);
         self.readFileDataLocked(open_file.node, open_file.offset, output[0..count]);
         open_file.offset += count;
+        if (count != 0) {
+            if (access_tick) |tick| node.accessed_tick = tick;
+        }
         return count;
     }
 
@@ -1474,6 +1528,7 @@ pub const Vfs = struct {
         node.size = size;
         node.mode = mode & 0o777;
         node.modified_tick = tick;
+        node.changed_tick = tick;
         self.invalidateFilePageCacheNode(node_index);
         self.discardDirtyFilePagesLocked(node_index, 0xFF);
         self.mutations +%= 1;
@@ -2011,7 +2066,10 @@ pub const Vfs = struct {
             .mode = mode & 0o777,
             .readonly = readonly,
             .mount_id = self.nodes[parent].mount_id,
+            .created_tick = tick,
             .modified_tick = tick,
+            .changed_tick = tick,
+            .accessed_tick = tick,
         };
         self.initializeDentry(entry_index, parent, @intCast(node_index), name);
         self.mutations +%= 1;
@@ -2118,6 +2176,7 @@ pub const Vfs = struct {
         self.copyIntoFileBlocks(node_index, offset, bytes);
         node.size = @max(node.size, offset + bytes.len);
         node.modified_tick = tick;
+        node.changed_tick = tick;
         self.invalidateFilePageCacheNode(node_index);
         const dirty_start = if (truncate_first) 0 else @min(offset, previous_size);
         const dirty_end = offset + bytes.len;
@@ -2146,6 +2205,7 @@ pub const Vfs = struct {
         }
         node.size = size;
         node.modified_tick = tick;
+        node.changed_tick = tick;
         self.invalidateFilePageCacheNode(node_index);
         self.trimDirtyFilePagesLocked(node_index);
         if (size > previous_size) {
@@ -2178,6 +2238,7 @@ pub const Vfs = struct {
             if (!flags.keep_size) node.size = @max(node.size, offset + length);
         }
         node.modified_tick = tick;
+        node.changed_tick = tick;
         self.invalidateFilePageCacheNode(node_index);
         const dirty_start = if (!flags.keep_size and offset > previous_size) previous_size else offset;
         const dirty_end = offset + length;
@@ -2516,7 +2577,7 @@ pub const Vfs = struct {
         entry.name = @splat(0);
         entry.name_length = @intCast(name.len);
         @memcpy(entry.name[0..name.len], name);
-        self.nodes[entry.node].modified_tick = tick;
+        self.nodes[entry.node].changed_tick = tick;
     }
 
     fn removeEntry(self: *Vfs, entry_index: u16) Error!void {
@@ -2617,7 +2678,10 @@ pub const Vfs = struct {
             .link_count = 1,
             .mode = self.nodes[mountpoint_node].mode,
             .mount_id = mount_id,
+            .created_tick = self.nodes[mountpoint_node].created_tick,
             .modified_tick = self.nodes[mountpoint_node].modified_tick,
+            .changed_tick = self.nodes[mountpoint_node].changed_tick,
+            .accessed_tick = self.nodes[mountpoint_node].accessed_tick,
         };
         return @intCast(node_index);
     }
@@ -3312,6 +3376,52 @@ test "VFS sparse restoration applies final nonwritable mode after privileged rec
     try std.testing.expectEqual(bytes.len, try fs.read(0, "/persist/tool.elf", 0, &bytes));
     for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0x4B), byte);
     try std.testing.expectError(Error.PermissionDenied, fs.write(0, "/persist/tool.elf", 0, "x", false, 3));
+    try std.testing.expect(fs.validate());
+}
+
+test "VFS stores creation modification change and access timestamps independently" {
+    var fs = Vfs.init();
+    _ = try fs.create(0, "/times.txt", 0o644, 10);
+    const created = try fs.timestamps(0, "/times.txt");
+    try std.testing.expectEqual(@as(u64, 10), created.created_tick);
+    try std.testing.expectEqual(@as(u64, 10), created.modified_tick);
+    try std.testing.expectEqual(@as(u64, 10), created.changed_tick);
+    try std.testing.expectEqual(@as(u64, 10), created.accessed_tick);
+
+    const handle = try fs.open(7, 0, "/times.txt", .{ .read = true, .write = true }, 0, 11);
+    _ = try fs.writeOpen(7, handle, "abc", 20);
+    const written = try fs.timestamps(0, "/times.txt");
+    try std.testing.expectEqual(@as(u64, 10), written.created_tick);
+    try std.testing.expectEqual(@as(u64, 20), written.modified_tick);
+    try std.testing.expectEqual(@as(u64, 20), written.changed_tick);
+    try std.testing.expectEqual(@as(u64, 10), written.accessed_tick);
+    try std.testing.expectEqual(written.modified_tick, (try fs.stat(0, "/times.txt")).modified_tick);
+
+    _ = try fs.seek(7, handle, 0, .start);
+    var bytes: [3]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), try fs.readOpenAtTick(7, handle, &bytes, 30));
+    try std.testing.expectEqualStrings("abc", &bytes);
+    const accessed = try fs.timestamps(0, "/times.txt");
+    try std.testing.expectEqual(@as(u64, 30), accessed.accessed_tick);
+    try std.testing.expectEqual(@as(u64, 20), accessed.modified_tick);
+    try std.testing.expectEqual(@as(u64, 20), accessed.changed_tick);
+
+    try fs.chmod(0, "/times.txt", 0o600, 40);
+    const changed = try fs.timestamps(0, "/times.txt");
+    try std.testing.expectEqual(@as(u64, 10), changed.created_tick);
+    try std.testing.expectEqual(@as(u64, 20), changed.modified_tick);
+    try std.testing.expectEqual(@as(u64, 40), changed.changed_tick);
+    try std.testing.expectEqual(@as(u64, 30), changed.accessed_tick);
+    try fs.close(7, handle);
+
+    const restored = Timestamps{
+        .created_tick = 101,
+        .modified_tick = 102,
+        .changed_tick = 103,
+        .accessed_tick = 104,
+    };
+    try fs.restoreTimestamps(0, "/times.txt", restored);
+    try std.testing.expectEqual(restored, try fs.timestamps(0, "/times.txt"));
     try std.testing.expect(fs.validate());
 }
 

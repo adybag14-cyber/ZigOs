@@ -590,6 +590,30 @@ pub const System = struct {
         fd: u16,
         output: []u8,
     ) Error!IoResult {
+        return self.readInternal(vfs, processes, process_handle, fd, output, null);
+    }
+
+    pub fn readAtTick(
+        self: *System,
+        vfs: *runtime_vfs.Vfs,
+        processes: *runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+        output: []u8,
+        tick: u64,
+    ) Error!IoResult {
+        return self.readInternal(vfs, processes, process_handle, fd, output, tick);
+    }
+
+    fn readInternal(
+        self: *System,
+        vfs: *runtime_vfs.Vfs,
+        processes: *runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+        output: []u8,
+        access_tick: ?u64,
+    ) Error!IoResult {
         _ = try processes.get(process_handle);
         const namespace_slot = try self.resolveNamespace(process_handle);
         const open_index = try self.resolveDescriptor(namespace_slot, fd);
@@ -620,7 +644,10 @@ pub const System = struct {
             },
             .udp_socket => return Error.InvalidOperation,
             .vfs => {
-                const count = try vfs.readOpen(description.vfs_owner, description.vfs_handle, output);
+                const count = if (access_tick) |tick|
+                    try vfs.readOpenAtTick(description.vfs_owner, description.vfs_handle, output, tick)
+                else
+                    try vfs.readOpen(description.vfs_owner, description.vfs_handle, output);
                 self.bytes_read +%= count;
                 if (count == 0) {
                     self.eof_reads +%= 1;

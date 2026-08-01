@@ -9,8 +9,9 @@ const argv_message = "zig-sdk: argc/argv passed\r\n";
 const abi_message = "zig-sdk: ABI discovery passed\r\n";
 const startup_vector_message = "zig-sdk: envp/auxv passed\r\n";
 const mmap_file_message = "zig-sdk: shared file mmap coherence passed\r\n";
+const timestamp_message = "zig-sdk: creation/modify/change/access timestamp separation passed\r\n";
 const mount_message = "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -118,7 +119,10 @@ fn run() zigos.Error!void {
     defer zigos.close(fd) catch {};
     var status: zigos.Stat = undefined;
     try zigos.fstat(fd, &status);
-    if (status.kind != 2 or status.readonly != 1) return error.InvalidArgument;
+    if (status.kind != 2 or status.readonly != 1 or @sizeOf(zigos.FileTimes) != 32) return error.InvalidArgument;
+    var proc_times: zigos.FileTimes = undefined;
+    try zigos.statTimes("/proc/version", &proc_times);
+    if (proc_times.modified_tick != status.modified_tick) return error.InvalidArgument;
 
     var bytes: [128]u8 = undefined;
     const count = try zigos.read(fd, &bytes);
@@ -127,6 +131,8 @@ fn run() zigos.Error!void {
     const vector_path = "/tmp/zig-sdk-vectors";
     zigos.unlink(vector_path) catch {};
     const vector_fd = try zigos.open(vector_path, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o600);
+    var created_times: zigos.FileTimes = undefined;
+    try zigos.statTimes(vector_path, &created_times);
     const write_vectors = [_]zigos.IoVector{
         zigos.constVector("vec"),
         zigos.constVector(""),
@@ -142,7 +148,13 @@ fn run() zigos.Error!void {
     }
     var vector_status: zigos.Stat = undefined;
     try zigos.fstat(vector_fd, &vector_status);
+    try zigos.sleep(2);
     if (vector_status.size != 0 or try zigos.writev(vector_fd, &.{}) != 0 or try zigos.writev(vector_fd, &write_vectors) != 9) return error.InvalidArgument;
+    var written_times: zigos.FileTimes = undefined;
+    try zigos.statTimes(vector_path, &written_times);
+    if (written_times.created_tick != created_times.created_tick or written_times.modified_tick <= created_times.modified_tick or
+        written_times.changed_tick <= created_times.changed_tick or written_times.accessed_tick != created_times.accessed_tick)
+        return error.InvalidArgument;
     if (try zigos.lseek(vector_fd, 0, .start) != 0) return error.InvalidArgument;
     var first: [2]u8 = undefined;
     var second: [3]u8 = undefined;
@@ -159,8 +171,22 @@ fn run() zigos.Error!void {
     if (zigos.readv(vector_fd, &invalid_read_vectors)) |_| return error.InvalidArgument else |err| {
         if (err != error.Fault) return err;
     }
+    try zigos.sleep(2);
     if (try zigos.readv(vector_fd, &read_vectors) != 9 or
         !equal(&first, "ve") or !equal(&second, "cto") or !equal(&third, "r-io")) return error.InvalidArgument;
+    var read_times: zigos.FileTimes = undefined;
+    try zigos.statTimes(vector_path, &read_times);
+    if (read_times.created_tick != created_times.created_tick or read_times.modified_tick != written_times.modified_tick or
+        read_times.changed_tick != written_times.changed_tick or read_times.accessed_tick <= written_times.accessed_tick)
+        return error.InvalidArgument;
+    try zigos.sleep(2);
+    try zigos.chmod(vector_path, 0o600);
+    var chmod_times: zigos.FileTimes = undefined;
+    try zigos.statTimes(vector_path, &chmod_times);
+    if (chmod_times.created_tick != created_times.created_tick or chmod_times.modified_tick != written_times.modified_tick or
+        chmod_times.accessed_tick != read_times.accessed_tick or chmod_times.changed_tick <= read_times.changed_tick)
+        return error.InvalidArgument;
+    try zigos.writeAll(1, timestamp_message);
     var too_many: [zigos.constants.maximum_iovecs + 1]zigos.IoVector = @splat(.{ .pointer = 0, .length = 0 });
     if (zigos.writev(vector_fd, &too_many)) |_| return error.InvalidArgument else |err| {
         if (err != error.InvalidArgument) return err;
