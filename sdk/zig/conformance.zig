@@ -10,8 +10,9 @@ const abi_message = "zig-sdk: ABI discovery passed\r\n";
 const startup_vector_message = "zig-sdk: envp/auxv passed\r\n";
 const mmap_file_message = "zig-sdk: shared file mmap coherence passed\r\n";
 const timestamp_message = "zig-sdk: timestamp precision/data/namespace/access ordering passed\r\n";
+const ownership_message = "zig-sdk: uid/gid creation and hard-link ownership passed\r\n";
 const mount_message = "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -38,7 +39,7 @@ pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize
         return 0xE9;
     }
     zigos.writeAll(1, startup_vector_message) catch return 0xEA;
-    run() catch {
+    run(auxv) catch {
         zigos.writeAll(2, fail_message) catch {};
         return 0xE2;
     };
@@ -74,7 +75,7 @@ fn startupVectorsValid(envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) boo
         (capabilities & zigos.constants.capability_terminal) != 0;
 }
 
-fn run() zigos.Error!void {
+fn run(auxv: [*]const zigos.AuxvEntry) zigos.Error!void {
     var info: zigos.AbiInfo = undefined;
     try zigos.queryAbi(&info);
     if (info.magic != zigos.constants.abi_magic or info.major != zigos.constants.abi_major or
@@ -86,6 +87,10 @@ fn run() zigos.Error!void {
         return error.InvalidArgument;
     }
     try zigos.writeAll(1, abi_message);
+    const uid_value = zigos.auxiliaryValue(auxv, zigos.constants.aux_uid) orelse return error.InvalidArgument;
+    const gid_value = zigos.auxiliaryValue(auxv, zigos.constants.aux_gid) orelse return error.InvalidArgument;
+    if (uid_value > 0xFFFF_FFFF or gid_value > 0xFFFF_FFFF) return error.InvalidArgument;
+    const expected_owner = zigos.FileOwner{ .uid = @intCast(uid_value), .gid = @intCast(gid_value) };
 
     var root_fs: zigos.FilesystemStat = undefined;
     try zigos.statfs("/", &root_fs);
@@ -123,6 +128,9 @@ fn run() zigos.Error!void {
     var proc_times: zigos.FileTimes = undefined;
     try zigos.statTimes("/proc/version", &proc_times);
     if (proc_times.modified_tick != status.modified_tick) return error.InvalidArgument;
+    var proc_owner: zigos.FileOwner = undefined;
+    try zigos.statOwner("/proc/version", &proc_owner);
+    if (proc_owner.uid != 0 or proc_owner.gid != 0 or @sizeOf(zigos.FileOwner) != 8) return error.InvalidArgument;
 
     var bytes: [128]u8 = undefined;
     const count = try zigos.read(fd, &bytes);
@@ -133,6 +141,9 @@ fn run() zigos.Error!void {
     const vector_fd = try zigos.open(vector_path, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o600);
     var created_times: zigos.FileTimes = undefined;
     try zigos.statTimes(vector_path, &created_times);
+    var created_owner: zigos.FileOwner = undefined;
+    try zigos.statOwner(vector_path, &created_owner);
+    if (created_owner.uid != expected_owner.uid or created_owner.gid != expected_owner.gid) return error.InvalidArgument;
     const write_vectors = [_]zigos.IoVector{
         zigos.constVector("vec"),
         zigos.constVector(""),
@@ -223,6 +234,12 @@ fn run() zigos.Error!void {
     var directory_after_link: zigos.FileTimes = undefined;
     try zigos.statTimes(timestamp_file, &file_after_link);
     try zigos.statTimes(timestamp_dir, &directory_after_link);
+    var hard_source_owner: zigos.FileOwner = undefined;
+    var hard_alias_owner: zigos.FileOwner = undefined;
+    try zigos.statOwner(timestamp_file, &hard_source_owner);
+    try zigos.statOwner(timestamp_alias, &hard_alias_owner);
+    if (hard_source_owner.uid != expected_owner.uid or hard_source_owner.gid != expected_owner.gid or
+        hard_alias_owner.uid != hard_source_owner.uid or hard_alias_owner.gid != hard_source_owner.gid) return error.InvalidArgument;
     if (file_after_link.created_tick != file_created.created_tick or file_after_link.modified_tick != file_created.modified_tick or
         file_after_link.accessed_tick != file_created.accessed_tick or file_after_link.changed_tick <= file_created.changed_tick or
         directory_after_link.modified_tick <= directory_after_file.modified_tick or directory_after_link.changed_tick <= directory_after_file.changed_tick)
@@ -258,6 +275,7 @@ fn run() zigos.Error!void {
     try zigos.unlink(timestamp_file);
     try zigos.rmdir(timestamp_dir);
     try zigos.writeAll(1, timestamp_message);
+    try zigos.writeAll(1, ownership_message);
     var too_many: [zigos.constants.maximum_iovecs + 1]zigos.IoVector = @splat(.{ .pointer = 0, .length = 0 });
     if (zigos.writev(vector_fd, &too_many)) |_| return error.InvalidArgument else |err| {
         if (err != error.InvalidArgument) return err;

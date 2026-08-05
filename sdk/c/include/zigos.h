@@ -7,10 +7,10 @@
 
 #define ZIGOS_ABI_MAGIC UINT32_C(0x4942415A)
 #define ZIGOS_ABI_MAJOR UINT16_C(1)
-#define ZIGOS_ABI_MINOR UINT16_C(15)
+#define ZIGOS_ABI_MINOR UINT16_C(16)
 #define ZIGOS_PAGE_SIZE UINT32_C(4096)
 #define ZIGOS_SYSCALL_BASE UINT16_C(64)
-#define ZIGOS_SYSCALL_COUNT UINT16_C(59)
+#define ZIGOS_SYSCALL_COUNT UINT16_C(60)
 #define ZIGOS_MAX_IOVECS UINT64_C(8)
 
 #define ZIGOS_AUX_NULL UINT64_C(0)
@@ -118,6 +118,7 @@
 #define ZIGOS_SYS_UMOUNT UINT64_C(120)
 #define ZIGOS_SYS_STATFS UINT64_C(121)
 #define ZIGOS_SYS_STATTIMES UINT64_C(122)
+#define ZIGOS_SYS_STATOWNER UINT64_C(123)
 
 #define ZIGOS_ERRNO_PERMISSION INT64_C(-1)
 #define ZIGOS_ERRNO_NOT_FOUND INT64_C(-2)
@@ -190,6 +191,8 @@ typedef struct zigos_file_times {
     uint64_t created_tick; uint64_t modified_tick; uint64_t changed_tick; uint64_t accessed_tick;
 } zigos_file_times;
 
+typedef struct zigos_file_owner { uint32_t uid; uint32_t gid; } zigos_file_owner;
+
 typedef struct zigos_filesystem_stat {
     uint64_t block_size; uint64_t total_blocks; uint64_t free_blocks; uint64_t available_blocks;
     uint64_t total_nodes; uint64_t free_nodes; uint32_t mount_id; uint16_t filesystem_kind; uint16_t flags; uint64_t reserved;
@@ -206,6 +209,7 @@ typedef struct zigos_auxv_entry { uint64_t kind; uint64_t value; } zigos_auxv_en
 _Static_assert(sizeof(zigos_abi_info) == 64, "zigos_abi_info layout");
 _Static_assert(sizeof(zigos_stat) == 32, "zigos_stat layout");
 _Static_assert(sizeof(zigos_file_times) == 32, "zigos_file_times layout");
+_Static_assert(sizeof(zigos_file_owner) == 8, "zigos_file_owner layout");
 _Static_assert(sizeof(zigos_filesystem_stat) == 64, "zigos_filesystem_stat layout");
 _Static_assert(sizeof(zigos_poll_descriptor) == 8, "zigos_poll_descriptor layout");
 _Static_assert(sizeof(zigos_iovec) == 16, "zigos_iovec layout");
@@ -225,6 +229,7 @@ int64_t zigos_openat(int64_t directory_fd, const char *path, uint64_t flags, uin
 int64_t zigos_fstat(uint16_t fd, zigos_stat *info);
 int64_t zigos_stat_path(const char *path, zigos_stat *info);
 int64_t zigos_stattimes(const char *path, zigos_file_times *times);
+int64_t zigos_statowner(const char *path, zigos_file_owner *owner);
 int64_t zigos_statfs(const char *path, zigos_filesystem_stat *info);
 int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);
 int64_t zigos_fsync(uint16_t fd);

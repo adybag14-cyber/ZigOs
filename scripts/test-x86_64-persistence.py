@@ -18,12 +18,12 @@ from dataclasses import dataclass
 
 PROMPT = b"root@zigos:/home/root# "
 HEADER_MAGIC = b"ZIGPERS1"
-HEADER_VERSION = 2
+HEADER_VERSION = 3
 HEADER_SIZE = 48
 COMMIT_MARKER = 0x434F4D54
 PERSIST_MAX_PAYLOAD_BYTES = 64 * 1024
 PERSIST_PAYLOAD_OFFSET_SECTORS = 2
-RECORD_HEADER_SIZE = 40
+RECORD_HEADER_SIZE = 48
 TIMESTAMP_TARGET = "abi14/renamed.txt"
 
 
@@ -45,10 +45,16 @@ class Record:
     modified_tick: int
     changed_tick: int
     accessed_tick: int
+    uid: int
+    gid: int
 
     @property
     def times(self) -> tuple[int, int, int, int]:
         return (self.created_tick, self.modified_tick, self.changed_tick, self.accessed_tick)
+
+    @property
+    def owner(self) -> tuple[int, int]:
+        return (self.uid, self.gid)
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -301,6 +307,8 @@ def parse_records(image: pathlib.Path, first_lba: int, header: Header, block_siz
         modified_tick = int.from_bytes(payload[offset + 16 : offset + 24], "little")
         changed_tick = int.from_bytes(payload[offset + 24 : offset + 32], "little")
         accessed_tick = int.from_bytes(payload[offset + 32 : offset + 40], "little")
+        uid = int.from_bytes(payload[offset + 40 : offset + 44], "little")
+        gid = int.from_bytes(payload[offset + 44 : offset + 48], "little")
         offset += RECORD_HEADER_SIZE
         end = offset + path_length + data_length
         if end > len(payload):
@@ -311,7 +319,7 @@ def parse_records(image: pathlib.Path, first_lba: int, header: Header, block_siz
             raise RuntimeError(f"slot {header.slot}: record {record_index} path was not ASCII") from error
         if path in records:
             raise RuntimeError(f"slot {header.slot}: duplicate persisted path {path!r}")
-        records[path] = Record(kind, path, mode, created_tick, modified_tick, changed_tick, accessed_tick)
+        records[path] = Record(kind, path, mode, created_tick, modified_tick, changed_tick, accessed_tick, uid, gid)
         offset = end
     if offset != len(payload):
         raise RuntimeError(f"slot {header.slot}: trailing bytes remained after record parsing")
@@ -428,6 +436,8 @@ def main() -> int:
         generation_one_target = timestamp_record(image, data_first_lba, header_a)
         if not all(value > 0 for value in generation_one_target.times):
             raise RuntimeError(f"generation 1 target timestamps were not initialized: {generation_one_target}")
+        if generation_one_target.owner != (0, 0):
+            raise RuntimeError(f"generation 1 target ownership was not root: {generation_one_target}")
 
         second_text = run_boot(
             boot_number=2,
@@ -458,6 +468,8 @@ def main() -> int:
             raise RuntimeError(f"file fsync changed persistent namespace cardinality: A={header_a}, B={header_b}")
 
         generation_two_target = timestamp_record(image, data_first_lba, header_b)
+        if generation_two_target.owner != generation_one_target.owner:
+            raise RuntimeError("fsync changed committed file ownership")
         if generation_two_target.created_tick != generation_one_target.created_tick:
             raise RuntimeError("fsync changed file creation timestamp")
         # Stored ticks are boot-local runtime ordering values, not a cross-boot epoch.
@@ -499,6 +511,8 @@ def main() -> int:
             raise RuntimeError(f"file fdatasync changed persistent namespace cardinality: A={header_a}, B={header_b}")
 
         generation_three_target = timestamp_record(image, data_first_lba, header_a)
+        if generation_three_target.owner != generation_two_target.owner:
+            raise RuntimeError("fdatasync changed committed file ownership")
         if generation_three_target.created_tick != generation_two_target.created_tick:
             raise RuntimeError("fdatasync changed committed file creation timestamp")
         if generation_three_target.modified_tick == generation_two_target.modified_tick:
@@ -563,6 +577,9 @@ def main() -> int:
             "generation1_target_times": generation_one_target.times,
             "generation2_target_times": generation_two_target.times,
             "generation3_target_times": generation_three_target.times,
+            "generation1_target_owner": generation_one_target.owner,
+            "generation2_target_owner": generation_two_target.owner,
+            "generation3_target_owner": generation_three_target.owner,
             "boot4_serial_bytes": len(fourth_text.encode("utf-8")),
         }
         (work / "result.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8", newline="\n")

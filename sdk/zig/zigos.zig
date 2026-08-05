@@ -5,6 +5,7 @@ pub const AbiInfo = abi.AbiInfo;
 pub const WaitStatus = abi.WaitStatus;
 pub const Stat = abi.Stat;
 pub const FileTimes = abi.FileTimes;
+pub const FileOwner = abi.FileOwner;
 pub const FilesystemStat = abi.FilesystemStat;
 pub const DirectoryEntry = abi.DirectoryEntry;
 pub const PollDescriptor = abi.PollDescriptor;
@@ -319,6 +320,10 @@ pub fn stat(path: [*:0]const u8, info: *Stat) Error!void {
 
 pub fn statTimes(path: [*:0]const u8, times: *FileTimes) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_stattimes, ptrValue(path), ptrValue(times), 0, 0, 0, 0));
+}
+
+pub fn statOwner(path: [*:0]const u8, owner: *FileOwner) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_statowner, ptrValue(path), ptrValue(owner), 0, 0, 0, 0));
 }
 
 pub fn statfs(path: [*:0]const u8, info: *FilesystemStat) Error!void {

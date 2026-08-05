@@ -71,7 +71,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.15 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.16 discovery passed\r\n")) {
         return 0xC4;
     }
 
@@ -99,6 +99,10 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
     if (sizeof(dev_times) != 32 || zigos_stattimes("/dev/null", &dev_times) != 0 ||
         dev_times.modified_tick != info.modified_tick) {
         return fail(0xDA, "path timestamps /dev/null");
+    }
+    zigos_file_owner dev_owner = {0};
+    if (sizeof(dev_owner) != 8 || zigos_statowner("/dev/null", &dev_owner) != 0 || dev_owner.uid != 0 || dev_owner.gid != 0) {
+        return fail(0xDB, "path owner /dev/null");
     }
 
     int64_t null_fd = zigos_open("/dev/null", ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE, 0);
@@ -192,7 +196,11 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
     zigos_stat hard_alias_info = {0};
     zigos_file_times hard_source_times = {0};
     zigos_file_times hard_alias_times = {0};
-    if (zigos_stattimes(hard_source, &hard_source_times) != 0 || zigos_stattimes(hard_alias, &hard_alias_times) != 0 ||
+    zigos_file_owner hard_source_owner = {0};
+    zigos_file_owner hard_alias_owner = {0};
+    if (zigos_statowner(hard_source, &hard_source_owner) != 0 || zigos_statowner(hard_alias, &hard_alias_owner) != 0 ||
+        hard_source_owner.uid != hard_alias_owner.uid || hard_source_owner.gid != hard_alias_owner.gid ||
+        zigos_stattimes(hard_source, &hard_source_times) != 0 || zigos_stattimes(hard_alias, &hard_alias_times) != 0 ||
         hard_source_times.created_tick != hard_alias_times.created_tick ||
         hard_source_times.modified_tick != hard_alias_times.modified_tick ||
         hard_source_times.changed_tick != hard_alias_times.changed_tick ||
@@ -284,7 +292,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xD6, "descriptor fsync/fdatasync");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
         return 0xD7;
     }
     return 0x57;

@@ -618,6 +618,7 @@ pub fn handleSyscall(
         syscall.syscall_stat => return syscallStat(context, frame),
         syscall.syscall_statfs => return syscallStatfs(context, frame),
         syscall.syscall_stattimes => return syscallStatTimes(context, frame),
+        syscall.syscall_statowner => return syscallStatOwner(context, frame),
         syscall.syscall_openat => return syscallOpenAt(context, frame),
         syscall.syscall_fsync => return syscallFsync(context, frame, fx_state),
         syscall.syscall_fdatasync => return syscallFdatasync(context, frame, fx_state),
@@ -880,7 +881,7 @@ fn syscallMkdir(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    _ = activeVfs().mkdir(process.cwd_node, path_buffer[0..path_length], mode, current_tick) catch |err| {
+    _ = activeVfs().mkdirOwned(process.cwd_node, path_buffer[0..path_length], mode, .{ .uid = process.uid, .gid = process.gid }, current_tick) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -2784,6 +2785,33 @@ fn syscallStatTimes(context: *Context, frame: *interrupt_context.Frame) u64 {
     return 0;
 }
 
+fn syscallStatOwner(context: *Context, frame: *interrupt_context.Frame) u64 {
+    var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
+    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
+        frame.rax = reject(errno_fault);
+        return 0;
+    };
+    if (!validateRange(context, frame.rsi, @sizeOf(runtime_abi.FileOwner), true)) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const process = activeProcesses().get(context.handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const ownership = activeVfs().ownership(process.cwd_node, path_buffer[0..path_length]) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const result = runtime_abi.FileOwner{ .uid = ownership.uid, .gid = ownership.gid };
+    if (!copyToUser(context, frame.rsi, std.mem.asBytes(&result))) {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    frame.rax = 0;
+    return 0;
+}
+
 fn syscallStatfs(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
     const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
@@ -2981,10 +3009,11 @@ fn syscallSymlink(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    _ = activeVfs().symlink(
+    _ = activeVfs().symlinkOwned(
         process.cwd_node,
         target_buffer[0..target_length],
         path_buffer[0..path_length],
+        .{ .uid = process.uid, .gid = process.gid },
         current_tick,
     ) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));

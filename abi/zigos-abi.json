@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 15,
+    "minor": 16,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -78,7 +78,8 @@
     "mount": 119,
     "umount": 120,
     "statfs": 121,
-    "stattimes": 122
+    "stattimes": 122,
+    "statowner": 123
   },
   "errno": {
     "permission": -1,

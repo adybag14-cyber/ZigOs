@@ -4,10 +4,12 @@ const runtime_vfs = @import("runtime_vfs.zig");
 
 pub const maximum_payload_bytes: usize = 64 * 1024;
 const magic = "ZIGPERS1".*;
-const version: u32 = 2;
+const version: u32 = 3;
+const timestamp_version: u32 = 2;
 const legacy_version: u32 = 1;
 const record_header_size_v1: usize = 8;
 const record_header_size_v2: usize = 40;
+const record_header_size_v3: usize = 48;
 const header_size: u32 = 48;
 const commit_marker: u32 = 0x434F_4D54;
 const persist_root = "/persist";
@@ -381,16 +383,18 @@ pub const Store = struct {
         var target_found = false;
         var committed_mode: ?u16 = null;
         var committed_times: ?runtime_vfs.Timestamps = null;
+        var committed_owner: ?runtime_vfs.Ownership = null;
         var record_index: u32 = 0;
         while (record_index < committed_count) : (record_index += 1) {
             const record_start = input_offset;
-            if (input_offset + record_header_size_v2 > committed_length) return Error.Corrupt;
+            if (input_offset + record_header_size_v3 > committed_length) return Error.Corrupt;
             const kind = decodeRecordKind(self.payload[input_offset]) orelse return Error.Corrupt;
             const path_length: usize = self.payload[input_offset + 1];
             const record_mode = read16(&self.payload, input_offset + 2);
             const data_length: usize = read32(&self.payload, input_offset + 4);
             const record_times = readRecordTimestamps(&self.payload, input_offset, version, 0) catch return Error.Corrupt;
-            input_offset += record_header_size_v2;
+            const record_owner = readRecordOwnership(&self.payload, input_offset, version) catch return Error.Corrupt;
+            input_offset += record_header_size_v3;
             if (path_length == 0 or input_offset + path_length > committed_length) return Error.Corrupt;
             const record_path = self.payload[input_offset .. input_offset + path_length];
             input_offset += path_length;
@@ -401,6 +405,7 @@ pub const Store = struct {
                 target_found = true;
                 committed_mode = record_mode;
                 committed_times = record_times;
+                committed_owner = record_owner;
                 continue;
             }
             const record_length = input_offset - record_start;
@@ -411,7 +416,7 @@ pub const Store = struct {
             output_count +%= 1;
         }
         if (input_offset != committed_length) return Error.Corrupt;
-        if (!target_found or committed_mode == null or committed_times == null) return Error.UnsupportedOperation;
+        if (!target_found or committed_mode == null or committed_times == null or committed_owner == null) return Error.UnsupportedOperation;
         const persisted_mode = if (include_metadata) stat.mode else committed_mode.?;
         const current_times = runtime_vfs.Timestamps{
             .created_tick = stat.created_tick,
@@ -421,6 +426,7 @@ pub const Store = struct {
         };
         var persisted_times = if (include_metadata) current_times else committed_times.?;
         if (!include_metadata) persisted_times.modified_tick = current_times.modified_tick;
+        const persisted_owner = if (include_metadata) ownershipFromStat(stat) else committed_owner.?;
 
         const sparse = vfs.sparseFileInfoNode(node_index) catch return Error.InvalidRecord;
         self.record_scratch[0] = sparse.allocation_bitmap;
@@ -442,6 +448,7 @@ pub const Store = struct {
             .sparse_file,
             persisted_mode,
             persisted_times,
+            persisted_owner,
             self.record_scratch[0..data_offset],
         );
         output_count +%= 1;
@@ -646,7 +653,7 @@ pub const Store = struct {
                 const child = try self.buildChildPath(parent, record.nameSlice());
                 const stat = vfs.stat(0, child) catch return Error.InvalidRecord;
                 const relative = child[persist_prefix.len..];
-                used = try appendRecord(output, used, relative, .directory, stat.mode, timestampsFromStat(stat), &.{});
+                used = try appendRecord(output, used, relative, .directory, stat.mode, timestampsFromStat(stat), ownershipFromStat(stat), &.{});
                 records +%= 1;
                 if (tail >= self.path_queue.len) return Error.NoSpace;
                 @memcpy(self.path_queue[tail][0..child.len], child);
@@ -662,7 +669,7 @@ pub const Store = struct {
                     var canonical_buffer: [runtime_vfs.maximum_path_length + 1]u8 = undefined;
                     const canonical = vfs.canonicalPath(record.node, &canonical_buffer) catch return Error.InvalidRecord;
                     if (!std.mem.startsWith(u8, canonical, persist_prefix)) return Error.InvalidRecord;
-                    used = try appendRecord(output, used, relative, .hard_link, stat.mode, timestampsFromStat(stat), canonical[persist_prefix.len..]);
+                    used = try appendRecord(output, used, relative, .hard_link, stat.mode, timestampsFromStat(stat), ownershipFromStat(stat), canonical[persist_prefix.len..]);
                     records +%= 1;
                     continue;
                 } else if (record.kind == .file) {
@@ -678,10 +685,10 @@ pub const Store = struct {
                         @memcpy(self.record_scratch[data_offset .. data_offset + block.len], &block);
                         data_offset += block.len;
                     }
-                    used = try appendRecord(output, used, relative, .sparse_file, stat.mode, timestampsFromStat(stat), self.record_scratch[0..data_offset]);
+                    used = try appendRecord(output, used, relative, .sparse_file, stat.mode, timestampsFromStat(stat), ownershipFromStat(stat), self.record_scratch[0..data_offset]);
                 } else {
                     const data = vfs.symlinkTargetNode(record.node) catch return Error.InvalidRecord;
-                    used = try appendRecord(output, used, relative, .symlink, stat.mode, timestampsFromStat(stat), data);
+                    used = try appendRecord(output, used, relative, .symlink, stat.mode, timestampsFromStat(stat), ownershipFromStat(stat), data);
                 }
                 records +%= 1;
             }
@@ -708,7 +715,7 @@ pub const Store = struct {
         if (count != candidate.record_count) return Error.Corrupt;
         try self.restorePass(vfs, candidate, tick, false);
         try self.restorePass(vfs, candidate, tick, true);
-        try self.restoreTimestampPass(vfs, candidate, tick);
+        try self.restoreMetadataPass(vfs, candidate, tick);
     }
 
     fn restorePass(self: *Store, vfs: *runtime_vfs.Vfs, candidate: Candidate, tick: u64, hard_links_only: bool) Error!void {
@@ -716,7 +723,7 @@ pub const Store = struct {
         var offset: usize = 4;
         var record_index: u32 = 0;
         while (record_index < count) : (record_index += 1) {
-            const record_header_size = if (candidate.format_version == legacy_version) record_header_size_v1 else record_header_size_v2;
+            const record_header_size = try recordHeaderSize(candidate.format_version);
             if (offset + record_header_size > candidate.payload_length) return Error.Corrupt;
             const kind = decodeRecordKind(self.payload[offset]) orelse return Error.Corrupt;
             const path_length: usize = self.payload[offset + 1];
@@ -768,17 +775,18 @@ pub const Store = struct {
         if (offset != candidate.payload_length) return Error.Corrupt;
     }
 
-    fn restoreTimestampPass(self: *Store, vfs: *runtime_vfs.Vfs, candidate: Candidate, tick: u64) Error!void {
+    fn restoreMetadataPass(self: *Store, vfs: *runtime_vfs.Vfs, candidate: Candidate, tick: u64) Error!void {
         const count = read32(&self.payload, 0);
         var offset: usize = 4;
         var record_index: u32 = 0;
         while (record_index < count) : (record_index += 1) {
-            const record_header_size = if (candidate.format_version == legacy_version) record_header_size_v1 else record_header_size_v2;
+            const record_header_size = try recordHeaderSize(candidate.format_version);
             if (offset + record_header_size > candidate.payload_length) return Error.Corrupt;
             const kind = decodeRecordKind(self.payload[offset]) orelse return Error.Corrupt;
             const path_length: usize = self.payload[offset + 1];
             const data_length: usize = read32(&self.payload, offset + 4);
             const record_times = readRecordTimestamps(&self.payload, offset, candidate.format_version, tick) catch return Error.Corrupt;
+            const record_owner = readRecordOwnership(&self.payload, offset, candidate.format_version) catch return Error.Corrupt;
             offset += record_header_size;
             if (path_length == 0 or offset + path_length > candidate.payload_length) return Error.Corrupt;
             const relative = self.payload[offset .. offset + path_length];
@@ -786,6 +794,7 @@ pub const Store = struct {
             if (!validRelativePath(relative) or offset + data_length > candidate.payload_length) return Error.Corrupt;
             const path = try self.absolutePath(relative);
             vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
+            vfs.restoreOwnership(0, path, record_owner) catch |err| return self.rejectRestoration(record_index, kind, err);
             offset += data_length;
         }
         if (offset != candidate.payload_length) return Error.Corrupt;
@@ -830,7 +839,7 @@ pub const Store = struct {
         if (allZero(self.sector[0..block_size])) return .absent;
         const encoded_version = read32(&self.sector, 8);
         if (!std.mem.eql(u8, self.sector[0..magic.len], &magic) or
-            (encoded_version != legacy_version and encoded_version != version) or read32(&self.sector, 12) != header_size or
+            (encoded_version != legacy_version and encoded_version != timestamp_version and encoded_version != version) or read32(&self.sector, 12) != header_size or
             read32(&self.sector, 44) != commit_marker)
         {
             self.corrupt_headers +%= 1;
@@ -948,6 +957,19 @@ fn timestampsFromStat(stat: runtime_vfs.Stat) runtime_vfs.Timestamps {
     };
 }
 
+fn ownershipFromStat(stat: runtime_vfs.Stat) runtime_vfs.Ownership {
+    return .{ .uid = stat.uid, .gid = stat.gid };
+}
+
+fn recordHeaderSize(format_version: u32) Error!usize {
+    return switch (format_version) {
+        legacy_version => record_header_size_v1,
+        timestamp_version => record_header_size_v2,
+        version => record_header_size_v3,
+        else => Error.Corrupt,
+    };
+}
+
 fn readRecordTimestamps(payload: []const u8, offset: usize, format_version: u32, legacy_tick: u64) Error!runtime_vfs.Timestamps {
     if (format_version == legacy_version) {
         return .{
@@ -957,13 +979,19 @@ fn readRecordTimestamps(payload: []const u8, offset: usize, format_version: u32,
             .accessed_tick = legacy_tick,
         };
     }
-    if (format_version != version or offset + record_header_size_v2 > payload.len) return Error.Corrupt;
+    if ((format_version != timestamp_version and format_version != version) or offset + record_header_size_v2 > payload.len) return Error.Corrupt;
     return .{
         .created_tick = read64(payload, offset + 8),
         .modified_tick = read64(payload, offset + 16),
         .changed_tick = read64(payload, offset + 24),
         .accessed_tick = read64(payload, offset + 32),
     };
+}
+
+fn readRecordOwnership(payload: []const u8, offset: usize, format_version: u32) Error!runtime_vfs.Ownership {
+    if (format_version == legacy_version or format_version == timestamp_version) return .{};
+    if (format_version != version or offset + record_header_size_v3 > payload.len) return Error.Corrupt;
+    return .{ .uid = read32(payload, offset + 40), .gid = read32(payload, offset + 44) };
 }
 
 fn appendRecord(
@@ -973,10 +1001,11 @@ fn appendRecord(
     kind: Store.RecordKind,
     mode: u16,
     times: runtime_vfs.Timestamps,
+    owner: runtime_vfs.Ownership,
     data: []const u8,
 ) Error!usize {
     if (relative_path.len == 0 or relative_path.len > 255 or data.len > maximum_record_data_bytes) return Error.InvalidRecord;
-    const required = record_header_size_v2 + relative_path.len + data.len;
+    const required = record_header_size_v3 + relative_path.len + data.len;
     if (initial_offset > payload.len or required > payload.len - initial_offset) return Error.NoSpace;
     payload[initial_offset] = @intFromEnum(kind);
     payload[initial_offset + 1] = @intCast(relative_path.len);
@@ -986,7 +1015,9 @@ fn appendRecord(
     write64(payload, initial_offset + 16, times.modified_tick);
     write64(payload, initial_offset + 24, times.changed_tick);
     write64(payload, initial_offset + 32, times.accessed_tick);
-    var offset = initial_offset + record_header_size_v2;
+    write32(payload, initial_offset + 40, owner.uid);
+    write32(payload, initial_offset + 44, owner.gid);
+    var offset = initial_offset + record_header_size_v3;
     @memcpy(payload[offset .. offset + relative_path.len], relative_path);
     offset += relative_path.len;
     @memcpy(payload[offset .. offset + data.len], data);
@@ -1254,9 +1285,17 @@ test "alternating snapshots restore a persistent VFS subtree" {
     const directory_times = runtime_vfs.Timestamps{ .created_tick = 101, .modified_tick = 102, .changed_tick = 103, .accessed_tick = 104 };
     const name_times = runtime_vfs.Timestamps{ .created_tick = 201, .modified_tick = 202, .changed_tick = 203, .accessed_tick = 204 };
     const symlink_times = runtime_vfs.Timestamps{ .created_tick = 301, .modified_tick = 302, .changed_tick = 303, .accessed_tick = 304 };
+    const directory_owner = runtime_vfs.Ownership{ .uid = 101, .gid = 201 };
+    const name_owner = runtime_vfs.Ownership{ .uid = 102, .gid = 202 };
+    const symlink_owner = runtime_vfs.Ownership{ .uid = 103, .gid = 203 };
+    const sparse_owner = runtime_vfs.Ownership{ .uid = 104, .gid = 204 };
     try first_vfs.restoreTimestamps(0, "/persist/config", directory_times);
     try first_vfs.restoreTimestamps(0, "/persist/config/name.txt", name_times);
     try first_vfs.restoreTimestamps(0, "/persist/name-link", symlink_times);
+    try first_vfs.restoreOwnership(0, "/persist/config", directory_owner);
+    try first_vfs.restoreOwnership(0, "/persist/config/name.txt", name_owner);
+    try first_vfs.restoreOwnership(0, "/persist/name-link", symlink_owner);
+    try first_vfs.restoreOwnership(0, "/persist/sparse.bin", sparse_owner);
     try first_store.sync(first_vfs);
     try std.testing.expectEqual(@as(u64, 1), first_store.report().generation);
     try first_store.check();
@@ -1270,12 +1309,15 @@ test "alternating snapshots restore a persistent VFS subtree" {
     try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/name-hard"));
     try std.testing.expectEqual((try second_vfs.stat(0, "/persist/config/name.txt")).node, (try second_vfs.stat(0, "/persist/name-hard")).node);
     const restored_directory = try second_vfs.stat(0, "/persist/config");
+    try std.testing.expectEqual(directory_owner, try second_vfs.ownership(0, "/persist/config"));
     try std.testing.expectEqual(directory_times.created_tick, restored_directory.created_tick);
     try std.testing.expectEqual(directory_times.modified_tick, restored_directory.modified_tick);
     try std.testing.expectEqual(directory_times.changed_tick, restored_directory.changed_tick);
     try std.testing.expectEqual(directory_times.accessed_tick, restored_directory.accessed_tick);
     const restored_name = try second_vfs.stat(0, "/persist/config/name.txt");
     const restored_hard = try second_vfs.stat(0, "/persist/name-hard");
+    try std.testing.expectEqual(name_owner, try second_vfs.ownership(0, "/persist/config/name.txt"));
+    try std.testing.expectEqual(name_owner, try second_vfs.ownership(0, "/persist/name-hard"));
     try std.testing.expectEqual(@as(u16, 2), restored_hard.link_count);
     try std.testing.expectEqual(name_times.created_tick, restored_name.created_tick);
     try std.testing.expectEqual(name_times.modified_tick, restored_name.modified_tick);
@@ -1288,11 +1330,13 @@ test "alternating snapshots restore a persistent VFS subtree" {
     try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/name-link"));
     const restored_symlink_node = try second_vfs.resolveNoFollow(0, "/persist/name-link");
     const restored_symlink = try second_vfs.statNode(restored_symlink_node);
+    try std.testing.expectEqual(symlink_owner, try second_vfs.ownershipNode(restored_symlink_node));
     try std.testing.expectEqual(symlink_times.created_tick, restored_symlink.created_tick);
     try std.testing.expectEqual(symlink_times.modified_tick, restored_symlink.modified_tick);
     try std.testing.expectEqual(symlink_times.changed_tick, restored_symlink.changed_tick);
     try std.testing.expectEqual(symlink_times.accessed_tick, restored_symlink.accessed_tick);
     const restored_sparse_node = (try second_vfs.stat(0, "/persist/sparse.bin")).node;
+    try std.testing.expectEqual(sparse_owner, try second_vfs.ownershipNode(restored_sparse_node));
     const restored_sparse = try second_vfs.sparseFileInfoNode(restored_sparse_node);
     try std.testing.expectEqual(@as(usize, 2 * runtime_vfs.file_block_size + 4), restored_sparse.size);
     try std.testing.expectEqual(@as(u8, (1 << 0) | (1 << 2)), restored_sparse.allocation_bitmap);
@@ -1535,7 +1579,7 @@ test "journal write and flush failures classify read only remount stage" {
     }
 }
 
-test "legacy version one snapshot restores coherent timestamps and migrates to version two" {
+test "legacy version one and two snapshots migrate timestamps and ownership to version three" {
     var disk: TestDisk = .{};
     var payload: [512]u8 = @splat(0);
     const relative = "legacy.txt";
@@ -1576,12 +1620,13 @@ test "legacy version one snapshot restores coherent timestamps and migrates to v
     try std.testing.expectEqual(legacy_version, legacy_store.payload_version);
     try std.testing.expectEqualStrings(data, try legacy_vfs.readOnlyView(0, "/persist/legacy.txt"));
     const legacy_times = try legacy_vfs.timestamps(0, "/persist/legacy.txt");
+    try std.testing.expectEqual(runtime_vfs.Ownership{}, try legacy_vfs.ownership(0, "/persist/legacy.txt"));
     try std.testing.expectEqual(@as(u64, 77), legacy_times.created_tick);
     try std.testing.expectEqual(@as(u64, 77), legacy_times.modified_tick);
     try std.testing.expectEqual(@as(u64, 77), legacy_times.changed_tick);
     try std.testing.expectEqual(@as(u64, 77), legacy_times.accessed_tick);
 
-    // A global sync rewrites the complete tree using v2 inline timestamps.
+    // A global sync rewrites the complete tree using v3 timestamps and ownership.
     try legacy_store.sync(legacy_vfs);
     try std.testing.expectEqual(@as(u64, 8), legacy_store.report().generation);
     try std.testing.expectEqual(version, legacy_store.payload_version);
@@ -1596,6 +1641,54 @@ test "legacy version one snapshot restores coherent timestamps and migrates to v
     try std.testing.expectEqual(version, migrated_store.payload_version);
     try std.testing.expectEqualStrings(data, try migrated_vfs.readOnlyView(0, "/persist/legacy.txt"));
     try std.testing.expectEqual(legacy_times, try migrated_vfs.timestamps(0, "/persist/legacy.txt"));
+    try std.testing.expectEqual(runtime_vfs.Ownership{}, try migrated_vfs.ownership(0, "/persist/legacy.txt"));
+
+    // Version 2 carries timestamps but predates ownership. It remains readable
+    // as root-owned metadata and migrates to v3 on the next global sync.
+    var disk_v2: TestDisk = .{};
+    var payload_v2: [512]u8 = @splat(0);
+    const relative_v2 = "v2.txt";
+    const data_v2 = "v2";
+    const v2_times = runtime_vfs.Timestamps{ .created_tick = 11, .modified_tick = 12, .changed_tick = 13, .accessed_tick = 14 };
+    write32(&payload_v2, 0, 1);
+    const record_v2: usize = 4;
+    payload_v2[record_v2] = @intFromEnum(Store.RecordKind.file);
+    payload_v2[record_v2 + 1] = @intCast(relative_v2.len);
+    write16(&payload_v2, record_v2 + 2, 0o600);
+    write32(&payload_v2, record_v2 + 4, data_v2.len);
+    write64(&payload_v2, record_v2 + 8, v2_times.created_tick);
+    write64(&payload_v2, record_v2 + 16, v2_times.modified_tick);
+    write64(&payload_v2, record_v2 + 24, v2_times.changed_tick);
+    write64(&payload_v2, record_v2 + 32, v2_times.accessed_tick);
+    var payload_v2_length = record_v2 + record_header_size_v2;
+    @memcpy(payload_v2[payload_v2_length .. payload_v2_length + relative_v2.len], relative_v2);
+    payload_v2_length += relative_v2.len;
+    @memcpy(payload_v2[payload_v2_length .. payload_v2_length + data_v2.len], data_v2);
+    payload_v2_length += data_v2.len;
+    @memcpy(disk_v2.blocks[1 + slotPayloadStart(512, 0)][0..payload_v2_length], payload_v2[0..payload_v2_length]);
+    var encoder_v2: Store = .{};
+    encoder_v2.device = disk_v2.device();
+    encoder_v2.encodeHeader(.{ .slot = 0, .format_version = timestamp_version, .generation = 9, .payload_length = @intCast(payload_v2_length), .payload_crc32 = gpt.crc32(payload_v2[0..payload_v2_length]), .record_count = 1 });
+    @memcpy(&disk_v2.blocks[1], encoder_v2.sector[0..512]);
+    const v2_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(v2_vfs);
+    v2_vfs.initialize();
+    var v2_store: Store = .{};
+    try v2_store.mount(v2_vfs, disk_v2.device(), 88);
+    try std.testing.expectEqual(timestamp_version, v2_store.payload_version);
+    try std.testing.expectEqualStrings(data_v2, try v2_vfs.readOnlyView(0, "/persist/v2.txt"));
+    try std.testing.expectEqual(v2_times, try v2_vfs.timestamps(0, "/persist/v2.txt"));
+    try std.testing.expectEqual(runtime_vfs.Ownership{}, try v2_vfs.ownership(0, "/persist/v2.txt"));
+    try v2_store.sync(v2_vfs);
+    try std.testing.expectEqual(version, v2_store.payload_version);
+    const v3_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(v3_vfs);
+    v3_vfs.initialize();
+    var v3_store: Store = .{};
+    try v3_store.mount(v3_vfs, disk_v2.device(), 99);
+    try std.testing.expectEqual(version, v3_store.payload_version);
+    try std.testing.expectEqual(v2_times, try v3_vfs.timestamps(0, "/persist/v2.txt"));
+    try std.testing.expectEqual(runtime_vfs.Ownership{}, try v3_vfs.ownership(0, "/persist/v2.txt"));
 }
 
 test "mount falls back to the previous valid generation" {

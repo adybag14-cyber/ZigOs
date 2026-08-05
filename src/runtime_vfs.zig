@@ -126,6 +126,11 @@ pub const Timestamps = struct {
     accessed_tick: u64,
 };
 
+pub const Ownership = struct {
+    uid: u32 = 0,
+    gid: u32 = 0,
+};
+
 pub const Stat = struct {
     node: u16,
     generation: u16,
@@ -135,6 +140,8 @@ pub const Stat = struct {
     readonly: bool,
     mount_id: u8,
     link_count: u16,
+    uid: u32,
+    gid: u32,
     created_tick: u64,
     modified_tick: u64,
     changed_tick: u64,
@@ -172,6 +179,8 @@ const Node = struct {
     mode: u16 = 0o644,
     readonly: bool = false,
     mount_id: u8 = 0,
+    uid: u32 = 0,
+    gid: u32 = 0,
     created_tick: u64 = 0,
     modified_tick: u64 = 0,
     changed_tick: u64 = 0,
@@ -469,11 +478,29 @@ pub const Vfs = struct {
             .readonly = self.nodeReadonly(node_index),
             .mount_id = node.mount_id,
             .link_count = node.link_count,
+            .uid = node.uid,
+            .gid = node.gid,
             .created_tick = node.created_tick,
             .modified_tick = node.modified_tick,
             .changed_tick = node.changed_tick,
             .accessed_tick = node.accessed_tick,
         };
+    }
+
+    pub fn ownership(self: *Vfs, cwd: u16, path: []const u8) Error!Ownership {
+        return self.ownershipNode(try self.resolve(cwd, path));
+    }
+
+    pub fn ownershipNode(self: *const Vfs, node_index: u16) Error!Ownership {
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used) return Error.NotFound;
+        const node = &self.nodes[node_index];
+        return .{ .uid = node.uid, .gid = node.gid };
+    }
+
+    pub fn restoreOwnership(self: *Vfs, cwd: u16, path: []const u8, restored: Ownership) Error!void {
+        const node_index = try self.resolveNoFollow(cwd, path);
+        self.nodes[node_index].uid = restored.uid;
+        self.nodes[node_index].gid = restored.gid;
     }
 
     pub fn restoreTimestamps(self: *Vfs, cwd: u16, path: []const u8, restored: Timestamps) Error!void {
@@ -531,13 +558,21 @@ pub const Vfs = struct {
     }
 
     pub fn mkdir(self: *Vfs, cwd: u16, path: []const u8, mode: u16, tick: u64) Error!u16 {
+        return self.mkdirOwned(cwd, path, mode, .{}, tick);
+    }
+
+    pub fn mkdirOwned(self: *Vfs, cwd: u16, path: []const u8, mode: u16, owner: Ownership, tick: u64) Error!u16 {
         const parent_name = try self.parentAndName(cwd, path);
-        return self.createNode(parent_name.parent, parent_name.name, .directory, mode, false, tick);
+        return self.createNode(parent_name.parent, parent_name.name, .directory, mode, false, owner, tick);
     }
 
     pub fn create(self: *Vfs, cwd: u16, path: []const u8, mode: u16, tick: u64) Error!u16 {
+        return self.createOwned(cwd, path, mode, .{}, tick);
+    }
+
+    pub fn createOwned(self: *Vfs, cwd: u16, path: []const u8, mode: u16, owner: Ownership, tick: u64) Error!u16 {
         const parent_name = try self.parentAndName(cwd, path);
-        return self.createNode(parent_name.parent, parent_name.name, .file, mode, false, tick);
+        return self.createNode(parent_name.parent, parent_name.name, .file, mode, false, owner, tick);
     }
 
     pub fn link(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, tick: u64) Error!u16 {
@@ -560,10 +595,14 @@ pub const Vfs = struct {
     }
 
     pub fn symlink(self: *Vfs, cwd: u16, target: []const u8, path: []const u8, tick: u64) Error!u16 {
+        return self.symlinkOwned(cwd, target, path, .{}, tick);
+    }
+
+    pub fn symlinkOwned(self: *Vfs, cwd: u16, target: []const u8, path: []const u8, owner: Ownership, tick: u64) Error!u16 {
         if (target.len == 0 or std.mem.indexOfScalar(u8, target, 0) != null) return Error.InvalidPath;
         if (target.len > maximum_symlink_target_length) return Error.PathTooLong;
         const parent_name = try self.parentAndName(cwd, path);
-        const node_index = try self.createNode(parent_name.parent, parent_name.name, .symlink, 0o777, false, tick);
+        const node_index = try self.createNode(parent_name.parent, parent_name.name, .symlink, 0o777, false, owner, tick);
         @memcpy(self.nodes[node_index].symlink_data[0..target.len], target);
         self.nodes[node_index].size = target.len;
         return node_index;
@@ -599,7 +638,7 @@ pub const Vfs = struct {
         context: ?*anyopaque,
     ) Error!u16 {
         const parent_name = try self.parentAndName(cwd, path);
-        const node_index = try self.createNode(parent_name.parent, parent_name.name, .pseudo, mode, false, tick);
+        const node_index = try self.createNode(parent_name.parent, parent_name.name, .pseudo, mode, false, .{}, tick);
         self.nodes[node_index].pseudo_operations = operations;
         self.nodes[node_index].pseudo_context = context;
         return node_index;
@@ -620,7 +659,7 @@ pub const Vfs = struct {
     ) Error!u16 {
         try self.validatePseudoMountRoot(mount_root);
         try validateSingleComponent(name);
-        const node_index = try self.createNodeInternal(mount_root, name, .pseudo, mode, false, tick, true);
+        const node_index = try self.createNodeInternal(mount_root, name, .pseudo, mode, false, .{}, tick, true);
         self.nodes[node_index].pseudo_operations = operations;
         self.nodes[node_index].pseudo_context = context;
         return node_index;
@@ -670,7 +709,7 @@ pub const Vfs = struct {
     ) Error!u16 {
         if (operations.read == null or operations.write != null or operations.stream != null) return Error.UnsupportedOperation;
         const parent_name = try self.parentAndName(cwd, path);
-        const node_index = try self.createNode(parent_name.parent, parent_name.name, .file, mode, true, tick);
+        const node_index = try self.createNode(parent_name.parent, parent_name.name, .file, mode, true, .{}, tick);
         self.nodes[node_index].size = size;
         self.nodes[node_index].pseudo_operations = operations;
         self.nodes[node_index].pseudo_context = context;
@@ -1051,9 +1090,13 @@ pub const Vfs = struct {
     }
 
     pub fn open(self: *Vfs, owner_pid: u32, cwd: u16, path: []const u8, flags: OpenFlags, mode: u16, tick: u64) Error!u32 {
+        return self.openOwned(owner_pid, cwd, path, flags, mode, .{}, tick);
+    }
+
+    pub fn openOwned(self: *Vfs, owner_pid: u32, cwd: u16, path: []const u8, flags: OpenFlags, mode: u16, owner: Ownership, tick: u64) Error!u32 {
         if (!flags.read and !flags.write) return Error.PermissionDenied;
         var node_index = self.resolve(cwd, path) catch |err| switch (err) {
-            Error.NotFound => if (flags.create) try self.create(cwd, path, mode, tick) else return err,
+            Error.NotFound => if (flags.create) try self.createOwned(cwd, path, mode, owner, tick) else return err,
             else => return err,
         };
         if (self.nodes[node_index].kind == .directory) {
@@ -2053,8 +2096,8 @@ pub const Vfs = struct {
         return .{ .parent = try self.resolve(cwd, parent_path), .name = name };
     }
 
-    fn createNode(self: *Vfs, parent: u16, name: []const u8, kind: Kind, mode: u16, readonly: bool, tick: u64) Error!u16 {
-        return self.createNodeInternal(parent, name, kind, mode, readonly, tick, false);
+    fn createNode(self: *Vfs, parent: u16, name: []const u8, kind: Kind, mode: u16, readonly: bool, owner: Ownership, tick: u64) Error!u16 {
+        return self.createNodeInternal(parent, name, kind, mode, readonly, owner, tick, false);
     }
 
     fn createNodeInternal(
@@ -2064,6 +2107,7 @@ pub const Vfs = struct {
         kind: Kind,
         mode: u16,
         readonly: bool,
+        owner: Ownership,
         tick: u64,
         privileged_pseudo_publication: bool,
     ) Error!u16 {
@@ -2088,6 +2132,8 @@ pub const Vfs = struct {
             .mode = mode & 0o777,
             .readonly = readonly,
             .mount_id = self.nodes[parent].mount_id,
+            .uid = owner.uid,
+            .gid = owner.gid,
             .created_tick = tick,
             .modified_tick = tick,
             .changed_tick = tick,

@@ -121,6 +121,11 @@ pub const FileTimes = extern struct {
     accessed_tick: u64,
 };
 
+pub const FileOwner = extern struct {
+    uid: u32,
+    gid: u32,
+};
+
 pub const FilesystemStat = extern struct {
     block_size: u64,
     total_blocks: u64,
@@ -359,6 +364,7 @@ test "spawnv request and startup vector layouts are stable" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(IoVector));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(Stat));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(FileTimes));
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(FileOwner));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(FilesystemStat));
     try std.testing.expectEqual(@as(usize, 8), constants.maximum_iovecs);
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(UserString));

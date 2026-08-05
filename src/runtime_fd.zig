@@ -367,7 +367,7 @@ pub const System = struct {
         const open_slot = self.findFreeOpenDescriptions(1) orelse return Error.OpenDescriptionLimit;
         const generation = nextGeneration(self.open_descriptions[open_slot[0]].generation);
         const owner = makeOpenId(open_slot[0], generation);
-        const vfs_handle = try vfs.open(owner, directory_node, path, flags, mode, tick);
+        const vfs_handle = try vfs.openOwned(owner, directory_node, path, flags, mode, .{ .uid = process.uid, .gid = process.gid }, tick);
         const stream = try vfs.pseudoStreamOpen(owner, vfs_handle);
         const kind: DescriptionKind = if (stream == .console) .terminal else .vfs;
         if (kind == .terminal and self.terminal_backend == null) {
@@ -1468,10 +1468,11 @@ test "numeric descriptor namespace uses lowest free descriptor" {
     try initializeTestFilesystem(&fs);
     var processes = runtime_process.Table.init(0);
     var system = System.init();
-    const handle = processes.initHandle();
+    const handle = try initializeTestProcess(&processes, "owner", 32);
     try system.bindProcess(&processes, handle, true);
     const first = try system.openFile(&fs, &processes, handle, "/tmp/a", .{ .read = true, .write = true, .create = true }, 0o644, 1);
     try std.testing.expectEqual(@as(u16, 3), first);
+    try std.testing.expectEqual(runtime_vfs.Ownership{ .uid = 1000, .gid = 1000 }, try fs.ownership(0, "/tmp/a"));
     try system.close(&fs, &processes, handle, first);
     const second = try system.openFile(&fs, &processes, handle, "/tmp/b", .{ .read = true, .write = true, .create = true }, 0o644, 2);
     try std.testing.expectEqual(first, second);

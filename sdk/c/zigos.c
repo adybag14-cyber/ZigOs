@@ -56,6 +56,10 @@ int64_t zigos_stattimes(const char *path, zigos_file_times *times) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_STATTIMES, pointer_value(path), pointer_value(times), 0, 0, 0, 0);
 }
 
+int64_t zigos_statowner(const char *path, zigos_file_owner *owner) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_STATOWNER, pointer_value(path), pointer_value(owner), 0, 0, 0, 0);
+}
+
 int64_t zigos_statfs(const char *path, zigos_filesystem_stat *info) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_STATFS, pointer_value(path), pointer_value(info), 0, 0, 0, 0);
 }
