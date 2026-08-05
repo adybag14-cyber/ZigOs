@@ -1470,11 +1470,62 @@ test "numeric descriptor namespace uses lowest free descriptor" {
     var system = System.init();
     const handle = try initializeTestProcess(&processes, "owner", 32);
     try system.bindProcess(&processes, handle, true);
+    const owner_credentials = runtime_vfs.Ownership{ .uid = 1000, .gid = 1000 };
+    const group_credentials = runtime_vfs.Ownership{ .uid = 2000, .gid = 1000 };
+    const other_credentials = runtime_vfs.Ownership{ .uid = 2000, .gid = 2000 };
     const first = try system.openFile(&fs, &processes, handle, "/tmp/a", .{ .read = true, .write = true, .create = true }, 0o644, 1);
     try std.testing.expectEqual(@as(u16, 3), first);
-    try std.testing.expectEqual(runtime_vfs.Ownership{ .uid = 1000, .gid = 1000 }, try fs.ownership(0, "/tmp/a"));
+    try std.testing.expectEqual(owner_credentials, try fs.ownership(0, "/tmp/a"));
+
+    const group_name = "group";
+    const group_handle = try processes.spawn(processes.initHandle(), .userspace, group_name, &.{group_name}, 0, 2000, 1000, 0, .{ .maximum_descriptors = 32 });
+    try system.bindProcess(&processes, group_handle, true);
+    const other_name = "other";
+    const other_handle = try processes.spawn(processes.initHandle(), .userspace, other_name, &.{other_name}, 0, 2000, 2000, 0, .{ .maximum_descriptors = 32 });
+    try system.bindProcess(&processes, other_handle, true);
+
+    // Exactly one class is selected: owner first, then matching primary group,
+    // otherwise other. A permissive lower-priority class never leaks through.
+    try fs.chmod(0, "/tmp/a", 0o640, 2);
+    const group_read = try system.openFile(&fs, &processes, group_handle, "/tmp/a", .{ .read = true }, 0, 3);
+    try system.close(&fs, &processes, group_handle, group_read);
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, system.openFile(&fs, &processes, group_handle, "/tmp/a", .{ .write = true }, 0, 4));
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, system.openFile(&fs, &processes, other_handle, "/tmp/a", .{ .read = true }, 0, 5));
+    try fs.chmod(0, "/tmp/a", 0o604, 6);
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, system.openFile(&fs, &processes, group_handle, "/tmp/a", .{ .read = true }, 0, 7));
+    const other_read = try system.openFile(&fs, &processes, other_handle, "/tmp/a", .{ .read = true }, 0, 8);
+    try system.close(&fs, &processes, other_handle, other_read);
+
+    // chmod is owner-or-root only. Mode changes affect later opens, while the
+    // already-open owner description retains the access granted at open time.
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, fs.chmodAs(0, "/tmp/a", 0o777, group_credentials, 9));
+    try fs.chmodAs(0, "/tmp/a", 0o600, owner_credentials, 10);
+    try fs.chmod(0, "/tmp/a", 0, 11);
+    try std.testing.expectEqual(@as(usize, 1), (try system.write(&fs, &processes, handle, first, "x", 12)).count);
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, system.openFile(&fs, &processes, handle, "/tmp/a", .{ .write = true }, 0, 13));
+    const a_node = (try fs.stat(0, "/tmp/a")).node;
+    try std.testing.expect(try fs.accessAllowedNode(a_node, .{}, .{ .read = true, .write = true, .execute = true }));
+
+    // Directory search is execute; namespace mutation is write+execute on the
+    // containing directory. The created inode inherits the mutating process.
+    _ = try fs.mkdirOwned(0, "/tmp/team", 0o730, owner_credentials, 14);
+    _ = try fs.resolveDirectoryAs(0, "/tmp/team", group_credentials);
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, fs.resolveDirectoryAs(0, "/tmp/team", other_credentials));
+    _ = try fs.createOwned(0, "/tmp/team/member", 0o640, group_credentials, 15);
+    try std.testing.expectEqual(group_credentials, try fs.ownership(0, "/tmp/team/member"));
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, fs.createOwned(0, "/tmp/team/denied", 0o600, other_credentials, 16));
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, fs.unlinkAs(0, "/tmp/team/member", other_credentials, 17));
+    try fs.unlinkAs(0, "/tmp/team/member", group_credentials, 18);
+
+    // Executability is independent from readability: group execute alone can
+    // launch the file, while the matching owner class cannot borrow group X.
+    _ = try fs.createOwned(0, "/tmp/run", 0o010, owner_credentials, 19);
+    try std.testing.expectEqual(@as(usize, 0), (try fs.executableViewAs(0, "/tmp/run", group_credentials)).len);
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, fs.executableViewAs(0, "/tmp/run", owner_credentials));
+    try std.testing.expectEqual(@as(usize, 0), (try fs.executableViewAs(0, "/tmp/run", .{})).len);
+
     try system.close(&fs, &processes, handle, first);
-    const second = try system.openFile(&fs, &processes, handle, "/tmp/b", .{ .read = true, .write = true, .create = true }, 0o644, 2);
+    const second = try system.openFile(&fs, &processes, handle, "/tmp/b", .{ .read = true, .write = true, .create = true }, 0o644, 20);
     try std.testing.expectEqual(first, second);
     try std.testing.expect(system.validate(&fs, &processes));
 }

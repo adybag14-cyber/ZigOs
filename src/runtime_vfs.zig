@@ -131,6 +131,12 @@ pub const Ownership = struct {
     gid: u32 = 0,
 };
 
+pub const Access = struct {
+    read: bool = false,
+    write: bool = false,
+    execute: bool = false,
+};
+
 pub const Stat = struct {
     node: u16,
     generation: u16,
@@ -455,15 +461,34 @@ pub const Vfs = struct {
     }
 
     pub fn resolve(self: *Vfs, cwd: u16, path: []const u8) Error!u16 {
-        return self.resolveInternal(cwd, path, true, 0);
+        return self.resolveAs(cwd, path, .{});
+    }
+
+    pub fn resolveAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error!u16 {
+        return self.resolveInternalAs(cwd, path, true, 0, credentials);
     }
 
     pub fn resolveNoFollow(self: *Vfs, cwd: u16, path: []const u8) Error!u16 {
-        return self.resolveInternal(cwd, path, false, 0);
+        return self.resolveNoFollowAs(cwd, path, .{});
+    }
+
+    pub fn resolveNoFollowAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error!u16 {
+        return self.resolveInternalAs(cwd, path, false, 0, credentials);
+    }
+
+    pub fn resolveDirectoryAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error!u16 {
+        const node_index = try self.resolveAs(cwd, path, credentials);
+        if (self.nodes[node_index].kind != .directory) return Error.NotDirectory;
+        try self.requireAccessNode(node_index, credentials, .{ .execute = true });
+        return node_index;
     }
 
     pub fn stat(self: *Vfs, cwd: u16, path: []const u8) Error!Stat {
-        return self.statNode(try self.resolve(cwd, path));
+        return self.statAs(cwd, path, .{});
+    }
+
+    pub fn statAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error!Stat {
+        return self.statNode(try self.resolveAs(cwd, path, credentials));
     }
 
     pub fn statNode(self: *const Vfs, node_index: u16) Error!Stat {
@@ -488,7 +513,11 @@ pub const Vfs = struct {
     }
 
     pub fn ownership(self: *Vfs, cwd: u16, path: []const u8) Error!Ownership {
-        return self.ownershipNode(try self.resolve(cwd, path));
+        return self.ownershipAs(cwd, path, .{});
+    }
+
+    pub fn ownershipAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error!Ownership {
+        return self.ownershipNode(try self.resolveAs(cwd, path, credentials));
     }
 
     pub fn ownershipNode(self: *const Vfs, node_index: u16) Error!Ownership {
@@ -513,7 +542,11 @@ pub const Vfs = struct {
     }
 
     pub fn timestamps(self: *Vfs, cwd: u16, path: []const u8) Error!Timestamps {
-        return self.timestampsNode(try self.resolve(cwd, path));
+        return self.timestampsAs(cwd, path, .{});
+    }
+
+    pub fn timestampsAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error!Timestamps {
+        return self.timestampsNode(try self.resolveAs(cwd, path, credentials));
     }
 
     pub fn timestampsNode(self: *const Vfs, node_index: u16) Error!Timestamps {
@@ -533,8 +566,13 @@ pub const Vfs = struct {
     }
 
     pub fn list(self: *Vfs, cwd: u16, path: []const u8) Error!DirectoryList {
-        const directory = try self.resolve(cwd, path);
+        return self.listAs(cwd, path, .{});
+    }
+
+    pub fn listAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error!DirectoryList {
+        const directory = try self.resolveAs(cwd, path, credentials);
         if (self.nodes[directory].kind != .directory) return Error.NotDirectory;
+        try self.requireAccessNode(directory, credentials, .{ .read = true });
         var result = DirectoryList{};
         for (self.dentries, 0..) |entry, entry_index| {
             if (!entry.used or entry.parent != directory) continue;
@@ -562,7 +600,7 @@ pub const Vfs = struct {
     }
 
     pub fn mkdirOwned(self: *Vfs, cwd: u16, path: []const u8, mode: u16, owner: Ownership, tick: u64) Error!u16 {
-        const parent_name = try self.parentAndName(cwd, path);
+        const parent_name = try self.parentAndNameAs(cwd, path, owner);
         return self.createNode(parent_name.parent, parent_name.name, .directory, mode, false, owner, tick);
     }
 
@@ -571,16 +609,20 @@ pub const Vfs = struct {
     }
 
     pub fn createOwned(self: *Vfs, cwd: u16, path: []const u8, mode: u16, owner: Ownership, tick: u64) Error!u16 {
-        const parent_name = try self.parentAndName(cwd, path);
+        const parent_name = try self.parentAndNameAs(cwd, path, owner);
         return self.createNode(parent_name.parent, parent_name.name, .file, mode, false, owner, tick);
     }
 
     pub fn link(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, tick: u64) Error!u16 {
-        const node_index = try self.resolveNoFollow(cwd, old_path);
+        return self.linkAs(cwd, old_path, new_path, .{}, tick);
+    }
+
+    pub fn linkAs(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, credentials: Ownership, tick: u64) Error!u16 {
+        const node_index = try self.resolveNoFollowAs(cwd, old_path, credentials);
         const node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
         if (node.kind != .file) return Error.UnsupportedOperation;
-        const destination = try self.parentAndName(cwd, new_path);
+        const destination = try self.parentAndNameAs(cwd, new_path, credentials);
         if (node.mount_id != self.nodes[destination.parent].mount_id) return Error.CrossMount;
         if (node.readonly or self.mountReadonly(node.mount_id) or self.nodes[destination.parent].readonly) return Error.ReadOnly;
         if (self.findDentry(destination.parent, destination.name) != null) return Error.AlreadyExists;
@@ -601,7 +643,7 @@ pub const Vfs = struct {
     pub fn symlinkOwned(self: *Vfs, cwd: u16, target: []const u8, path: []const u8, owner: Ownership, tick: u64) Error!u16 {
         if (target.len == 0 or std.mem.indexOfScalar(u8, target, 0) != null) return Error.InvalidPath;
         if (target.len > maximum_symlink_target_length) return Error.PathTooLong;
-        const parent_name = try self.parentAndName(cwd, path);
+        const parent_name = try self.parentAndNameAs(cwd, path, owner);
         const node_index = try self.createNode(parent_name.parent, parent_name.name, .symlink, 0o777, false, owner, tick);
         @memcpy(self.nodes[node_index].symlink_data[0..target.len], target);
         self.nodes[node_index].size = target.len;
@@ -609,7 +651,11 @@ pub const Vfs = struct {
     }
 
     pub fn readlink(self: *Vfs, cwd: u16, path: []const u8, output: []u8, tick: u64) Error!usize {
-        const node_index = try self.resolveNoFollow(cwd, path);
+        return self.readlinkAs(cwd, path, output, .{}, tick);
+    }
+
+    pub fn readlinkAs(self: *Vfs, cwd: u16, path: []const u8, output: []u8, credentials: Ownership, tick: u64) Error!usize {
+        const node_index = try self.resolveNoFollowAs(cwd, path, credentials);
         const target = try self.symlinkTargetNode(node_index);
         const count = @min(output.len, target.len);
         @memcpy(output[0..count], target[0..count]);
@@ -744,10 +790,14 @@ pub const Vfs = struct {
     }
 
     pub fn read(self: *Vfs, cwd: u16, path: []const u8, offset: usize, output: []u8) Error!usize {
-        const node_index = try self.resolve(cwd, path);
+        return self.readAs(cwd, path, offset, output, .{});
+    }
+
+    pub fn readAs(self: *Vfs, cwd: u16, path: []const u8, offset: usize, output: []u8, credentials: Ownership) Error!usize {
+        const node_index = try self.resolveAs(cwd, path, credentials);
         var node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
-        if ((node.mode & 0o444) == 0) return Error.PermissionDenied;
+        try self.requireAccessNode(node_index, credentials, .{ .read = true });
         if (node.pseudo_operations != null) return self.readPseudo(node_index, offset, output);
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
@@ -758,10 +808,24 @@ pub const Vfs = struct {
     }
 
     pub fn readOnlyView(self: *Vfs, cwd: u16, path: []const u8) Error![]const u8 {
-        const node_index = try self.resolve(cwd, path);
+        return self.readOnlyViewAs(cwd, path, .{});
+    }
+
+    pub fn readOnlyViewAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error![]const u8 {
+        const node_index = try self.resolveAs(cwd, path, credentials);
+        try self.requireAccessNode(node_index, credentials, .{ .read = true });
+        return self.fileViewNode(node_index);
+    }
+
+    pub fn executableViewAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error![]const u8 {
+        const node_index = try self.resolveAs(cwd, path, credentials);
+        try self.requireAccessNode(node_index, credentials, .{ .execute = true });
+        return self.fileViewNode(node_index);
+    }
+
+    fn fileViewNode(self: *Vfs, node_index: u16) Error![]const u8 {
         var node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
-        if ((node.mode & 0o444) == 0) return Error.PermissionDenied;
         if (node.kind != .file or node.pseudo_operations != null) return Error.UnsupportedOperation;
         _ = node.data_lock.acquire();
         defer node.data_lock.release();
@@ -806,14 +870,22 @@ pub const Vfs = struct {
     }
 
     pub fn unlink(self: *Vfs, cwd: u16, path: []const u8, tick: u64) Error!void {
-        const entry_index = try self.entryForPath(cwd, path);
+        return self.unlinkAs(cwd, path, .{}, tick);
+    }
+
+    pub fn unlinkAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership, tick: u64) Error!void {
+        const entry_index = try self.entryForPathAs(cwd, path, credentials);
         const node_index = self.dentries[entry_index].node;
         if (self.nodes[node_index].kind == .directory) return Error.IsDirectory;
         try self.unlinkEntry(entry_index, tick);
     }
 
     pub fn rmdir(self: *Vfs, cwd: u16, path: []const u8, tick: u64) Error!void {
-        const entry_index = try self.entryForPath(cwd, path);
+        return self.rmdirAs(cwd, path, .{}, tick);
+    }
+
+    pub fn rmdirAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership, tick: u64) Error!void {
+        const entry_index = try self.entryForPathAs(cwd, path, credentials);
         const node_index = self.dentries[entry_index].node;
         if (node_index == 0 or self.nodes[node_index].kind != .directory) return Error.NotDirectory;
         if (self.hasChildren(node_index)) return Error.DirectoryNotEmpty;
@@ -821,11 +893,15 @@ pub const Vfs = struct {
     }
 
     pub fn rename(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, tick: u64) Error!void {
-        const source_entry = try self.entryForPath(cwd, old_path);
+        return self.renameAs(cwd, old_path, new_path, .{}, tick);
+    }
+
+    pub fn renameAs(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, credentials: Ownership, tick: u64) Error!void {
+        const source_entry = try self.entryForPathAs(cwd, old_path, credentials);
         const source = self.dentries[source_entry].node;
         const source_parent = self.dentries[source_entry].parent;
         if (self.mountAtNode(source) != null) return Error.Busy;
-        const destination = try self.parentAndName(cwd, new_path);
+        const destination = try self.parentAndNameAs(cwd, new_path, credentials);
         if (self.nodes[source].mount_id != self.nodes[destination.parent].mount_id) return Error.CrossMount;
         if (self.nodes[source].readonly or self.mountReadonly(self.nodes[source].mount_id) or self.nodes[destination.parent].readonly)
             return Error.ReadOnly;
@@ -846,7 +922,12 @@ pub const Vfs = struct {
     }
 
     pub fn chmod(self: *Vfs, cwd: u16, path: []const u8, mode: u16, tick: u64) Error!void {
-        const node_index = try self.resolve(cwd, path);
+        return self.chmodAs(cwd, path, mode, .{}, tick);
+    }
+
+    pub fn chmodAs(self: *Vfs, cwd: u16, path: []const u8, mode: u16, credentials: Ownership, tick: u64) Error!void {
+        const node_index = try self.resolveAs(cwd, path, credentials);
+        if (credentials.uid != 0 and credentials.uid != self.nodes[node_index].uid) return Error.PermissionDenied;
         if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
         self.nodes[node_index].mode = mode & 0o777;
         self.nodes[node_index].changed_tick = tick;
@@ -982,7 +1063,11 @@ pub const Vfs = struct {
     }
 
     pub fn statFilesystem(self: *Vfs, cwd: u16, path: []const u8) Error!FilesystemStats {
-        const node_index = try self.resolve(cwd, path);
+        return self.statFilesystemAs(cwd, path, .{});
+    }
+
+    pub fn statFilesystemAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error!FilesystemStats {
+        const node_index = try self.resolveAs(cwd, path, credentials);
         const mount_id = self.nodes[node_index].mount_id;
         if (mount_id == 0) return Error.CorruptState;
         const mount_index: usize = mount_id - 1;
@@ -1095,25 +1180,38 @@ pub const Vfs = struct {
 
     pub fn openOwned(self: *Vfs, owner_pid: u32, cwd: u16, path: []const u8, flags: OpenFlags, mode: u16, owner: Ownership, tick: u64) Error!u32 {
         if (!flags.read and !flags.write) return Error.PermissionDenied;
-        var node_index = self.resolve(cwd, path) catch |err| switch (err) {
+        var node_index = self.resolveAs(cwd, path, owner) catch |err| switch (err) {
             Error.NotFound => if (flags.create) try self.createOwned(cwd, path, mode, owner, tick) else return err,
             else => return err,
         };
         if (self.nodes[node_index].kind == .directory) {
             if (flags.write or flags.create or flags.truncate or flags.append) return Error.IsDirectory;
+            if (flags.read) try self.requireAccessNode(node_index, owner, .{ .read = true });
         } else if (self.nodes[node_index].kind == .pseudo) {
             const operations = self.nodes[node_index].pseudo_operations orelse return Error.UnsupportedOperation;
             if (flags.create or flags.truncate or flags.append) return Error.UnsupportedOperation;
-            if (flags.read and ((self.nodes[node_index].mode & 0o444) == 0 or
-                (operations.read == null and operations.stream == null))) return Error.PermissionDenied;
-            if (flags.write and ((self.nodes[node_index].mode & 0o222) == 0 or
-                (operations.write == null and operations.stream == null))) return Error.PermissionDenied;
+            if (flags.read) {
+                try self.requireAccessNode(node_index, owner, .{ .read = true });
+                if (operations.read == null and operations.stream == null) return Error.PermissionDenied;
+            }
+            if (flags.write) {
+                try self.requireAccessNode(node_index, owner, .{ .write = true });
+                if (operations.write == null and operations.stream == null) return Error.PermissionDenied;
+            }
         } else {
-            if (flags.read and (self.nodes[node_index].mode & 0o444) == 0) return Error.PermissionDenied;
-            if (flags.write) try self.requireWritableFile(node_index);
-            if (flags.truncate and flags.write) try self.truncate(cwd, path, 0, tick);
+            if (flags.read) try self.requireAccessNode(node_index, owner, .{ .read = true });
+            if (flags.write) {
+                try self.requireAccessNode(node_index, owner, .{ .write = true });
+                try self.requireMutableFile(node_index);
+            }
+            if (flags.truncate and flags.write) {
+                var node = &self.nodes[node_index];
+                _ = node.data_lock.acquire();
+                defer node.data_lock.release();
+                self.truncateNodeLocked(node_index, 0, tick);
+            }
         }
-        node_index = try self.resolve(cwd, path);
+        node_index = try self.resolveAs(cwd, path, owner);
         var owner_count: usize = 0;
         for (self.open_files) |open_file| {
             if (open_file.used and open_file.owner_pid == owner_pid) owner_count += 1;
@@ -1873,8 +1971,12 @@ pub const Vfs = struct {
         return result;
     }
 
-    fn resolveInternal(self: *Vfs, cwd: u16, path: []const u8, follow_final: bool, depth: usize) Error!u16 {
-        if (path.len == 0) return self.validateDirectory(cwd);
+    fn resolveInternalAs(self: *Vfs, cwd: u16, path: []const u8, follow_final: bool, depth: usize, credentials: Ownership) Error!u16 {
+        if (path.len == 0) {
+            const directory = try self.validateDirectory(cwd);
+            try self.requireAccessNode(directory, credentials, .{ .execute = true });
+            return directory;
+        }
         if (path.len > maximum_path_length) return Error.PathTooLong;
         var current: u16 = if (path[0] == '/') 0 else try self.validateDirectory(cwd);
         var position: usize = 0;
@@ -1884,13 +1986,14 @@ pub const Vfs = struct {
             const start = position;
             while (position < path.len and path[position] != '/') position += 1;
             const component = path[start..position];
-            if (std.mem.eql(u8, component, ".")) continue;
             if (component.len > maximum_name_length) return Error.NameTooLong;
+            if (self.nodes[current].kind != .directory) return Error.NotDirectory;
+            try self.requireAccessNode(current, credentials, .{ .execute = true });
+            if (std.mem.eql(u8, component, ".")) continue;
             if (std.mem.eql(u8, component, "..")) {
                 current = try self.directoryParent(current);
                 continue;
             }
-            if (self.nodes[current].kind != .directory) return Error.NotDirectory;
             const reference = self.acquireDentry(current, component) orelse return Error.NotFound;
             defer self.releaseDentryReference(reference);
             const entry = &self.dentries[reference.dentry];
@@ -1899,7 +2002,7 @@ pub const Vfs = struct {
             if (self.nodes[child].kind == .symlink and (follow_final or has_suffix)) {
                 if (depth >= maximum_symlink_depth) return Error.Cycle;
                 const target = self.nodes[child].symlink_data[0..self.nodes[child].size];
-                current = try self.resolveInternal(entry.parent, target, true, depth + 1);
+                current = try self.resolveInternalAs(entry.parent, target, true, depth + 1, credentials);
             } else {
                 current = self.followMount(child);
             }
@@ -2048,7 +2151,11 @@ pub const Vfs = struct {
     }
 
     fn entryForPath(self: *Vfs, cwd: u16, path: []const u8) Error!u16 {
-        const parent_name = try self.parentAndName(cwd, path);
+        return self.entryForPathAs(cwd, path, .{});
+    }
+
+    fn entryForPathAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error!u16 {
+        const parent_name = try self.parentAndNameAs(cwd, path, credentials);
         return self.findDentry(parent_name.parent, parent_name.name) orelse Error.NotFound;
     }
 
@@ -2081,6 +2188,10 @@ pub const Vfs = struct {
     };
 
     fn parentAndName(self: *Vfs, cwd: u16, path: []const u8) Error!ParentName {
+        return self.parentAndNameAs(cwd, path, .{});
+    }
+
+    fn parentAndNameAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error!ParentName {
         if (path.len == 0 or path.len > maximum_path_length) return if (path.len == 0) Error.InvalidPath else Error.PathTooLong;
         var end = path.len;
         while (end > 1 and path[end - 1] == '/') end -= 1;
@@ -2093,7 +2204,9 @@ pub const Vfs = struct {
             if (position == 0) break :blk "/";
             break :blk trimmed[0..position];
         } else ".";
-        return .{ .parent = try self.resolve(cwd, parent_path), .name = name };
+        const parent = try self.resolveAs(cwd, parent_path, credentials);
+        try self.requireAccessNode(parent, credentials, .{ .write = true, .execute = true });
+        return .{ .parent = parent, .name = name };
     }
 
     fn createNode(self: *Vfs, parent: u16, name: []const u8, kind: Kind, mode: u16, readonly: bool, owner: Ownership, tick: u64) Error!u16 {
@@ -2601,6 +2714,26 @@ pub const Vfs = struct {
         var count: usize = 0;
         for (0..self.data_blocks.len) |block_index| count += @intFromBool(!self.data_blocks[block_index].used);
         return count;
+    }
+
+    pub fn accessAllowedNode(self: *const Vfs, node_index: u16, credentials: Ownership, requested: Access) Error!bool {
+        if (node_index >= self.nodes.len or !self.nodes[node_index].used or self.nodes[node_index].link_count == 0) return Error.NotFound;
+        if (credentials.uid == 0) return true;
+        const node = &self.nodes[node_index];
+        const bits: u16 = if (credentials.uid == node.uid)
+            (node.mode >> 6) & 0o7
+        else if (credentials.gid == node.gid)
+            (node.mode >> 3) & 0o7
+        else
+            node.mode & 0o7;
+        if (requested.read and (bits & 0o4) == 0) return false;
+        if (requested.write and (bits & 0o2) == 0) return false;
+        if (requested.execute and (bits & 0o1) == 0) return false;
+        return true;
+    }
+
+    fn requireAccessNode(self: *const Vfs, node_index: u16, credentials: Ownership, requested: Access) Error!void {
+        if (!try self.accessAllowedNode(node_index, credentials, requested)) return Error.PermissionDenied;
     }
 
     fn requireMutableFile(self: *const Vfs, node_index: u16) Error!void {

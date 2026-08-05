@@ -911,8 +911,8 @@ fn syscallSinglePathMutation(context: *Context, frame: *interrupt_context.Frame,
     };
     const path = path_buffer[0..path_length];
     (switch (operation) {
-        .unlink => activeVfs().unlink(process.cwd_node, path, current_tick),
-        .rmdir => activeVfs().rmdir(process.cwd_node, path, current_tick),
+        .unlink => activeVfs().unlinkAs(process.cwd_node, path, .{ .uid = process.uid, .gid = process.gid }, current_tick),
+        .rmdir => activeVfs().rmdirAs(process.cwd_node, path, .{ .uid = process.uid, .gid = process.gid }, current_tick),
     }) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -936,10 +936,11 @@ fn syscallRename(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    activeVfs().rename(
+    activeVfs().renameAs(
         process.cwd_node,
         old_buffer[0..old_length],
         new_buffer[0..new_length],
+        .{ .uid = process.uid, .gid = process.gid },
         current_tick,
     ) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
@@ -963,7 +964,7 @@ fn syscallChmod(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    activeVfs().chmod(process.cwd_node, path_buffer[0..path_length], mode, current_tick) catch |err| {
+    activeVfs().chmodAs(process.cwd_node, path_buffer[0..path_length], mode, .{ .uid = process.uid, .gid = process.gid }, current_tick) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -1067,15 +1068,11 @@ fn syscallChdir(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     };
     const path = path_buffer[0..path_length];
-    const info = activeVfs().stat(process.cwd_node, path) catch |err| {
-        frame.rax = reject(runtime_abi.fromError(err));
-        return 0;
-    };
-    if (info.kind != .directory) {
-        frame.rax = reject(runtime_abi.errno_not_directory);
-        return 0;
-    }
-    const node = activeVfs().resolve(process.cwd_node, path) catch |err| {
+    const node = activeVfs().resolveDirectoryAs(
+        process.cwd_node,
+        path,
+        .{ .uid = process.uid, .gid = process.gid },
+    ) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -2145,7 +2142,7 @@ fn syscallSpawn(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const image_bytes = activeVfs().readOnlyView(parent.cwd_node, path) catch |err| {
+    const image_bytes = activeVfs().executableViewAs(parent.cwd_node, path, .{ .uid = parent.uid, .gid = parent.gid }) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -2283,7 +2280,7 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const image_bytes = activeVfs().readOnlyView(parent.cwd_node, path) catch |err| {
+    const image_bytes = activeVfs().executableViewAs(parent.cwd_node, path, .{ .uid = parent.uid, .gid = parent.gid }) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -2712,7 +2709,7 @@ fn syscallStat(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const info = activeVfs().stat(process.cwd_node, path_buffer[0..path_length]) catch |err| {
+    const info = activeVfs().statAs(process.cwd_node, path_buffer[0..path_length], .{ .uid = process.uid, .gid = process.gid }) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -2767,7 +2764,7 @@ fn syscallStatTimes(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const times = activeVfs().timestamps(process.cwd_node, path_buffer[0..path_length]) catch |err| {
+    const times = activeVfs().timestampsAs(process.cwd_node, path_buffer[0..path_length], .{ .uid = process.uid, .gid = process.gid }) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -2799,7 +2796,7 @@ fn syscallStatOwner(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const ownership = activeVfs().ownership(process.cwd_node, path_buffer[0..path_length]) catch |err| {
+    const ownership = activeVfs().ownershipAs(process.cwd_node, path_buffer[0..path_length], .{ .uid = process.uid, .gid = process.gid }) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -2826,7 +2823,7 @@ fn syscallStatfs(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const info = activeVfs().statFilesystem(process.cwd_node, path_buffer[0..path_length]) catch |err| {
+    const info = activeVfs().statFilesystemAs(process.cwd_node, path_buffer[0..path_length], .{ .uid = process.uid, .gid = process.gid }) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -3038,10 +3035,11 @@ fn syscallLink(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    _ = activeVfs().link(
+    _ = activeVfs().linkAs(
         process.cwd_node,
         old_buffer[0..old_length],
         new_buffer[0..new_length],
+        .{ .uid = process.uid, .gid = process.gid },
         current_tick,
     ) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
@@ -3070,7 +3068,7 @@ fn syscallReadlink(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     };
     var output: [maximum_io_bytes]u8 = undefined;
-    const count = activeVfs().readlink(process.cwd_node, path_buffer[0..path_length], output[0..length], current_tick) catch |err| {
+    const count = activeVfs().readlinkAs(process.cwd_node, path_buffer[0..path_length], output[0..length], .{ .uid = process.uid, .gid = process.gid }, current_tick) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
