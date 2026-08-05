@@ -910,8 +910,8 @@ fn syscallSinglePathMutation(context: *Context, frame: *interrupt_context.Frame,
     };
     const path = path_buffer[0..path_length];
     (switch (operation) {
-        .unlink => activeVfs().unlink(process.cwd_node, path),
-        .rmdir => activeVfs().rmdir(process.cwd_node, path),
+        .unlink => activeVfs().unlink(process.cwd_node, path, current_tick),
+        .rmdir => activeVfs().rmdir(process.cwd_node, path, current_tick),
     }) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -1601,6 +1601,7 @@ fn syscallGetdents(context: *Context, frame: *interrupt_context.Frame) u64 {
         context.handle,
         fd,
         records[0..capacity],
+        current_tick,
     ) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -3040,7 +3041,7 @@ fn syscallReadlink(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     };
     var output: [maximum_io_bytes]u8 = undefined;
-    const count = activeVfs().readlink(process.cwd_node, path_buffer[0..path_length], output[0..length]) catch |err| {
+    const count = activeVfs().readlink(process.cwd_node, path_buffer[0..path_length], output[0..length], current_tick) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };

@@ -9,7 +9,7 @@ const argv_message = "zig-sdk: argc/argv passed\r\n";
 const abi_message = "zig-sdk: ABI discovery passed\r\n";
 const startup_vector_message = "zig-sdk: envp/auxv passed\r\n";
 const mmap_file_message = "zig-sdk: shared file mmap coherence passed\r\n";
-const timestamp_message = "zig-sdk: creation/modify/change/access timestamp separation passed\r\n";
+const timestamp_message = "zig-sdk: timestamp precision/data/namespace/access ordering passed\r\n";
 const mount_message = "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed\r\n";
 const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
@@ -186,6 +186,77 @@ fn run() zigos.Error!void {
     if (chmod_times.created_tick != created_times.created_tick or chmod_times.modified_tick != written_times.modified_tick or
         chmod_times.accessed_tick != read_times.accessed_tick or chmod_times.changed_tick <= read_times.changed_tick)
         return error.InvalidArgument;
+
+    const timestamp_dir = "/tmp/zig-sdk-time-dir";
+    const timestamp_file = "/tmp/zig-sdk-time-dir/file";
+    const timestamp_alias = "/tmp/zig-sdk-time-dir/alias";
+    zigos.unlink(timestamp_alias) catch {};
+    zigos.unlink(timestamp_file) catch {};
+    zigos.rmdir(timestamp_dir) catch {};
+    var tmp_before_create: zigos.FileTimes = undefined;
+    try zigos.statTimes("/tmp", &tmp_before_create);
+    try zigos.sleep(2);
+    try zigos.mkdir(timestamp_dir, 0o755);
+    var tmp_after_create: zigos.FileTimes = undefined;
+    var directory_created: zigos.FileTimes = undefined;
+    try zigos.statTimes("/tmp", &tmp_after_create);
+    try zigos.statTimes(timestamp_dir, &directory_created);
+    if (tmp_after_create.modified_tick <= tmp_before_create.modified_tick or tmp_after_create.changed_tick <= tmp_before_create.changed_tick or
+        tmp_after_create.accessed_tick != tmp_before_create.accessed_tick or directory_created.created_tick != directory_created.modified_tick or
+        directory_created.created_tick != directory_created.changed_tick or directory_created.created_tick != directory_created.accessed_tick)
+        return error.InvalidArgument;
+
+    try zigos.sleep(2);
+    const timestamp_fd = try zigos.open(timestamp_file, .{ .read = true, .write = true, .create = true }, 0o600);
+    var directory_after_file: zigos.FileTimes = undefined;
+    var file_created: zigos.FileTimes = undefined;
+    try zigos.statTimes(timestamp_dir, &directory_after_file);
+    try zigos.statTimes(timestamp_file, &file_created);
+    if (directory_after_file.created_tick != directory_created.created_tick or directory_after_file.modified_tick <= directory_created.modified_tick or
+        directory_after_file.changed_tick <= directory_created.changed_tick or directory_after_file.accessed_tick != directory_created.accessed_tick or
+        file_created.created_tick != file_created.modified_tick or file_created.created_tick != file_created.changed_tick or file_created.created_tick != file_created.accessed_tick)
+        return error.InvalidArgument;
+
+    try zigos.sleep(2);
+    try zigos.link(timestamp_file, timestamp_alias);
+    var file_after_link: zigos.FileTimes = undefined;
+    var directory_after_link: zigos.FileTimes = undefined;
+    try zigos.statTimes(timestamp_file, &file_after_link);
+    try zigos.statTimes(timestamp_dir, &directory_after_link);
+    if (file_after_link.created_tick != file_created.created_tick or file_after_link.modified_tick != file_created.modified_tick or
+        file_after_link.accessed_tick != file_created.accessed_tick or file_after_link.changed_tick <= file_created.changed_tick or
+        directory_after_link.modified_tick <= directory_after_file.modified_tick or directory_after_link.changed_tick <= directory_after_file.changed_tick)
+        return error.InvalidArgument;
+
+    try zigos.sleep(2);
+    try zigos.unlink(timestamp_alias);
+    var file_after_unlink: zigos.FileTimes = undefined;
+    var directory_after_unlink: zigos.FileTimes = undefined;
+    try zigos.statTimes(timestamp_file, &file_after_unlink);
+    try zigos.statTimes(timestamp_dir, &directory_after_unlink);
+    if (file_after_unlink.changed_tick <= file_after_link.changed_tick or file_after_unlink.modified_tick != file_after_link.modified_tick or
+        file_after_unlink.accessed_tick != file_after_link.accessed_tick or directory_after_unlink.modified_tick <= directory_after_link.modified_tick or
+        directory_after_unlink.changed_tick <= directory_after_link.changed_tick)
+        return error.InvalidArgument;
+
+    const timestamp_dir_fd = try zigos.open(timestamp_dir, .{ .read = true }, 0);
+    try zigos.sleep(2);
+    var directory_entries: [8]zigos.DirectoryEntry = undefined;
+    if (try zigos.getdents(timestamp_dir_fd, &directory_entries) == 0) return error.InvalidArgument;
+    var directory_after_read: zigos.FileTimes = undefined;
+    try zigos.statTimes(timestamp_dir, &directory_after_read);
+    if (directory_after_read.created_tick != directory_after_unlink.created_tick or directory_after_read.modified_tick != directory_after_unlink.modified_tick or
+        directory_after_read.changed_tick != directory_after_unlink.changed_tick or directory_after_read.accessed_tick <= directory_after_unlink.accessed_tick)
+        return error.InvalidArgument;
+    try zigos.sleep(2);
+    if (try zigos.getdents(timestamp_dir_fd, &directory_entries) != 0) return error.InvalidArgument;
+    var directory_after_eof: zigos.FileTimes = undefined;
+    try zigos.statTimes(timestamp_dir, &directory_after_eof);
+    if (directory_after_eof.accessed_tick != directory_after_read.accessed_tick) return error.InvalidArgument;
+    try zigos.close(timestamp_dir_fd);
+    try zigos.close(timestamp_fd);
+    try zigos.unlink(timestamp_file);
+    try zigos.rmdir(timestamp_dir);
     try zigos.writeAll(1, timestamp_message);
     var too_many: [zigos.constants.maximum_iovecs + 1]zigos.IoVector = @splat(.{ .pointer = 0, .length = 0 });
     if (zigos.writev(vector_fd, &too_many)) |_| return error.InvalidArgument else |err| {

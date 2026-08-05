@@ -873,12 +873,12 @@ fn commandMkdir(stage: *const runtime_command.Stage, output: *Output) void {
 
 fn commandRm(stage: *const runtime_command.Stage, output: *Output) void {
     if (stage.count < 2) return usage("rm FILE...", output);
-    for (stage.arguments[1..stage.count]) |argument| state.vfs.unlink(state.cwd, argument.slice()) catch |err| return shellError("rm", err, output);
+    for (stage.arguments[1..stage.count]) |argument| state.vfs.unlink(state.cwd, argument.slice(), currentTick()) catch |err| return shellError("rm", err, output);
 }
 
 fn commandRmdir(stage: *const runtime_command.Stage, output: *Output) void {
     if (stage.count < 2) return usage("rmdir DIRECTORY...", output);
-    for (stage.arguments[1..stage.count]) |argument| state.vfs.rmdir(state.cwd, argument.slice()) catch |err| return shellError("rmdir", err, output);
+    for (stage.arguments[1..stage.count]) |argument| state.vfs.rmdir(state.cwd, argument.slice(), currentTick()) catch |err| return shellError("rmdir", err, output);
 }
 
 fn commandMv(stage: *const runtime_command.Stage, output: *Output) void {
@@ -1248,7 +1248,7 @@ fn runFdContract() !void {
     if (!std.mem.eql(u8, file_bytes[0..truncated_read.count], "alpha-beta")) return error.FdContractTruncateData;
     try state.descriptors.close(&state.vfs, &state.processes, state.shell_handle, file_fd);
     try state.descriptors.close(&state.vfs, &state.processes, state.shell_handle, 9);
-    try state.vfs.unlink(0, "/tmp/capstone18-fd.txt");
+    try state.vfs.unlink(0, "/tmp/capstone18-fd.txt", currentTick());
 
     const reader = try state.processes.spawn(
         state.shell_handle,

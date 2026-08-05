@@ -858,13 +858,14 @@ pub const System = struct {
         process_handle: u64,
         fd: u16,
         output: []runtime_vfs.DirectoryRecord,
+        tick: u64,
     ) Error!usize {
         _ = try processes.get(process_handle);
         const namespace_slot = try self.resolveNamespace(process_handle);
         const open_index = try self.resolveDescriptor(namespace_slot, fd);
         const description = self.open_descriptions[open_index];
         if (description.kind != .vfs) return Error.NotDirectory;
-        return vfs.readDirectoryOpen(description.vfs_owner, description.vfs_handle, output);
+        return vfs.readDirectoryOpen(description.vfs_owner, description.vfs_handle, output, tick);
     }
 
     pub fn poll(
@@ -1523,7 +1524,7 @@ test "directory openat and deferred unlink survive descriptor aliases" {
     _ = try system.write(&fs, &processes, process, file_fd, "open-data", 4);
     const alias = try system.duplicate(&processes, process, file_fd);
 
-    try fs.unlink(directory, "note");
+    try fs.unlink(directory, "note", 0);
     try std.testing.expectError(runtime_vfs.Error.NotFound, fs.stat(directory, "note"));
     _ = try system.seek(&fs, &processes, process, alias, 0, .start);
     var bytes: [16]u8 = undefined;

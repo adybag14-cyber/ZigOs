@@ -708,6 +708,7 @@ pub const Store = struct {
         if (count != candidate.record_count) return Error.Corrupt;
         try self.restorePass(vfs, candidate, tick, false);
         try self.restorePass(vfs, candidate, tick, true);
+        try self.restoreTimestampPass(vfs, candidate, tick);
     }
 
     fn restorePass(self: *Store, vfs: *runtime_vfs.Vfs, candidate: Candidate, tick: u64, hard_links_only: bool) Error!void {
@@ -721,7 +722,6 @@ pub const Store = struct {
             const path_length: usize = self.payload[offset + 1];
             const mode = read16(&self.payload, offset + 2);
             const data_length: usize = read32(&self.payload, offset + 4);
-            const record_times = readRecordTimestamps(&self.payload, offset, candidate.format_version, tick) catch return Error.Corrupt;
             offset += record_header_size;
             if (path_length == 0 or offset + path_length > candidate.payload_length) return Error.Corrupt;
             const relative = self.payload[offset .. offset + path_length];
@@ -736,7 +736,6 @@ pub const Store = struct {
                     const target = try absolutePathInto(data, &target_buffer);
                     const path = try self.absolutePath(relative);
                     _ = vfs.link(0, target, path, tick) catch |err| return self.rejectRestoration(record_index, kind, err);
-                    vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
                 }
             } else if (!hard_links_only) {
                 const path = try self.absolutePath(relative);
@@ -744,12 +743,10 @@ pub const Store = struct {
                     .directory => {
                         if (data_length != 0) return Error.Corrupt;
                         _ = vfs.ensureDirectory(0, path, mode, tick) catch |err| return self.rejectRestoration(record_index, kind, err);
-                        vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
                     },
                     .file => {
                         if (data_length > runtime_vfs.maximum_file_size) return Error.Corrupt;
                         _ = vfs.putFile(0, path, data, mode, false, tick) catch |err| return self.rejectRestoration(record_index, kind, err);
-                        vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
                     },
                     .sparse_file => {
                         if (data_length < 5 or data_length > maximum_record_data_bytes) return Error.Corrupt;
@@ -758,16 +755,37 @@ pub const Store = struct {
                         const allocated_count: usize = @popCount(allocation_bitmap);
                         if (logical_size > runtime_vfs.maximum_file_size or data_length != 5 + allocated_count * runtime_vfs.file_block_size) return Error.Corrupt;
                         _ = vfs.restoreSparseFile(0, path, mode, logical_size, allocation_bitmap, data[5..], tick) catch |err| return self.rejectRestoration(record_index, kind, err);
-                        vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
                     },
                     .symlink => {
                         if (data_length == 0 or data_length > runtime_vfs.maximum_symlink_target_length) return Error.Corrupt;
                         _ = vfs.symlink(0, data, path, tick) catch |err| return self.rejectRestoration(record_index, kind, err);
-                        vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
                     },
                     .hard_link => unreachable,
                 }
             }
+            offset += data_length;
+        }
+        if (offset != candidate.payload_length) return Error.Corrupt;
+    }
+
+    fn restoreTimestampPass(self: *Store, vfs: *runtime_vfs.Vfs, candidate: Candidate, tick: u64) Error!void {
+        const count = read32(&self.payload, 0);
+        var offset: usize = 4;
+        var record_index: u32 = 0;
+        while (record_index < count) : (record_index += 1) {
+            const record_header_size = if (candidate.format_version == legacy_version) record_header_size_v1 else record_header_size_v2;
+            if (offset + record_header_size > candidate.payload_length) return Error.Corrupt;
+            const kind = decodeRecordKind(self.payload[offset]) orelse return Error.Corrupt;
+            const path_length: usize = self.payload[offset + 1];
+            const data_length: usize = read32(&self.payload, offset + 4);
+            const record_times = readRecordTimestamps(&self.payload, offset, candidate.format_version, tick) catch return Error.Corrupt;
+            offset += record_header_size;
+            if (path_length == 0 or offset + path_length > candidate.payload_length) return Error.Corrupt;
+            const relative = self.payload[offset .. offset + path_length];
+            offset += path_length;
+            if (!validRelativePath(relative) or offset + data_length > candidate.payload_length) return Error.Corrupt;
+            const path = try self.absolutePath(relative);
+            vfs.restoreTimestamps(0, path, record_times) catch |err| return self.rejectRestoration(record_index, kind, err);
             offset += data_length;
         }
         if (offset != candidate.payload_length) return Error.Corrupt;
@@ -1159,7 +1177,7 @@ test "bounded asynchronous writeback services immediate durable unsupported fail
 
     const stale_node = try ram_vfs.putFile(0, "/stale", "old", 0o600, false, 2);
     _ = try ram_store.requestWriteback(ram_vfs, stale_node);
-    try ram_vfs.unlink(0, "/stale");
+    try ram_vfs.unlink(0, "/stale", 0);
     try std.testing.expectEqual(WritebackOutcome.stale, ram_store.serviceWriteback(ram_vfs));
 
     var disk: TestDisk = .{};
@@ -1285,7 +1303,7 @@ test "alternating snapshots restore a persistent VFS subtree" {
     try std.testing.expectEqual(@as(usize, 4), try second_vfs.read(0, "/persist/sparse.bin", 2 * runtime_vfs.file_block_size, &sparse_tail));
     try std.testing.expectEqualStrings("tail", &sparse_tail);
     var link_target: [runtime_vfs.maximum_path_length]u8 = undefined;
-    const link_length = try second_vfs.readlink(0, "/persist/name-link", &link_target);
+    const link_length = try second_vfs.readlink(0, "/persist/name-link", &link_target, 0);
     try std.testing.expectEqualStrings("config/name.txt", link_target[0..link_length]);
     try std.testing.expectEqual(@as(u64, 1), second_store.report().generation);
 

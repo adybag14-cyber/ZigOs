@@ -115,6 +115,10 @@ pub const MappedFilePage = struct {
     valid_bytes: usize,
 };
 
+/// Boot-local persistent-runtime ordering ticks. The runtime samples a 100 Hz
+/// counter, so nominal precision is 10 ms and multiple operations may share one
+/// value. Persistence preserves raw values but does not create wall-clock or
+/// cross-reboot monotonic time; the counter restarts from zero on each boot.
 pub const Timestamps = struct {
     created_tick: u64,
     modified_tick: u64,
@@ -550,6 +554,7 @@ pub const Vfs = struct {
         self.initializeDentry(entry_index, destination.parent, node_index, destination.name);
         self.nodes[node_index].link_count += 1;
         self.nodes[node_index].changed_tick = tick;
+        self.touchDirectoryMutation(destination.parent, tick);
         self.mutations +%= 1;
         return node_index;
     }
@@ -564,11 +569,12 @@ pub const Vfs = struct {
         return node_index;
     }
 
-    pub fn readlink(self: *Vfs, cwd: u16, path: []const u8, output: []u8) Error!usize {
+    pub fn readlink(self: *Vfs, cwd: u16, path: []const u8, output: []u8, tick: u64) Error!usize {
         const node_index = try self.resolveNoFollow(cwd, path);
         const target = try self.symlinkTargetNode(node_index);
         const count = @min(output.len, target.len);
         @memcpy(output[0..count], target[0..count]);
+        if (count != 0) self.nodes[node_index].accessed_tick = tick;
         return count;
     }
 
@@ -729,7 +735,12 @@ pub const Vfs = struct {
         const node_index = try self.resolve(cwd, path);
         if (self.nodes[node_index].kind == .pseudo) {
             if (truncate_first) return Error.UnsupportedOperation;
-            return self.writePseudo(node_index, offset, bytes);
+            const written = try self.writePseudo(node_index, offset, bytes);
+            if (written != 0) {
+                self.nodes[node_index].modified_tick = tick;
+                self.nodes[node_index].changed_tick = tick;
+            }
+            return written;
         }
         return self.writeNode(node_index, offset, bytes, truncate_first, tick);
     }
@@ -755,24 +766,25 @@ pub const Vfs = struct {
         try self.allocateNode(node_index, offset, length, flags, tick, true);
     }
 
-    pub fn unlink(self: *Vfs, cwd: u16, path: []const u8) Error!void {
+    pub fn unlink(self: *Vfs, cwd: u16, path: []const u8, tick: u64) Error!void {
         const entry_index = try self.entryForPath(cwd, path);
         const node_index = self.dentries[entry_index].node;
         if (self.nodes[node_index].kind == .directory) return Error.IsDirectory;
-        try self.unlinkEntry(entry_index);
+        try self.unlinkEntry(entry_index, tick);
     }
 
-    pub fn rmdir(self: *Vfs, cwd: u16, path: []const u8) Error!void {
+    pub fn rmdir(self: *Vfs, cwd: u16, path: []const u8, tick: u64) Error!void {
         const entry_index = try self.entryForPath(cwd, path);
         const node_index = self.dentries[entry_index].node;
         if (node_index == 0 or self.nodes[node_index].kind != .directory) return Error.NotDirectory;
         if (self.hasChildren(node_index)) return Error.DirectoryNotEmpty;
-        try self.removeEntry(entry_index);
+        try self.removeEntry(entry_index, tick);
     }
 
     pub fn rename(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, tick: u64) Error!void {
         const source_entry = try self.entryForPath(cwd, old_path);
         const source = self.dentries[source_entry].node;
+        const source_parent = self.dentries[source_entry].parent;
         if (self.mountAtNode(source) != null) return Error.Busy;
         const destination = try self.parentAndName(cwd, new_path);
         if (self.nodes[source].mount_id != self.nodes[destination.parent].mount_id) return Error.CrossMount;
@@ -782,11 +794,15 @@ pub const Vfs = struct {
 
         if (self.findDentry(destination.parent, destination.name)) |target_entry| {
             if (target_entry == source_entry or self.dentries[target_entry].node == source) return;
-            try self.validateRenameReplacement(source, self.dentries[target_entry].node);
+            const target = self.dentries[target_entry].node;
+            try self.validateRenameReplacement(source, target);
+            self.nodes[target].changed_tick = tick;
             self.detachOrReclaimEntry(target_entry);
         }
 
         self.renameEntry(source_entry, destination.parent, destination.name, tick);
+        self.touchDirectoryMutation(source_parent, tick);
+        if (destination.parent != source_parent) self.touchDirectoryMutation(destination.parent, tick);
         self.mutations +%= 1;
     }
 
@@ -1154,6 +1170,7 @@ pub const Vfs = struct {
         owner_pid: u32,
         handle: u32,
         output: []DirectoryRecord,
+        tick: u64,
     ) Error!usize {
         const open_index = try self.resolveOpen(owner_pid, handle);
         var open_file = &self.open_files[open_index];
@@ -1180,6 +1197,7 @@ pub const Vfs = struct {
             count += 1;
         }
         open_file.offset = entry_index;
+        if (count != 0) self.nodes[directory].accessed_tick = tick;
         return count;
     }
 
@@ -1190,6 +1208,10 @@ pub const Vfs = struct {
         if (self.nodes[open_file.node].kind == .pseudo) {
             const written = try self.writePseudo(open_file.node, open_file.offset, bytes);
             open_file.offset += written;
+            if (written != 0) {
+                self.nodes[open_file.node].modified_tick = tick;
+                self.nodes[open_file.node].changed_tick = tick;
+            }
             return written;
         }
         if (open_file.append) {
@@ -2072,8 +2094,15 @@ pub const Vfs = struct {
             .accessed_tick = tick,
         };
         self.initializeDentry(entry_index, parent, @intCast(node_index), name);
+        self.touchDirectoryMutation(parent, tick);
         self.mutations +%= 1;
         return @intCast(node_index);
+    }
+
+    fn touchDirectoryMutation(self: *Vfs, node_index: u16, tick: u64) void {
+        std.debug.assert(node_index < self.nodes.len and self.nodes[node_index].used and self.nodes[node_index].kind == .directory);
+        self.nodes[node_index].modified_tick = tick;
+        self.nodes[node_index].changed_tick = tick;
     }
 
     fn freeDentry(self: *const Vfs) ?usize {
@@ -2163,6 +2192,7 @@ pub const Vfs = struct {
 
     fn writeNodeLocked(self: *Vfs, node_index: u16, offset: usize, bytes: []const u8, truncate_first: bool, tick: u64) Error!usize {
         if (offset > maximum_file_size or bytes.len > maximum_file_size - offset) return Error.FileTooLarge;
+        if (bytes.len == 0 and !truncate_first) return 0;
         var node = &self.nodes[node_index];
         const page_bitmap: u8 = if (truncate_first) 0xFF else filePageRangeBitmap(offset, bytes.len);
         self.acquirePageWriteLocks(node, page_bitmap);
@@ -2539,11 +2569,14 @@ pub const Vfs = struct {
         if ((self.nodes[node_index].mode & 0o222) == 0) return Error.PermissionDenied;
     }
 
-    fn unlinkEntry(self: *Vfs, entry_index: u16) Error!void {
+    fn unlinkEntry(self: *Vfs, entry_index: u16, tick: u64) Error!void {
         if (entry_index >= self.dentries.len or !self.dentries[entry_index].used) return Error.NotFound;
         const node_index = self.dentries[entry_index].node;
+        const parent = self.dentries[entry_index].parent;
         if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
         if (self.mountAtNode(node_index) != null) return Error.Busy;
+        self.nodes[node_index].changed_tick = tick;
+        self.touchDirectoryMutation(parent, tick);
         self.detachOrReclaimEntry(entry_index);
         self.mutations +%= 1;
     }
@@ -2580,12 +2613,14 @@ pub const Vfs = struct {
         self.nodes[entry.node].changed_tick = tick;
     }
 
-    fn removeEntry(self: *Vfs, entry_index: u16) Error!void {
+    fn removeEntry(self: *Vfs, entry_index: u16, tick: u64) Error!void {
         if (entry_index >= self.dentries.len or !self.dentries[entry_index].used) return Error.NotFound;
         const node_index = self.dentries[entry_index].node;
+        const parent = self.dentries[entry_index].parent;
         if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
         if (self.mountAtNode(node_index) != null) return Error.Busy;
         if (self.hasOpenReferences(node_index)) return Error.Busy;
+        self.touchDirectoryMutation(parent, tick);
         self.detachOrReclaimEntry(entry_index);
         self.mutations +%= 1;
     }
@@ -3160,7 +3195,7 @@ test "VFS sparse holes allocate punch persist size and reuse bounded blocks" {
     const after_failure = fs.report();
     try std.testing.expectEqual(before_failure.allocated_blocks, after_failure.allocated_blocks);
     try std.testing.expectEqual(@as(usize, 0), (try fs.statOpen(2, victim)).size);
-    try fs.unlink(0, "/tmp/full-0");
+    try fs.unlink(0, "/tmp/full-0", 0);
     try fs.allocateOpen(2, victim, 0, file_block_size, .{}, 10);
     try std.testing.expectEqual(@as(usize, file_block_size), (try fs.statOpen(2, victim)).size);
     try std.testing.expectEqual(maximum_data_blocks - file_blocks_per_node + 1, fs.report().allocated_blocks);
@@ -3213,7 +3248,7 @@ test "VFS dirty page ledger survives cache eviction and clears on synchronizatio
     try std.testing.expectEqual(@as(usize, 1), try fs.read(0, "/dirty/value", 0, &zero));
     try std.testing.expectEqual(@as(u8, 0), zero[0]);
     try std.testing.expect(fs.report().file_page_cache_dirty_entries > 0);
-    try fs.unlink(0, "/dirty/value");
+    try fs.unlink(0, "/dirty/value", 0);
     report = fs.report();
     try std.testing.expectEqual(@as(usize, 0), report.dirty_file_pages);
     try std.testing.expect(report.dirty_page_discards > 0);
@@ -3307,7 +3342,7 @@ test "VFS pinned file page resists pressure refreshes writes and retains unlinke
     report = fs.report();
     try std.testing.expectEqual(@as(u64, 1), report.file_page_cache_mapping_refreshes);
 
-    try fs.unlink(0, "/mapped/shared");
+    try fs.unlink(0, "/mapped/shared", 0);
     try std.testing.expectEqual(@as(u16, 0), (try fs.statNode(node)).link_count);
     try std.testing.expectEqual(@as(usize, 0), fs.reclaimCleanFilePageCacheUnderPressure(1, 2, 0));
     try std.testing.expectEqualSlices(u8, &replacement, page[128 .. 128 + replacement.len]);
@@ -3379,49 +3414,106 @@ test "VFS sparse restoration applies final nonwritable mode after privileged rec
     try std.testing.expect(fs.validate());
 }
 
-test "VFS stores creation modification change and access timestamps independently" {
+test "VFS timestamp policy covers data metadata namespace and access operations" {
     var fs = Vfs.init();
-    _ = try fs.create(0, "/times.txt", 0o644, 10);
-    const created = try fs.timestamps(0, "/times.txt");
-    try std.testing.expectEqual(@as(u64, 10), created.created_tick);
-    try std.testing.expectEqual(@as(u64, 10), created.modified_tick);
-    try std.testing.expectEqual(@as(u64, 10), created.changed_tick);
-    try std.testing.expectEqual(@as(u64, 10), created.accessed_tick);
 
-    const handle = try fs.open(7, 0, "/times.txt", .{ .read = true, .write = true }, 0, 11);
-    _ = try fs.writeOpen(7, handle, "abc", 20);
-    const written = try fs.timestamps(0, "/times.txt");
-    try std.testing.expectEqual(@as(u64, 10), written.created_tick);
-    try std.testing.expectEqual(@as(u64, 20), written.modified_tick);
-    try std.testing.expectEqual(@as(u64, 20), written.changed_tick);
-    try std.testing.expectEqual(@as(u64, 10), written.accessed_tick);
-    try std.testing.expectEqual(written.modified_tick, (try fs.stat(0, "/times.txt")).modified_tick);
+    _ = try fs.mkdir(0, "/left", 0o755, 10);
+    const left_created = try fs.timestamps(0, "/left");
+    try std.testing.expectEqual(Timestamps{ .created_tick = 10, .modified_tick = 10, .changed_tick = 10, .accessed_tick = 10 }, left_created);
+    _ = try fs.mkdir(0, "/right", 0o755, 20);
+    const root_after_directories = try fs.timestamps(0, "/");
+    try std.testing.expectEqual(@as(u64, 20), root_after_directories.modified_tick);
+    try std.testing.expectEqual(@as(u64, 20), root_after_directories.changed_tick);
 
+    _ = try fs.create(0, "/left/file", 0o644, 30);
+    try std.testing.expectEqual(Timestamps{ .created_tick = 30, .modified_tick = 30, .changed_tick = 30, .accessed_tick = 30 }, try fs.timestamps(0, "/left/file"));
+    const left_after_create = try fs.timestamps(0, "/left");
+    try std.testing.expectEqual(@as(u64, 10), left_after_create.created_tick);
+    try std.testing.expectEqual(@as(u64, 30), left_after_create.modified_tick);
+    try std.testing.expectEqual(@as(u64, 30), left_after_create.changed_tick);
+    try std.testing.expectEqual(@as(u64, 10), left_after_create.accessed_tick);
+
+    const handle = try fs.open(7, 0, "/left/file", .{ .read = true, .write = true }, 0, 31);
+    try std.testing.expectEqual(@as(usize, 0), try fs.writeOpen(7, handle, "", 35));
+    try std.testing.expectEqual(Timestamps{ .created_tick = 30, .modified_tick = 30, .changed_tick = 30, .accessed_tick = 30 }, try fs.timestamps(0, "/left/file"));
+    try std.testing.expectEqual(@as(usize, 3), try fs.writeOpen(7, handle, "abc", 40));
+    const written = try fs.timestamps(0, "/left/file");
+    try std.testing.expectEqual(Timestamps{ .created_tick = 30, .modified_tick = 40, .changed_tick = 40, .accessed_tick = 30 }, written);
+
+    var no_bytes: [0]u8 = .{};
+    try std.testing.expectEqual(@as(usize, 0), try fs.readOpenAtTick(7, handle, &no_bytes, 45));
+    try std.testing.expectEqual(written, try fs.timestamps(0, "/left/file"));
     _ = try fs.seek(7, handle, 0, .start);
     var bytes: [3]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 3), try fs.readOpenAtTick(7, handle, &bytes, 30));
+    try std.testing.expectEqual(@as(usize, 3), try fs.readOpenAtTick(7, handle, &bytes, 50));
     try std.testing.expectEqualStrings("abc", &bytes);
-    const accessed = try fs.timestamps(0, "/times.txt");
-    try std.testing.expectEqual(@as(u64, 30), accessed.accessed_tick);
-    try std.testing.expectEqual(@as(u64, 20), accessed.modified_tick);
-    try std.testing.expectEqual(@as(u64, 20), accessed.changed_tick);
+    const read_times = try fs.timestamps(0, "/left/file");
+    try std.testing.expectEqual(Timestamps{ .created_tick = 30, .modified_tick = 40, .changed_tick = 40, .accessed_tick = 50 }, read_times);
 
-    try fs.chmod(0, "/times.txt", 0o600, 40);
-    const changed = try fs.timestamps(0, "/times.txt");
-    try std.testing.expectEqual(@as(u64, 10), changed.created_tick);
-    try std.testing.expectEqual(@as(u64, 20), changed.modified_tick);
-    try std.testing.expectEqual(@as(u64, 40), changed.changed_tick);
-    try std.testing.expectEqual(@as(u64, 30), changed.accessed_tick);
+    try fs.chmod(0, "/left/file", 0o600, 60);
+    try std.testing.expectEqual(Timestamps{ .created_tick = 30, .modified_tick = 40, .changed_tick = 60, .accessed_tick = 50 }, try fs.timestamps(0, "/left/file"));
+    _ = try fs.link(0, "/left/file", "/left/alias", 70);
+    try std.testing.expectEqual(Timestamps{ .created_tick = 30, .modified_tick = 40, .changed_tick = 70, .accessed_tick = 50 }, try fs.timestamps(0, "/left/file"));
+    const left_after_link = try fs.timestamps(0, "/left");
+    try std.testing.expectEqual(@as(u64, 70), left_after_link.modified_tick);
+    try std.testing.expectEqual(@as(u64, 70), left_after_link.changed_tick);
+
+    _ = try fs.symlink(0, "file", "/left/sym", 80);
+    const symlink_node = try fs.resolveNoFollow(0, "/left/sym");
+    try std.testing.expectEqual(Timestamps{ .created_tick = 80, .modified_tick = 80, .changed_tick = 80, .accessed_tick = 80 }, try fs.timestampsNode(symlink_node));
+    var link_target: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try fs.readlink(0, "/left/sym", &link_target, 90));
+    try std.testing.expectEqualStrings("file", link_target[0..4]);
+    try std.testing.expectEqual(Timestamps{ .created_tick = 80, .modified_tick = 80, .changed_tick = 80, .accessed_tick = 90 }, try fs.timestampsNode(symlink_node));
+
+    const directory_handle = try fs.open(8, 0, "/left", .{ .read = true }, 0, 95);
+    var records: [8]DirectoryRecord = undefined;
+    try std.testing.expect((try fs.readDirectoryOpen(8, directory_handle, &records, 100)) >= 3);
+    const left_after_read = try fs.timestamps(0, "/left");
+    try std.testing.expectEqual(@as(u64, 80), left_after_read.modified_tick);
+    try std.testing.expectEqual(@as(u64, 80), left_after_read.changed_tick);
+    try std.testing.expectEqual(@as(u64, 100), left_after_read.accessed_tick);
+    try std.testing.expectEqual(@as(usize, 0), try fs.readDirectoryOpen(8, directory_handle, &records, 105));
+    try std.testing.expectEqual(left_after_read, try fs.timestamps(0, "/left"));
+    try fs.close(8, directory_handle);
+
+    try fs.rename(0, "/left/alias", "/right/moved", 110);
+    try std.testing.expectEqual(Timestamps{ .created_tick = 30, .modified_tick = 40, .changed_tick = 110, .accessed_tick = 50 }, try fs.timestamps(0, "/right/moved"));
+    const left_after_rename = try fs.timestamps(0, "/left");
+    const right_after_rename = try fs.timestamps(0, "/right");
+    try std.testing.expectEqual(@as(u64, 110), left_after_rename.modified_tick);
+    try std.testing.expectEqual(@as(u64, 110), left_after_rename.changed_tick);
+    try std.testing.expectEqual(@as(u64, 100), left_after_rename.accessed_tick);
+    try std.testing.expectEqual(@as(u64, 110), right_after_rename.modified_tick);
+    try std.testing.expectEqual(@as(u64, 110), right_after_rename.changed_tick);
+    try std.testing.expectEqual(@as(u64, 20), right_after_rename.accessed_tick);
+
+    try fs.unlink(0, "/left/file", 120);
+    const survivor = try fs.timestamps(0, "/right/moved");
+    try std.testing.expectEqual(Timestamps{ .created_tick = 30, .modified_tick = 40, .changed_tick = 120, .accessed_tick = 50 }, survivor);
+    try std.testing.expectEqual(@as(u16, 1), (try fs.stat(0, "/right/moved")).link_count);
+    const left_after_unlink = try fs.timestamps(0, "/left");
+    try std.testing.expectEqual(@as(u64, 120), left_after_unlink.modified_tick);
+    try std.testing.expectEqual(@as(u64, 120), left_after_unlink.changed_tick);
+    try std.testing.expectError(Error.NotFound, fs.unlink(0, "/left/missing", 125));
+    try std.testing.expectEqual(left_after_unlink, try fs.timestamps(0, "/left"));
+
+    _ = try fs.mkdir(0, "/right/empty", 0o755, 130);
+    try fs.rmdir(0, "/right/empty", 140);
+    const right_after_rmdir = try fs.timestamps(0, "/right");
+    try std.testing.expectEqual(@as(u64, 140), right_after_rmdir.modified_tick);
+    try std.testing.expectEqual(@as(u64, 140), right_after_rmdir.changed_tick);
+    try std.testing.expectEqual(@as(u64, 20), right_after_rmdir.accessed_tick);
+
+    const before_queries = try fs.timestamps(0, "/right/moved");
+    _ = try fs.stat(0, "/right/moved");
+    _ = try fs.timestamps(0, "/right/moved");
+    try std.testing.expectEqual(before_queries, try fs.timestamps(0, "/right/moved"));
     try fs.close(7, handle);
 
-    const restored = Timestamps{
-        .created_tick = 101,
-        .modified_tick = 102,
-        .changed_tick = 103,
-        .accessed_tick = 104,
-    };
-    try fs.restoreTimestamps(0, "/times.txt", restored);
-    try std.testing.expectEqual(restored, try fs.timestamps(0, "/times.txt"));
+    const restored = Timestamps{ .created_tick = 201, .modified_tick = 202, .changed_tick = 203, .accessed_tick = 204 };
+    try fs.restoreTimestamps(0, "/right/moved", restored);
+    try std.testing.expectEqual(restored, try fs.timestamps(0, "/right/moved"));
     try std.testing.expect(fs.validate());
 }
 
@@ -3450,10 +3542,10 @@ test "VFS directory mutation rejects cycles and nonempty removal" {
     var fs = Vfs.init();
     const a = try fs.mkdir(0, "/a", 0o755, 1);
     _ = try fs.mkdir(a, "b", 0o755, 2);
-    try std.testing.expectError(Error.DirectoryNotEmpty, fs.rmdir(0, "/a"));
+    try std.testing.expectError(Error.DirectoryNotEmpty, fs.rmdir(0, "/a", 0));
     try std.testing.expectError(Error.Cycle, fs.rename(0, "/a", "/a/b/a", 3));
     try fs.rename(0, "/a/b", "/b", 4);
-    try fs.rmdir(0, "/a");
+    try fs.rmdir(0, "/a", 0);
     try std.testing.expectEqual(@as(u16, 1), (try fs.stat(0, "/b")).generation);
 }
 
@@ -3523,11 +3615,11 @@ test "VFS hard links share node identity data and deferred lifetime" {
     try std.testing.expectEqual(first_listing.records[0].node, first_listing.records[1].node);
 
     const retained = try fs.open(7, 0, "/second/shared", .{ .read = true }, 0, 7);
-    try fs.unlink(0, "/first/original");
+    try fs.unlink(0, "/first/original", 0);
     try std.testing.expectEqual(@as(u16, 2), (try fs.stat(0, "/first/alias")).link_count);
-    try fs.unlink(0, "/first/alias");
+    try fs.unlink(0, "/first/alias", 0);
     try std.testing.expectEqual(@as(u16, 1), (try fs.stat(0, "/second/shared")).link_count);
-    try fs.unlink(0, "/second/shared");
+    try fs.unlink(0, "/second/shared", 0);
     try std.testing.expectError(Error.NotFound, fs.stat(0, "/second/shared"));
     try std.testing.expectEqual(baseline_nodes + 1, fs.report().nodes_used);
     var bytes: [16]u8 = undefined;
@@ -3558,20 +3650,20 @@ test "VFS symbolic links follow relative and absolute targets with bounded loops
     _ = try fs.symlink(root_dir, "../links/nested", "directory", 6);
 
     var target_buffer: [maximum_path_length]u8 = undefined;
-    const target_length = try fs.readlink(root_dir, "relative", &target_buffer);
+    const target_length = try fs.readlink(root_dir, "relative", &target_buffer, 0);
     try std.testing.expectEqualStrings("nested/target", target_buffer[0..target_length]);
     try std.testing.expectEqual(relative_link, try fs.resolveNoFollow(root_dir, "relative"));
     try std.testing.expectEqualStrings("payload", try fs.readOnlyView(root_dir, "relative"));
     try std.testing.expectEqualStrings("payload", try fs.readOnlyView(root_dir, "absolute"));
     try std.testing.expectEqualStrings("payload", try fs.readOnlyView(root_dir, "directory/target"));
-    try std.testing.expectError(Error.NotSymlink, fs.readlink(root_dir, "nested/target", &target_buffer));
+    try std.testing.expectError(Error.NotSymlink, fs.readlink(root_dir, "nested/target", &target_buffer, 0));
 
     _ = try fs.symlink(root_dir, "loop-b", "loop-a", 7);
     _ = try fs.symlink(root_dir, "loop-a", "loop-b", 8);
     try std.testing.expectError(Error.Cycle, fs.resolve(root_dir, "loop-a"));
     try std.testing.expectError(Error.Cycle, fs.resolve(root_dir, "loop-a/child"));
 
-    try fs.unlink(root_dir, "relative");
+    try fs.unlink(root_dir, "relative", 0);
     try std.testing.expectError(Error.NotFound, fs.resolveNoFollow(root_dir, "relative"));
     try std.testing.expectEqualStrings("payload", try fs.readOnlyView(root_dir, "nested/target"));
     try fs.rename(root_dir, "absolute", "renamed", 9);
@@ -3636,7 +3728,7 @@ test "VFS unlink detaches names and reclaims after the final open handle" {
     const second = try fs.open(8, 0, "/tmp/live", .{ .read = true }, 0, 4);
     const original = try fs.statOpen(7, first);
 
-    try fs.unlink(0, "/tmp/live");
+    try fs.unlink(0, "/tmp/live", 0);
     try std.testing.expectError(Error.NotFound, fs.stat(0, "/tmp/live"));
     try std.testing.expectEqual(baseline_nodes + 1, fs.report().nodes_used);
     try std.testing.expectEqual(@as(usize, 5), try fs.seek(7, first, 0, .end));
@@ -3691,7 +3783,7 @@ test "VFS nested mount roots cross boundaries and unmount child first" {
     try std.testing.expectEqual(inner_point, mounts[inner_id - 1].mountpoint_node);
     try std.testing.expectEqual(inner_root, mounts[inner_id - 1].root_node);
 
-    try std.testing.expectError(Error.Busy, fs.rmdir(0, "/outer/inner"));
+    try std.testing.expectError(Error.Busy, fs.rmdir(0, "/outer/inner", 0));
     try std.testing.expectError(Error.Busy, fs.rename(0, "/outer/inner", "/outer/renamed", 6));
     try std.testing.expectError(Error.Busy, fs.unmount(outer_id));
     const handle = try fs.open(7, 0, "/outer/inner/seed", .{ .read = true }, 0, 7);
@@ -3711,7 +3803,7 @@ test "VFS empty tmpfs mounts are isolated and resolve exact unmount targets" {
     const mountpoint = try fs.mkdir(0, "/mnt", 0o755, 1);
     _ = try fs.putFile(mountpoint, "seed", "underlay", 0o644, false, 2);
     try std.testing.expectError(Error.DirectoryNotEmpty, fs.mountEmpty(0, "/mnt", .tmpfs, false, "userspace-tmpfs"));
-    try fs.unlink(0, "/mnt/seed");
+    try fs.unlink(0, "/mnt/seed", 0);
 
     const mount_id = try fs.mountEmpty(0, "/mnt", .tmpfs, false, "userspace-tmpfs");
     const mount_root = try fs.resolve(0, "/mnt");
@@ -3806,7 +3898,7 @@ test "VFS read only remount rejects retained and new writes while preserving rea
     try std.testing.expectEqual(@as(u16, 1), try fs.pollOpen(7, handle, 0x3));
     try std.testing.expectError(Error.ReadOnly, fs.open(8, 0, "/persist/value", .{ .write = true }, 0, 5));
     try std.testing.expectError(Error.ReadOnly, fs.create(try fs.resolve(0, "/persist"), "new", 0o644, 5));
-    try std.testing.expectError(Error.ReadOnly, fs.unlink(0, "/persist/value"));
+    try std.testing.expectError(Error.ReadOnly, fs.unlink(0, "/persist/value", 0));
     try std.testing.expectError(Error.ReadOnly, fs.chmod(0, "/persist/value", 0o600, 5));
     try std.testing.expectEqualStrings("before-dirty", try fs.readOnlyView(0, "/persist/value"));
     try std.testing.expectEqual(@as(usize, 0), try fs.remountReadOnly(mount_id));

@@ -255,7 +255,7 @@ def main() -> int:
                 "writable mounts synchronized",
                 "zig-sdk: envp/auxv passed",
                 "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed",
-                "zig-sdk: creation/modify/change/access timestamp separation passed",
+                "zig-sdk: timestamp precision/data/namespace/access ordering passed",
                 "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes passed",
                 "process 4 exited 86",
                 "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/fallocate/sparse/open-unlink/rmdir/sync passed",
