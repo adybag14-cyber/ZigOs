@@ -79,6 +79,7 @@ pub const Process = struct {
     session: u32 = 0,
     uid: u32 = 0,
     gid: u32 = 0,
+    umask: u16 = 0,
     kind: Kind = .userspace,
     state: State = .free,
     wait_reason: WaitReason = .none,
@@ -464,6 +465,13 @@ pub const Table = struct {
         self.processes[try self.resolve(handle)].signal_mask = mask & ~(@as(u64, 1) << 9);
     }
 
+    pub fn setUmask(self: *Table, handle: u64, mask: u16) Error!u16 {
+        const slot = try self.resolve(handle);
+        const previous = self.processes[slot].umask;
+        self.processes[slot].umask = mask & 0o777;
+        return previous;
+    }
+
     pub fn childForWait(self: *const Table, parent_handle: u64, target_pid: u32) Error!?u64 {
         const parent_slot = try self.resolve(parent_handle);
         var first_child: ?u64 = null;
@@ -628,6 +636,7 @@ pub const Table = struct {
             .session = if (parent_slot == invalid_slot) pid else self.processes[parent_slot].session,
             .uid = uid,
             .gid = gid,
+            .umask = if (parent_slot == invalid_slot) 0 else self.processes[parent_slot].umask,
             .kind = kind,
             .state = .runnable,
             .name_length = @intCast(name.len),
@@ -745,6 +754,11 @@ test "reserved PID 1 can become a schedulable userspace init" {
     try std.testing.expectEqualStrings("init.elf", process.nameSlice());
     try std.testing.expectEqualStrings("init.elf", process.arguments[0].slice());
     try std.testing.expectEqual(@as(u16, 7), process.cwd_node);
+    try std.testing.expectEqual(@as(u16, 0), process.umask);
+    try std.testing.expectEqual(@as(u16, 0), try table.setUmask(init_handle, 0o027));
+    const child = try table.spawn(init_handle, .userspace, "umask-child", &.{"umask-child"}, 7, 1000, 1000, 1, .{});
+    try std.testing.expectEqual(@as(u16, 0o027), (try table.get(child)).umask);
+    try std.testing.expectEqual(@as(u16, 0o027), try table.setUmask(init_handle, 0));
 }
 
 test "process generations reject stale handles after reap and reuse" {

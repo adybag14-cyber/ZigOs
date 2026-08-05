@@ -323,7 +323,7 @@ def main() -> int:
                 "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed",
                 "zig-sdk: timestamp precision/data/namespace/access ordering passed",
                 "zig-sdk: uid/gid creation and hard-link ownership passed",
-                "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner passed",
+                "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask passed",
                 "process 4 exited 86",
                 "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/fallocate/sparse/open-unlink/rmdir/sync passed",
                 "process 5 exited 88",
@@ -335,9 +335,9 @@ def main() -> int:
                 "cat: input/output error",
                 "ZigOs block-backed FAT16 runtime",
                 "ZigOs NVMe read fault injection: failures 1 armed no clean yes",
-                "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5547588 metadata/file/block reads 112/3/113 failures 1 clusters claimed/free/loop/cross/range 10839/5272/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes",
+                "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5548612 metadata/file/block reads 112/3/113 failures 1 clusters claimed/free/loop/cross/range 10841/5270/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 134/134 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 135/135 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

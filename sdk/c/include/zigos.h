@@ -7,10 +7,10 @@
 
 #define ZIGOS_ABI_MAGIC UINT32_C(0x4942415A)
 #define ZIGOS_ABI_MAJOR UINT16_C(1)
-#define ZIGOS_ABI_MINOR UINT16_C(16)
+#define ZIGOS_ABI_MINOR UINT16_C(17)
 #define ZIGOS_PAGE_SIZE UINT32_C(4096)
 #define ZIGOS_SYSCALL_BASE UINT16_C(64)
-#define ZIGOS_SYSCALL_COUNT UINT16_C(60)
+#define ZIGOS_SYSCALL_COUNT UINT16_C(61)
 #define ZIGOS_MAX_IOVECS UINT64_C(8)
 
 #define ZIGOS_AUX_NULL UINT64_C(0)
@@ -119,6 +119,7 @@
 #define ZIGOS_SYS_STATFS UINT64_C(121)
 #define ZIGOS_SYS_STATTIMES UINT64_C(122)
 #define ZIGOS_SYS_STATOWNER UINT64_C(123)
+#define ZIGOS_SYS_UMASK UINT64_C(124)
 
 #define ZIGOS_ERRNO_PERMISSION INT64_C(-1)
 #define ZIGOS_ERRNO_NOT_FOUND INT64_C(-2)
@@ -231,6 +232,7 @@ int64_t zigos_stat_path(const char *path, zigos_stat *info);
 int64_t zigos_stattimes(const char *path, zigos_file_times *times);
 int64_t zigos_statowner(const char *path, zigos_file_owner *owner);
 int64_t zigos_statfs(const char *path, zigos_filesystem_stat *info);
+int64_t zigos_umask(uint16_t mask);
 int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);
 int64_t zigos_fsync(uint16_t fd);
 int64_t zigos_fdatasync(uint16_t fd);

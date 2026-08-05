@@ -11,8 +11,9 @@ const startup_vector_message = "zig-sdk: envp/auxv passed\r\n";
 const mmap_file_message = "zig-sdk: shared file mmap coherence passed\r\n";
 const timestamp_message = "zig-sdk: timestamp precision/data/namespace/access ordering passed\r\n";
 const ownership_message = "zig-sdk: uid/gid creation and hard-link ownership passed\r\n";
+const umask_message = "zig-sdk: process umask file/directory creation passed\r\n";
 const mount_message = "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -131,6 +132,28 @@ fn run(auxv: [*]const zigos.AuxvEntry) zigos.Error!void {
     var proc_owner: zigos.FileOwner = undefined;
     try zigos.statOwner("/proc/version", &proc_owner);
     if (proc_owner.uid != 0 or proc_owner.gid != 0 or @sizeOf(zigos.FileOwner) != 8) return error.InvalidArgument;
+
+    const umask_file = "/tmp/zig-sdk-umask-file";
+    const umask_dir = "/tmp/zig-sdk-umask-dir";
+    zigos.unlink(umask_file) catch {};
+    zigos.rmdir(umask_dir) catch {};
+    const previous_umask = try zigos.umask(0o027);
+    if (previous_umask != 0) return error.InvalidArgument;
+    if (zigos.umask(0o1000)) |_| return error.InvalidArgument else |err| {
+        if (err != error.InvalidArgument) return err;
+    }
+    const umask_fd = try zigos.open(umask_file, .{ .read = true, .write = true, .create = true }, 0o666);
+    try zigos.close(umask_fd);
+    try zigos.mkdir(umask_dir, 0o777);
+    var umask_file_stat: zigos.Stat = undefined;
+    var umask_dir_stat: zigos.Stat = undefined;
+    try zigos.stat(umask_file, &umask_file_stat);
+    try zigos.stat(umask_dir, &umask_dir_stat);
+    if (umask_file_stat.mode != 0o640 or umask_dir_stat.mode != 0o750) return error.InvalidArgument;
+    if (try zigos.umask(previous_umask) != 0o027) return error.InvalidArgument;
+    try zigos.unlink(umask_file);
+    try zigos.rmdir(umask_dir);
+    try zigos.writeAll(1, umask_message);
 
     var bytes: [128]u8 = undefined;
     const count = try zigos.read(fd, &bytes);

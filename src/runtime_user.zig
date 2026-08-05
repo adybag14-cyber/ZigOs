@@ -290,14 +290,15 @@ pub fn spawnWithEnvironment(
     try validateImage(image);
     const context_index = findFreeContext() orelse return error.ContextLimit;
     const processes = activeProcesses();
+    const parent = try processes.get(parent_handle);
     const handle = try processes.spawn(
         parent_handle,
         .userspace,
         name,
         arguments,
         cwd_node,
-        0,
-        0,
+        parent.uid,
+        parent.gid,
         tick,
         .{
             .maximum_pages = maximum_mappings + maximum_page_tables + 3,
@@ -639,6 +640,7 @@ pub fn handleSyscall(
         syscall.syscall_rmdir => return syscallRmdir(context, frame),
         syscall.syscall_rename => return syscallRename(context, frame),
         syscall.syscall_chmod => return syscallChmod(context, frame),
+        syscall.syscall_umask => return syscallUmask(context, frame),
         syscall.syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
@@ -881,7 +883,8 @@ fn syscallMkdir(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    _ = activeVfs().mkdirOwned(process.cwd_node, path_buffer[0..path_length], mode, .{ .uid = process.uid, .gid = process.gid }, current_tick) catch |err| {
+    const creation_mode = mode & (~process.umask & 0o777);
+    _ = activeVfs().mkdirOwned(process.cwd_node, path_buffer[0..path_length], creation_mode, .{ .uid = process.uid, .gid = process.gid }, current_tick) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -969,6 +972,23 @@ fn syscallChmod(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     };
     frame.rax = 0;
+    return 0;
+}
+
+fn syscallUmask(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const mask = runtime_abi.mode(frame.rdi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if ((mask & ~@as(u16, 0o777)) != 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const previous = activeProcesses().setUmask(context.handle, mask) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = previous;
     return 0;
 }
 

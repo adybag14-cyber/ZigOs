@@ -462,6 +462,10 @@ pub fn chmod(path: [*:0]const u8, mode: u16) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_chmod, ptrValue(path), mode, 0, 0, 0, 0));
 }
 
+pub fn umask(mask: u16) Error!u16 {
+    return @intCast(try result(zigos_syscall6(abi.syscall_umask, mask, 0, 0, 0, 0, 0)));
+}
+
 pub fn mount(
     source: ?[*:0]const u8,
     target: [*:0]const u8,

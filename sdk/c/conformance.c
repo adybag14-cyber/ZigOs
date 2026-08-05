@@ -71,7 +71,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.16 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.17 discovery passed\r\n")) {
         return 0xC4;
     }
 
@@ -103,6 +103,21 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
     zigos_file_owner dev_owner = {0};
     if (sizeof(dev_owner) != 8 || zigos_statowner("/dev/null", &dev_owner) != 0 || dev_owner.uid != 0 || dev_owner.gid != 0) {
         return fail(0xDB, "path owner /dev/null");
+    }
+
+    static const char umask_path[] = "/tmp/c-sdk-umask";
+    (void)remove_path(umask_path);
+    if (zigos_umask(0027) != 0 || zigos_umask(01000) != ZIGOS_ERRNO_INVALID) {
+        return fail(0xDC, "umask set/invalid");
+    }
+    int64_t umask_fd = zigos_open(umask_path, ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE | ZIGOS_OPEN_CREATE, 0666);
+    zigos_stat umask_info = {0};
+    if (umask_fd < 0 || zigos_close((uint16_t)umask_fd) != 0 || zigos_stat_path(umask_path, &umask_info) != 0 ||
+        umask_info.mode != 0640 || zigos_umask(0) != 0027) {
+        return fail(0xDD, "umask creation");
+    }
+    if (remove_path(umask_path) != 0 || !emit("c-sdk: process umask creation passed\r\n")) {
+        return fail(0xDE, "umask cleanup");
     }
 
     int64_t null_fd = zigos_open("/dev/null", ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE, 0);
@@ -292,7 +307,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xD6, "descriptor fsync/fdatasync");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
         return 0xD7;
     }
     return 0x57;
