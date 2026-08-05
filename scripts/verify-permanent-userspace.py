@@ -572,7 +572,7 @@ def main() -> int:
     require(io_error_boot_test, "metadata/file/block reads 112/3/113 failures 1", "QEMU requires exact failed-read and retry accounting")
     require(io_error_boot_test, 'str(work / "zig-cache")', "FAT EIO private-prefix build isolates its local Zig cache")
     require(readonly_remount_boot_test, 'str(work / "zig-cache")', "persistent fail-stop private-prefix build isolates its local Zig cache")
-    require(io_error_boot_test, "10841/5270/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes", "EIO recovery remains distinct from FAT corruption quarantine")
+    require(io_error_boot_test, "10844/5267/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes", "EIO recovery remains distinct from FAT corruption quarantine")
     require(build_graph, '"nvme-write-fault-lba"', "build graph exposes the disabled-by-default persistent write-error target")
     require(kernel, "NVMe one-shot write error armed:", "test build arms persistent write failure only after boot-time inspection")
     require(runtime, "fn persistenceDamageClean", "normal shutdown accepts one classified contained persistent write failure at any prior generation")
@@ -593,16 +593,16 @@ def main() -> int:
     require(readonly_remount_boot_test, "append: read-only filesystem", "retained mutation paths are rejected after fail-stop remount")
     require(readonly_remount_boot_test, "damaged yes reason payload_write remounts/failures 1/0 discarded/rejected 1/1", "QEMU requires exact damage and remount conservation")
     require(readonly_remount_boot_test, "vfs-remount/discard 1/1 mount-readonly yes clean yes", "VFS and persistence remount accounting must agree exactly")
-    require(readonly_remount_boot_test, "10841/5270/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "contained persistent-write failure profile retains exact healthy FAT ownership")
+    require(readonly_remount_boot_test, "10844/5267/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "contained persistent-write failure profile retains exact healthy FAT ownership")
     require(readonly_remount_boot_test, "alloc/free 58/58 cache-released 9 storage persistent-read-only clean yes", "contained normal boot balances every measured resource")
     require(runtime_test, "cat /boot/README.TXT", "diagnostic QEMU reads a root file after NVMe handoff")
     require(runtime_test, "cat /boot/EFI/BOOT/BOOT.CFG", "diagnostic QEMU reads a nested file after NVMe handoff")
     require(runtime_test, "stat /boot/EFI/BOOT/BOOTX64.EFI", "diagnostic QEMU stats the multi-mebibyte boot image without RAM-copying it")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 54 failed 0", "offline diagnostic profile requires the expanded block-backed FAT command matrix")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 56 failed 0", "live diagnostic profile requires the expanded block-backed FAT command matrix")
-    require(runtime_test, "10941/5170/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
+    require(runtime_test, "10944/5167/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
     require(normal_boot_test, "ZigOs boot FAT: block-backed yes files/directories 3/2", "persistent normal boot requires a clean real block-backed /boot")
-    require(normal_boot_test, "10841/5270/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "normal QEMU requires exact FAT ownership with zero classified corruption")
+    require(normal_boot_test, "10844/5267/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "normal QEMU requires exact FAT ownership with zero classified corruption")
     require(diskless_normal_boot_test, "ZigOs boot FAT: block-backed no files/directories 0/0", "diskless normal boot requires an explicitly absent backend and fallback namespace")
     require(diskless_normal_boot_test, "0/0/0/0/0 lock tickets/outstanding 0/0 quarantine state/reason/events no/none/0 clean yes", "diskless fallback has no FAT ownership or classified corruption state")
     for script_text, profile in (
@@ -783,8 +783,8 @@ def main() -> int:
     require(process_source, "umask: u16 = 0", "process records carry a compatibility-default zero creation mask")
     require(process_source, "pub fn setUmask", "process table exposes bounded umask mutation returning the previous value")
     require(process_source, "self.processes[parent_slot].umask", "child process creation inherits the parent umask")
-    require(fd_source, "const creation_mode = mode & (~process.umask & 0o777);", "descriptor O_CREAT applies process umask exactly once")
-    require(executor, "const creation_mode = mode & (~process.umask & 0o777);", "mkdir applies process umask exactly once")
+    require(fd_source, "const creation_mode = runtime_vfs.applyCreationUmask(mode, process.umask);", "descriptor O_CREAT applies process umask exactly once to rwx bits")
+    require(executor, "const creation_mode = runtime_vfs.applyCreationUmask(mode, process.umask);", "mkdir applies process umask exactly once to rwx bits")
     require(executor, "fn syscallUmask", "kernel dispatches ABI 1.17 process umask")
     require(executor, "mask & ~@as(u16, 0o777)", "umask rejects bits outside the nine permission bits")
     require(executor, "parent.uid", "userspace child spawn preserves the parent UID")
@@ -794,6 +794,25 @@ def main() -> int:
     require(sdk_source, "pub fn umask", "Zig SDK exposes process umask")
     require(sdk_conformance, "process umask file/directory creation passed", "Zig CPL3 fixture proves file and directory creation masking")
     require(c_conformance, "process umask creation passed", "C CPL3 fixture independently proves generated umask wrapper and file masking")
+    require(vfs_source, "pub const setgid_mode_bit: u16 = 0o2000", "VFS names the stored setgid metadata bit")
+    require(vfs_source, "pub const setuid_mode_bit: u16 = 0o4000", "VFS names the stored setuid metadata bit")
+    require(vfs_source, "pub const stored_mode_mask: u16 = permission_mode_mask | setid_mode_mask", "VFS limits stored mode metadata to 06777 until sticky-directory G243")
+    require(vfs_source, "pub fn validStoredMode", "VFS rejects sticky and unknown mode bits instead of silently stripping them")
+    require(vfs_source, "pub fn applyCreationUmask", "creation umask preserves set-ID metadata while masking rwx bits")
+    require(vfs_source, "return (mode & setid_mode_mask)", "creation mode keeps setuid/setgid outside the rwx umask")
+    require(vfs_source, "self.nodes[node_index].mode = mode;", "chmod stores validated set-ID metadata without truncating to 0777")
+    require(fd_source, "0o6750", "host descriptor proof preserves set-ID bits across umask creation")
+    require(fd_source, "0o6650", "host descriptor proof preserves set-ID bits across chmod")
+    require(fd_source, "0o1755", "host descriptor proof rejects sticky mode before G243")
+    require(persist_source, "0o2755", "journal test restores setgid directory metadata")
+    require(persist_source, "0o6650", "journal/fsync test restores setuid+setgid file metadata")
+    require(persist_source, "0o4640", "fdatasync test retains previously committed setuid metadata")
+    require(executor, "G242 stores setuid/setgid as inode metadata only", "runtime documents inert set-ID execution semantics")
+    require(executor, "children inherit caller credentials", "process creation explicitly refuses set-ID credential elevation")
+    require(sdk_conformance, "setuid/setgid metadata inert-exec policy passed", "Zig CPL3 fixture proves set-ID storage/chmod and sticky rejection")
+    require(c_conformance, "setuid/setgid metadata passed", "C CPL3 fixture independently proves set-ID metadata handling")
+    require(persistence_test, "same-tick ties are valid", "four-boot gate accounts for boot-local timestamp ties before requiring an fdatasync mtime change")
+    require(persistence_test, '("sleep 1", "sleep complete")', "four-boot fdatasync proof deliberately advances the boot-local timestamp clock")
     require(persist_source, "ownershipFromStat", "journal serialization records inode UID/GID")
     require(persist_source, "write32(payload, initial_offset + 40, owner.uid)", "journal v3 writes UID at the fixed ownership offset")
     require(persist_source, "write32(payload, initial_offset + 44, owner.gid)", "journal v3 writes GID at the fixed ownership offset")
@@ -834,7 +853,7 @@ def main() -> int:
     require(sdk_conformance, "zigos.statOwner", "Zig CPL3 fixture exercises statowner")
     require(c_conformance, "zigos_statowner", "C CPL3 fixture exercises generated statowner")
     require(c_conformance, 'zigos_stattimes("/dev/null", &dev_times)', "C CPL3 fixture independently queries the four-field timestamp ABI")
-    require(c_conformance, "generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed", "booted C fixture covers devices, sync variants, links, sparse allocation and vectored I/O")
+    require(c_conformance, "generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed", "booted C fixture covers devices, sync variants, links, sparse allocation and vectored I/O")
     require(c_conformance, "invalid_write_vectors", "C fixture proves vector prevalidation prevents partial writes")
     require(c_conformance, "invalid_read_vectors", "C fixture proves vector prevalidation preserves read offsets")
     require(c_conformance, "nondirectory != ZIGOS_ERRNO_NOT_DIRECTORY", "C fixture rejects relative openat on a non-directory descriptor")
@@ -913,7 +932,7 @@ def main() -> int:
     require(sdk_conformance, "shared file mmap coherence passed", "Zig conformance binary proves ordinary writes immediately refresh mapped reads after close and unlink")
     require(sdk_conformance, "try zigos.chmod(mapping_path, 0);", "CPL3 fixture maps through a descriptor opened before pathname permissions are removed")
     require(sdk_conformance, "null,\n        13,", "CPL3 fixture exercises a partial final file page rather than a preallocated full page")
-    require(sdk_conformance, "startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask passed", "Zig conformance binary spans startup, shared file mappings, both sync wrappers and vectored I/O")
+    require(sdk_conformance, "startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata passed", "Zig conformance binary spans startup, shared file mappings, both sync wrappers and vectored I/O")
     require(sdk_source, "pub const MountFlags", "Zig SDK publishes typed mount flags")
     require(sdk_source, "pub fn mount", "Zig SDK exposes the mount syscall")
     require(sdk_source, "pub fn umount", "Zig SDK exposes the unmount syscall")
@@ -1117,8 +1136,8 @@ def main() -> int:
     require(workflow, "test-boot-fat-io-error.py --boot-timeout 240", "hosted integration runs the block-read EIO and retry gate")
     require(workflow, "test-persistent-readonly-remount.py --boot-timeout 240", "hosted integration runs the persistent fail-stop read-only remount gate")
     require(readme, "248/248 canonical host-test executions across all 102 unique isolated-test declarations", "README carries the clean canonical execution and declaration counts")
-    require(readme, "Size:    5,599,744 bytes", "README carries the reproducible ABI 1.17 EFI size")
-    require(readme, "SHA-256: 06CE235F10F08D789492111233E66F7AC0EA95DD7092263037BB7735476216B2", "README carries the reproducible ABI 1.17 EFI hash")
+    require(readme, "Size:    5,601,280 bytes", "README carries the reproducible ABI 1.17 EFI size")
+    require(readme, "SHA-256: 7D4411E30475E5A77AD144A981AF06A0191106596CDDC9D65488970A814A1DFF", "README carries the reproducible ABI 1.17 EFI hash")
     require(readme, "Persistent NVMe write-error read-only-remount profile", "README documents the required fail-stop profile")
     require(readme, "discarded/rejected 1/1 vfs-remount/discard 1/1 mount-readonly yes clean yes", "README freezes exact G229 containment telemetry")
     require(priority, "248/248 canonical host-test executions across 102 unique isolated Zig test declarations", "priority remediation carries the canonical execution and declaration counts")
@@ -1147,11 +1166,14 @@ def main() -> int:
     require(readme, "ABI 1.16 `statowner` syscall 123", "README documents the inode ownership ABI")
     require(priority, "ABI 1.16 completes G239 with syscall 123 `statowner`", "priority remediation records G239")
     require(threat_model, "G240 makes this metadata authoritative for the bounded VFS", "threat model records the G240 authorization boundary")
-    require(threat_model, "Supplementary groups, `chown`, setuid/setgid and sticky-directory rules remain open", "threat model limits G240 to the implemented owner/primary-group/other subset")
+    require(threat_model, "set-ID bits do not grant credentials", "threat model records G242 as inert metadata rather than privilege elevation")
     require(readme, "ABI 1.17 `umask` syscall 124", "README documents process creation masking")
     require(priority, "ABI 1.17 syscall 124 `umask`", "priority remediation records G241")
     require(threat_model, "ABI 1.17 adds syscall 124 `umask`", "threat model records the G241 security boundary")
-    require(roadmap, "201 complete, 299 open", "roadmap arithmetic includes G241")
+    require(readme, "G242 keeps ABI 1.17 and extends stored inode mode metadata to `06777`", "README documents inert set-ID metadata")
+    require(priority, "G242 keeps ABI 1.17 and validates one stored mode mask of `06777`", "priority remediation records G242")
+    require(threat_model, "G242 extends stored mode metadata to validated `06777`", "threat model records G242 storage without set-ID execution")
+    require(roadmap, "202 complete, 298 open", "roadmap arithmetic includes G242")
     require(roadmap, "- [x] **G229** " + chr(0x2014) + " Remount a damaged writable filesystem read-only.", "roadmap marks G229 complete with the canonical separator")
     require(roadmap, "- [x] **G230** " + chr(0x2014) + " Expose mount and unmount syscalls.", "roadmap marks G230 complete with the canonical separator")
     require(roadmap, "- [x] **G231** " + chr(0x2014) + " Reject unmount while paths or descriptors remain busy.", "roadmap marks G231 complete with the canonical separator")
@@ -1165,9 +1187,10 @@ def main() -> int:
     require(roadmap, "- [x] **G239** " + chr(0x2014) + " Store owner UID and GID on persistent inodes.", "roadmap marks G239 complete with the canonical separator")
     require(roadmap, "- [x] **G240** " + chr(0x2014) + " Enforce owner/group/other read, write and execute permissions.", "roadmap marks G240 complete with the canonical separator")
     require(roadmap, "- [x] **G241** " + chr(0x2014) + " Apply process umask during object creation.", "roadmap marks G241 complete with the canonical separator")
+    require(roadmap, "- [x] **G242** " + chr(0x2014) + " Support setuid and setgid metadata without enabling unsafe execution by default.", "roadmap marks G242 complete with the canonical separator")
     roadmap_items = re.findall(r"^- \[([ x])\] \*\*G\d{3}\*\*", roadmap, flags=re.MULTILINE)
-    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 201:
-        raise SystemExit("roadmap must contain 500 goals with exactly 201 complete after G241")
+    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 202:
+        raise SystemExit("roadmap must contain 500 goals with exactly 202 complete after G242")
     require(workflow, "Cross-platform artifact identity gate", "hosted cross-platform reproducibility gate")
     require(workflow, "cmp --", "artifact bytes are compared instead of only printed")
     require(asset_builder, '"schema": 2', "host-independent generated-asset manifest schema")
@@ -1227,9 +1250,9 @@ def main() -> int:
         "zig-sdk: shared file mmap coherence passed",
         "zig-sdk: timestamp precision/data/namespace/access ordering passed",
         "zig-sdk: uid/gid creation and hard-link ownership passed",
-        "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask passed",
+        "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata passed",
         "c-sdk: ABI 1.17 discovery passed",
-        "c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
+        "c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
         "ZigOs block-backed FAT16 runtime mount",
         "source=nvme0p1",
         "mode=readonly",
@@ -1272,7 +1295,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.17 Zig/C SDKs with process umask, statfs, four-field inode timestamps, persistent UID/GID ownership metadata and owner/group/other VFS enforcement, with root-only tmpfs mount/umount and busy-path protection, fixed live devfs/procfs/netfs registries, retained read-only block-backed FAT16 boot files with staged validation, classified quarantine fallback, recoverable block-read EIO propagation and fail-stop persistent write-error read-only remount, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/degraded/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.17 Zig/C SDKs with process umask and inert setuid/setgid metadata, statfs, four-field inode timestamps, persistent UID/GID ownership metadata and owner/group/other VFS enforcement, with root-only tmpfs mount/umount and busy-path protection, fixed live devfs/procfs/netfs registries, retained read-only block-backed FAT16 boot files with staged validation, classified quarantine fallback, recoverable block-read EIO propagation and fail-stop persistent write-error read-only remount, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/degraded/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

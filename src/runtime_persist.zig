@@ -1273,8 +1273,8 @@ test "alternating snapshots restore a persistent VFS subtree" {
     first_vfs.initialize();
     var first_store: Store = .{};
     try first_store.mount(first_vfs, disk.device(), 1);
-    _ = try first_vfs.ensureDirectory(0, "/persist/config", 0o755, 2);
-    _ = try first_vfs.putFile(0, "/persist/config/name.txt", "zigos\n", 0o640, false, 3);
+    _ = try first_vfs.ensureDirectory(0, "/persist/config", 0o2755, 2);
+    _ = try first_vfs.putFile(0, "/persist/config/name.txt", "zigos\n", 0o6650, false, 3);
     _ = try first_vfs.link(0, "/persist/config/name.txt", "/persist/name-hard", 4);
     _ = try first_vfs.symlink(0, "config/name.txt", "/persist/name-link", 5);
     const sparse_handle = try first_vfs.open(1, 0, "/persist/sparse.bin", .{ .read = true, .write = true, .create = true }, 0o600, 6);
@@ -1309,6 +1309,7 @@ test "alternating snapshots restore a persistent VFS subtree" {
     try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/name-hard"));
     try std.testing.expectEqual((try second_vfs.stat(0, "/persist/config/name.txt")).node, (try second_vfs.stat(0, "/persist/name-hard")).node);
     const restored_directory = try second_vfs.stat(0, "/persist/config");
+    try std.testing.expectEqual(@as(u16, 0o2755), restored_directory.mode);
     try std.testing.expectEqual(directory_owner, try second_vfs.ownership(0, "/persist/config"));
     try std.testing.expectEqual(directory_times.created_tick, restored_directory.created_tick);
     try std.testing.expectEqual(directory_times.modified_tick, restored_directory.modified_tick);
@@ -1316,6 +1317,8 @@ test "alternating snapshots restore a persistent VFS subtree" {
     try std.testing.expectEqual(directory_times.accessed_tick, restored_directory.accessed_tick);
     const restored_name = try second_vfs.stat(0, "/persist/config/name.txt");
     const restored_hard = try second_vfs.stat(0, "/persist/name-hard");
+    try std.testing.expectEqual(@as(u16, 0o6650), restored_name.mode);
+    try std.testing.expectEqual(restored_name.mode, restored_hard.mode);
     try std.testing.expectEqual(name_owner, try second_vfs.ownership(0, "/persist/config/name.txt"));
     try std.testing.expectEqual(name_owner, try second_vfs.ownership(0, "/persist/name-hard"));
     try std.testing.expectEqual(@as(u16, 2), restored_hard.link_count);
@@ -1371,7 +1374,7 @@ test "file sync commits one stable file and excludes unrelated dirty state" {
     try std.testing.expectEqual(@as(u64, 1), store.report().generation);
 
     _ = try live_vfs.putFile(0, "/persist/target.txt", "target-v2", 0o600, false, 4);
-    try live_vfs.chmod(0, "/persist/target.txt", 0o600, 5);
+    try live_vfs.chmod(0, "/persist/target.txt", 0o6650, 5);
     const full_sync_times = try live_vfs.stat(0, "/persist/target.txt");
     const other_node = try live_vfs.putFile(0, "/persist/other.txt", "other-v2", 0o700, false, 6);
     try live_vfs.chmod(0, "/persist/other.txt", 0o700, 7);
@@ -1389,7 +1392,7 @@ test "file sync commits one stable file and excludes unrelated dirty state" {
     try recovered.mount(recovered_vfs, disk.device(), 8);
     try std.testing.expectEqualStrings("target-v2", try recovered_vfs.readOnlyView(0, "/persist/target.txt"));
     const full_sync_restored = try recovered_vfs.stat(0, "/persist/target.txt");
-    try std.testing.expectEqual(@as(u16, 0o600), full_sync_restored.mode);
+    try std.testing.expectEqual(@as(u16, 0o6650), full_sync_restored.mode);
     try std.testing.expectEqual(full_sync_times.created_tick, full_sync_restored.created_tick);
     try std.testing.expectEqual(full_sync_times.modified_tick, full_sync_restored.modified_tick);
     try std.testing.expectEqual(full_sync_times.changed_tick, full_sync_restored.changed_tick);
@@ -1408,13 +1411,13 @@ test "file data sync persists bytes and size without dirty mode metadata" {
     live_vfs.initialize();
     var store: Store = .{};
     try store.mount(live_vfs, disk.device(), 1);
-    const target_node = try live_vfs.putFile(0, "/persist/target.txt", "before", 0o640, false, 2);
+    const target_node = try live_vfs.putFile(0, "/persist/target.txt", "before", 0o4640, false, 2);
     _ = try live_vfs.putFile(0, "/persist/other.txt", "stable", 0o600, false, 3);
     try store.sync(live_vfs);
     const committed_times = try live_vfs.stat(0, "/persist/target.txt");
 
     _ = try live_vfs.putFile(0, "/persist/target.txt", "after-data-and-size", 0o600, false, 4);
-    try live_vfs.chmod(0, "/persist/target.txt", 0o600, 5);
+    try live_vfs.chmod(0, "/persist/target.txt", 0o6650, 5);
     const data_dirty_times = try live_vfs.stat(0, "/persist/target.txt");
     const other_node = try live_vfs.putFile(0, "/persist/other.txt", "dirty", 0o700, false, 6);
     try std.testing.expect((try live_vfs.dirtyFilePageBitmap(target_node)) != 0);
@@ -1430,7 +1433,7 @@ test "file data sync persists bytes and size without dirty mode metadata" {
     try recovered.mount(recovered_vfs, disk.device(), 7);
     try std.testing.expectEqualStrings("after-data-and-size", try recovered_vfs.readOnlyView(0, "/persist/target.txt"));
     const data_sync_restored = try recovered_vfs.stat(0, "/persist/target.txt");
-    try std.testing.expectEqual(@as(u16, 0o640), data_sync_restored.mode);
+    try std.testing.expectEqual(@as(u16, 0o4640), data_sync_restored.mode);
     try std.testing.expectEqual(committed_times.created_tick, data_sync_restored.created_tick);
     try std.testing.expectEqual(data_dirty_times.modified_tick, data_sync_restored.modified_tick);
     try std.testing.expectEqual(committed_times.changed_tick, data_sync_restored.changed_tick);

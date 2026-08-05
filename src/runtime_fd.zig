@@ -367,7 +367,8 @@ pub const System = struct {
         const open_slot = self.findFreeOpenDescriptions(1) orelse return Error.OpenDescriptionLimit;
         const generation = nextGeneration(self.open_descriptions[open_slot[0]].generation);
         const owner = makeOpenId(open_slot[0], generation);
-        const creation_mode = mode & (~process.umask & 0o777);
+        if (flags.create and !runtime_vfs.validStoredMode(mode)) return runtime_vfs.Error.InvalidPath;
+        const creation_mode = runtime_vfs.applyCreationUmask(mode, process.umask);
         const vfs_handle = try vfs.openOwned(owner, directory_node, path, flags, creation_mode, .{ .uid = process.uid, .gid = process.gid }, tick);
         const stream = try vfs.pseudoStreamOpen(owner, vfs_handle);
         const kind: DescriptionKind = if (stream == .console) .terminal else .vfs;
@@ -1530,6 +1531,13 @@ test "numeric descriptor namespace uses lowest free descriptor" {
     const second = try system.openFile(&fs, &processes, handle, "/tmp/b", .{ .read = true, .write = true, .create = true }, 0o666, 20);
     try std.testing.expectEqual(first, second);
     try std.testing.expectEqual(@as(u16, 0o640), (try fs.stat(0, "/tmp/b")).mode);
+    const setid_fd = try system.openFile(&fs, &processes, handle, "/tmp/setid", .{ .read = true, .write = true, .create = true }, 0o6755, 21);
+    try std.testing.expectEqual(@as(u16, 0o6750), (try fs.stat(0, "/tmp/setid")).mode);
+    try fs.chmodAs(0, "/tmp/setid", 0o6650, owner_credentials, 22);
+    try std.testing.expectEqual(@as(u16, 0o6650), (try fs.stat(0, "/tmp/setid")).mode);
+    try std.testing.expectError(runtime_vfs.Error.InvalidPath, fs.chmodAs(0, "/tmp/setid", 0o1755, owner_credentials, 23));
+    try std.testing.expectEqual(@as(u16, 0o6650), (try fs.stat(0, "/tmp/setid")).mode);
+    try system.close(&fs, &processes, handle, setid_fd);
     try std.testing.expectEqual(@as(u16, 0o027), try processes.setUmask(handle, 0));
     try std.testing.expect(system.validate(&fs, &processes));
 }

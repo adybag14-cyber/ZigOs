@@ -120,6 +120,21 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xDE, "umask cleanup");
     }
 
+    static const char setid_path[] = "/tmp/c-sdk-setid";
+    (void)remove_path(setid_path);
+    int64_t setid_fd = zigos_open(setid_path, ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE | ZIGOS_OPEN_CREATE, 06755);
+    zigos_stat setid_info = {0};
+    if (setid_fd < 0 || zigos_close((uint16_t)setid_fd) != 0 || zigos_stat_path(setid_path, &setid_info) != 0 || setid_info.mode != 06755 ||
+        (int64_t)zigos_syscall6(ZIGOS_SYS_CHMOD, (uint64_t)(uintptr_t)setid_path, 06650, 0, 0, 0, 0) != 0 ||
+        zigos_stat_path(setid_path, &setid_info) != 0 || setid_info.mode != 06650 ||
+        (int64_t)zigos_syscall6(ZIGOS_SYS_CHMOD, (uint64_t)(uintptr_t)setid_path, 01755, 0, 0, 0, 0) != ZIGOS_ERRNO_INVALID ||
+        zigos_stat_path(setid_path, &setid_info) != 0 || setid_info.mode != 06650) {
+        return fail(0xDF, "setid metadata/sticky reject");
+    }
+    if (remove_path(setid_path) != 0 || !emit("c-sdk: setuid/setgid metadata passed\r\n")) {
+        return fail(0xB0, "setid cleanup");
+    }
+
     int64_t null_fd = zigos_open("/dev/null", ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE, 0);
     if (null_fd < 0) {
         return fail(0xC6, "open /dev/null");
@@ -307,7 +322,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xD6, "descriptor fsync/fdatasync");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
         return 0xD7;
     }
     return 0x57;

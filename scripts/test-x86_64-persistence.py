@@ -491,9 +491,14 @@ def main() -> int:
             image=image,
             boot_timeout=args.boot_timeout,
             commands=[
+                # Stored timestamps are boot-local and same-tick ties are valid. Advance
+                # boot 3 deliberately so this gate can prove fdatasync persisted a new
+                # modification tick rather than accidentally comparing tick 2 to tick 2.
+                ("sleep 1", "sleep complete"),
                 ("exec /bin/fs.elf fdatasync", "exec: PID 3 state zombie status 0x5C"),
             ],
             required_markers=[
+                "sleep complete",
                 "fs-api: recovered fsync metadata then fdatasync data/size committed dirty mode and unrelated data excluded",
                 "exec: PID 3 state zombie status 0x5C",
             ],

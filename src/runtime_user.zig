@@ -291,6 +291,8 @@ pub fn spawnWithEnvironment(
     const context_index = findFreeContext() orelse return error.ContextLimit;
     const processes = activeProcesses();
     const parent = try processes.get(parent_handle);
+    // G242 stores setuid/setgid as inode metadata only. Process creation never
+    // consumes executable mode/owner metadata; children inherit caller credentials.
     const handle = try processes.spawn(
         parent_handle,
         .userspace,
@@ -883,7 +885,11 @@ fn syscallMkdir(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const creation_mode = mode & (~process.umask & 0o777);
+    if (!runtime_vfs.validStoredMode(mode)) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const creation_mode = runtime_vfs.applyCreationUmask(mode, process.umask);
     _ = activeVfs().mkdirOwned(process.cwd_node, path_buffer[0..path_length], creation_mode, .{ .uid = process.uid, .gid = process.gid }, current_tick) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -963,6 +969,10 @@ fn syscallChmod(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     };
+    if (!runtime_vfs.validStoredMode(mode)) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
     const process = activeProcesses().get(context.handle) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;

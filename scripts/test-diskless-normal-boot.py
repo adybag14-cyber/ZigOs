@@ -185,7 +185,7 @@ def main() -> int:
                 "ZigOs userspace init PID 1",
                 "ZigOs userspace shell PID 2",
                 "c-sdk: ABI 1.17 discovery passed",
-                "c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
+                "c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
                 "process 3 exited 87",
                 "writable mounts synchronized",
                 "userspace shell requested shutdown",

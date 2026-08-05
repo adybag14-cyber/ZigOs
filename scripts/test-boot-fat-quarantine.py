@@ -257,7 +257,7 @@ def main() -> int:
                 "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed",
                 "zig-sdk: timestamp precision/data/namespace/access ordering passed",
                 "zig-sdk: uid/gid creation and hard-link ownership passed",
-                "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask passed",
+                "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata passed",
                 "process 4 exited 86",
                 "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/fallocate/sparse/open-unlink/rmdir/sync passed",
                 "process 5 exited 88",

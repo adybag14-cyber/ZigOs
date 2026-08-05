@@ -131,6 +131,20 @@ pub const Ownership = struct {
     gid: u32 = 0,
 };
 
+pub const permission_mode_mask: u16 = 0o0777;
+pub const setgid_mode_bit: u16 = 0o2000;
+pub const setuid_mode_bit: u16 = 0o4000;
+pub const setid_mode_mask: u16 = setuid_mode_bit | setgid_mode_bit;
+pub const stored_mode_mask: u16 = permission_mode_mask | setid_mode_mask;
+
+pub fn validStoredMode(mode: u16) bool {
+    return (mode & ~stored_mode_mask) == 0;
+}
+
+pub fn applyCreationUmask(mode: u16, mask: u16) u16 {
+    return (mode & setid_mode_mask) | ((mode & permission_mode_mask) & (~mask & permission_mode_mask));
+}
+
 pub const Access = struct {
     read: bool = false,
     write: bool = false,
@@ -771,6 +785,7 @@ pub const Vfs = struct {
 
     pub fn putFile(self: *Vfs, cwd: u16, path: []const u8, bytes: []const u8, mode: u16, readonly: bool, tick: u64) Error!u16 {
         if (bytes.len > maximum_file_size) return Error.FileTooLarge;
+        if (!validStoredMode(mode)) return Error.InvalidPath;
         const node_index = self.resolve(cwd, path) catch |err| switch (err) {
             Error.NotFound => try self.create(cwd, path, mode, tick),
             else => return err,
@@ -929,7 +944,8 @@ pub const Vfs = struct {
         const node_index = try self.resolveAs(cwd, path, credentials);
         if (credentials.uid != 0 and credentials.uid != self.nodes[node_index].uid) return Error.PermissionDenied;
         if (self.nodes[node_index].readonly or self.mountReadonly(self.nodes[node_index].mount_id)) return Error.ReadOnly;
-        self.nodes[node_index].mode = mode & 0o777;
+        if (!validStoredMode(mode)) return Error.InvalidPath;
+        self.nodes[node_index].mode = mode;
         self.nodes[node_index].changed_tick = tick;
         self.mutations +%= 1;
     }
@@ -1660,6 +1676,7 @@ pub const Vfs = struct {
 
     pub fn restoreSparseFile(self: *Vfs, cwd: u16, path: []const u8, mode: u16, size: usize, allocation_bitmap: u8, allocated_data: []const u8, tick: u64) Error!u16 {
         if (size > maximum_file_size) return Error.FileTooLarge;
+        if (!validStoredMode(mode)) return Error.InvalidPath;
         const allocated_count: usize = @popCount(allocation_bitmap);
         if (allocated_data.len != allocated_count * file_block_size) return Error.InvalidPath;
         const node_index = self.resolve(cwd, path) catch |err| switch (err) {
@@ -1689,7 +1706,7 @@ pub const Vfs = struct {
             data_offset += file_block_size;
         }
         node.size = size;
-        node.mode = mode & 0o777;
+        node.mode = mode;
         node.modified_tick = tick;
         node.changed_tick = tick;
         self.invalidateFilePageCacheNode(node_index);
@@ -2225,6 +2242,7 @@ pub const Vfs = struct {
         privileged_pseudo_publication: bool,
     ) Error!u16 {
         _ = try self.validateDirectory(parent);
+        if (!validStoredMode(mode)) return Error.InvalidPath;
         if (self.findDentry(parent, name) != null) return Error.AlreadyExists;
         const parent_readonly = self.nodes[parent].readonly or self.mountReadonly(self.nodes[parent].mount_id);
         if (parent_readonly and !privileged_pseudo_publication) return Error.ReadOnly;
@@ -2242,7 +2260,7 @@ pub const Vfs = struct {
             .generation = node_generation,
             .kind = kind,
             .link_count = 1,
-            .mode = mode & 0o777,
+            .mode = mode,
             .readonly = readonly,
             .mount_id = self.nodes[parent].mount_id,
             .uid = owner.uid,

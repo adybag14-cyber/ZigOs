@@ -344,6 +344,7 @@ test "open protection map and message flags reject unknown or contradictory bits
 
 test "mode arguments reject values wider than the ABI" {
     try std.testing.expectEqual(@as(?u16, 0o755), mode(0o755));
+    try std.testing.expectEqual(@as(?u16, 0o6755), mode(0o6755));
     try std.testing.expect(mode(@as(u64, std.math.maxInt(u16)) + 1) == null);
 }
 

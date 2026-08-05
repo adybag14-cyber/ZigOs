@@ -12,8 +12,9 @@ const mmap_file_message = "zig-sdk: shared file mmap coherence passed\r\n";
 const timestamp_message = "zig-sdk: timestamp precision/data/namespace/access ordering passed\r\n";
 const ownership_message = "zig-sdk: uid/gid creation and hard-link ownership passed\r\n";
 const umask_message = "zig-sdk: process umask file/directory creation passed\r\n";
+const setid_message = "zig-sdk: setuid/setgid metadata inert-exec policy passed\r\n";
 const mount_message = "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -154,6 +155,30 @@ fn run(auxv: [*]const zigos.AuxvEntry) zigos.Error!void {
     try zigos.unlink(umask_file);
     try zigos.rmdir(umask_dir);
     try zigos.writeAll(1, umask_message);
+
+    const setid_file = "/tmp/zig-sdk-setid-file";
+    const setgid_dir = "/tmp/zig-sdk-setgid-dir";
+    zigos.unlink(setid_file) catch {};
+    zigos.rmdir(setgid_dir) catch {};
+    const setid_fd = try zigos.open(setid_file, .{ .read = true, .write = true, .create = true }, 0o6755);
+    try zigos.close(setid_fd);
+    try zigos.mkdir(setgid_dir, 0o2755);
+    var setid_stat: zigos.Stat = undefined;
+    var setgid_dir_stat: zigos.Stat = undefined;
+    try zigos.stat(setid_file, &setid_stat);
+    try zigos.stat(setgid_dir, &setgid_dir_stat);
+    if (setid_stat.mode != 0o6755 or setgid_dir_stat.mode != 0o2755) return error.InvalidArgument;
+    try zigos.chmod(setid_file, 0o6650);
+    try zigos.stat(setid_file, &setid_stat);
+    if (setid_stat.mode != 0o6650) return error.InvalidArgument;
+    if (zigos.chmod(setid_file, 0o1755)) |_| return error.InvalidArgument else |err| {
+        if (err != error.InvalidArgument) return err;
+    }
+    try zigos.stat(setid_file, &setid_stat);
+    if (setid_stat.mode != 0o6650) return error.InvalidArgument;
+    try zigos.unlink(setid_file);
+    try zigos.rmdir(setgid_dir);
+    try zigos.writeAll(1, setid_message);
 
     var bytes: [128]u8 = undefined;
     const count = try zigos.read(fd, &bytes);
