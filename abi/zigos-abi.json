@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 17,
+    "minor": 18,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -80,7 +80,8 @@
     "statfs": 121,
     "stattimes": 122,
     "statowner": 123,
-    "umask": 124
+    "umask": 124,
+    "flock": 125
   },
   "errno": {
     "permission": -1,
@@ -176,5 +177,11 @@
     "shared_blocks": 1,
     "shared_nodes": 2,
     "synthetic": 3
+  },
+  "flock_operations": {
+    "shared": 1,
+    "exclusive": 2,
+    "nonblock": 4,
+    "unlock": 8
   }
 }

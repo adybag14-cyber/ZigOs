@@ -466,6 +466,18 @@ pub fn umask(mask: u16) Error!u16 {
     return @intCast(try result(zigos_syscall6(abi.syscall_umask, mask, 0, 0, 0, 0, 0)));
 }
 
+pub const LockOperation = enum(u64) {
+    shared = abi.flock_shared,
+    exclusive = abi.flock_exclusive,
+    unlock = abi.flock_unlock,
+};
+
+pub fn flock(fd: u16, operation: LockOperation, nonblocking: bool) Error!void {
+    var bits: u64 = @intFromEnum(operation);
+    if (nonblocking and operation != .unlock) bits |= abi.flock_nonblock;
+    _ = try result(zigos_syscall6(abi.syscall_flock, fd, bits, 0, 0, 0, 0));
+}
+
 pub fn mount(
     source: ?[*:0]const u8,
     target: [*:0]const u8,

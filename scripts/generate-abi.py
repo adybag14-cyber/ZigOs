@@ -78,6 +78,9 @@ def generate(spec: dict) -> tuple[str, str, str]:
     for name, value in spec.get("filesystem_stat_flags", {}).items():
         zig.append(f"pub const filesystem_stat_{name}: u16 = @as(u16, 1) << {value};\n")
         nasm.append(f"%define ZIGOS_FS_STAT_{name.upper()} (1 << {value})\n")
+    for name, value in spec.get("flock_operations", {}).items():
+        zig.append(f"pub const flock_{name}: u64 = {value};\n")
+        nasm.append(f"%define ZIGOS_LOCK_{name.upper()} {value}\n")
     for group in ("capabilities", "syscalls", "errno"):
         zig.append("\n")
         nasm.append("\n")
@@ -261,6 +264,8 @@ def generate_c(spec: dict) -> str:
         lines.append(f"#define ZIGOS_FS_TYPE_{name.upper()} UINT16_C({value})\n")
     for name, value in spec.get("filesystem_stat_flags", {}).items():
         lines.append(f"#define ZIGOS_FS_STAT_{name.upper()} (UINT16_C(1) << {value})\n")
+    for name, value in spec.get("flock_operations", {}).items():
+        lines.append(f"#define ZIGOS_LOCK_{name.upper()} UINT64_C({value})\n")
     lines.append("\n")
     for name, bit in spec["capabilities"].items():
         lines.append(f"#define ZIGOS_CAP_{name.upper()} (UINT64_C(1) << {bit})\n")
@@ -337,6 +342,7 @@ def generate_c(spec: dict) -> str:
         "int64_t zigos_statowner(const char *path, zigos_file_owner *owner);\n",
         "int64_t zigos_statfs(const char *path, zigos_filesystem_stat *info);\n",
         "int64_t zigos_umask(uint16_t mask);\n",
+        "int64_t zigos_flock(uint16_t fd, uint64_t operation);\n",
         "int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);\n",
         "int64_t zigos_fsync(uint16_t fd);\n",
         "int64_t zigos_fdatasync(uint16_t fd);\n",

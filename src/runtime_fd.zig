@@ -75,6 +75,17 @@ pub const SeekWhence = enum(u8) {
     end,
 };
 
+pub const AdvisoryLock = enum(u8) {
+    none,
+    shared,
+    exclusive,
+};
+
+pub const LockResult = enum(u8) {
+    acquired,
+    blocked,
+};
+
 const Descriptor = struct {
     used: bool = false,
     open_index: u16 = invalid_open_description,
@@ -99,6 +110,7 @@ const OpenDescription = struct {
     resource_generation: u32 = 0,
     vfs_owner: u32 = 0,
     vfs_handle: u32 = 0,
+    advisory_lock: AdvisoryLock = .none,
 };
 
 const Pipe = struct {
@@ -784,6 +796,57 @@ pub const System = struct {
         try vfs.allocateOpen(description.vfs_owner, description.vfs_handle, offset, length, flags, tick);
     }
 
+    pub fn flock(
+        self: *System,
+        vfs: *const runtime_vfs.Vfs,
+        processes: *runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+        requested: AdvisoryLock,
+        nonblocking: bool,
+    ) Error!LockResult {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        var description = &self.open_descriptions[open_index];
+        if (description.kind != .vfs) return Error.InvalidOperation;
+        const info = try vfs.openInfo(description.vfs_owner, description.vfs_handle);
+        const node_stat = try vfs.statNode(info.node);
+        if (node_stat.kind != .file or node_stat.generation != info.node_generation) return Error.InvalidOperation;
+        const wait_key = fileLockWaitKey(info.node, info.node_generation);
+
+        if (requested == .none) {
+            if (description.advisory_lock != .none) {
+                description.advisory_lock = .none;
+                _ = processes.wakeMatching(.file_lock, wait_key, true);
+            }
+            return .acquired;
+        }
+        if (description.advisory_lock == requested) return .acquired;
+        if (description.advisory_lock == .exclusive and requested == .shared) {
+            description.advisory_lock = .shared;
+            _ = processes.wakeMatching(.file_lock, wait_key, true);
+            return .acquired;
+        }
+
+        const previous = description.advisory_lock;
+        if (previous == .shared and requested == .exclusive) description.advisory_lock = .none;
+        if (!(try self.advisoryLockConflicts(vfs, open_index, info.node, info.node_generation, requested))) {
+            description.advisory_lock = requested;
+            return .acquired;
+        }
+        if (nonblocking) {
+            description.advisory_lock = previous;
+            return .blocked;
+        }
+        if (previous == .shared) _ = processes.wakeMatching(.file_lock, wait_key, true);
+        processes.block(process_handle, .file_lock, wait_key) catch |err| {
+            description.advisory_lock = previous;
+            return err;
+        };
+        return .blocked;
+    }
+
     pub fn descriptorKind(
         self: *const System,
         processes: *const runtime_process.Table,
@@ -1156,7 +1219,17 @@ pub const System = struct {
                     if (description.vfs_handle != 0) _ = vfs.openInfo(description.vfs_owner, description.vfs_handle) catch return false;
                 },
                 .vfs => {
-                    _ = vfs.openInfo(description.vfs_owner, description.vfs_handle) catch return false;
+                    const info = vfs.openInfo(description.vfs_owner, description.vfs_handle) catch return false;
+                    if (description.advisory_lock != .none) {
+                        const node_stat = vfs.statNode(info.node) catch return false;
+                        if (node_stat.kind != .file or node_stat.generation != info.node_generation) return false;
+                        for (self.open_descriptions[0..index]) |other| {
+                            if (!other.used or other.kind != .vfs or other.advisory_lock == .none) continue;
+                            const other_info = vfs.openInfo(other.vfs_owner, other.vfs_handle) catch return false;
+                            if (other_info.node != info.node or other_info.node_generation != info.node_generation) continue;
+                            if (description.advisory_lock == .exclusive or other.advisory_lock == .exclusive) return false;
+                        }
+                    }
                 },
                 .udp_socket => {
                     if (description.resource_index == invalid_resource or description.resource_generation == 0) return false;
@@ -1177,6 +1250,23 @@ pub const System = struct {
             if (pipe.readers == 0 and pipe.writers == 0) return false;
         }
         return true;
+    }
+
+    fn advisoryLockConflicts(
+        self: *const System,
+        vfs: *const runtime_vfs.Vfs,
+        owner_index: usize,
+        node: u16,
+        node_generation: u16,
+        requested: AdvisoryLock,
+    ) Error!bool {
+        for (self.open_descriptions, 0..) |other, index| {
+            if (index == owner_index or !other.used or other.kind != .vfs or other.advisory_lock == .none) continue;
+            const info = try vfs.openInfo(other.vfs_owner, other.vfs_handle);
+            if (info.node != node or info.node_generation != node_generation) continue;
+            if (requested == .exclusive or other.advisory_lock == .exclusive) return true;
+        }
+        return false;
     }
 
     fn resolveNamespace(self: *const System, process_handle: u64) Error!usize {
@@ -1230,6 +1320,11 @@ pub const System = struct {
         const open_index: usize = descriptor.open_index;
         const description = self.open_descriptions[open_index];
         if (!description.used or description.references == 0) return Error.CorruptState;
+        var advisory_wait_key: ?u64 = null;
+        if (description.references == 1 and description.kind == .vfs and description.advisory_lock != .none) {
+            const info = try vfs.openInfo(description.vfs_owner, description.vfs_handle);
+            advisory_wait_key = fileLockWaitKey(info.node, info.node_generation);
+        }
         if (description.references == 1) switch (description.kind) {
             .terminal => if (description.vfs_handle != 0) try vfs.close(description.vfs_owner, description.vfs_handle),
             .vfs => try vfs.close(description.vfs_owner, description.vfs_handle),
@@ -1264,6 +1359,7 @@ pub const System = struct {
             },
         }
         self.clearDescription(open_index);
+        if (advisory_wait_key) |wait_key| _ = processes.wakeMatching(.file_lock, wait_key, true);
     }
 
     fn releasePipeIfUnused(self: *System, pipe_index: usize) void {
@@ -1390,6 +1486,10 @@ fn nextGeneration(current: u16) u16 {
 
 fn makeOpenId(index: usize, generation: u16) u32 {
     return (@as(u32, generation) << 16) | @as(u32, @intCast(index + 1));
+}
+
+pub fn fileLockWaitKey(node: u16, generation: u16) u64 {
+    return (@as(u64, generation) << 32) | node;
 }
 
 pub fn pipeWaitKey(index: usize, generation: u16) u64 {
@@ -1578,7 +1678,7 @@ test "dup and dup2 share a VFS open description and offset" {
     var system = System.init();
     const handle = processes.initHandle();
     try system.bindProcess(&processes, handle, true);
-    const fd = try system.openFile(&fs, &processes, handle, "/tmp/shared", .{ .read = true, .write = true, .create = true, .truncate = true }, 0o644, 1);
+    const fd = try system.openFile(&fs, &processes, handle, "/tmp/shared", .{ .read = true, .write = true, .create = true, .truncate = true }, 0o666, 1);
     try std.testing.expectEqual(@as(usize, 5), (try system.write(&fs, &processes, handle, fd, "alpha", 2)).count);
     const duplicate = try system.duplicate(&processes, handle, fd);
     try std.testing.expectEqual(@as(usize, 5), (try system.write(&fs, &processes, handle, duplicate, "-beta", 3)).count);
@@ -1589,6 +1689,37 @@ test "dup and dup2 share a VFS open description and offset" {
     try std.testing.expectEqualStrings("alpha-beta", bytes[0..result.count]);
     const snapshot = try system.snapshot(&fs, &processes, handle);
     try std.testing.expectEqual(@as(u16, 3), snapshot.entries[3].references);
+
+    // Whole-file locks are owned by the shared open description, while
+    // independently opened hard-link aliases contend by inode generation.
+    _ = try fs.link(0, "/tmp/shared", "/tmp/shared-alias", 4);
+    const contender = try initializeTestProcess(&processes, "lock-contender", 8);
+    try system.bindProcess(&processes, contender, false);
+    const contender_fd = try system.openFile(&fs, &processes, contender, "/tmp/shared-alias", .{ .read = true, .write = true }, 0, 5);
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, handle, fd, .exclusive, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, handle, duplicate, .exclusive, true));
+    try std.testing.expectEqual(LockResult.blocked, try system.flock(&fs, &processes, contender, contender_fd, .shared, true));
+
+    // Advisory means advisory: conflicting data I/O is still permitted.
+    try std.testing.expectEqual(@as(usize, 1), (try system.write(&fs, &processes, contender, contender_fd, "!", 6)).count);
+    try std.testing.expectEqual(LockResult.blocked, try system.flock(&fs, &processes, contender, contender_fd, .exclusive, false));
+    const blocked = try processes.get(contender);
+    const shared_stat = try fs.stat(0, "/tmp/shared");
+    try std.testing.expectEqual(runtime_process.State.blocked, blocked.state);
+    try std.testing.expectEqual(runtime_process.WaitReason.file_lock, blocked.wait_reason);
+    try std.testing.expectEqual(fileLockWaitKey(shared_stat.node, shared_stat.generation), blocked.wait_target);
+
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, handle, duplicate, .none, false));
+    try std.testing.expectEqual(runtime_process.State.runnable, (try processes.get(contender)).state);
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, contender, contender_fd, .exclusive, false));
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, contender, contender_fd, .shared, false));
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, handle, 9, .shared, false));
+    try std.testing.expectEqual(LockResult.blocked, try system.flock(&fs, &processes, handle, fd, .exclusive, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, contender, contender_fd, .none, false));
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, handle, fd, .exclusive, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, handle, duplicate, .none, false));
+    try std.testing.expectError(Error.InvalidOperation, system.flock(&fs, &processes, handle, 1, .exclusive, true));
+    try system.close(&fs, &processes, contender, contender_fd);
     try std.testing.expect(system.validate(&fs, &processes));
 }
 
@@ -1672,18 +1803,33 @@ test "cloned process namespaces inherit shared descriptions and close-on-exec" {
     var system = System.init();
     const parent = processes.initHandle();
     try system.bindProcess(&processes, parent, true);
-    const fd = try system.openFile(&fs, &processes, parent, "/tmp/fork", .{ .read = true, .write = true, .create = true, .truncate = true }, 0o644, 1);
+    const fd = try system.openFile(&fs, &processes, parent, "/tmp/fork", .{ .read = true, .write = true, .create = true, .truncate = true }, 0o666, 1);
     _ = try system.write(&fs, &processes, parent, fd, "parent", 2);
     const child = try initializeTestProcess(&processes, "child", 16);
     try std.testing.expectEqual(@as(usize, 4), try system.cloneProcess(&processes, parent, child));
     _ = try system.write(&fs, &processes, child, fd, "-child", 3);
-    try system.setCloseOnExec(&processes, child, fd, true);
-    try std.testing.expectEqual(@as(usize, 1), try system.closeOnExec(&fs, &processes, child));
-    try std.testing.expectError(Error.BadDescriptor, system.write(&fs, &processes, child, fd, "x", 4));
     _ = try system.seek(&fs, &processes, parent, fd, 0, .start);
     var bytes: [32]u8 = undefined;
     const result = try system.read(&fs, &processes, parent, fd, &bytes);
     try std.testing.expectEqualStrings("parent-child", bytes[0..result.count]);
+
+    // Forked descriptor namespaces share the same open-description lock. The
+    // lock therefore survives a parent close until the child's last inherited
+    // reference is closed, at which point an independent opener can acquire it.
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, parent, fd, .exclusive, true));
+    const contender = try initializeTestProcess(&processes, "fork-lock-contender", 8);
+    try system.bindProcess(&processes, contender, false);
+    const contender_fd = try system.openFile(&fs, &processes, contender, "/tmp/fork", .{ .read = true, .write = true }, 0, 4);
+    try std.testing.expectEqual(LockResult.blocked, try system.flock(&fs, &processes, contender, contender_fd, .shared, true));
+    try system.close(&fs, &processes, parent, fd);
+    try std.testing.expectEqual(LockResult.blocked, try system.flock(&fs, &processes, contender, contender_fd, .shared, true));
+    try system.setCloseOnExec(&processes, child, fd, true);
+    try std.testing.expectEqual(@as(usize, 1), try system.closeOnExec(&fs, &processes, child));
+    try std.testing.expectError(Error.BadDescriptor, system.write(&fs, &processes, child, fd, "x", 5));
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, contender, contender_fd, .exclusive, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, contender, contender_fd, .none, false));
+    try system.close(&fs, &processes, contender, contender_fd);
+
     _ = try system.releaseProcess(&fs, &processes, child);
     try processes.exit(child, 0);
     _ = (try processes.wait(parent, child, false)).?;

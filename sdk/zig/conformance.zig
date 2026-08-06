@@ -13,8 +13,9 @@ const timestamp_message = "zig-sdk: timestamp precision/data/namespace/access or
 const ownership_message = "zig-sdk: uid/gid creation and hard-link ownership passed\r\n";
 const umask_message = "zig-sdk: process umask file/directory creation passed\r\n";
 const setid_message = "zig-sdk: setuid/setgid metadata inert-exec policy passed\r\n";
+const flock_message = "zig-sdk: advisory whole-file flock passed\r\n";
 const mount_message = "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata/flock passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -177,6 +178,28 @@ fn run(auxv: [*]const zigos.AuxvEntry) zigos.Error!void {
     try zigos.unlink(setid_file);
     try zigos.rmdir(setgid_dir);
     try zigos.writeAll(1, setid_message);
+
+    const flock_path = "/tmp/zig-sdk-flock";
+    zigos.unlink(flock_path) catch {};
+    const flock_fd = try zigos.open(flock_path, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o666);
+    const flock_alias = try zigos.dup(flock_fd);
+    const flock_other = try zigos.open(flock_path, .{ .read = true, .write = true }, 0);
+    try zigos.flock(flock_fd, .exclusive, true);
+    try zigos.flock(flock_alias, .exclusive, true);
+    if (zigos.flock(flock_other, .shared, true)) |_| return error.InvalidArgument else |err| {
+        if (err != error.WouldBlock) return err;
+    }
+    if (try zigos.write(flock_other, "!") != 1) return error.InvalidArgument;
+    try zigos.close(flock_fd);
+    if (zigos.flock(flock_other, .shared, true)) |_| return error.InvalidArgument else |err| {
+        if (err != error.WouldBlock) return err;
+    }
+    try zigos.close(flock_alias);
+    try zigos.flock(flock_other, .exclusive, true);
+    try zigos.flock(flock_other, .unlock, false);
+    try zigos.close(flock_other);
+    try zigos.unlink(flock_path);
+    try zigos.writeAll(1, flock_message);
 
     var bytes: [128]u8 = undefined;
     const count = try zigos.read(fd, &bytes);

@@ -68,6 +68,10 @@ int64_t zigos_umask(uint16_t mask) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_UMASK, mask, 0, 0, 0, 0, 0);
 }
 
+int64_t zigos_flock(uint16_t fd, uint64_t operation) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_FLOCK, fd, operation, 0, 0, 0, 0);
+}
+
 int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_IOCTL, fd, request, argument, 0, 0, 0);
 }

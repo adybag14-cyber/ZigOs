@@ -41,6 +41,7 @@ pub const WaitReason = enum(u8) {
     terminal_read,
     pipe_read,
     pipe_write,
+    file_lock,
     socket_read,
     socket_write,
     device_io,

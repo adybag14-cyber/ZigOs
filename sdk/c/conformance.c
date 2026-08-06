@@ -71,7 +71,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.17 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.18 discovery passed\r\n")) {
         return 0xC4;
     }
 
@@ -133,6 +133,32 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
     }
     if (remove_path(setid_path) != 0 || !emit("c-sdk: setuid/setgid metadata passed\r\n")) {
         return fail(0xB0, "setid cleanup");
+    }
+
+    static const char flock_path[] = "/tmp/c-sdk-flock";
+    (void)remove_path(flock_path);
+    int64_t flock_fd = zigos_open(flock_path, ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE | ZIGOS_OPEN_CREATE | ZIGOS_OPEN_TRUNCATE, 0666);
+    int64_t flock_alias = flock_fd < 0 ? flock_fd : (int64_t)zigos_syscall6(ZIGOS_SYS_DUP, (uint64_t)flock_fd, 0, 0, 0, 0, 0);
+    int64_t flock_other = flock_alias < 0 ? flock_alias : zigos_open(flock_path, ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE, 0);
+    if (flock_fd < 0 || flock_alias < 0 || flock_other < 0 ||
+        zigos_flock((uint16_t)flock_fd, ZIGOS_LOCK_EXCLUSIVE | ZIGOS_LOCK_NONBLOCK) != 0 ||
+        zigos_flock((uint16_t)flock_alias, ZIGOS_LOCK_EXCLUSIVE | ZIGOS_LOCK_NONBLOCK) != 0 ||
+        zigos_flock((uint16_t)flock_other, ZIGOS_LOCK_SHARED | ZIGOS_LOCK_NONBLOCK) != ZIGOS_ERRNO_WOULD_BLOCK ||
+        zigos_flock((uint16_t)flock_other, ZIGOS_LOCK_SHARED | ZIGOS_LOCK_EXCLUSIVE) != ZIGOS_ERRNO_INVALID ||
+        zigos_flock((uint16_t)flock_other, ZIGOS_LOCK_UNLOCK | ZIGOS_LOCK_NONBLOCK) != ZIGOS_ERRNO_INVALID ||
+        zigos_write((uint16_t)flock_other, "!", 1) != 1) {
+        return fail(0xB1, "flock conflict/advisory");
+    }
+    if (zigos_close((uint16_t)flock_fd) != 0 ||
+        zigos_flock((uint16_t)flock_other, ZIGOS_LOCK_SHARED | ZIGOS_LOCK_NONBLOCK) != ZIGOS_ERRNO_WOULD_BLOCK ||
+        zigos_close((uint16_t)flock_alias) != 0 ||
+        zigos_flock((uint16_t)flock_other, ZIGOS_LOCK_EXCLUSIVE | ZIGOS_LOCK_NONBLOCK) != 0 ||
+        zigos_flock((uint16_t)flock_other, ZIGOS_LOCK_UNLOCK) != 0 ||
+        zigos_close((uint16_t)flock_other) != 0) {
+        return fail(0xB2, "flock lifetime");
+    }
+    if (remove_path(flock_path) != 0 || !emit("c-sdk: advisory whole-file flock passed\r\n")) {
+        return fail(0xB3, "flock cleanup");
     }
 
     int64_t null_fd = zigos_open("/dev/null", ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE, 0);
@@ -322,7 +348,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xD6, "descriptor fsync/fdatasync");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/flock/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
         return 0xD7;
     }
     return 0x57;

@@ -643,6 +643,7 @@ pub fn handleSyscall(
         syscall.syscall_rename => return syscallRename(context, frame),
         syscall.syscall_chmod => return syscallChmod(context, frame),
         syscall.syscall_umask => return syscallUmask(context, frame),
+        syscall.syscall_flock => return syscallFlock(context, frame, fx_state),
         syscall.syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
@@ -1000,6 +1001,60 @@ fn syscallUmask(context: *Context, frame: *interrupt_context.Frame) u64 {
     };
     frame.rax = previous;
     return 0;
+}
+
+fn syscallFlock(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const operation = frame.rsi;
+    const lock_mask = syscall.flock_shared | syscall.flock_exclusive | syscall.flock_unlock;
+    const allowed = lock_mask | syscall.flock_nonblock;
+    if ((operation & ~allowed) != 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const mode = operation & lock_mask;
+    const nonblocking = (operation & syscall.flock_nonblock) != 0;
+    const requested: runtime_fd.AdvisoryLock = if (mode == syscall.flock_shared)
+        .shared
+    else if (mode == syscall.flock_exclusive)
+        .exclusive
+    else if (mode == syscall.flock_unlock and !nonblocking)
+        .none
+    else {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const lock_result = activeDescriptors().flock(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        fd,
+        requested,
+        nonblocking,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    switch (lock_result) {
+        .acquired => {
+            frame.rax = 0;
+            return 0;
+        },
+        .blocked => {
+            if (nonblocking) {
+                frame.rax = reject(errno_would_block);
+                return 0;
+            }
+            return blockAndRetry(context, frame, fx_state);
+        },
+    }
 }
 
 fn syscallSync(
