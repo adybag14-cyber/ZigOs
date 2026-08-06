@@ -71,7 +71,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.18 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.19 discovery passed\r\n")) {
         return 0xC4;
     }
 
@@ -159,6 +159,35 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
     }
     if (remove_path(flock_path) != 0 || !emit("c-sdk: advisory whole-file flock passed\r\n")) {
         return fail(0xB3, "flock cleanup");
+    }
+
+    static const char range_path[] = "/tmp/c-sdk-lockrange";
+    (void)remove_path(range_path);
+    int64_t range_fd = zigos_open(range_path, ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE | ZIGOS_OPEN_CREATE | ZIGOS_OPEN_TRUNCATE, 0666);
+    int64_t range_other = range_fd < 0 ? range_fd : zigos_open(range_path, ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE, 0);
+    if (range_fd < 0 || range_other < 0 ||
+        zigos_lockrange((uint16_t)range_fd, 0, 12, ZIGOS_LOCK_EXCLUSIVE | ZIGOS_LOCK_NONBLOCK) != 0 ||
+        zigos_lockrange((uint16_t)range_other, 12, 4, ZIGOS_LOCK_SHARED | ZIGOS_LOCK_NONBLOCK) != 0 ||
+        zigos_lockrange((uint16_t)range_other, 4, 4, ZIGOS_LOCK_SHARED | ZIGOS_LOCK_NONBLOCK) != ZIGOS_ERRNO_WOULD_BLOCK ||
+        zigos_write((uint16_t)range_other, "R", 1) != 1 ||
+        zigos_lockrange((uint16_t)range_other, 12, 4, ZIGOS_LOCK_UNLOCK) != 0 ||
+        zigos_lockrange((uint16_t)range_fd, 3, 6, ZIGOS_LOCK_UNLOCK) != 0 ||
+        zigos_lockrange((uint16_t)range_other, 3, 6, ZIGOS_LOCK_EXCLUSIVE | ZIGOS_LOCK_NONBLOCK) != 0 ||
+        zigos_lockrange((uint16_t)range_other, 2, 2, ZIGOS_LOCK_EXCLUSIVE | ZIGOS_LOCK_NONBLOCK) != ZIGOS_ERRNO_WOULD_BLOCK ||
+        zigos_lockrange((uint16_t)range_other, 3, 6, ZIGOS_LOCK_UNLOCK) != 0 ||
+        zigos_lockrange((uint16_t)range_fd, 0, 12, ZIGOS_LOCK_UNLOCK) != 0 ||
+        zigos_lockrange((uint16_t)range_fd, 0, 0, ZIGOS_LOCK_EXCLUSIVE | ZIGOS_LOCK_NONBLOCK) != ZIGOS_ERRNO_INVALID) {
+        return fail(0xB4, "lockrange overlap/split");
+    }
+    if (zigos_flock((uint16_t)range_fd, ZIGOS_LOCK_EXCLUSIVE | ZIGOS_LOCK_NONBLOCK) != 0 ||
+        zigos_lockrange((uint16_t)range_other, 0, 4, ZIGOS_LOCK_SHARED | ZIGOS_LOCK_NONBLOCK) != 0 ||
+        zigos_lockrange((uint16_t)range_other, 0, 4, ZIGOS_LOCK_UNLOCK) != 0 ||
+        zigos_flock((uint16_t)range_fd, ZIGOS_LOCK_UNLOCK) != 0 ||
+        zigos_close((uint16_t)range_other) != 0 || zigos_close((uint16_t)range_fd) != 0) {
+        return fail(0xB5, "lockrange namespace/lifetime");
+    }
+    if (remove_path(range_path) != 0 || !emit("c-sdk: advisory byte-range lock passed\r\n")) {
+        return fail(0xB6, "lockrange cleanup");
     }
 
     int64_t null_fd = zigos_open("/dev/null", ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE, 0);
@@ -348,7 +377,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xD6, "descriptor fsync/fdatasync");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/flock/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
         return 0xD7;
     }
     return 0x57;

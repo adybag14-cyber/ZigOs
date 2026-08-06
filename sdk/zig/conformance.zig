@@ -14,8 +14,9 @@ const ownership_message = "zig-sdk: uid/gid creation and hard-link ownership pas
 const umask_message = "zig-sdk: process umask file/directory creation passed\r\n";
 const setid_message = "zig-sdk: setuid/setgid metadata inert-exec policy passed\r\n";
 const flock_message = "zig-sdk: advisory whole-file flock passed\r\n";
+const lockrange_message = "zig-sdk: advisory byte-range lock passed\r\n";
 const mount_message = "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata/flock passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -200,6 +201,57 @@ fn run(auxv: [*]const zigos.AuxvEntry) zigos.Error!void {
     try zigos.close(flock_other);
     try zigos.unlink(flock_path);
     try zigos.writeAll(1, flock_message);
+
+    const range_path = "/tmp/zig-sdk-lockrange";
+    zigos.unlink(range_path) catch {};
+    const range_fd = try zigos.open(range_path, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o666);
+    const range_alias = try zigos.dup(range_fd);
+    const range_other = try zigos.open(range_path, .{ .read = true, .write = true }, 0);
+    try zigos.lockRange(range_fd, 0, 8, .exclusive, true);
+    try zigos.lockRange(range_alias, 0, 8, .exclusive, true);
+    if (zigos.lockRange(range_other, 4, 4, .shared, true)) |_| return error.InvalidArgument else |err| {
+        if (err != error.WouldBlock) return err;
+    }
+    if (try zigos.write(range_other, "R") != 1) return error.InvalidArgument;
+    try zigos.close(range_fd);
+    if (zigos.lockRange(range_other, 4, 4, .shared, true)) |_| return error.InvalidArgument else |err| {
+        if (err != error.WouldBlock) return err;
+    }
+    try zigos.close(range_alias);
+    try zigos.lockRange(range_other, 0, 8, .exclusive, true);
+    try zigos.lockRange(range_other, 0, 8, .unlock, false);
+
+    const range_peer = try zigos.open(range_path, .{ .read = true, .write = true }, 0);
+    try zigos.lockRange(range_other, 0, 12, .exclusive, true);
+    try zigos.lockRange(range_other, 3, 6, .unlock, false);
+    try zigos.lockRange(range_peer, 3, 6, .exclusive, true);
+    if (zigos.lockRange(range_peer, 2, 2, .exclusive, true)) |_| return error.InvalidArgument else |err| {
+        if (err != error.WouldBlock) return err;
+    }
+    try zigos.lockRange(range_peer, 3, 6, .unlock, false);
+    try zigos.lockRange(range_other, 0, 12, .unlock, false);
+    try zigos.lockRange(range_other, 4, 4, .shared, true);
+    try zigos.lockRange(range_peer, 4, 4, .shared, true);
+    if (zigos.lockRange(range_other, 4, 4, .exclusive, true)) |_| return error.InvalidArgument else |err| {
+        if (err != error.WouldBlock) return err;
+    }
+    if (zigos.lockRange(range_peer, 4, 4, .exclusive, true)) |_| return error.InvalidArgument else |err| {
+        if (err != error.WouldBlock) return err;
+    }
+    try zigos.lockRange(range_peer, 4, 4, .unlock, false);
+    try zigos.lockRange(range_other, 4, 4, .exclusive, true);
+    try zigos.lockRange(range_other, 4, 4, .unlock, false);
+    try zigos.flock(range_other, .exclusive, true);
+    try zigos.lockRange(range_peer, 0, 4, .shared, true);
+    try zigos.lockRange(range_peer, 0, 4, .unlock, false);
+    try zigos.flock(range_other, .unlock, false);
+    if (zigos.lockRange(range_other, 0, 0, .exclusive, true)) |_| return error.InvalidArgument else |err| {
+        if (err != error.InvalidArgument) return err;
+    }
+    try zigos.close(range_peer);
+    try zigos.close(range_other);
+    try zigos.unlink(range_path);
+    try zigos.writeAll(1, lockrange_message);
 
     var bytes: [128]u8 = undefined;
     const count = try zigos.read(fd, &bytes);

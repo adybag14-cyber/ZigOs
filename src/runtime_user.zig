@@ -644,6 +644,7 @@ pub fn handleSyscall(
         syscall.syscall_chmod => return syscallChmod(context, frame),
         syscall.syscall_umask => return syscallUmask(context, frame),
         syscall.syscall_flock => return syscallFlock(context, frame, fx_state),
+        syscall.syscall_lockrange => return syscallLockRange(context, frame, fx_state),
         syscall.syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
@@ -1012,25 +1013,12 @@ fn syscallFlock(
         frame.rax = reject(errno_bad_fd);
         return 0;
     };
-    const operation = frame.rsi;
-    const lock_mask = syscall.flock_shared | syscall.flock_exclusive | syscall.flock_unlock;
-    const allowed = lock_mask | syscall.flock_nonblock;
-    if ((operation & ~allowed) != 0) {
-        frame.rax = reject(errno_invalid);
-        return 0;
-    }
-    const mode = operation & lock_mask;
-    const nonblocking = (operation & syscall.flock_nonblock) != 0;
-    const requested: runtime_fd.AdvisoryLock = if (mode == syscall.flock_shared)
-        .shared
-    else if (mode == syscall.flock_exclusive)
-        .exclusive
-    else if (mode == syscall.flock_unlock and !nonblocking)
-        .none
-    else {
+    const request = decodeAdvisoryLockRequest(frame.rsi) orelse {
         frame.rax = reject(errno_invalid);
         return 0;
     };
+    const requested = request.lock;
+    const nonblocking = request.nonblocking;
     const lock_result = activeDescriptors().flock(
         activeVfs(),
         activeProcesses(),
@@ -1049,6 +1037,69 @@ fn syscallFlock(
         },
         .blocked => {
             if (nonblocking) {
+                frame.rax = reject(errno_would_block);
+                return 0;
+            }
+            return blockAndRetry(context, frame, fx_state);
+        },
+    }
+}
+
+const AdvisoryLockRequest = struct {
+    lock: runtime_fd.AdvisoryLock,
+    nonblocking: bool,
+};
+
+fn decodeAdvisoryLockRequest(operation: u64) ?AdvisoryLockRequest {
+    const lock_mask = syscall.flock_shared | syscall.flock_exclusive | syscall.flock_unlock;
+    const allowed = lock_mask | syscall.flock_nonblock;
+    if ((operation & ~allowed) != 0) return null;
+    const mode = operation & lock_mask;
+    const nonblocking = (operation & syscall.flock_nonblock) != 0;
+    const lock: runtime_fd.AdvisoryLock = if (mode == syscall.flock_shared)
+        .shared
+    else if (mode == syscall.flock_exclusive)
+        .exclusive
+    else if (mode == syscall.flock_unlock and !nonblocking)
+        .none
+    else
+        return null;
+    return .{ .lock = lock, .nonblocking = nonblocking };
+}
+
+fn syscallLockRange(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const request = decodeAdvisoryLockRequest(frame.r10) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const lock_result = activeDescriptors().lockRange(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        fd,
+        frame.rsi,
+        frame.rdx,
+        request.lock,
+        request.nonblocking,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    switch (lock_result) {
+        .acquired => {
+            frame.rax = 0;
+            return 0;
+        },
+        .blocked => {
+            if (request.nonblocking) {
                 frame.rax = reject(errno_would_block);
                 return 0;
             }

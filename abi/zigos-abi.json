@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 18,
+    "minor": 19,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -81,7 +81,8 @@
     "stattimes": 122,
     "statowner": 123,
     "umask": 124,
-    "flock": 125
+    "flock": 125,
+    "lockrange": 126
   },
   "errno": {
     "permission": -1,

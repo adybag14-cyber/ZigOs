@@ -478,6 +478,12 @@ pub fn flock(fd: u16, operation: LockOperation, nonblocking: bool) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_flock, fd, bits, 0, 0, 0, 0));
 }
 
+pub fn lockRange(fd: u16, start: u64, length: u64, operation: LockOperation, nonblocking: bool) Error!void {
+    var bits: u64 = @intFromEnum(operation);
+    if (nonblocking and operation != .unlock) bits |= abi.flock_nonblock;
+    _ = try result(zigos_syscall6(abi.syscall_lockrange, fd, start, length, bits, 0, 0));
+}
+
 pub fn mount(
     source: ?[*:0]const u8,
     target: [*:0]const u8,

@@ -277,7 +277,7 @@ pub fn fromError(err: anyerror) i64 {
         error.DirectoryNotEmpty => errno_not_empty,
         error.ReadOnly => errno_read_only,
         error.NoRuntimeFrames, error.AddressSpaceFailure, error.MappingLimit, error.MappingFailure, error.OutOfMemory => errno_no_memory,
-        error.NoSpace, error.PipeLimit => errno_no_space,
+        error.NoSpace, error.PipeLimit, error.RangeLockLimit => errno_no_space,
         error.FileTooLarge => errno_file_too_large,
         error.Busy => errno_busy,
         error.CrossMount => errno_cross_device,

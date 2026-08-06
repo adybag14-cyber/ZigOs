@@ -343,6 +343,7 @@ def generate_c(spec: dict) -> str:
         "int64_t zigos_statfs(const char *path, zigos_filesystem_stat *info);\n",
         "int64_t zigos_umask(uint16_t mask);\n",
         "int64_t zigos_flock(uint16_t fd, uint64_t operation);\n",
+        "int64_t zigos_lockrange(uint16_t fd, uint64_t start, uint64_t length, uint64_t operation);\n",
         "int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);\n",
         "int64_t zigos_fsync(uint16_t fd);\n",
         "int64_t zigos_fdatasync(uint16_t fd);\n",

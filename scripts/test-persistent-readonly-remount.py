@@ -328,7 +328,7 @@ def main() -> int:
                     "sync: read-only filesystem",
                     "ZigOs NVMe write fault injection: failures 1 armed no clean yes",
                     "ZigOs persistent damage containment: damaged yes reason payload_write remounts/failures 1/0 discarded/rejected 1/1 vfs-remount/discard 1/1 mount-readonly yes clean yes",
-                    "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5554244 metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10852/5259/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                    "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5569604 metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10882/5229/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                     "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
                     "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 58/58 cache-released 9 storage persistent-read-only clean yes",
                     "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent-read-only cleanup yes",

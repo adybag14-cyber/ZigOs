@@ -7,6 +7,7 @@ const runtime_abi = @import("runtime_abi.zig");
 pub const maximum_descriptors_per_process: usize = 32;
 pub const maximum_open_descriptions: usize = 96;
 pub const maximum_pipes: usize = 32;
+pub const maximum_byte_range_locks_per_description: usize = 8;
 pub const pipe_capacity: usize = 1024;
 pub const invalid_open_description: u16 = 0xFFFF;
 pub const invalid_resource: u16 = 0xFFFF;
@@ -37,6 +38,7 @@ pub const Error = runtime_process.Error || runtime_vfs.Error || error{
     NotSeekable,
     BrokenPipe,
     InvalidOperation,
+    RangeLockLimit,
     ReferenceOverflow,
     CorruptState,
 };
@@ -86,6 +88,13 @@ pub const LockResult = enum(u8) {
     blocked,
 };
 
+pub const ByteRangeLock = struct {
+    used: bool = false,
+    start: u32 = 0,
+    end: u32 = 0,
+    kind: AdvisoryLock = .none,
+};
+
 const Descriptor = struct {
     used: bool = false,
     open_index: u16 = invalid_open_description,
@@ -111,6 +120,7 @@ const OpenDescription = struct {
     vfs_owner: u32 = 0,
     vfs_handle: u32 = 0,
     advisory_lock: AdvisoryLock = .none,
+    byte_range_locks: [maximum_byte_range_locks_per_description]ByteRangeLock = @splat(.{}),
 };
 
 const Pipe = struct {
@@ -847,6 +857,56 @@ pub const System = struct {
         return .blocked;
     }
 
+    pub fn lockRange(
+        self: *System,
+        vfs: *const runtime_vfs.Vfs,
+        processes: *runtime_process.Table,
+        process_handle: u64,
+        fd: u16,
+        start_value: u64,
+        length_value: u64,
+        requested: AdvisoryLock,
+        nonblocking: bool,
+    ) Error!LockResult {
+        _ = try processes.get(process_handle);
+        if (length_value == 0 or start_value >= runtime_vfs.maximum_file_size or
+            length_value > runtime_vfs.maximum_file_size - start_value)
+        {
+            return Error.InvalidOperation;
+        }
+        const start: u32 = @intCast(start_value);
+        const end: u32 = @intCast(start_value + length_value);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const open_index = try self.resolveDescriptor(namespace_slot, fd);
+        var description = &self.open_descriptions[open_index];
+        if (description.kind != .vfs) return Error.InvalidOperation;
+        const info = try vfs.openInfo(description.vfs_owner, description.vfs_handle);
+        const node_stat = try vfs.statNode(info.node);
+        if (node_stat.kind != .file or node_stat.generation != info.node_generation) return Error.InvalidOperation;
+        const wait_key = fileLockWaitKey(info.node, info.node_generation);
+
+        if (requested == .none) {
+            description.byte_range_locks = try replaceByteRangeLocks(description.byte_range_locks, start, end, .none);
+            _ = processes.wakeMatching(.file_lock, wait_key, true);
+            return .acquired;
+        }
+        if (!(try self.byteRangeLockConflicts(vfs, open_index, info.node, info.node_generation, start, end, requested))) {
+            description.byte_range_locks = try replaceByteRangeLocks(description.byte_range_locks, start, end, requested);
+            return .acquired;
+        }
+        if (nonblocking) return .blocked;
+
+        const previous = description.byte_range_locks;
+        const had_overlap = byteRangeLocksOverlap(previous, start, end);
+        description.byte_range_locks = try replaceByteRangeLocks(previous, start, end, .none);
+        if (had_overlap) _ = processes.wakeMatching(.file_lock, wait_key, true);
+        processes.block(process_handle, .file_lock, wait_key) catch |err| {
+            description.byte_range_locks = previous;
+            return err;
+        };
+        return .blocked;
+    }
+
     pub fn descriptorKind(
         self: *const System,
         processes: *const runtime_process.Table,
@@ -1230,6 +1290,23 @@ pub const System = struct {
                             if (description.advisory_lock == .exclusive or other.advisory_lock == .exclusive) return false;
                         }
                     }
+                    if (!validateByteRangeLocks(description.byte_range_locks)) return false;
+                    if (hasByteRangeLocks(description.byte_range_locks)) {
+                        const node_stat = vfs.statNode(info.node) catch return false;
+                        if (node_stat.kind != .file or node_stat.generation != info.node_generation) return false;
+                        for (self.open_descriptions[0..index]) |other| {
+                            if (!other.used or other.kind != .vfs or !hasByteRangeLocks(other.byte_range_locks)) continue;
+                            const other_info = vfs.openInfo(other.vfs_owner, other.vfs_handle) catch return false;
+                            if (other_info.node != info.node or other_info.node_generation != info.node_generation) continue;
+                            for (description.byte_range_locks) |current_lock| {
+                                if (!current_lock.used) continue;
+                                for (other.byte_range_locks) |other_lock| {
+                                    if (!other_lock.used or !rangesOverlap(current_lock.start, current_lock.end, other_lock.start, other_lock.end)) continue;
+                                    if (current_lock.kind == .exclusive or other_lock.kind == .exclusive) return false;
+                                }
+                            }
+                        }
+                    }
                 },
                 .udp_socket => {
                     if (description.resource_index == invalid_resource or description.resource_generation == 0) return false;
@@ -1265,6 +1342,28 @@ pub const System = struct {
             const info = try vfs.openInfo(other.vfs_owner, other.vfs_handle);
             if (info.node != node or info.node_generation != node_generation) continue;
             if (requested == .exclusive or other.advisory_lock == .exclusive) return true;
+        }
+        return false;
+    }
+
+    fn byteRangeLockConflicts(
+        self: *const System,
+        vfs: *const runtime_vfs.Vfs,
+        owner_index: usize,
+        node: u16,
+        node_generation: u16,
+        start: u32,
+        end: u32,
+        requested: AdvisoryLock,
+    ) Error!bool {
+        for (self.open_descriptions, 0..) |other, index| {
+            if (index == owner_index or !other.used or other.kind != .vfs or !hasByteRangeLocks(other.byte_range_locks)) continue;
+            const info = try vfs.openInfo(other.vfs_owner, other.vfs_handle);
+            if (info.node != node or info.node_generation != node_generation) continue;
+            for (other.byte_range_locks) |other_lock| {
+                if (!other_lock.used or !rangesOverlap(start, end, other_lock.start, other_lock.end)) continue;
+                if (requested == .exclusive or other_lock.kind == .exclusive) return true;
+            }
         }
         return false;
     }
@@ -1321,7 +1420,9 @@ pub const System = struct {
         const description = self.open_descriptions[open_index];
         if (!description.used or description.references == 0) return Error.CorruptState;
         var advisory_wait_key: ?u64 = null;
-        if (description.references == 1 and description.kind == .vfs and description.advisory_lock != .none) {
+        if (description.references == 1 and description.kind == .vfs and
+            (description.advisory_lock != .none or hasByteRangeLocks(description.byte_range_locks)))
+        {
             const info = try vfs.openInfo(description.vfs_owner, description.vfs_handle);
             advisory_wait_key = fileLockWaitKey(info.node, info.node_generation);
         }
@@ -1486,6 +1587,91 @@ fn nextGeneration(current: u16) u16 {
 
 fn makeOpenId(index: usize, generation: u16) u32 {
     return (@as(u32, generation) << 16) | @as(u32, @intCast(index + 1));
+}
+
+fn rangesOverlap(start_a: u32, end_a: u32, start_b: u32, end_b: u32) bool {
+    return start_a < end_b and start_b < end_a;
+}
+
+fn hasByteRangeLocks(locks: [maximum_byte_range_locks_per_description]ByteRangeLock) bool {
+    for (locks) |lock| if (lock.used) return true;
+    return false;
+}
+
+fn byteRangeLocksOverlap(locks: [maximum_byte_range_locks_per_description]ByteRangeLock, start: u32, end: u32) bool {
+    for (locks) |lock| {
+        if (lock.used and rangesOverlap(start, end, lock.start, lock.end)) return true;
+    }
+    return false;
+}
+
+fn validateByteRangeLocks(locks: [maximum_byte_range_locks_per_description]ByteRangeLock) bool {
+    var seen_unused = false;
+    var previous_end: u32 = 0;
+    for (locks) |lock| {
+        if (!lock.used) {
+            seen_unused = true;
+            continue;
+        }
+        if (seen_unused or lock.kind == .none or lock.start >= lock.end or lock.end > runtime_vfs.maximum_file_size) return false;
+        if (lock.start < previous_end) return false;
+        previous_end = lock.end;
+    }
+    return true;
+}
+
+fn replaceByteRangeLocks(
+    current: [maximum_byte_range_locks_per_description]ByteRangeLock,
+    start: u32,
+    end: u32,
+    replacement: AdvisoryLock,
+) Error![maximum_byte_range_locks_per_description]ByteRangeLock {
+    var scratch: [maximum_byte_range_locks_per_description + 2]ByteRangeLock = @splat(.{});
+    var count: usize = 0;
+    for (current) |lock| {
+        if (!lock.used) continue;
+        if (!rangesOverlap(lock.start, lock.end, start, end)) {
+            scratch[count] = lock;
+            count += 1;
+            continue;
+        }
+        if (lock.start < start) {
+            scratch[count] = .{ .used = true, .start = lock.start, .end = start, .kind = lock.kind };
+            count += 1;
+        }
+        if (lock.end > end) {
+            scratch[count] = .{ .used = true, .start = end, .end = lock.end, .kind = lock.kind };
+            count += 1;
+        }
+    }
+    if (replacement != .none) {
+        scratch[count] = .{ .used = true, .start = start, .end = end, .kind = replacement };
+        count += 1;
+    }
+
+    var i: usize = 1;
+    while (i < count) : (i += 1) {
+        const value = scratch[i];
+        var j = i;
+        while (j > 0 and scratch[j - 1].start > value.start) : (j -= 1) scratch[j] = scratch[j - 1];
+        scratch[j] = value;
+    }
+
+    var result: [maximum_byte_range_locks_per_description]ByteRangeLock = @splat(.{});
+    var result_count: usize = 0;
+    for (scratch[0..count]) |lock| {
+        if (result_count != 0) {
+            var previous = &result[result_count - 1];
+            if (previous.kind == lock.kind and previous.end == lock.start) {
+                previous.end = lock.end;
+                continue;
+            }
+        }
+        if (result_count == result.len) return Error.RangeLockLimit;
+        result[result_count] = lock;
+        result_count += 1;
+    }
+    return result;
 }
 
 pub fn fileLockWaitKey(node: u16, generation: u16) u64 {
@@ -1719,6 +1905,52 @@ test "dup and dup2 share a VFS open description and offset" {
     try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, handle, fd, .exclusive, true));
     try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, handle, duplicate, .none, false));
     try std.testing.expectError(Error.InvalidOperation, system.flock(&fs, &processes, handle, 1, .exclusive, true));
+
+    // Byte-range locks are independently normalized on each open description.
+    // Non-overlapping regions coexist, overlap uses half-open interval math, and
+    // ordinary writes remain advisory even when they land inside a foreign lock.
+    try std.testing.expectError(Error.InvalidOperation, system.lockRange(&fs, &processes, handle, fd, 0, 0, .exclusive, true));
+    try std.testing.expectError(Error.InvalidOperation, system.lockRange(&fs, &processes, handle, fd, runtime_vfs.maximum_file_size, 1, .exclusive, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, handle, fd, 0, 8, .exclusive, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, contender, contender_fd, 8, 8, .shared, true));
+    try std.testing.expectEqual(LockResult.blocked, try system.lockRange(&fs, &processes, contender, contender_fd, 4, 4, .shared, true));
+    try std.testing.expectEqual(@as(usize, 1), (try system.write(&fs, &processes, contender, contender_fd, "?", 7)).count);
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, contender, contender_fd, 8, 8, .none, false));
+
+    // Blocking overlap uses the same inode-generation wait key as whole-file
+    // advisory locks; unlock wakes the sleeper and the retried request acquires.
+    try std.testing.expectEqual(LockResult.blocked, try system.lockRange(&fs, &processes, contender, contender_fd, 4, 4, .shared, false));
+    try std.testing.expectEqual(runtime_process.State.blocked, (try processes.get(contender)).state);
+    try std.testing.expectEqual(runtime_process.WaitReason.file_lock, (try processes.get(contender)).wait_reason);
+    try std.testing.expectEqual(fileLockWaitKey(shared_stat.node, shared_stat.generation), (try processes.get(contender)).wait_target);
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, handle, duplicate, 0, 8, .none, false));
+    try std.testing.expectEqual(runtime_process.State.runnable, (try processes.get(contender)).state);
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, contender, contender_fd, 4, 4, .shared, false));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, handle, 9, 4, 4, .shared, true));
+
+    // A failed nonblocking shared-to-exclusive conversion is failure-atomic.
+    // The retained shared interval continues to block the other owner's upgrade.
+    try std.testing.expectEqual(LockResult.blocked, try system.lockRange(&fs, &processes, handle, fd, 4, 4, .exclusive, true));
+    try std.testing.expectEqual(LockResult.blocked, try system.lockRange(&fs, &processes, contender, contender_fd, 4, 4, .exclusive, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, contender, contender_fd, 4, 4, .none, false));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, handle, fd, 4, 4, .exclusive, true));
+
+    // Replacement plus partial unlock splits one held interval into two preserved
+    // fragments. Only the newly unlocked middle can be acquired by another owner.
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, handle, duplicate, 0, 12, .exclusive, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, handle, fd, 3, 6, .none, false));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, contender, contender_fd, 3, 6, .exclusive, true));
+    try std.testing.expectEqual(LockResult.blocked, try system.lockRange(&fs, &processes, contender, contender_fd, 2, 2, .exclusive, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, contender, contender_fd, 3, 6, .none, false));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, handle, fd, 0, 12, .none, false));
+
+    // G244 flock and G245 byte-range locks are deliberately separate advisory
+    // namespaces, mirroring the common whole-file/record-lock distinction.
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, handle, fd, .exclusive, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, contender, contender_fd, 0, 4, .shared, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, contender, contender_fd, 0, 4, .none, false));
+    try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, handle, duplicate, .none, false));
+    try std.testing.expectError(Error.InvalidOperation, system.lockRange(&fs, &processes, handle, 1, 0, 1, .exclusive, true));
     try system.close(&fs, &processes, contender, contender_fd);
     try std.testing.expect(system.validate(&fs, &processes));
 }
@@ -1823,11 +2055,15 @@ test "cloned process namespaces inherit shared descriptions and close-on-exec" {
     try std.testing.expectEqual(LockResult.blocked, try system.flock(&fs, &processes, contender, contender_fd, .shared, true));
     try system.close(&fs, &processes, parent, fd);
     try std.testing.expectEqual(LockResult.blocked, try system.flock(&fs, &processes, contender, contender_fd, .shared, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, child, fd, 0, 4, .exclusive, true));
+    try std.testing.expectEqual(LockResult.blocked, try system.lockRange(&fs, &processes, contender, contender_fd, 0, 4, .shared, true));
     try system.setCloseOnExec(&processes, child, fd, true);
     try std.testing.expectEqual(@as(usize, 1), try system.closeOnExec(&fs, &processes, child));
     try std.testing.expectError(Error.BadDescriptor, system.write(&fs, &processes, child, fd, "x", 5));
     try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, contender, contender_fd, .exclusive, true));
     try std.testing.expectEqual(LockResult.acquired, try system.flock(&fs, &processes, contender, contender_fd, .none, false));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, contender, contender_fd, 0, 4, .exclusive, true));
+    try std.testing.expectEqual(LockResult.acquired, try system.lockRange(&fs, &processes, contender, contender_fd, 0, 4, .none, false));
     try system.close(&fs, &processes, contender, contender_fd);
 
     _ = try system.releaseProcess(&fs, &processes, child);
