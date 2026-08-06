@@ -162,20 +162,18 @@ fn run(auxv: [*]const zigos.AuxvEntry) zigos.Error!void {
     zigos.rmdir(setgid_dir) catch {};
     const setid_fd = try zigos.open(setid_file, .{ .read = true, .write = true, .create = true }, 0o6755);
     try zigos.close(setid_fd);
-    try zigos.mkdir(setgid_dir, 0o2755);
+    try zigos.mkdir(setgid_dir, 0o3755);
     var setid_stat: zigos.Stat = undefined;
     var setgid_dir_stat: zigos.Stat = undefined;
     try zigos.stat(setid_file, &setid_stat);
     try zigos.stat(setgid_dir, &setgid_dir_stat);
-    if (setid_stat.mode != 0o6755 or setgid_dir_stat.mode != 0o2755) return error.InvalidArgument;
+    if (setid_stat.mode != 0o6755 or setgid_dir_stat.mode != 0o3755) return error.InvalidArgument;
     try zigos.chmod(setid_file, 0o6650);
     try zigos.stat(setid_file, &setid_stat);
     if (setid_stat.mode != 0o6650) return error.InvalidArgument;
-    if (zigos.chmod(setid_file, 0o1755)) |_| return error.InvalidArgument else |err| {
-        if (err != error.InvalidArgument) return err;
-    }
+    try zigos.chmod(setid_file, 0o7650);
     try zigos.stat(setid_file, &setid_stat);
-    if (setid_stat.mode != 0o6650) return error.InvalidArgument;
+    if (setid_stat.mode != 0o7650) return error.InvalidArgument;
     try zigos.unlink(setid_file);
     try zigos.rmdir(setgid_dir);
     try zigos.writeAll(1, setid_message);

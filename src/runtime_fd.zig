@@ -1475,6 +1475,7 @@ test "numeric descriptor namespace uses lowest free descriptor" {
     const owner_credentials = runtime_vfs.Ownership{ .uid = 1000, .gid = 1000 };
     const group_credentials = runtime_vfs.Ownership{ .uid = 2000, .gid = 1000 };
     const other_credentials = runtime_vfs.Ownership{ .uid = 2000, .gid = 2000 };
+    const stranger_credentials = runtime_vfs.Ownership{ .uid = 3000, .gid = 3000 };
     const first = try system.openFile(&fs, &processes, handle, "/tmp/a", .{ .read = true, .write = true, .create = true }, 0o644, 1);
     try std.testing.expectEqual(@as(u16, 3), first);
     try std.testing.expectEqual(owner_credentials, try fs.ownership(0, "/tmp/a"));
@@ -1535,9 +1536,37 @@ test "numeric descriptor namespace uses lowest free descriptor" {
     try std.testing.expectEqual(@as(u16, 0o6750), (try fs.stat(0, "/tmp/setid")).mode);
     try fs.chmodAs(0, "/tmp/setid", 0o6650, owner_credentials, 22);
     try std.testing.expectEqual(@as(u16, 0o6650), (try fs.stat(0, "/tmp/setid")).mode);
-    try std.testing.expectError(runtime_vfs.Error.InvalidPath, fs.chmodAs(0, "/tmp/setid", 0o1755, owner_credentials, 23));
-    try std.testing.expectEqual(@as(u16, 0o6650), (try fs.stat(0, "/tmp/setid")).mode);
+    try fs.chmodAs(0, "/tmp/setid", 0o7650, owner_credentials, 23);
+    try std.testing.expectEqual(@as(u16, 0o7650), (try fs.stat(0, "/tmp/setid")).mode);
     try system.close(&fs, &processes, handle, setid_fd);
+
+    // Sticky directories add a victim-ownership rule on top of ordinary W+X.
+    // Root, the directory owner, or the victim owner may remove/rename; an
+    // unrelated UID may not. Replacement rename checks both removed entries.
+    _ = try fs.mkdirOwned(0, "/tmp/sticky", 0o1777, owner_credentials, 24);
+    try std.testing.expectEqual(@as(u16, 0o1777), (try fs.stat(0, "/tmp/sticky")).mode);
+    _ = try fs.createOwned(0, "/tmp/sticky/victim", 0o644, group_credentials, 25);
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, fs.unlinkAs(0, "/tmp/sticky/victim", stranger_credentials, 26));
+    try fs.unlinkAs(0, "/tmp/sticky/victim", group_credentials, 27);
+    _ = try fs.createOwned(0, "/tmp/sticky/by-dir-owner", 0o644, group_credentials, 28);
+    try fs.unlinkAs(0, "/tmp/sticky/by-dir-owner", owner_credentials, 29);
+    _ = try fs.createOwned(0, "/tmp/sticky/by-root", 0o644, group_credentials, 30);
+    try fs.unlinkAs(0, "/tmp/sticky/by-root", .{}, 31);
+
+    _ = try fs.mkdirOwned(0, "/tmp/sticky/child", 0o755, group_credentials, 32);
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, fs.rmdirAs(0, "/tmp/sticky/child", stranger_credentials, 33));
+    try fs.rmdirAs(0, "/tmp/sticky/child", group_credentials, 34);
+
+    _ = try fs.createOwned(0, "/tmp/sticky/move", 0o644, group_credentials, 35);
+    try fs.renameAs(0, "/tmp/sticky/move", "/tmp/sticky/move", stranger_credentials, 36);
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, fs.renameAs(0, "/tmp/sticky/move", "/tmp/sticky/moved", stranger_credentials, 37));
+    try fs.renameAs(0, "/tmp/sticky/move", "/tmp/sticky/moved", group_credentials, 38);
+
+    _ = try fs.createOwned(0, "/tmp/sticky/source", 0o644, stranger_credentials, 39);
+    _ = try fs.createOwned(0, "/tmp/sticky/target", 0o644, group_credentials, 40);
+    try std.testing.expectError(runtime_vfs.Error.PermissionDenied, fs.renameAs(0, "/tmp/sticky/source", "/tmp/sticky/target", stranger_credentials, 41));
+    try fs.renameAs(0, "/tmp/sticky/source", "/tmp/sticky/target", owner_credentials, 42);
+
     try std.testing.expectEqual(@as(u16, 0o027), try processes.setUmask(handle, 0));
     try std.testing.expect(system.validate(&fs, &processes));
 }

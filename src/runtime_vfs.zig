@@ -132,17 +132,19 @@ pub const Ownership = struct {
 };
 
 pub const permission_mode_mask: u16 = 0o0777;
+pub const sticky_mode_bit: u16 = 0o1000;
 pub const setgid_mode_bit: u16 = 0o2000;
 pub const setuid_mode_bit: u16 = 0o4000;
 pub const setid_mode_mask: u16 = setuid_mode_bit | setgid_mode_bit;
-pub const stored_mode_mask: u16 = permission_mode_mask | setid_mode_mask;
+pub const special_mode_mask: u16 = sticky_mode_bit | setid_mode_mask;
+pub const stored_mode_mask: u16 = permission_mode_mask | special_mode_mask;
 
 pub fn validStoredMode(mode: u16) bool {
     return (mode & ~stored_mode_mask) == 0;
 }
 
 pub fn applyCreationUmask(mode: u16, mask: u16) u16 {
-    return (mode & setid_mode_mask) | ((mode & permission_mode_mask) & (~mask & permission_mode_mask));
+    return (mode & special_mode_mask) | ((mode & permission_mode_mask) & (~mask & permission_mode_mask));
 }
 
 pub const Access = struct {
@@ -892,6 +894,7 @@ pub const Vfs = struct {
         const entry_index = try self.entryForPathAs(cwd, path, credentials);
         const node_index = self.dentries[entry_index].node;
         if (self.nodes[node_index].kind == .directory) return Error.IsDirectory;
+        try self.requireStickyRemoval(self.dentries[entry_index].parent, node_index, credentials);
         try self.unlinkEntry(entry_index, tick);
     }
 
@@ -904,6 +907,7 @@ pub const Vfs = struct {
         const node_index = self.dentries[entry_index].node;
         if (node_index == 0 or self.nodes[node_index].kind != .directory) return Error.NotDirectory;
         if (self.hasChildren(node_index)) return Error.DirectoryNotEmpty;
+        try self.requireStickyRemoval(self.dentries[entry_index].parent, node_index, credentials);
         try self.removeEntry(entry_index, tick);
     }
 
@@ -922,12 +926,18 @@ pub const Vfs = struct {
             return Error.ReadOnly;
         if (self.nodes[source].kind == .directory and self.isDescendant(destination.parent, source)) return Error.Cycle;
 
-        if (self.findDentry(destination.parent, destination.name)) |target_entry| {
-            if (target_entry == source_entry or self.dentries[target_entry].node == source) return;
-            const target = self.dentries[target_entry].node;
+        const target_entry = self.findDentry(destination.parent, destination.name);
+        if (target_entry) |entry_index| {
+            if (entry_index == source_entry or self.dentries[entry_index].node == source) return;
+        }
+
+        try self.requireStickyRemoval(source_parent, source, credentials);
+        if (target_entry) |entry_index| {
+            const target = self.dentries[entry_index].node;
+            try self.requireStickyRemoval(destination.parent, target, credentials);
             try self.validateRenameReplacement(source, target);
             self.nodes[target].changed_tick = tick;
-            self.detachOrReclaimEntry(target_entry);
+            self.detachOrReclaimEntry(entry_index);
         }
 
         self.renameEntry(source_entry, destination.parent, destination.name, tick);
@@ -2752,6 +2762,15 @@ pub const Vfs = struct {
 
     fn requireAccessNode(self: *const Vfs, node_index: u16, credentials: Ownership, requested: Access) Error!void {
         if (!try self.accessAllowedNode(node_index, credentials, requested)) return Error.PermissionDenied;
+    }
+
+    fn requireStickyRemoval(self: *const Vfs, parent: u16, victim: u16, credentials: Ownership) Error!void {
+        if (parent >= self.nodes.len or victim >= self.nodes.len or !self.nodes[parent].used or !self.nodes[victim].used) return Error.NotFound;
+        const directory = &self.nodes[parent];
+        if (directory.kind != .directory) return Error.NotDirectory;
+        if ((directory.mode & sticky_mode_bit) == 0 or credentials.uid == 0 or
+            credentials.uid == directory.uid or credentials.uid == self.nodes[victim].uid) return;
+        return Error.PermissionDenied;
     }
 
     fn requireMutableFile(self: *const Vfs, node_index: u16) Error!void {

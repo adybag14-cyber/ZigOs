@@ -127,9 +127,9 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
     if (setid_fd < 0 || zigos_close((uint16_t)setid_fd) != 0 || zigos_stat_path(setid_path, &setid_info) != 0 || setid_info.mode != 06755 ||
         (int64_t)zigos_syscall6(ZIGOS_SYS_CHMOD, (uint64_t)(uintptr_t)setid_path, 06650, 0, 0, 0, 0) != 0 ||
         zigos_stat_path(setid_path, &setid_info) != 0 || setid_info.mode != 06650 ||
-        (int64_t)zigos_syscall6(ZIGOS_SYS_CHMOD, (uint64_t)(uintptr_t)setid_path, 01755, 0, 0, 0, 0) != ZIGOS_ERRNO_INVALID ||
-        zigos_stat_path(setid_path, &setid_info) != 0 || setid_info.mode != 06650) {
-        return fail(0xDF, "setid metadata/sticky reject");
+        (int64_t)zigos_syscall6(ZIGOS_SYS_CHMOD, (uint64_t)(uintptr_t)setid_path, 07650, 0, 0, 0, 0) != 0 ||
+        zigos_stat_path(setid_path, &setid_info) != 0 || setid_info.mode != 07650) {
+        return fail(0xDF, "setid/sticky metadata");
     }
     if (remove_path(setid_path) != 0 || !emit("c-sdk: setuid/setgid metadata passed\r\n")) {
         return fail(0xB0, "setid cleanup");

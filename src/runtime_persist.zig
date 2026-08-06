@@ -1273,7 +1273,7 @@ test "alternating snapshots restore a persistent VFS subtree" {
     first_vfs.initialize();
     var first_store: Store = .{};
     try first_store.mount(first_vfs, disk.device(), 1);
-    _ = try first_vfs.ensureDirectory(0, "/persist/config", 0o2755, 2);
+    _ = try first_vfs.ensureDirectory(0, "/persist/config", 0o3755, 2);
     _ = try first_vfs.putFile(0, "/persist/config/name.txt", "zigos\n", 0o6650, false, 3);
     _ = try first_vfs.link(0, "/persist/config/name.txt", "/persist/name-hard", 4);
     _ = try first_vfs.symlink(0, "config/name.txt", "/persist/name-link", 5);
@@ -1309,7 +1309,7 @@ test "alternating snapshots restore a persistent VFS subtree" {
     try std.testing.expectEqualStrings("zigos\n", try second_vfs.readOnlyView(0, "/persist/name-hard"));
     try std.testing.expectEqual((try second_vfs.stat(0, "/persist/config/name.txt")).node, (try second_vfs.stat(0, "/persist/name-hard")).node);
     const restored_directory = try second_vfs.stat(0, "/persist/config");
-    try std.testing.expectEqual(@as(u16, 0o2755), restored_directory.mode);
+    try std.testing.expectEqual(@as(u16, 0o3755), restored_directory.mode);
     try std.testing.expectEqual(directory_owner, try second_vfs.ownership(0, "/persist/config"));
     try std.testing.expectEqual(directory_times.created_tick, restored_directory.created_tick);
     try std.testing.expectEqual(directory_times.modified_tick, restored_directory.modified_tick);
