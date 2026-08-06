@@ -15,8 +15,9 @@ const umask_message = "zig-sdk: process umask file/directory creation passed\r\n
 const setid_message = "zig-sdk: setuid/setgid metadata inert-exec policy passed\r\n";
 const flock_message = "zig-sdk: advisory whole-file flock passed\r\n";
 const lockrange_message = "zig-sdk: advisory byte-range lock passed\r\n";
+const watchdir_message = "zig-sdk: directory watch notifications passed\r\n";
 const mount_message = "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/watchdir passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -252,6 +253,44 @@ fn run(auxv: [*]const zigos.AuxvEntry) zigos.Error!void {
     try zigos.close(range_other);
     try zigos.unlink(range_path);
     try zigos.writeAll(1, lockrange_message);
+
+    const watch_source = "/tmp/zig-sdk-watch-a";
+    const watch_moved = "/tmp/zig-sdk-watch-b";
+    zigos.unlink(watch_source) catch {};
+    zigos.unlink(watch_moved) catch {};
+    const watch_directory = try zigos.open("/tmp", .{ .read = true }, 0);
+    const watch_fd = try zigos.watchdir(watch_directory);
+    var watch_poll = [_]zigos.PollDescriptor{.{
+        .fd = watch_fd,
+        .requested = zigos.constants.poll_readable | zigos.constants.poll_error | zigos.constants.poll_hangup,
+        .returned = 0,
+        .reserved = 0,
+    }};
+    if (try zigos.poll(&watch_poll) != 0 or watch_poll[0].returned != 0) return error.InvalidArgument;
+    var watch_events: [4]zigos.DirectoryEvent = undefined;
+    if (zigos.readDirectoryEvents(watch_fd, &watch_events)) |_| return error.InvalidArgument else |err| {
+        if (err != error.WouldBlock) return err;
+    }
+    const watched_file = try zigos.open(watch_source, .{ .read = true, .write = true, .create = true, .truncate = true }, 0o600);
+    try zigos.close(watched_file);
+    watch_poll[0].returned = 0;
+    if (try zigos.poll(&watch_poll) != 1 or (watch_poll[0].returned & zigos.constants.poll_readable) == 0) return error.InvalidArgument;
+    if (try zigos.readDirectoryEvents(watch_fd, &watch_events) != 1 or
+        watch_events[0].flags != zigos.constants.directory_event_created or
+        !equal(watch_events[0].name[0..watch_events[0].name_length], "zig-sdk-watch-a")) return error.InvalidArgument;
+    try zigos.rename(watch_source, watch_moved);
+    if (try zigos.readDirectoryEvents(watch_fd, &watch_events) != 2 or
+        watch_events[0].flags != zigos.constants.directory_event_rename_from or
+        watch_events[1].flags != zigos.constants.directory_event_rename_to or
+        !equal(watch_events[0].name[0..watch_events[0].name_length], "zig-sdk-watch-a") or
+        !equal(watch_events[1].name[0..watch_events[1].name_length], "zig-sdk-watch-b")) return error.InvalidArgument;
+    try zigos.unlink(watch_moved);
+    if (try zigos.readDirectoryEvents(watch_fd, &watch_events) != 1 or
+        watch_events[0].flags != zigos.constants.directory_event_removed or
+        !equal(watch_events[0].name[0..watch_events[0].name_length], "zig-sdk-watch-b")) return error.InvalidArgument;
+    try zigos.close(watch_fd);
+    try zigos.close(watch_directory);
+    try zigos.writeAll(1, watchdir_message);
 
     var bytes: [128]u8 = undefined;
     const count = try zigos.read(fd, &bytes);

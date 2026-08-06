@@ -81,6 +81,9 @@ def generate(spec: dict) -> tuple[str, str, str]:
     for name, value in spec.get("flock_operations", {}).items():
         zig.append(f"pub const flock_{name}: u64 = {value};\n")
         nasm.append(f"%define ZIGOS_LOCK_{name.upper()} {value}\n")
+    for name, value in spec.get("directory_event_flags", {}).items():
+        zig.append(f"pub const directory_event_{name}: u8 = @as(u8, 1) << {value};\n")
+        nasm.append(f"%define ZIGOS_DIRECTORY_EVENT_{name.upper()} (1 << {value})\n")
     for group in ("capabilities", "syscalls", "errno"):
         zig.append("\n")
         nasm.append("\n")
@@ -195,6 +198,17 @@ def generate(spec: dict) -> tuple[str, str, str]:
         "    returned: u16,\n",
         "    reserved: u16,\n",
         "};\n\n",
+        "pub const DirectoryEvent = extern struct {\n",
+        "    sequence: u64,\n",
+        "    node: u32,\n",
+        "    generation: u16,\n",
+        "    kind: u8,\n",
+        "    flags: u8,\n",
+        "    name_length: u16,\n",
+        "    reserved0: [6]u8,\n",
+        "    name: [32]u8,\n",
+        "    reserved1: [8]u8,\n",
+        "};\n\n",
         "pub const IoVector = extern struct {\n",
         "    pointer: u64,\n",
         "    length: u64,\n",
@@ -266,6 +280,8 @@ def generate_c(spec: dict) -> str:
         lines.append(f"#define ZIGOS_FS_STAT_{name.upper()} (UINT16_C(1) << {value})\n")
     for name, value in spec.get("flock_operations", {}).items():
         lines.append(f"#define ZIGOS_LOCK_{name.upper()} UINT64_C({value})\n")
+    for name, value in spec.get("directory_event_flags", {}).items():
+        lines.append(f"#define ZIGOS_DIRECTORY_EVENT_{name.upper()} (UINT8_C(1) << {value})\n")
     lines.append("\n")
     for name, bit in spec["capabilities"].items():
         lines.append(f"#define ZIGOS_CAP_{name.upper()} (UINT64_C(1) << {bit})\n")
@@ -317,6 +333,10 @@ def generate_c(spec: dict) -> str:
         "typedef struct zigos_poll_descriptor {\n",
         "    uint16_t fd; uint16_t requested; uint16_t returned; uint16_t reserved;\n",
         "} zigos_poll_descriptor;\n\n",
+        "typedef struct zigos_directory_event {\n",
+        "    uint64_t sequence; uint32_t node; uint16_t generation; uint8_t kind; uint8_t flags;\n",
+        "    uint16_t name_length; uint8_t reserved0[6]; uint8_t name[32]; uint8_t reserved1[8];\n",
+        "} zigos_directory_event;\n\n",
         "typedef struct zigos_iovec { uint64_t pointer; uint64_t length; } zigos_iovec;\n\n",
         "typedef struct zigos_auxv_entry { uint64_t kind; uint64_t value; } zigos_auxv_entry;\n\n",
         '_Static_assert(sizeof(zigos_abi_info) == 64, "zigos_abi_info layout");\n',
@@ -325,6 +345,7 @@ def generate_c(spec: dict) -> str:
         '_Static_assert(sizeof(zigos_file_owner) == 8, "zigos_file_owner layout");\n',
         '_Static_assert(sizeof(zigos_filesystem_stat) == 64, "zigos_filesystem_stat layout");\n',
         '_Static_assert(sizeof(zigos_poll_descriptor) == 8, "zigos_poll_descriptor layout");\n',
+        '_Static_assert(sizeof(zigos_directory_event) == 64, "zigos_directory_event layout");\n',
         '_Static_assert(sizeof(zigos_iovec) == 16, "zigos_iovec layout");\n\n',
         '#ifdef __cplusplus\nextern "C" {\n#endif\n',
         "uint64_t zigos_syscall6(uint64_t number, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6);\n",
@@ -344,6 +365,7 @@ def generate_c(spec: dict) -> str:
         "int64_t zigos_umask(uint16_t mask);\n",
         "int64_t zigos_flock(uint16_t fd, uint64_t operation);\n",
         "int64_t zigos_lockrange(uint16_t fd, uint64_t start, uint64_t length, uint64_t operation);\n",
+        "int64_t zigos_watchdir(uint16_t directory_fd);\n",
         "int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);\n",
         "int64_t zigos_fsync(uint16_t fd);\n",
         "int64_t zigos_fdatasync(uint16_t fd);\n",

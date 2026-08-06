@@ -155,6 +155,18 @@ pub const PollDescriptor = extern struct {
     reserved: u16 = 0,
 };
 
+pub const DirectoryEvent = extern struct {
+    sequence: u64,
+    node: u32,
+    generation: u16,
+    kind: u8,
+    flags: u8,
+    name_length: u16,
+    reserved0: [6]u8 = @splat(0),
+    name: [32]u8 = @splat(0),
+    reserved1: [8]u8 = @splat(0),
+};
+
 pub const IoVector = extern struct {
     pointer: u64,
     length: u64,
@@ -265,7 +277,7 @@ pub fn fromError(err: anyerror) i64 {
         error.NotFound => errno_not_found,
         error.NoProcess, error.AlreadyTerminal => errno_no_process,
         error.NotChild => errno_no_child,
-        error.StillRunning, error.NoSlots, error.NoContext, error.ContextLimit, error.QuotaExceeded => errno_would_block,
+        error.StillRunning, error.NoSlots, error.NoContext, error.ContextLimit, error.QuotaExceeded, error.WouldBlock => errno_would_block,
         error.PermissionDenied => errno_access,
         error.InvalidHandle, error.BadDescriptor, error.NotReadable, error.NotWritable => errno_bad_fd,
         error.InvalidPath, error.InvalidOffset, error.InvalidOperation, error.InvalidState, error.InvalidSignal, error.InvalidAddress, error.InvalidProtection, error.InvalidMapping, error.NotSymlink => errno_invalid,
@@ -297,6 +309,7 @@ pub fn fromError(err: anyerror) i64 {
 
 test "ABI information has a stable 64-byte versioned layout" {
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(AbiInfo));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(DirectoryEvent));
     const info = makeInfo(.{
         .capabilities = constants.capability_process | constants.capability_virtual_memory,
         .user_base = 0x1000,

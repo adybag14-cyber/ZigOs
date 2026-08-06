@@ -645,6 +645,7 @@ pub fn handleSyscall(
         syscall.syscall_umask => return syscallUmask(context, frame),
         syscall.syscall_flock => return syscallFlock(context, frame, fx_state),
         syscall.syscall_lockrange => return syscallLockRange(context, frame, fx_state),
+        syscall.syscall_watchdir => return syscallWatchDir(context, frame),
         syscall.syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
@@ -1106,6 +1107,28 @@ fn syscallLockRange(
             return blockAndRetry(context, frame, fx_state);
         },
     }
+}
+
+fn syscallWatchDir(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const directory_fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    if (frame.rsi != 0 or frame.rdx != 0 or frame.r10 != 0 or frame.r8 != 0 or frame.r9 != 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const fd = activeDescriptors().createDirectoryWatch(
+        activeVfs(),
+        activeProcesses(),
+        context.handle,
+        directory_fd,
+    ) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = fd;
+    return 0;
 }
 
 fn syscallSync(

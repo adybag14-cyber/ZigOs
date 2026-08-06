@@ -8,6 +8,7 @@ pub const maximum_descriptors_per_process: usize = 32;
 pub const maximum_open_descriptions: usize = 96;
 pub const maximum_pipes: usize = 32;
 pub const maximum_byte_range_locks_per_description: usize = 8;
+pub const maximum_directory_event_batch: usize = 16;
 pub const pipe_capacity: usize = 1024;
 pub const invalid_open_description: u16 = 0xFFFF;
 pub const invalid_resource: u16 = 0xFFFF;
@@ -39,6 +40,7 @@ pub const Error = runtime_process.Error || runtime_vfs.Error || error{
     BrokenPipe,
     InvalidOperation,
     RangeLockLimit,
+    WouldBlock,
     ReferenceOverflow,
     CorruptState,
 };
@@ -49,6 +51,7 @@ pub const DescriptionKind = enum(u8) {
     pipe_read,
     pipe_write,
     udp_socket,
+    directory_watch,
 };
 
 pub const ExternalCloseFn = *const fn (context: ?*anyopaque, resource_index: u16, generation: u32) bool;
@@ -121,6 +124,9 @@ const OpenDescription = struct {
     vfs_handle: u32 = 0,
     advisory_lock: AdvisoryLock = .none,
     byte_range_locks: [maximum_byte_range_locks_per_description]ByteRangeLock = @splat(.{}),
+    watch_node: u16 = runtime_vfs.invalid_node,
+    watch_generation: u16 = 0,
+    watch_cursor: u64 = 0,
 };
 
 const Pipe = struct {
@@ -168,6 +174,7 @@ pub const Report = struct {
     pipe_read_descriptions: usize,
     pipe_write_descriptions: usize,
     udp_socket_descriptions: usize,
+    directory_watch_descriptions: usize,
     pipes: usize,
     duplicated_descriptors: u64,
     inherited_descriptors: u64,
@@ -410,6 +417,41 @@ pub const System = struct {
             return err;
         };
         return @intCast(fd[0]);
+    }
+
+    pub fn createDirectoryWatch(
+        self: *System,
+        vfs: *const runtime_vfs.Vfs,
+        processes: *runtime_process.Table,
+        process_handle: u64,
+        directory_fd: u16,
+    ) Error!u16 {
+        const process = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        const source_index = try self.resolveDescriptor(namespace_slot, directory_fd);
+        const source = self.open_descriptions[source_index];
+        if (source.kind != .vfs) return Error.NotDirectory;
+        const info = try vfs.openInfo(source.vfs_owner, source.vfs_handle);
+        const node_stat = try vfs.statNode(info.node);
+        if (node_stat.kind != .directory or node_stat.generation != info.node_generation) return Error.NotDirectory;
+        try self.requireDescriptorCapacity(&self.namespaces[namespace_slot], process, 1);
+        const descriptor_slots = self.findFreeDescriptors(&self.namespaces[namespace_slot], 1) orelse return Error.DescriptorLimit;
+        const open_slots = self.findFreeOpenDescriptions(1) orelse return Error.OpenDescriptionLimit;
+        const cursor = try vfs.directoryEventCursor(info.node, info.node_generation);
+        self.initializeDescription(open_slots[0], .directory_watch, true, false, false, invalid_resource, 0, 0, 0);
+        self.open_descriptions[open_slots[0]].watch_node = info.node;
+        self.open_descriptions[open_slots[0]].watch_generation = info.node_generation;
+        self.open_descriptions[open_slots[0]].watch_cursor = cursor;
+        self.namespaces[namespace_slot].descriptors[descriptor_slots[0]] = .{
+            .used = true,
+            .open_index = @intCast(open_slots[0]),
+        };
+        self.syncDescriptorCount(processes, process_handle) catch |err| {
+            self.namespaces[namespace_slot].descriptors[descriptor_slots[0]] = .{};
+            self.clearDescription(open_slots[0]);
+            return err;
+        };
+        return @intCast(descriptor_slots[0]);
     }
 
     pub fn createExternalDescriptor(
@@ -679,6 +721,34 @@ pub const System = struct {
                 }
                 return .{ .status = .complete, .count = count };
             },
+            .directory_watch => {
+                if (output.len < @sizeOf(runtime_abi.DirectoryEvent) or output.len % @sizeOf(runtime_abi.DirectoryEvent) != 0)
+                    return Error.InvalidOperation;
+                const capacity = @min(output.len / @sizeOf(runtime_abi.DirectoryEvent), maximum_directory_event_batch);
+                var changes: [maximum_directory_event_batch]runtime_vfs.DirectoryChange = @splat(.{});
+                var watch = &self.open_descriptions[open_index];
+                const count = try vfs.readDirectoryEvents(
+                    watch.watch_node,
+                    watch.watch_generation,
+                    &watch.watch_cursor,
+                    changes[0..capacity],
+                );
+                if (count == 0) return Error.WouldBlock;
+                var events: [maximum_directory_event_batch]runtime_abi.DirectoryEvent = @splat(std.mem.zeroes(runtime_abi.DirectoryEvent));
+                for (changes[0..count], 0..) |change, index| {
+                    events[index].sequence = change.sequence;
+                    events[index].node = change.node;
+                    events[index].generation = change.generation;
+                    events[index].kind = @intFromEnum(change.kind);
+                    events[index].flags = change.flags;
+                    events[index].name_length = change.name_length;
+                    @memcpy(events[index].name[0..change.name_length], change.nameSlice());
+                }
+                const byte_count = count * @sizeOf(runtime_abi.DirectoryEvent);
+                @memcpy(output[0..byte_count], std.mem.asBytes(&events)[0..byte_count]);
+                self.bytes_read +%= byte_count;
+                return .{ .status = .complete, .count = byte_count };
+            },
             .pipe_read => {
                 const pipe_index = try self.resolvePipe(description);
                 if (self.pipes[pipe_index].count != 0) {
@@ -720,7 +790,7 @@ pub const System = struct {
                 self.bytes_written +%= bytes.len;
                 return .{ .status = .complete, .count = bytes.len };
             },
-            .udp_socket => return Error.InvalidOperation,
+            .udp_socket, .directory_watch => return Error.InvalidOperation,
             .vfs => {
                 const count = try vfs.writeOpen(description.vfs_owner, description.vfs_handle, bytes, tick);
                 self.bytes_written +%= count;
@@ -959,6 +1029,17 @@ pub const System = struct {
                 .size = 0,
                 .modified_tick = 0,
             },
+            .directory_watch => .{
+                .node = description.watch_node,
+                .generation = description.watch_generation,
+                .kind = @intFromEnum(runtime_vfs.Kind.pseudo),
+                .readonly = 1,
+                .mode = 0o400,
+                .mount_id = 0,
+                .link_count = 1,
+                .size = 0,
+                .modified_tick = 0,
+            },
             .pipe_read, .pipe_write => blk: {
                 const pipe_index = try self.resolvePipe(description);
                 break :blk .{
@@ -1018,6 +1099,13 @@ pub const System = struct {
                 if (description.writable) ready |= runtime_abi.poll_writable;
             },
             .vfs => ready |= try vfs.pollOpen(description.vfs_owner, description.vfs_handle, requested),
+            .directory_watch => {
+                const event_ready = vfs.directoryEventsReady(description.watch_node, description.watch_generation, description.watch_cursor) catch {
+                    ready |= runtime_abi.poll_error | runtime_abi.poll_hangup;
+                    return ready & requested;
+                };
+                if (event_ready) ready |= runtime_abi.poll_readable;
+            },
             .udp_socket => {
                 const poll_fn = self.external_poll orelse return Error.InvalidOperation;
                 ready |= poll_fn(self.external_context, description.resource_index, description.resource_generation, requested);
@@ -1172,6 +1260,10 @@ pub const System = struct {
                     resource_id = (@as(u64, info.node_generation) << 32) | info.node;
                     offset_or_buffered = info.offset;
                 },
+                .directory_watch => {
+                    resource_id = (@as(u64, description.watch_generation) << 32) | description.watch_node;
+                    offset_or_buffered = @intCast(description.watch_cursor);
+                },
                 .udp_socket => {
                     resource_id = (@as(u64, description.resource_generation) << 16) | description.resource_index;
                 },
@@ -1207,6 +1299,7 @@ pub const System = struct {
             .pipe_read_descriptions = 0,
             .pipe_write_descriptions = 0,
             .udp_socket_descriptions = 0,
+            .directory_watch_descriptions = 0,
             .pipes = 0,
             .duplicated_descriptors = self.duplicated_descriptors,
             .inherited_descriptors = self.inherited_descriptors,
@@ -1236,6 +1329,7 @@ pub const System = struct {
                 .pipe_read => result.pipe_read_descriptions += 1,
                 .pipe_write => result.pipe_write_descriptions += 1,
                 .udp_socket => result.udp_socket_descriptions += 1,
+                .directory_watch => result.directory_watch_descriptions += 1,
             }
         }
         for (self.pipes) |pipe| result.pipes += @intFromBool(pipe.used);
@@ -1307,6 +1401,13 @@ pub const System = struct {
                             }
                         }
                     }
+                },
+                .directory_watch => {
+                    if (description.resource_index != invalid_resource or description.vfs_handle != 0 or description.watch_generation == 0) return false;
+                    const node_stat = vfs.statNode(description.watch_node) catch return false;
+                    if (node_stat.kind != .directory or node_stat.generation != description.watch_generation) return false;
+                    const current = vfs.directoryEventCursor(description.watch_node, description.watch_generation) catch return false;
+                    if (description.watch_cursor > current) return false;
                 },
                 .udp_socket => {
                     if (description.resource_index == invalid_resource or description.resource_generation == 0) return false;
@@ -1441,7 +1542,7 @@ pub const System = struct {
         if (self.open_descriptions[open_index].references != 0) return;
 
         switch (description.kind) {
-            .terminal, .vfs, .udp_socket => {},
+            .terminal, .vfs, .udp_socket, .directory_watch => {},
             .pipe_read => {
                 const pipe_index = try self.resolvePipe(description);
                 if (self.pipes[pipe_index].readers == 0) return Error.CorruptState;
@@ -1955,7 +2056,7 @@ test "dup and dup2 share a VFS open description and offset" {
     try std.testing.expect(system.validate(&fs, &processes));
 }
 
-test "directory openat and deferred unlink survive descriptor aliases" {
+test "directory openat deferred unlink and notification watches survive descriptor aliases" {
     var fs = runtime_vfs.Vfs.init();
     try initializeTestFilesystem(&fs);
     const directory = try fs.mkdir(0, "/tmp/base", 0o755, 1);
@@ -1966,6 +2067,12 @@ test "directory openat and deferred unlink survive descriptor aliases" {
 
     const directory_fd = try system.openFile(&fs, &processes, process, "/tmp/base", .{ .read = true }, 0, 2);
     try std.testing.expectEqual(directory, try system.directoryNode(&fs, &processes, process, directory_fd));
+    const watch = try system.createDirectoryWatch(&fs, &processes, process, directory_fd);
+    const poll_bits = runtime_abi.poll_readable | runtime_abi.poll_error | runtime_abi.poll_hangup;
+    try std.testing.expectEqual(@as(u16, 0), try system.poll(&fs, &processes, process, watch, poll_bits));
+    var events: [4]runtime_abi.DirectoryEvent = @splat(std.mem.zeroes(runtime_abi.DirectoryEvent));
+    try std.testing.expectError(Error.WouldBlock, system.read(&fs, &processes, process, watch, std.mem.asBytes(&events)));
+
     const file_fd = try system.openFileAt(
         &fs,
         &processes,
@@ -1977,10 +2084,40 @@ test "directory openat and deferred unlink survive descriptor aliases" {
         3,
     );
     try std.testing.expectError(Error.NotDirectory, system.directoryNode(&fs, &processes, process, file_fd));
-    _ = try system.write(&fs, &processes, process, file_fd, "open-data", 4);
+    try std.testing.expectError(Error.NotDirectory, system.createDirectoryWatch(&fs, &processes, process, file_fd));
+    const watch_alias = try system.duplicate(&processes, process, watch);
+    try std.testing.expectEqual(runtime_abi.poll_readable, try system.poll(&fs, &processes, process, watch, runtime_abi.poll_readable));
+    const created = try system.read(&fs, &processes, process, watch, std.mem.asBytes(&events));
+    try std.testing.expectEqual(@as(usize, @sizeOf(runtime_abi.DirectoryEvent)), created.count);
+    try std.testing.expectEqual(runtime_abi.constants.directory_event_created, events[0].flags);
+    try std.testing.expectEqualStrings("note", events[0].name[0..events[0].name_length]);
+    try std.testing.expectError(Error.WouldBlock, system.read(&fs, &processes, process, watch_alias, std.mem.asBytes(&events)));
+
+    // A separately created watch starts at the current sequence and therefore
+    // does not replay the already-consumed create event.
+    const independent_watch = try system.createDirectoryWatch(&fs, &processes, process, directory_fd);
+    try fs.rename(directory, "note", "moved", 4);
+    const renamed_shared = try system.read(&fs, &processes, process, watch_alias, std.mem.asBytes(&events));
+    try std.testing.expectEqual(@as(usize, 2 * @sizeOf(runtime_abi.DirectoryEvent)), renamed_shared.count);
+    try std.testing.expectEqual(runtime_abi.constants.directory_event_rename_from, events[0].flags);
+    try std.testing.expectEqualStrings("note", events[0].name[0..events[0].name_length]);
+    try std.testing.expectEqual(runtime_abi.constants.directory_event_rename_to, events[1].flags);
+    try std.testing.expectEqualStrings("moved", events[1].name[0..events[1].name_length]);
+    const renamed_independent = try system.read(&fs, &processes, process, independent_watch, std.mem.asBytes(&events));
+    try std.testing.expectEqual(renamed_shared.count, renamed_independent.count);
+    try fs.rename(directory, "moved", "note", 5);
+    _ = try system.read(&fs, &processes, process, watch, std.mem.asBytes(&events));
+    _ = try system.read(&fs, &processes, process, independent_watch, std.mem.asBytes(&events));
+
+    _ = try system.write(&fs, &processes, process, file_fd, "open-data", 6);
     const alias = try system.duplicate(&processes, process, file_fd);
 
-    try fs.unlink(directory, "note", 0);
+    try fs.unlink(directory, "note", 7);
+    const removed = try system.read(&fs, &processes, process, watch_alias, std.mem.asBytes(&events));
+    try std.testing.expectEqual(@as(usize, @sizeOf(runtime_abi.DirectoryEvent)), removed.count);
+    try std.testing.expectEqual(runtime_abi.constants.directory_event_removed, events[0].flags);
+    try std.testing.expectEqualStrings("note", events[0].name[0..events[0].name_length]);
+    _ = try system.read(&fs, &processes, process, independent_watch, std.mem.asBytes(&events));
     try std.testing.expectError(runtime_vfs.Error.NotFound, fs.stat(directory, "note"));
     _ = try system.seek(&fs, &processes, process, alias, 0, .start);
     var bytes: [16]u8 = undefined;
@@ -2001,10 +2138,31 @@ test "directory openat and deferred unlink survive descriptor aliases" {
         "note",
         .{ .read = true, .write = true, .create = true },
         0o644,
-        5,
+        8,
     );
     try system.close(&fs, &processes, process, replacement);
+    _ = try system.read(&fs, &processes, process, watch, std.mem.asBytes(&events));
+    _ = try system.read(&fs, &processes, process, independent_watch, std.mem.asBytes(&events));
+
+    // The journal is globally bounded to 64 records. A lagging watcher gets an
+    // explicit overflow marker before resuming from the oldest retained record.
+    const overflow_watch = try system.createDirectoryWatch(&fs, &processes, process, directory_fd);
+    for (0..33) |index| {
+        _ = try fs.create(directory, "burst", 0o644, @intCast(20 + index * 2));
+        try fs.unlink(directory, "burst", @intCast(21 + index * 2));
+    }
+    const overflow = try system.read(&fs, &processes, process, overflow_watch, std.mem.asBytes(&events));
+    try std.testing.expectEqual(@as(usize, @sizeOf(runtime_abi.DirectoryEvent)), overflow.count);
+    try std.testing.expectEqual(runtime_abi.constants.directory_event_overflow, events[0].flags);
+    try std.testing.expectEqual(@as(u16, 0), events[0].name_length);
+    try std.testing.expectEqual(runtime_abi.poll_readable, try system.poll(&fs, &processes, process, overflow_watch, runtime_abi.poll_readable));
+
+    try system.close(&fs, &processes, process, overflow_watch);
+    try system.close(&fs, &processes, process, independent_watch);
+    try system.close(&fs, &processes, process, watch_alias);
+    try system.close(&fs, &processes, process, watch);
     try system.close(&fs, &processes, process, directory_fd);
+    try std.testing.expectEqual(@as(usize, 0), system.report().directory_watch_descriptions);
     try std.testing.expect(system.validate(&fs, &processes));
 }
 

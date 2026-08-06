@@ -1,3 +1,4 @@
+const std = @import("std");
 const abi = @import("abi.zig");
 
 pub const constants = abi;
@@ -9,6 +10,7 @@ pub const FileOwner = abi.FileOwner;
 pub const FilesystemStat = abi.FilesystemStat;
 pub const DirectoryEntry = abi.DirectoryEntry;
 pub const PollDescriptor = abi.PollDescriptor;
+pub const DirectoryEvent = abi.DirectoryEvent;
 pub const IoVector = abi.IoVector;
 pub const Ipv4SocketAddress = abi.Ipv4SocketAddress;
 pub const UserString = abi.UserString;
@@ -362,6 +364,18 @@ pub fn getdents(fd: u16, entries: []DirectoryEntry) Error!usize {
     const bytes = entries.len * @sizeOf(DirectoryEntry);
     const returned = try result(zigos_syscall6(abi.syscall_getdents, fd, ptrValue(entries.ptr), bytes, 0, 0, 0));
     return @intCast(returned / @sizeOf(DirectoryEntry));
+}
+
+pub fn watchdir(directory_fd: u16) Error!u16 {
+    return @intCast(try result(zigos_syscall6(abi.syscall_watchdir, directory_fd, 0, 0, 0, 0, 0)));
+}
+
+pub fn readDirectoryEvents(fd: u16, events: []DirectoryEvent) Error!usize {
+    if (events.len == 0) return 0;
+    const bytes = std.mem.sliceAsBytes(events);
+    const returned = try read(fd, bytes);
+    if (returned % @sizeOf(DirectoryEvent) != 0) return Error.Unknown;
+    return returned / @sizeOf(DirectoryEvent);
 }
 
 pub fn poll(descriptors: []PollDescriptor) Error!usize {

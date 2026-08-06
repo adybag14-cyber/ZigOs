@@ -17,6 +17,7 @@ pub const invalid_data_block: u16 = 0xFFFF;
 pub const maximum_mounts: usize = 8;
 pub const maximum_open_files: usize = 64;
 pub const maximum_directory_entries: usize = 64;
+pub const maximum_directory_events: usize = 64;
 pub const invalid_node: u16 = 0xFFFF;
 pub const invalid_dentry: u16 = 0xFFFF;
 pub const invalid_cache_entry: u16 = 0xFFFF;
@@ -187,6 +188,28 @@ pub const DirectoryRecord = struct {
 pub const DirectoryList = struct {
     records: [maximum_directory_entries]DirectoryRecord = @splat(.{}),
     count: usize = 0,
+};
+
+pub const directory_event_created: u8 = 1 << 0;
+pub const directory_event_removed: u8 = 1 << 1;
+pub const directory_event_rename_from: u8 = 1 << 2;
+pub const directory_event_rename_to: u8 = 1 << 3;
+pub const directory_event_overflow: u8 = 1 << 4;
+
+pub const DirectoryChange = struct {
+    sequence: u64 = 0,
+    directory: u16 = invalid_node,
+    directory_generation: u16 = 0,
+    node: u16 = invalid_node,
+    generation: u16 = 0,
+    kind: Kind = .file,
+    flags: u8 = 0,
+    name: [maximum_name_length + 1]u8 = @splat(0),
+    name_length: u8 = 0,
+
+    pub fn nameSlice(self: *const DirectoryChange) []const u8 {
+        return self.name[0..self.name_length];
+    }
 };
 
 const Node = struct {
@@ -425,6 +448,8 @@ pub const Vfs = struct {
     dirty_page_discards: u64 = 0,
     view_scratch: [maximum_file_size]u8 = @splat(0),
     dentries: [maximum_dentries]Dentry = @splat(.{}),
+    directory_events: [maximum_directory_events]DirectoryChange = @splat(.{}),
+    directory_event_sequence: u64 = 0,
     dentry_cache: [maximum_dentry_cache_entries]DentryCacheEntry = @splat(.{}),
     mounts: [maximum_mounts]Mount = @splat(.{}),
     read_only_remounts: u64 = 0,
@@ -611,6 +636,64 @@ pub const Vfs = struct {
         return result;
     }
 
+    pub fn directoryEventCursor(self: *const Vfs, directory: u16, generation: u16) Error!u64 {
+        try self.validateDirectoryGeneration(directory, generation);
+        return self.directory_event_sequence;
+    }
+
+    pub fn directoryEventsReady(self: *const Vfs, directory: u16, generation: u16, cursor: u64) Error!bool {
+        try self.validateDirectoryGeneration(directory, generation);
+        const current = self.directory_event_sequence;
+        if (cursor > current) return Error.CorruptState;
+        if (cursor == current) return false;
+        const earliest = if (current > maximum_directory_events) current - maximum_directory_events + 1 else 1;
+        if (cursor + 1 < earliest) return true;
+        var sequence = cursor + 1;
+        while (sequence <= current) : (sequence += 1) {
+            const event = &self.directory_events[@intCast((sequence - 1) % maximum_directory_events)];
+            if (event.sequence != sequence) return Error.CorruptState;
+            if (event.directory == directory and event.directory_generation == generation) return true;
+        }
+        return false;
+    }
+
+    pub fn readDirectoryEvents(
+        self: *const Vfs,
+        directory: u16,
+        generation: u16,
+        cursor: *u64,
+        output: []DirectoryChange,
+    ) Error!usize {
+        try self.validateDirectoryGeneration(directory, generation);
+        if (output.len == 0) return 0;
+        const current = self.directory_event_sequence;
+        if (cursor.* > current) return Error.CorruptState;
+        if (cursor.* == current) return 0;
+        const earliest = if (current > maximum_directory_events) current - maximum_directory_events + 1 else 1;
+        if (cursor.* + 1 < earliest) {
+            output[0] = .{
+                .sequence = earliest - 1,
+                .directory = directory,
+                .directory_generation = generation,
+                .flags = directory_event_overflow,
+            };
+            cursor.* = earliest - 1;
+            return 1;
+        }
+        var count: usize = 0;
+        var sequence = cursor.* + 1;
+        while (sequence <= current) : (sequence += 1) {
+            const event = self.directory_events[@intCast((sequence - 1) % maximum_directory_events)];
+            if (event.sequence != sequence) return Error.CorruptState;
+            cursor.* = sequence;
+            if (event.directory != directory or event.directory_generation != generation) continue;
+            output[count] = event;
+            count += 1;
+            if (count == output.len) return count;
+        }
+        return count;
+    }
+
     pub fn mkdir(self: *Vfs, cwd: u16, path: []const u8, mode: u16, tick: u64) Error!u16 {
         return self.mkdirOwned(cwd, path, mode, .{}, tick);
     }
@@ -648,6 +731,7 @@ pub const Vfs = struct {
         self.nodes[node_index].link_count += 1;
         self.nodes[node_index].changed_tick = tick;
         self.touchDirectoryMutation(destination.parent, tick);
+        self.recordDirectoryChange(destination.parent, node_index, directory_event_created, destination.name);
         self.mutations +%= 1;
         return node_index;
     }
@@ -738,6 +822,7 @@ pub const Vfs = struct {
         if (self.nodes[node_index].kind != .pseudo or self.nodes[node_index].mount_id != self.nodes[mount_root].mount_id)
             return Error.UnsupportedOperation;
         if (self.hasOpenReferences(node_index)) return Error.Busy;
+        self.recordDirectoryChange(mount_root, node_index, directory_event_removed, self.dentries[entry_index].nameSlice());
         self.detachOrReclaimEntry(@intCast(entry_index));
         self.mutations +%= 1;
     }
@@ -937,10 +1022,13 @@ pub const Vfs = struct {
             try self.requireStickyRemoval(destination.parent, target, credentials);
             try self.validateRenameReplacement(source, target);
             self.nodes[target].changed_tick = tick;
+            self.recordDirectoryChange(destination.parent, target, directory_event_removed, self.dentries[entry_index].nameSlice());
             self.detachOrReclaimEntry(entry_index);
         }
 
+        self.recordDirectoryChange(source_parent, source, directory_event_rename_from, self.dentries[source_entry].nameSlice());
         self.renameEntry(source_entry, destination.parent, destination.name, tick);
+        self.recordDirectoryChange(destination.parent, source, directory_event_rename_to, destination.name);
         self.touchDirectoryMutation(source_parent, tick);
         if (destination.parent != source_parent) self.touchDirectoryMutation(destination.parent, tick);
         self.mutations +%= 1;
@@ -2282,6 +2370,7 @@ pub const Vfs = struct {
         };
         self.initializeDentry(entry_index, parent, @intCast(node_index), name);
         self.touchDirectoryMutation(parent, tick);
+        self.recordDirectoryChange(parent, @intCast(node_index), directory_event_created, name);
         self.mutations +%= 1;
         return @intCast(node_index);
     }
@@ -2760,6 +2849,31 @@ pub const Vfs = struct {
         return true;
     }
 
+    fn validateDirectoryGeneration(self: *const Vfs, directory: u16, generation: u16) Error!void {
+        if (directory >= self.nodes.len or !self.nodes[directory].used or self.nodes[directory].generation != generation) return Error.NotFound;
+        if (self.nodes[directory].kind != .directory) return Error.NotDirectory;
+    }
+
+    fn recordDirectoryChange(self: *Vfs, directory: u16, node_index: u16, flags: u8, name: []const u8) void {
+        std.debug.assert(directory < self.nodes.len and self.nodes[directory].used and self.nodes[directory].kind == .directory);
+        std.debug.assert(node_index < self.nodes.len and self.nodes[node_index].used);
+        std.debug.assert(name.len != 0 and name.len <= maximum_name_length);
+        self.directory_event_sequence +%= 1;
+        if (self.directory_event_sequence == 0) self.directory_event_sequence = 1;
+        const slot: usize = @intCast((self.directory_event_sequence - 1) % maximum_directory_events);
+        self.directory_events[slot] = .{
+            .sequence = self.directory_event_sequence,
+            .directory = directory,
+            .directory_generation = self.nodes[directory].generation,
+            .node = node_index,
+            .generation = self.nodes[node_index].generation,
+            .kind = self.nodes[node_index].kind,
+            .flags = flags,
+            .name_length = @intCast(name.len),
+        };
+        @memcpy(self.directory_events[slot].name[0..name.len], name);
+    }
+
     fn requireAccessNode(self: *const Vfs, node_index: u16, credentials: Ownership, requested: Access) Error!void {
         if (!try self.accessAllowedNode(node_index, credentials, requested)) return Error.PermissionDenied;
     }
@@ -2793,6 +2907,7 @@ pub const Vfs = struct {
         if (self.mountAtNode(node_index) != null) return Error.Busy;
         self.nodes[node_index].changed_tick = tick;
         self.touchDirectoryMutation(parent, tick);
+        self.recordDirectoryChange(parent, node_index, directory_event_removed, self.dentries[entry_index].nameSlice());
         self.detachOrReclaimEntry(entry_index);
         self.mutations +%= 1;
     }
@@ -2837,6 +2952,7 @@ pub const Vfs = struct {
         if (self.mountAtNode(node_index) != null) return Error.Busy;
         if (self.hasOpenReferences(node_index)) return Error.Busy;
         self.touchDirectoryMutation(parent, tick);
+        self.recordDirectoryChange(parent, node_index, directory_event_removed, self.dentries[entry_index].nameSlice());
         self.detachOrReclaimEntry(entry_index);
         self.mutations +%= 1;
     }

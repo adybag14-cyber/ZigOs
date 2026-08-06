@@ -71,7 +71,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.19 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.20 discovery passed\r\n")) {
         return 0xC4;
     }
 
@@ -188,6 +188,42 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
     }
     if (remove_path(range_path) != 0 || !emit("c-sdk: advisory byte-range lock passed\r\n")) {
         return fail(0xB6, "lockrange cleanup");
+    }
+
+    static const char watch_source[] = "/tmp/c-sdk-watch-a";
+    static const char watch_moved[] = "/tmp/c-sdk-watch-b";
+    (void)remove_path(watch_source);
+    (void)remove_path(watch_moved);
+    int64_t watch_directory = zigos_open("/tmp", ZIGOS_OPEN_READ, 0);
+    int64_t watch_fd = watch_directory < 0 ? watch_directory : zigos_watchdir((uint16_t)watch_directory);
+    zigos_poll_descriptor watch_poll = {(uint16_t)(watch_fd < 0 ? 0 : watch_fd), ZIGOS_POLL_READABLE | ZIGOS_POLL_ERROR | ZIGOS_POLL_HANGUP, 0, 0};
+    zigos_directory_event watch_events[4] = {0};
+    if (watch_directory < 0 || watch_fd < 0 ||
+        (int64_t)zigos_syscall6(ZIGOS_SYS_POLL, (uint64_t)(uintptr_t)&watch_poll, 1, 0, 0, 0, 0) != 0 ||
+        zigos_read((uint16_t)watch_fd, watch_events, sizeof(watch_events)) != ZIGOS_ERRNO_WOULD_BLOCK) {
+        return fail(0xB7, "watchdir initial readiness");
+    }
+    int64_t watched_fd = zigos_open(watch_source, ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE | ZIGOS_OPEN_CREATE | ZIGOS_OPEN_TRUNCATE, 0600);
+    if (watched_fd < 0 || zigos_close((uint16_t)watched_fd) != 0) return fail(0xB8, "watchdir create");
+    watch_poll.returned = 0;
+    if ((int64_t)zigos_syscall6(ZIGOS_SYS_POLL, (uint64_t)(uintptr_t)&watch_poll, 1, 0, 0, 0, 0) != 1 ||
+        (watch_poll.returned & ZIGOS_POLL_READABLE) == 0 ||
+        zigos_read((uint16_t)watch_fd, watch_events, sizeof(watch_events)) != (int64_t)sizeof(zigos_directory_event) ||
+        watch_events[0].flags != ZIGOS_DIRECTORY_EVENT_CREATED || !text_equal((const char *)watch_events[0].name, "c-sdk-watch-a")) {
+        return fail(0xB9, "watchdir create event");
+    }
+    if ((int64_t)zigos_syscall6(ZIGOS_SYS_RENAME, (uint64_t)(uintptr_t)watch_source, (uint64_t)(uintptr_t)watch_moved, 0, 0, 0, 0) != 0 ||
+        zigos_read((uint16_t)watch_fd, watch_events, sizeof(watch_events)) != 2 * (int64_t)sizeof(zigos_directory_event) ||
+        watch_events[0].flags != ZIGOS_DIRECTORY_EVENT_RENAME_FROM || watch_events[1].flags != ZIGOS_DIRECTORY_EVENT_RENAME_TO ||
+        !text_equal((const char *)watch_events[0].name, "c-sdk-watch-a") || !text_equal((const char *)watch_events[1].name, "c-sdk-watch-b")) {
+        return fail(0xBA, "watchdir rename events");
+    }
+    if (remove_path(watch_moved) != 0 ||
+        zigos_read((uint16_t)watch_fd, watch_events, sizeof(watch_events)) != (int64_t)sizeof(zigos_directory_event) ||
+        watch_events[0].flags != ZIGOS_DIRECTORY_EVENT_REMOVED || !text_equal((const char *)watch_events[0].name, "c-sdk-watch-b") ||
+        zigos_close((uint16_t)watch_fd) != 0 || zigos_close((uint16_t)watch_directory) != 0 ||
+        !emit("c-sdk: directory watch notifications passed\r\n")) {
+        return fail(0xBB, "watchdir remove/cleanup");
     }
 
     int64_t null_fd = zigos_open("/dev/null", ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE, 0);
@@ -377,7 +413,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xD6, "descriptor fsync/fdatasync");
     }
 
-    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
+    if (!emit("c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/watchdir/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed\r\n")) {
         return 0xD7;
     }
     return 0x57;

@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 19,
+    "minor": 20,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -82,7 +82,8 @@
     "statowner": 123,
     "umask": 124,
     "flock": 125,
-    "lockrange": 126
+    "lockrange": 126,
+    "watchdir": 127
   },
   "errno": {
     "permission": -1,
@@ -184,5 +185,12 @@
     "exclusive": 2,
     "nonblock": 4,
     "unlock": 8
+  },
+  "directory_event_flags": {
+    "created": 0,
+    "removed": 1,
+    "rename_from": 2,
+    "rename_to": 3,
+    "overflow": 4
   }
 }
