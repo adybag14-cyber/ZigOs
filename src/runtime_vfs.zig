@@ -3919,6 +3919,307 @@ test "VFS accepts the full 32 KiB file boundary" {
     try std.testing.expectEqual(maximum_file_size, (try fs.stat(0, "/large.bin")).size);
     try std.testing.expectError(Error.FileTooLarge, fs.putFile(0, "/too-large.bin", &oversized, 0o444, false, 2));
 }
+const namespace_fuzz_directories = [_][]const u8{ "aa", "bb", "cc", "dd" };
+const namespace_fuzz_names = [_][]const u8{ "f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7" };
+const namespace_fuzz_slot_count = namespace_fuzz_directories.len * namespace_fuzz_names.len;
+const namespace_fuzz_steps_per_seed: usize = 512;
+const namespace_fuzz_seeds = [_]u64{
+    0x243F6A8885A308D3,
+    0x13198A2E03707344,
+    0xA4093822299F31D0,
+    0x082EFA98EC4E6C89,
+    0x452821E638D01377,
+    0xBE5466CF34E90C6C,
+    0xC0AC29B7C97C50DD,
+    0x3F84D5B5B5470917,
+};
+
+const NamespaceFuzzSlot = struct {
+    present: bool = false,
+    node: u16 = invalid_node,
+    generation: u16 = 0,
+};
+
+const NamespaceFuzzRng = struct {
+    state: u64,
+
+    fn next(self: *NamespaceFuzzRng) u64 {
+        var value = self.state;
+        value ^= value << 13;
+        value ^= value >> 7;
+        value ^= value << 17;
+        self.state = value;
+        return value;
+    }
+
+    fn index(self: *NamespaceFuzzRng, limit: usize) usize {
+        return @intCast(self.next() % limit);
+    }
+};
+
+fn namespaceFuzzPath(buffer: []u8, slot_index: usize, variant: usize) []const u8 {
+    const directory = namespace_fuzz_directories[slot_index / namespace_fuzz_names.len];
+    const name = namespace_fuzz_names[slot_index % namespace_fuzz_names.len];
+    const normalized = variant % 5;
+    const path = switch (normalized) {
+        0 => std.fmt.bufPrint(buffer, "/{s}/{s}", .{ directory, name }) catch unreachable,
+        1 => std.fmt.bufPrint(buffer, "//{s}///{s}", .{ directory, name }) catch unreachable,
+        2 => std.fmt.bufPrint(buffer, "/{s}/./{s}", .{ directory, name }) catch unreachable,
+        3 => std.fmt.bufPrint(buffer, "{s}/{s}", .{ directory, name }) catch unreachable,
+        4 => std.fmt.bufPrint(buffer, "/{s}/{s}", .{ directory, name }) catch unreachable,
+        else => unreachable,
+    };
+    if (normalized == 4) {
+        for (path) |*byte| byte.* = std.ascii.toUpper(byte.*);
+    }
+    return path;
+}
+
+fn namespaceFuzzCanonicalPath(buffer: []u8, slot_index: usize) []const u8 {
+    const directory = namespace_fuzz_directories[slot_index / namespace_fuzz_names.len];
+    const name = namespace_fuzz_names[slot_index % namespace_fuzz_names.len];
+    return std.fmt.bufPrint(buffer, "/{s}/{s}", .{ directory, name }) catch unreachable;
+}
+
+fn namespaceFuzzMismatch(seed: u64, step: usize, operation: usize, detail: []const u8) error{NamespaceFuzzMismatch} {
+    std.debug.print("G248 namespace fuzz mismatch seed=0x{x:0>16} step={d} op={d}: {s}\n", .{ seed, step, operation, detail });
+    return error.NamespaceFuzzMismatch;
+}
+
+fn namespaceFuzzUnexpectedError(seed: u64, step: usize, operation: usize, action: []const u8, err: anyerror) error{NamespaceFuzzMismatch} {
+    std.debug.print("G248 namespace fuzz unexpected error seed=0x{x:0>16} step={d} op={d} action={s}: {s}\n", .{ seed, step, operation, action, @errorName(err) });
+    return error.NamespaceFuzzMismatch;
+}
+
+fn namespaceFuzzFindPresent(model: *const [namespace_fuzz_slot_count]NamespaceFuzzSlot, start: usize) ?usize {
+    for (0..model.len) |offset| {
+        const index = (start + offset) % model.len;
+        if (model[index].present) return index;
+    }
+    return null;
+}
+
+fn namespaceFuzzCheck(
+    fs: *Vfs,
+    model: *const [namespace_fuzz_slot_count]NamespaceFuzzSlot,
+    seed: u64,
+    step: usize,
+    operation: usize,
+) !void {
+    if (!fs.validate()) return namespaceFuzzMismatch(seed, step, operation, "VFS structural validator failed");
+
+    var occupied: usize = 0;
+    for (model) |slot| {
+        if (slot.present) occupied += 1;
+    }
+    const report = fs.report();
+    if (report.nodes_used != 1 + namespace_fuzz_directories.len + occupied)
+        return namespaceFuzzMismatch(seed, step, operation, "node conservation mismatch");
+    if (report.dentries_used != namespace_fuzz_directories.len + occupied)
+        return namespaceFuzzMismatch(seed, step, operation, "dentry conservation mismatch");
+    if (report.files != occupied or report.directories != 1 + namespace_fuzz_directories.len)
+        return namespaceFuzzMismatch(seed, step, operation, "file/directory accounting mismatch");
+    if (report.open_files != 0 or report.allocated_blocks != 0 or report.dentry_cache_references != 0)
+        return namespaceFuzzMismatch(seed, step, operation, "transient-resource conservation mismatch");
+    if (report.data_lock_outstanding != 0 or report.page_write_lock_outstanding != 0 or report.data_pool_lock_outstanding != 0)
+        return namespaceFuzzMismatch(seed, step, operation, "lock conservation mismatch");
+
+    for (model, 0..) |expected, slot_index| {
+        var path_buffer: [64]u8 = undefined;
+        const path = namespaceFuzzPath(&path_buffer, slot_index, 0);
+        if (expected.present) {
+            const node = fs.resolve(0, path) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "resolve-present", err);
+            if (node != expected.node) return namespaceFuzzMismatch(seed, step, operation, "resolved node identity mismatch");
+            const info = fs.stat(0, path) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "stat-present", err);
+            if (info.node != expected.node or info.generation != expected.generation or info.kind != .file or info.link_count != 1)
+                return namespaceFuzzMismatch(seed, step, operation, "stat identity/generation mismatch");
+            var canonical_buffer: [64]u8 = undefined;
+            const canonical = fs.canonicalPath(node, &canonical_buffer) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "canonical-present", err);
+            var expected_path_buffer: [64]u8 = undefined;
+            const expected_path = namespaceFuzzCanonicalPath(&expected_path_buffer, slot_index);
+            if (!std.mem.eql(u8, canonical, expected_path))
+                return namespaceFuzzMismatch(seed, step, operation, "canonical path mismatch");
+        } else {
+            if (fs.resolve(0, path)) |_| {
+                return namespaceFuzzMismatch(seed, step, operation, "absent model slot unexpectedly resolved");
+            } else |err| {
+                if (err != Error.NotFound) return namespaceFuzzUnexpectedError(seed, step, operation, "resolve-absent", err);
+            }
+        }
+    }
+}
+
+fn runNamespaceStateMachineFuzz(seed: u64) !void {
+    var fs = Vfs.init();
+    for (namespace_fuzz_directories, 0..) |directory, index| {
+        var path_buffer: [16]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buffer, "/{s}", .{directory}) catch unreachable;
+        _ = try fs.mkdir(0, path, 0o755, @intCast(index + 1));
+    }
+
+    var model: [namespace_fuzz_slot_count]NamespaceFuzzSlot = @splat(.{});
+    var rng = NamespaceFuzzRng{ .state = seed };
+    var operation_counts: [10]usize = @splat(0);
+    var source_variant_counts: [5]usize = @splat(0);
+    var destination_variant_counts: [4]usize = @splat(0);
+    var successful_renames: usize = 0;
+    var replacement_renames: usize = 0;
+    var successful_unlinks: usize = 0;
+    try namespaceFuzzCheck(&fs, &model, seed, 0, 0);
+
+    for (0..namespace_fuzz_steps_per_seed) |step| {
+        const operation = rng.index(10);
+        const source_index = rng.index(namespace_fuzz_slot_count);
+        const destination_index = rng.index(namespace_fuzz_slot_count);
+        const source_variant = rng.index(5);
+        const destination_variant = rng.index(4);
+        operation_counts[operation] += 1;
+        source_variant_counts[source_variant] += 1;
+        destination_variant_counts[destination_variant] += 1;
+        const tick: u64 = @intCast(1000 + step);
+        var source_buffer: [64]u8 = undefined;
+        var destination_buffer: [64]u8 = undefined;
+        const source_path = namespaceFuzzPath(&source_buffer, source_index, source_variant);
+        const destination_path = namespaceFuzzPath(&destination_buffer, destination_index, destination_variant);
+
+        switch (operation) {
+            0 => {
+                var create_buffer: [64]u8 = undefined;
+                const create_path = namespaceFuzzPath(&create_buffer, source_index, rng.index(4));
+                if (model[source_index].present) {
+                    if (fs.create(0, create_path, 0o644, tick)) |_| return namespaceFuzzMismatch(seed, step, operation, "create replaced an existing model slot") else |err| {
+                        if (err != Error.AlreadyExists) return namespaceFuzzUnexpectedError(seed, step, operation, "create-existing", err);
+                    }
+                } else {
+                    const node = fs.create(0, create_path, 0o644, tick) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "create-new", err);
+                    const info = fs.stat(0, create_path) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "stat-created", err);
+                    model[source_index] = .{ .present = true, .node = node, .generation = info.generation };
+                }
+            },
+            1 => {
+                if (model[source_index].present) {
+                    const node = fs.resolve(0, source_path) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "resolve-existing", err);
+                    if (node != model[source_index].node) return namespaceFuzzMismatch(seed, step, operation, "path spelling resolved the wrong node");
+                } else {
+                    if (fs.resolve(0, source_path)) |_| return namespaceFuzzMismatch(seed, step, operation, "missing model slot resolved") else |err| {
+                        if (err != Error.NotFound) return namespaceFuzzUnexpectedError(seed, step, operation, "resolve-missing", err);
+                    }
+                }
+            },
+            2 => {
+                const source_before = model[source_index];
+                if (!source_before.present) {
+                    if (fs.rename(0, source_path, destination_path, tick)) |_| return namespaceFuzzMismatch(seed, step, operation, "rename succeeded for absent source") else |err| {
+                        if (err != Error.NotFound) return namespaceFuzzUnexpectedError(seed, step, operation, "rename-absent", err);
+                    }
+                } else {
+                    const destination_before = model[destination_index];
+                    fs.rename(0, source_path, destination_path, tick) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "rename-present", err);
+                    successful_renames += 1;
+                    if (source_index != destination_index) {
+                        if (destination_before.present) replacement_renames += 1;
+                        model[destination_index] = source_before;
+                        model[source_index] = .{};
+                    }
+                }
+            },
+            3 => {
+                if (model[source_index].present) {
+                    fs.unlink(0, source_path, tick) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "unlink-present", err);
+                    successful_unlinks += 1;
+                    model[source_index] = .{};
+                } else {
+                    if (fs.unlink(0, source_path, tick)) |_| return namespaceFuzzMismatch(seed, step, operation, "unlink succeeded for absent model slot") else |err| {
+                        if (err != Error.NotFound) return namespaceFuzzUnexpectedError(seed, step, operation, "unlink-absent", err);
+                    }
+                }
+            },
+            4 => {
+                if (fs.rename(0, "/aa/not-here", destination_path, tick)) |_| return namespaceFuzzMismatch(seed, step, operation, "missing-source rename succeeded") else |err| {
+                    if (err != Error.NotFound) return namespaceFuzzUnexpectedError(seed, step, operation, "rename-missing-source", err);
+                }
+            },
+            5 => {
+                var retained_index = namespaceFuzzFindPresent(&model, source_index);
+                if (retained_index == null) {
+                    var create_buffer: [64]u8 = undefined;
+                    const create_path = namespaceFuzzPath(&create_buffer, source_index, 0);
+                    const node = fs.create(0, create_path, 0o644, tick) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "seed-retained-source", err);
+                    const info = fs.stat(0, create_path) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "stat-retained-source", err);
+                    model[source_index] = .{ .present = true, .node = node, .generation = info.generation };
+                    retained_index = source_index;
+                }
+                var retained_buffer: [64]u8 = undefined;
+                const retained_path = namespaceFuzzPath(&retained_buffer, retained_index.?, rng.index(5));
+                if (fs.rename(0, retained_path, "/missing-parent/f0", tick)) |_| return namespaceFuzzMismatch(seed, step, operation, "rename into missing parent succeeded") else |err| {
+                    if (err != Error.NotFound) return namespaceFuzzUnexpectedError(seed, step, operation, "rename-missing-parent", err);
+                }
+            },
+            6 => {
+                const overlong_component = "/aa/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+                if (fs.resolve(0, overlong_component)) |_| return namespaceFuzzMismatch(seed, step, operation, "overlong component resolved") else |err| {
+                    if (err != Error.NameTooLong) return namespaceFuzzUnexpectedError(seed, step, operation, "resolve-overlong-component", err);
+                }
+                if (fs.unlink(0, overlong_component, tick)) |_| return namespaceFuzzMismatch(seed, step, operation, "overlong component unlinked") else |err| {
+                    if (err != Error.NameTooLong) return namespaceFuzzUnexpectedError(seed, step, operation, "unlink-overlong-component", err);
+                }
+            },
+            7 => {
+                const directory = namespace_fuzz_directories[rng.index(namespace_fuzz_directories.len)];
+                var directory_buffer: [16]u8 = undefined;
+                const directory_path = std.fmt.bufPrint(&directory_buffer, "/{s}", .{directory}) catch unreachable;
+                if (fs.unlink(0, directory_path, tick)) |_| return namespaceFuzzMismatch(seed, step, operation, "unlink removed a directory") else |err| {
+                    if (err != Error.IsDirectory) return namespaceFuzzUnexpectedError(seed, step, operation, "unlink-directory", err);
+                }
+            },
+            8 => {
+                var retained_index = namespaceFuzzFindPresent(&model, source_index);
+                if (retained_index == null) {
+                    var create_buffer: [64]u8 = undefined;
+                    const create_path = namespaceFuzzPath(&create_buffer, source_index, 0);
+                    const node = fs.create(0, create_path, 0o644, tick) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "seed-type-source", err);
+                    const info = fs.stat(0, create_path) catch |err| return namespaceFuzzUnexpectedError(seed, step, operation, "stat-type-source", err);
+                    model[source_index] = .{ .present = true, .node = node, .generation = info.generation };
+                    retained_index = source_index;
+                }
+                var retained_buffer: [64]u8 = undefined;
+                const retained_path = namespaceFuzzPath(&retained_buffer, retained_index.?, rng.index(5));
+                const directory = namespace_fuzz_directories[rng.index(namespace_fuzz_directories.len)];
+                var directory_buffer: [16]u8 = undefined;
+                const directory_path = std.fmt.bufPrint(&directory_buffer, "/{s}", .{directory}) catch unreachable;
+                if (fs.rename(0, retained_path, directory_path, tick)) |_| return namespaceFuzzMismatch(seed, step, operation, "file replaced a directory") else |err| {
+                    if (err != Error.IsDirectory) return namespaceFuzzUnexpectedError(seed, step, operation, "rename-file-over-directory", err);
+                }
+            },
+            9 => {
+                const directory = namespace_fuzz_directories[rng.index(namespace_fuzz_directories.len)];
+                var missing_buffer: [32]u8 = undefined;
+                const missing_path = std.fmt.bufPrint(&missing_buffer, "/{s}/not-here", .{directory}) catch unreachable;
+                if (rng.index(2) == 1) {
+                    for (missing_path) |*byte| byte.* = std.ascii.toUpper(byte.*);
+                }
+                if (fs.resolve(0, missing_path)) |_| return namespaceFuzzMismatch(seed, step, operation, "guaranteed-missing path resolved") else |err| {
+                    if (err != Error.NotFound) return namespaceFuzzUnexpectedError(seed, step, operation, "resolve-guaranteed-missing", err);
+                }
+            },
+            else => unreachable,
+        }
+        try namespaceFuzzCheck(&fs, &model, seed, step, operation);
+    }
+
+    for (operation_counts) |count| {
+        if (count == 0) return namespaceFuzzMismatch(seed, namespace_fuzz_steps_per_seed, 10, "operation class received no coverage");
+    }
+    for (source_variant_counts) |count| {
+        if (count == 0) return namespaceFuzzMismatch(seed, namespace_fuzz_steps_per_seed, 10, "source path spelling received no coverage");
+    }
+    for (destination_variant_counts) |count| {
+        if (count == 0) return namespaceFuzzMismatch(seed, namespace_fuzz_steps_per_seed, 10, "destination path spelling received no coverage");
+    }
+    if (successful_renames == 0 or replacement_renames == 0 or successful_unlinks == 0)
+        return namespaceFuzzMismatch(seed, namespace_fuzz_steps_per_seed, 10, "seed missed successful rename/replacement/unlink coverage");
+}
+
 test "VFS directory mutation rejects cycles and nonempty removal" {
     var fs = Vfs.init();
     const a = try fs.mkdir(0, "/a", 0o755, 1);
@@ -3928,6 +4229,11 @@ test "VFS directory mutation rejects cycles and nonempty removal" {
     try fs.rename(0, "/a/b", "/b", 4);
     try fs.rmdir(0, "/a", 0);
     try std.testing.expectEqual(@as(u16, 1), (try fs.stat(0, "/b")).generation);
+
+    // G248: deterministic model-based fuzzing of resolution, rename/replacement
+    // and unlink. Eight fixed seeds x 512 transitions give 4,096 reproducible
+    // state-machine operations without adding another isolated test declaration.
+    for (namespace_fuzz_seeds) |seed| try runNamespaceStateMachineFuzz(seed);
 }
 
 test "VFS dentry cache references protect pinned entries and invalidate mutations" {
