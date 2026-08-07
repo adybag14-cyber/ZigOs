@@ -439,6 +439,7 @@ fn filePageBytes(address: usize) []u8 {
 pub const Vfs = struct {
     nodes: [maximum_nodes]Node = @splat(.{}),
     data_blocks: [maximum_data_blocks]DataBlock = @splat(.{}),
+    namespace_operation_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
     data_pool_lock: synchronization.TicketLock = synchronization.TicketLock.init(),
     file_page_cache: [maximum_file_page_cache_entries]FilePageCacheEntry = @splat(.{}),
     file_page_cache_allocator: ?FilePageAllocator = null,
@@ -726,6 +727,8 @@ pub const Vfs = struct {
     }
 
     pub fn createOwned(self: *Vfs, cwd: u16, path: []const u8, mode: u16, owner: Ownership, tick: u64) Error!u16 {
+        _ = self.namespace_operation_lock.acquire();
+        defer self.namespace_operation_lock.release();
         const parent_name = try self.parentAndNameAs(cwd, path, owner);
         return self.createNode(parent_name.parent, parent_name.name, .file, mode, false, owner, tick);
     }
@@ -958,6 +961,8 @@ pub const Vfs = struct {
     }
 
     pub fn write(self: *Vfs, cwd: u16, path: []const u8, offset: usize, bytes: []const u8, truncate_first: bool, tick: u64) Error!usize {
+        _ = self.namespace_operation_lock.acquire();
+        defer self.namespace_operation_lock.release();
         const node_index = try self.resolve(cwd, path);
         if (self.nodes[node_index].kind == .pseudo) {
             if (truncate_first) return Error.UnsupportedOperation;
@@ -997,6 +1002,8 @@ pub const Vfs = struct {
     }
 
     pub fn unlinkAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership, tick: u64) Error!void {
+        _ = self.namespace_operation_lock.acquire();
+        defer self.namespace_operation_lock.release();
         const entry_index = try self.entryForPathAs(cwd, path, credentials);
         const node_index = self.dentries[entry_index].node;
         if (self.nodes[node_index].kind == .directory) return Error.IsDirectory;
@@ -1022,6 +1029,8 @@ pub const Vfs = struct {
     }
 
     pub fn renameAs(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, credentials: Ownership, tick: u64) Error!void {
+        _ = self.namespace_operation_lock.acquire();
+        defer self.namespace_operation_lock.release();
         try validatePathBounds(old_path);
         try validatePathBounds(new_path);
         const source_entry = try self.entryForPathAs(cwd, old_path, credentials);
@@ -1837,6 +1846,7 @@ pub const Vfs = struct {
     }
 
     pub fn validate(self: *const Vfs) bool {
+        if (self.namespace_operation_lock.next() != self.namespace_operation_lock.serving()) return false;
         if (self.data_pool_lock.next() != self.data_pool_lock.serving()) return false;
         if (self.file_page_cache_lock.next() != self.file_page_cache_lock.serving()) return false;
         if (!self.nodes[0].used or self.nodes[0].generation == 0 or self.nodes[0].kind != .directory or self.nodes[0].link_count != 1) return false;
@@ -3402,6 +3412,34 @@ const ConcurrentAppendWorker = struct {
     }
 };
 
+const ConcurrentNamespaceWorker = struct {
+    fs: *Vfs,
+    barrier: *synchronization.Barrier,
+    worker_id: u8,
+
+    fn run(worker: ConcurrentNamespaceWorker) void {
+        _ = worker.barrier.wait();
+        var iteration: u8 = 0;
+        while (iteration < 64) : (iteration += 1) {
+            var source_buffer: [32]u8 = undefined;
+            var destination_buffer: [32]u8 = undefined;
+            const source = std.fmt.bufPrint(&source_buffer, "/tmp/g249-{d}-{d}-a", .{ worker.worker_id, iteration }) catch
+                @panic("G249 source path formatting failed");
+            const destination = std.fmt.bufPrint(&destination_buffer, "/tmp/g249-{d}-{d}-b", .{ worker.worker_id, iteration }) catch
+                @panic("G249 destination path formatting failed");
+            const tick = @as(u64, worker.worker_id) * 1000 + iteration + 100;
+            _ = worker.fs.create(0, source, 0o600, tick) catch @panic("G249 concurrent create failed");
+            var payload: [32]u8 = @splat(worker.worker_id);
+            payload[0] = worker.worker_id;
+            payload[1] = iteration;
+            const written = worker.fs.write(0, source, 0, &payload, true, tick + 1) catch @panic("G249 concurrent write failed");
+            if (written != payload.len) @panic("G249 concurrent write was partial");
+            worker.fs.rename(0, source, destination, tick + 2) catch @panic("G249 concurrent rename failed");
+            worker.fs.unlink(0, destination, tick + 3) catch @panic("G249 concurrent unlink failed");
+        }
+    }
+};
+
 test "VFS append writes are atomic across independent concurrent writers" {
     var fs = Vfs.init();
     _ = try fs.mkdir(0, "/tmp", 0o777, 1);
@@ -3453,6 +3491,32 @@ test "VFS append writes are atomic across independent concurrent writers" {
     const after = fs.report();
     try std.testing.expectEqual(@as(u64, expected_records), after_appends.data_lock_tickets - before);
     try std.testing.expectEqual(@as(u64, 0), after.data_lock_outstanding);
+
+    // G249: four host threads contend on the shared bounded namespace and data
+    // allocators. Every cycle must create, write, rename and unlink exactly once.
+    var namespace_barrier = synchronization.Barrier.init(workers).?;
+    const namespace_before = fs.report();
+    const lock_before = fs.namespace_operation_lock.next();
+    for (0..workers) |worker_index| {
+        threads[worker_index] = try std.Thread.spawn(.{}, ConcurrentNamespaceWorker.run, .{ConcurrentNamespaceWorker{
+            .fs = &fs,
+            .barrier = &namespace_barrier,
+            .worker_id = @intCast(worker_index),
+        }});
+    }
+    for (&threads) |*thread| thread.join();
+    const namespace_after = fs.report();
+    const expected_namespace_operations: u32 = @intCast(workers * 64 * 4);
+    try std.testing.expectEqual(@as(u32, 1), namespace_barrier.currentGeneration());
+    try std.testing.expectEqual(expected_namespace_operations, fs.namespace_operation_lock.next() -% lock_before);
+    try std.testing.expectEqual(fs.namespace_operation_lock.next(), fs.namespace_operation_lock.serving());
+    try std.testing.expectEqual(namespace_before.nodes_used, namespace_after.nodes_used);
+    try std.testing.expectEqual(namespace_before.dentries_used, namespace_after.dentries_used);
+    try std.testing.expectEqual(namespace_before.allocated_blocks, namespace_after.allocated_blocks);
+    try std.testing.expectEqual(namespace_before.open_files, namespace_after.open_files);
+    try std.testing.expectEqual(@as(u64, expected_namespace_operations), namespace_after.mutations - namespace_before.mutations);
+    try std.testing.expect(fs.validate());
+
     for (0..workers) |worker_index| try fs.close(@intCast(worker_index + 1), handles[worker_index]);
     try std.testing.expect(fs.validate());
 }
