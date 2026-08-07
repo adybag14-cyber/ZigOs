@@ -226,6 +226,19 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         return fail(0xBB, "watchdir remove/cleanup");
     }
 
+    /* G247 pathname boundary: 255 bytes reaches ordinary lookup, while 256
+       bytes or a 32-byte component returns ENAMETOOLONG before lookup. */
+    static const char exact_path_boundary[] = "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/hhhhhhhhhhhhhhhhhhhhhhhhhhhhhh";
+    static const char overlong_path_boundary[] = "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char overlong_component_path[] = "/missing/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+    zigos_stat boundary_info;
+    if (sizeof(exact_path_boundary) != 256 || sizeof(overlong_path_boundary) != 257 ||
+        zigos_stat_path(exact_path_boundary, &boundary_info) != ZIGOS_ERRNO_NOT_FOUND ||
+        zigos_stat_path(overlong_path_boundary, &boundary_info) != ZIGOS_ERRNO_NAME_TOO_LONG ||
+        zigos_stat_path(overlong_component_path, &boundary_info) != ZIGOS_ERRNO_NAME_TOO_LONG) {
+        return fail(0xBC, "pathname length/component bounds");
+    }
+
     int64_t null_fd = zigos_open("/dev/null", ZIGOS_OPEN_READ | ZIGOS_OPEN_WRITE, 0);
     if (null_fd < 0) {
         return fail(0xC6, "open /dev/null");

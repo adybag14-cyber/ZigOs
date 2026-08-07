@@ -364,7 +364,7 @@ try {
         'faults 1',
         $(if ($Network) { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/62/1 blocked 3/1 wakeups 3/1' } else { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/56/1 blocked 3/1 wakeups 3/1' }),
         'ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes',
-        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5632068 metadata/file/block reads 111/4/113 failures 0 clusters claimed/free/loop/cross/range 11004/5107/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
+        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5633604 metadata/file/block reads 112/4/114 failures 0 clusters claimed/free/loop/cross/range 11007/5104/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
         'ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes',
         'ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 global/mount/immediate/durable/reject 1/2/1/1/0 writeback active no request/complete/pass 1/1/1 immediate/durable/clean/unsupported/failure/stale 1/0/0/0/0/0 pages queued/completed 6/6 payload/header/flush 1/1/2 NVMe read/write/flush ',
         ' errors 0/0 clean yes',

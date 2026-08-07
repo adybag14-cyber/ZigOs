@@ -241,7 +241,9 @@ pub fn spawn(path: []const u8) Error!u32 {
 }
 
 pub fn spawnv(path: []const u8, arguments: []const []const u8, environment: []const []const u8) Error!u32 {
-    if (path.len == 0 or path.len > 255 or arguments.len == 0 or arguments.len > abi.maximum_arguments or
+    if (path.len == 0) return Error.InvalidArgument;
+    if (path.len > 255) return Error.NameTooLong;
+    if (arguments.len == 0 or arguments.len > abi.maximum_arguments or
         environment.len > abi.maximum_environment) return Error.TooBig;
     var argument_descriptors: [abi.maximum_arguments]UserString = @splat(.{ .pointer = 0, .length = 0 });
     var environment_descriptors: [abi.maximum_environment]UserString = @splat(.{ .pointer = 0, .length = 0 });

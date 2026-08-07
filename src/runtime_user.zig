@@ -876,10 +876,7 @@ fn syscallLseek(context: *Context, frame: *interrupt_context.Frame) u64 {
 
 fn syscallMkdir(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const path_length = copyUserPath(context, frame, frame.rdi, &path_buffer) orelse return 0;
     const mode = runtime_abi.mode(frame.rsi) orelse {
         frame.rax = reject(errno_invalid);
         return 0;
@@ -913,10 +910,7 @@ const PathMutation = enum { unlink, rmdir };
 
 fn syscallSinglePathMutation(context: *Context, frame: *interrupt_context.Frame, operation: PathMutation) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const path_length = copyUserPath(context, frame, frame.rdi, &path_buffer) orelse return 0;
     const process = activeProcesses().get(context.handle) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -936,14 +930,8 @@ fn syscallSinglePathMutation(context: *Context, frame: *interrupt_context.Frame,
 fn syscallRename(context: *Context, frame: *interrupt_context.Frame) u64 {
     var old_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
     var new_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const old_length = copyUserString(context, frame.rdi, &old_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
-    const new_length = copyUserString(context, frame.rsi, &new_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const old_length = copyUserPath(context, frame, frame.rdi, &old_buffer) orelse return 0;
+    const new_length = copyUserPath(context, frame, frame.rsi, &new_buffer) orelse return 0;
     const process = activeProcesses().get(context.handle) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -964,10 +952,7 @@ fn syscallRename(context: *Context, frame: *interrupt_context.Frame) u64 {
 
 fn syscallChmod(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const path_length = copyUserPath(context, frame, frame.rdi, &path_buffer) orelse return 0;
     const mode = runtime_abi.mode(frame.rsi) orelse {
         frame.rax = reject(errno_invalid);
         return 0;
@@ -1218,10 +1203,7 @@ fn syscallGetcwd(context: *Context, frame: *interrupt_context.Frame) u64 {
 
 fn syscallChdir(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const path_length = copyUserPath(context, frame, frame.rdi, &path_buffer) orelse return 0;
     const process = activeProcesses().get(context.handle) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -2285,9 +2267,15 @@ fn syscallSpawn(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     };
-    if (path_length == 0 or path_length > runtime_vfs.maximum_path_length or
-        !validateRange(context, frame.rdi, path_length, false))
-    {
+    if (path_length == 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    if (path_length > runtime_vfs.maximum_path_length) {
+        frame.rax = reject(runtime_abi.errno_name_too_long);
+        return 0;
+    }
+    if (!validateRange(context, frame.rdi, path_length, false)) {
         frame.rax = reject(errno_fault);
         return 0;
     }
@@ -2297,6 +2285,14 @@ fn syscallSpawn(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     }
     const path = path_buffer[0..path_length];
+    if (std.mem.indexOfScalar(u8, path, 0) != null) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    runtime_vfs.validatePathBounds(path) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
     const parent = activeProcesses().get(context.handle) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -2347,9 +2343,15 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_fault);
         return 0;
     }
-    if (request.flags != 0 or request.path_length == 0 or
-        request.path_length > runtime_vfs.maximum_path_length or
-        request.argument_count == 0 or request.argument_count > syscall.maximum_arguments or
+    if (request.flags != 0 or request.path_length == 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    if (request.path_length > runtime_vfs.maximum_path_length) {
+        frame.rax = reject(runtime_abi.errno_name_too_long);
+        return 0;
+    }
+    if (request.argument_count == 0 or request.argument_count > syscall.maximum_arguments or
         request.environment_count > syscall.maximum_environment)
     {
         frame.rax = reject(if (request.argument_count > syscall.maximum_arguments or
@@ -2370,6 +2372,10 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     }
+    runtime_vfs.validatePathBounds(path) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
 
     const argument_bytes = @as(usize, request.argument_count) * @sizeOf(runtime_abi.UserString);
     const environment_bytes = @as(usize, request.environment_count) * @sizeOf(runtime_abi.UserString);
@@ -2800,10 +2806,7 @@ fn syscallReadv(
 
 fn syscallOpen(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const path_length = copyUserPath(context, frame, frame.rdi, &path_buffer) orelse return 0;
     const bits = runtime_abi.openFlagBits(frame.rsi) orelse {
         frame.rax = reject(errno_invalid);
         return 0;
@@ -2856,10 +2859,7 @@ fn syscallIoctl(context: *Context, frame: *interrupt_context.Frame) u64 {
 
 fn syscallStat(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const path_length = copyUserPath(context, frame, frame.rdi, &path_buffer) orelse return 0;
     if (!validateRange(context, frame.rsi, @sizeOf(runtime_abi.Stat), true)) {
         frame.rax = reject(errno_fault);
         return 0;
@@ -2911,10 +2911,7 @@ fn filesystemStatFromVfs(info: runtime_vfs.FilesystemStats) runtime_abi.Filesyst
 
 fn syscallStatTimes(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const path_length = copyUserPath(context, frame, frame.rdi, &path_buffer) orelse return 0;
     if (!validateRange(context, frame.rsi, @sizeOf(runtime_abi.FileTimes), true)) {
         frame.rax = reject(errno_fault);
         return 0;
@@ -2943,10 +2940,7 @@ fn syscallStatTimes(context: *Context, frame: *interrupt_context.Frame) u64 {
 
 fn syscallStatOwner(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const path_length = copyUserPath(context, frame, frame.rdi, &path_buffer) orelse return 0;
     if (!validateRange(context, frame.rsi, @sizeOf(runtime_abi.FileOwner), true)) {
         frame.rax = reject(errno_fault);
         return 0;
@@ -2970,10 +2964,7 @@ fn syscallStatOwner(context: *Context, frame: *interrupt_context.Frame) u64 {
 
 fn syscallStatfs(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const path_length = copyUserPath(context, frame, frame.rdi, &path_buffer) orelse return 0;
     if (!validateRange(context, frame.rsi, @sizeOf(runtime_abi.FilesystemStat), true)) {
         frame.rax = reject(errno_fault);
         return 0;
@@ -2997,10 +2988,7 @@ fn syscallStatfs(context: *Context, frame: *interrupt_context.Frame) u64 {
 
 fn syscallOpenAt(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context, frame.rsi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const path_length = copyUserPath(context, frame, frame.rsi, &path_buffer) orelse return 0;
     const bits = runtime_abi.openFlagBits(frame.rdx) orelse {
         frame.rax = reject(errno_invalid);
         return 0;
@@ -3072,10 +3060,7 @@ fn syscallMount(context: *Context, frame: *interrupt_context.Frame) u64 {
     }
 
     var target_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const target_length = copyUserString(context, frame.rsi, &target_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const target_length = copyUserPath(context, frame, frame.rsi, &target_buffer) orelse return 0;
     var filesystem_buffer: [17]u8 = @splat(0);
     const filesystem_length = copyUserString(context, frame.rdx, &filesystem_buffer) orelse {
         frame.rax = reject(errno_fault);
@@ -3123,10 +3108,7 @@ fn syscallUmount(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     }
     var target_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const target_length = copyUserString(context, frame.rdi, &target_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const target_length = copyUserPath(context, frame, frame.rdi, &target_buffer) orelse return 0;
     const mount_id = activeVfs().mountIdAtPath(process.cwd_node, target_buffer[0..target_length]) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -3153,14 +3135,8 @@ fn syscallUmount(context: *Context, frame: *interrupt_context.Frame) u64 {
 fn syscallSymlink(context: *Context, frame: *interrupt_context.Frame) u64 {
     var target_buffer: [runtime_vfs.maximum_symlink_target_length + 1]u8 = @splat(0);
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const target_length = copyUserString(context, frame.rdi, &target_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
-    const path_length = copyUserString(context, frame.rsi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const target_length = copyUserPath(context, frame, frame.rdi, &target_buffer) orelse return 0;
+    const path_length = copyUserPath(context, frame, frame.rsi, &path_buffer) orelse return 0;
     const process = activeProcesses().get(context.handle) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -3182,14 +3158,8 @@ fn syscallSymlink(context: *Context, frame: *interrupt_context.Frame) u64 {
 fn syscallLink(context: *Context, frame: *interrupt_context.Frame) u64 {
     var old_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
     var new_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const old_length = copyUserString(context, frame.rdi, &old_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
-    const new_length = copyUserString(context, frame.rsi, &new_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const old_length = copyUserPath(context, frame, frame.rdi, &old_buffer) orelse return 0;
+    const new_length = copyUserPath(context, frame, frame.rsi, &new_buffer) orelse return 0;
     const process = activeProcesses().get(context.handle) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
@@ -3210,10 +3180,7 @@ fn syscallLink(context: *Context, frame: *interrupt_context.Frame) u64 {
 
 fn syscallReadlink(context: *Context, frame: *interrupt_context.Frame) u64 {
     var path_buffer: [runtime_vfs.maximum_path_length + 1]u8 = @splat(0);
-    const path_length = copyUserString(context, frame.rdi, &path_buffer) orelse {
-        frame.rax = reject(errno_fault);
-        return 0;
-    };
+    const path_length = copyUserPath(context, frame, frame.rdi, &path_buffer) orelse return 0;
     const length: usize = std.math.cast(usize, frame.rdx) orelse {
         frame.rax = reject(errno_invalid);
         return 0;
@@ -3763,16 +3730,48 @@ fn copyToUser(context: *const Context, address: u64, source: []const u8) bool {
     return true;
 }
 
+fn copyUserPath(context: *const Context, frame: *interrupt_context.Frame, address: u64, destination: []u8) ?usize {
+    if (destination.len != runtime_vfs.maximum_path_length + 1) {
+        frame.rax = reject(errno_invalid);
+        return null;
+    }
+    for (0..destination.len) |index| {
+        var byte: [1]u8 = undefined;
+        const virtual = std.math.add(u64, address, index) catch {
+            frame.rax = reject(errno_fault);
+            return null;
+        };
+        if (!copyFromUser(context, virtual, &byte)) {
+            frame.rax = reject(errno_fault);
+            return null;
+        }
+        if (byte[0] == 0) {
+            runtime_vfs.validatePathBounds(destination[0..index]) catch |err| {
+                frame.rax = reject(runtime_abi.fromError(err));
+                return null;
+            };
+            return index;
+        }
+        if (index == destination.len - 1) {
+            frame.rax = reject(runtime_abi.errno_name_too_long);
+            return null;
+        }
+        destination[index] = byte[0];
+    }
+    unreachable;
+}
+
 fn copyUserString(context: *const Context, address: u64, destination: []u8) ?usize {
     if (destination.len == 0) return null;
-    for (0..destination.len - 1) |index| {
+    for (0..destination.len) |index| {
         var byte: [1]u8 = undefined;
         const virtual = std.math.add(u64, address, index) catch return null;
         if (!copyFromUser(context, virtual, &byte)) return null;
         if (byte[0] == 0) return index;
+        if (index == destination.len - 1) return null;
         destination[index] = byte[0];
     }
-    return null;
+    unreachable;
 }
 
 fn appendOutput(context: *Context, bytes: []const u8) void {

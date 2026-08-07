@@ -292,6 +292,29 @@ fn run(auxv: [*]const zigos.AuxvEntry) zigos.Error!void {
     try zigos.close(watch_directory);
     try zigos.writeAll(1, watchdir_message);
 
+    // G247: every user pathname is fully bounded before lookup. Exactly 255
+    // bytes is accepted and reaches ordinary ENOENT resolution; byte 256 and
+    // any 32-byte component must report ENAMETOOLONG instead of EFAULT/ENOENT.
+    const exact_path_boundary = "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/hhhhhhhhhhhhhhhhhhhhhhhhhhhhhh";
+    const overlong_path_boundary = "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const overlong_component_path = "/missing/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+    var boundary_info: zigos.Stat = undefined;
+    if (zigos.stat(exact_path_boundary, &boundary_info)) |_| return error.InvalidArgument else |err| {
+        if (err != error.NotFound) return err;
+    }
+    if (zigos.stat(overlong_path_boundary, &boundary_info)) |_| return error.InvalidArgument else |err| {
+        if (err != error.NameTooLong) return err;
+    }
+    if (zigos.stat(overlong_component_path, &boundary_info)) |_| return error.InvalidArgument else |err| {
+        if (err != error.NameTooLong) return err;
+    }
+    if (zigos.spawn(overlong_path_boundary[0..])) |_| return error.InvalidArgument else |err| {
+        if (err != error.NameTooLong) return err;
+    }
+    if (zigos.spawnv(overlong_path_boundary[0..], &.{"missing"}, &.{})) |_| return error.InvalidArgument else |err| {
+        if (err != error.NameTooLong) return err;
+    }
+
     var bytes: [128]u8 = undefined;
     const count = try zigos.read(fd, &bytes);
     if (count < 5 or !contains(bytes[0..count], "ZigOs")) return error.InvalidArgument;

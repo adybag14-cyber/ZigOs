@@ -148,6 +148,24 @@ pub fn applyCreationUmask(mode: u16, mask: u16) u16 {
     return (mode & special_mode_mask) | ((mode & permission_mode_mask) & (~mask & permission_mode_mask));
 }
 
+/// Validate the bounded pathname representation before any namespace lookup or
+/// mutation. This deliberately scans every component first so an overlong
+/// later component cannot be hidden by an earlier missing entry or permission
+/// failure. Empty paths remain valid for the resolver's existing cwd semantics.
+pub fn validatePathBounds(path: []const u8) Error!void {
+    if (path.len > maximum_path_length) return Error.PathTooLong;
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return Error.InvalidPath;
+
+    var position: usize = 0;
+    while (position < path.len) {
+        while (position < path.len and path[position] == '/') position += 1;
+        if (position >= path.len) break;
+        const start = position;
+        while (position < path.len and path[position] != '/') position += 1;
+        if (position - start > maximum_name_length) return Error.NameTooLong;
+    }
+}
+
 pub const Access = struct {
     read: bool = false,
     write: bool = false,
@@ -717,6 +735,8 @@ pub const Vfs = struct {
     }
 
     pub fn linkAs(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, credentials: Ownership, tick: u64) Error!u16 {
+        try validatePathBounds(old_path);
+        try validatePathBounds(new_path);
         const node_index = try self.resolveNoFollowAs(cwd, old_path, credentials);
         const node = &self.nodes[node_index];
         if (node.kind == .directory) return Error.IsDirectory;
@@ -741,8 +761,9 @@ pub const Vfs = struct {
     }
 
     pub fn symlinkOwned(self: *Vfs, cwd: u16, target: []const u8, path: []const u8, owner: Ownership, tick: u64) Error!u16 {
-        if (target.len == 0 or std.mem.indexOfScalar(u8, target, 0) != null) return Error.InvalidPath;
-        if (target.len > maximum_symlink_target_length) return Error.PathTooLong;
+        if (target.len == 0) return Error.InvalidPath;
+        try validatePathBounds(target);
+        try validatePathBounds(path);
         const parent_name = try self.parentAndNameAs(cwd, path, owner);
         const node_index = try self.createNode(parent_name.parent, parent_name.name, .symlink, 0o777, false, owner, tick);
         @memcpy(self.nodes[node_index].symlink_data[0..target.len], target);
@@ -1001,6 +1022,8 @@ pub const Vfs = struct {
     }
 
     pub fn renameAs(self: *Vfs, cwd: u16, old_path: []const u8, new_path: []const u8, credentials: Ownership, tick: u64) Error!void {
+        try validatePathBounds(old_path);
+        try validatePathBounds(new_path);
         const source_entry = try self.entryForPathAs(cwd, old_path, credentials);
         const source = self.dentries[source_entry].node;
         const source_parent = self.dentries[source_entry].parent;
@@ -2087,12 +2110,12 @@ pub const Vfs = struct {
     }
 
     fn resolveInternalAs(self: *Vfs, cwd: u16, path: []const u8, follow_final: bool, depth: usize, credentials: Ownership) Error!u16 {
+        try validatePathBounds(path);
         if (path.len == 0) {
             const directory = try self.validateDirectory(cwd);
             try self.requireAccessNode(directory, credentials, .{ .execute = true });
             return directory;
         }
-        if (path.len > maximum_path_length) return Error.PathTooLong;
         var current: u16 = if (path[0] == '/') 0 else try self.validateDirectory(cwd);
         var position: usize = 0;
         while (position < path.len) {
@@ -2101,7 +2124,6 @@ pub const Vfs = struct {
             const start = position;
             while (position < path.len and path[position] != '/') position += 1;
             const component = path[start..position];
-            if (component.len > maximum_name_length) return Error.NameTooLong;
             if (self.nodes[current].kind != .directory) return Error.NotDirectory;
             try self.requireAccessNode(current, credentials, .{ .execute = true });
             if (std.mem.eql(u8, component, ".")) continue;
@@ -2307,14 +2329,14 @@ pub const Vfs = struct {
     }
 
     fn parentAndNameAs(self: *Vfs, cwd: u16, path: []const u8, credentials: Ownership) Error!ParentName {
-        if (path.len == 0 or path.len > maximum_path_length) return if (path.len == 0) Error.InvalidPath else Error.PathTooLong;
+        try validatePathBounds(path);
+        if (path.len == 0) return Error.InvalidPath;
         var end = path.len;
         while (end > 1 and path[end - 1] == '/') end -= 1;
         const trimmed = path[0..end];
         const separator = std.mem.lastIndexOfScalar(u8, trimmed, '/');
         const name = if (separator) |position| trimmed[position + 1 ..] else trimmed;
         if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return Error.InvalidPath;
-        if (name.len > maximum_name_length) return Error.NameTooLong;
         const parent_path = if (separator) |position| blk: {
             if (position == 0) break :blk "/";
             break :blk trimmed[0..position];
@@ -3334,6 +3356,33 @@ test "VFS resolves absolute relative dot and parent paths" {
     try std.testing.expectEqual(user, try fs.resolve(home, "user"));
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings("/home/user", try fs.canonicalPath(user, &buffer));
+
+    // G247 freezes both bounds before lookup. A legal 255-byte pathname must
+    // reach ordinary resolution, while byte 256 and any 32-byte component are
+    // rejected even when an earlier component is missing.
+    var boundary: [maximum_path_length]u8 = undefined;
+    var cursor: usize = 0;
+    for (0..8) |component_index| {
+        boundary[cursor] = '/';
+        cursor += 1;
+        const component_length: usize = if (component_index == 7) maximum_name_length - 1 else maximum_name_length;
+        @memset(boundary[cursor .. cursor + component_length], @as(u8, 'a') + @as(u8, @intCast(component_index)));
+        cursor += component_length;
+    }
+    try std.testing.expectEqual(maximum_path_length, cursor);
+    try validatePathBounds(&boundary);
+    try std.testing.expectError(Error.NotFound, fs.resolve(0, &boundary));
+
+    var overlong_path: [maximum_path_length + 1]u8 = undefined;
+    @memcpy(overlong_path[0..maximum_path_length], &boundary);
+    overlong_path[maximum_path_length] = '/';
+    try std.testing.expectError(Error.PathTooLong, validatePathBounds(&overlong_path));
+    try std.testing.expectError(Error.PathTooLong, fs.resolve(0, &overlong_path));
+    try std.testing.expectError(Error.NameTooLong, validatePathBounds("/missing/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    try std.testing.expectError(Error.NameTooLong, fs.resolve(0, "/missing/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    try std.testing.expectError(Error.NameTooLong, fs.rename(0, "/missing", "/missing/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 3));
+    try std.testing.expectError(Error.NameTooLong, fs.link(0, "/missing", "/missing/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 4));
+    try std.testing.expectError(Error.NameTooLong, fs.symlink(0, "/missing/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "/home/link", 5));
 }
 
 const ConcurrentAppendWorker = struct {
