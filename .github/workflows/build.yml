@@ -77,7 +77,7 @@ jobs:
         shell: pwsh
         run: .\scripts\test-runtime.ps1 -TimeoutSeconds 180 -Network
 
-      - name: Prove x86-64 NVMe persistence across two boots
+      - name: Prove x86-64 NVMe persistence and block-corruption recovery
         shell: pwsh
         run: python .\scripts\test-x86_64-persistence.py --skip-build --boot-timeout 220
 

@@ -227,7 +227,9 @@ pub const Store = struct {
             self.record_count = candidate.record_count;
             self.payload_length = candidate.payload_length;
             self.payload_version = candidate.format_version;
-            if ((first == .invalid or second == .invalid) or
+            const first_rejected = first != .absent and first_valid == null;
+            const second_rejected = second != .absent and second_valid == null;
+            if (first_rejected or second_rejected or
                 (first_valid != null and second_valid != null and first_valid.?.generation != second_valid.?.generation))
             {
                 self.recoveries +%= 1;
@@ -1716,4 +1718,31 @@ test "mount falls back to the previous valid generation" {
     try std.testing.expectEqualStrings("one", try recovered_vfs.readOnlyView(0, "/persist/value"));
     try std.testing.expectEqual(@as(u64, 1), recovered.report().generation);
     try std.testing.expectEqual(@as(u64, 1), recovered.report().recoveries);
+    try std.testing.expectEqual(@as(u64, 1), recovered.report().corrupt_headers);
+
+    // G250 also rejects a newest slot whose header is structurally valid but
+    // whose payload block no longer matches the committed CRC. Recreate the
+    // two-generation disk, corrupt one byte in slot 1's first payload sector,
+    // and require the same generation-1 fallback plus recovery accounting.
+    var payload_disk: TestDisk = .{};
+    const payload_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(payload_vfs);
+    payload_vfs.initialize();
+    var payload_store: Store = .{};
+    try payload_store.mount(payload_vfs, payload_disk.device(), 1);
+    _ = try payload_vfs.putFile(0, "/persist/value", "one", 0o644, false, 2);
+    try payload_store.sync(payload_vfs);
+    _ = try payload_vfs.putFile(0, "/persist/value", "two", 0o644, false, 3);
+    try payload_store.sync(payload_vfs);
+    const payload_lba = payload_disk.device().first_lba + slotPayloadStart(512, 1);
+    payload_disk.blocks[payload_lba][4] ^= 0xA5;
+    const payload_recovered_vfs = try std.testing.allocator.create(runtime_vfs.Vfs);
+    defer std.testing.allocator.destroy(payload_recovered_vfs);
+    payload_recovered_vfs.initialize();
+    var payload_recovered: Store = .{};
+    try payload_recovered.mount(payload_recovered_vfs, payload_disk.device(), 4);
+    try std.testing.expectEqualStrings("one", try payload_recovered_vfs.readOnlyView(0, "/persist/value"));
+    try std.testing.expectEqual(@as(u64, 1), payload_recovered.report().generation);
+    try std.testing.expectEqual(@as(u64, 1), payload_recovered.report().recoveries);
+    try std.testing.expectEqual(@as(u64, 0), payload_recovered.report().corrupt_headers);
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove global sync, fsync and fdatasync across four independent x86-64 boots."""
+"""Prove four-boot persistence plus block-level A/B journal corruption recovery."""
 
 from __future__ import annotations
 
@@ -243,6 +243,42 @@ def run_boot(
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     process.terminate()
+
+
+def corrupt_block_byte(
+    image: pathlib.Path,
+    lba: int,
+    byte_offset: int,
+    *,
+    xor_mask: int = 0xA5,
+    block_size: int = 512,
+) -> tuple[str, str]:
+    if byte_offset < 0 or byte_offset >= block_size:
+        raise RuntimeError(f"corruption byte offset {byte_offset} was outside one {block_size}-byte block")
+    with image.open("r+b") as stream:
+        stream.seek(lba * block_size)
+        before = bytearray(stream.read(block_size))
+        if len(before) != block_size:
+            raise RuntimeError(f"corruption target LBA {lba} was truncated")
+        after = bytearray(before)
+        after[byte_offset] ^= xor_mask
+        differences = [index for index, (old, new) in enumerate(zip(before, after)) if old != new]
+        if differences != [byte_offset]:
+            raise RuntimeError(f"corruption mutation changed unexpected byte set: {differences}")
+        stream.seek(lba * block_size)
+        stream.write(after)
+        stream.flush()
+        os.fsync(stream.fileno())
+    before_hash = hashlib.sha256(before).hexdigest()
+    after_hash = hashlib.sha256(after).hexdigest()
+    if before_hash == after_hash:
+        raise RuntimeError("corruption mutation did not change the target block hash")
+    return before_hash, after_hash
+
+
+def slot_payload_lba(first_lba: int, slot: int, block_size: int = 512) -> int:
+    payload_sectors = (PERSIST_MAX_PAYLOAD_BYTES + block_size - 1) // block_size
+    return first_lba + PERSIST_PAYLOAD_OFFSET_SECTORS + slot * payload_sectors
 
 
 def parse_header(image: pathlib.Path, first_lba: int, slot: int, block_size: int = 512) -> Header | None:
@@ -568,6 +604,95 @@ def main() -> int:
         if header_a.record_count != 8 or header_b.record_count != 3:
             raise RuntimeError(f"unexpected final A/B record counts: A={header_a}, B={header_b}")
 
+        # G250: mutate exactly one physical block in two independent copies of
+        # the healthy A=3/B=4 image. The newest slot B must be rejected and the
+        # older slot A generation 3 restored in both cases.
+        header_corrupt_image = work / "persistent-header-corrupt.img"
+        payload_corrupt_image = work / "persistent-payload-corrupt.img"
+        shutil.copyfile(image, header_corrupt_image)
+        shutil.copyfile(image, payload_corrupt_image)
+
+        newest_slot = header_b.slot
+        if newest_slot != 1 or header_b.generation != 4:
+            raise RuntimeError(f"G250 expected newest slot B generation 4, got {header_b}")
+        header_lba = data_first_lba + newest_slot
+        payload_lba = slot_payload_lba(data_first_lba, newest_slot)
+        header_block_before, header_block_after = corrupt_block_byte(header_corrupt_image, header_lba, 40)
+        payload_block_before, payload_block_after = corrupt_block_byte(payload_corrupt_image, payload_lba, 4)
+
+        # The healthy older generation remains independently parseable in both
+        # copies before boot. The header-corrupt newest slot must fail host CRC
+        # parsing; the payload-corrupt newest header remains structurally valid.
+        header_fallback = parse_header(header_corrupt_image, data_first_lba, 0)
+        payload_fallback = parse_header(payload_corrupt_image, data_first_lba, 0)
+        if header_fallback is None or payload_fallback is None or header_fallback.generation != 3 or payload_fallback.generation != 3:
+            raise RuntimeError("G250 corruption copies lost the older valid generation 3 slot")
+        try:
+            parse_header(header_corrupt_image, data_first_lba, newest_slot)
+        except RuntimeError as error:
+            if "header CRC mismatch" not in str(error):
+                raise
+        else:
+            raise RuntimeError("G250 header corruption did not invalidate the newest header CRC")
+        payload_newest = parse_header(payload_corrupt_image, data_first_lba, newest_slot)
+        if payload_newest is None or payload_newest.generation != 4:
+            raise RuntimeError("G250 payload corruption unexpectedly invalidated the newest header")
+        try:
+            parse_records(payload_corrupt_image, data_first_lba, payload_newest)
+        except RuntimeError as error:
+            if "payload CRC mismatch" not in str(error):
+                raise
+        else:
+            raise RuntimeError("G250 payload corruption did not invalidate the newest payload CRC")
+
+        header_corrupt_hash = sha256(header_corrupt_image)
+        header_recovery_text = run_boot(
+            boot_number=5,
+            qemu=qemu,
+            code_source=code_source,
+            vars_source=vars_source,
+            work=work,
+            image=header_corrupt_image,
+            boot_timeout=args.boot_timeout,
+            commands=[
+                ("cat /persist/config/message.txt", "survived-generation-one"),
+                ("shutdown", "ZigOs persistent storage: mounted yes generation/slot 3/0"),
+            ],
+            required_markers=[
+                "ZigOs persistent storage: mounted yes generation/slot 3/0 records/payload 8/",
+                "mounts/syncs/checks/recoveries 1/0/0/1",
+                "errors 0/1 clean no",
+            ],
+        )
+        if "survived-generation-four" in header_recovery_text:
+            raise RuntimeError("G250 header-corruption recovery exposed rejected generation-4 data")
+        if sha256(header_corrupt_image) != header_corrupt_hash:
+            raise RuntimeError("G250 header-corruption recovery unexpectedly rewrote the damaged image")
+
+        payload_corrupt_hash = sha256(payload_corrupt_image)
+        payload_recovery_text = run_boot(
+            boot_number=6,
+            qemu=qemu,
+            code_source=code_source,
+            vars_source=vars_source,
+            work=work,
+            image=payload_corrupt_image,
+            boot_timeout=args.boot_timeout,
+            commands=[
+                ("cat /persist/config/message.txt", "survived-generation-one"),
+                ("shutdown", "ZigOs persistent storage: mounted yes generation/slot 3/0"),
+            ],
+            required_markers=[
+                "ZigOs persistent storage: mounted yes generation/slot 3/0 records/payload 8/",
+                "mounts/syncs/checks/recoveries 1/0/0/1",
+                "errors 0/0 clean no",
+            ],
+        )
+        if "survived-generation-four" in payload_recovery_text:
+            raise RuntimeError("G250 payload-corruption recovery exposed rejected generation-4 data")
+        if sha256(payload_corrupt_image) != payload_corrupt_hash:
+            raise RuntimeError("G250 payload-corruption recovery unexpectedly rewrote the damaged image")
+
         summary = {
             "initial_sha256": initial_hash,
             "after_boot1_sha256": after_first_hash,
@@ -586,13 +711,37 @@ def main() -> int:
             "generation2_target_owner": generation_two_target.owner,
             "generation3_target_owner": generation_three_target.owner,
             "boot4_serial_bytes": len(fourth_text.encode("utf-8")),
+            "g250_header_corruption": {
+                "lba": header_lba,
+                "byte_offset": 40,
+                "block_sha256_before": header_block_before,
+                "block_sha256_after": header_block_after,
+                "image_sha256": header_corrupt_hash,
+                "recovered_generation": 3,
+                "recoveries": 1,
+                "corrupt_headers": 1,
+            },
+            "g250_payload_corruption": {
+                "lba": payload_lba,
+                "byte_offset": 4,
+                "block_sha256_before": payload_block_before,
+                "block_sha256_after": payload_block_after,
+                "image_sha256": payload_corrupt_hash,
+                "recovered_generation": 3,
+                "recoveries": 1,
+                "corrupt_headers": 0,
+            },
+            "boot5_header_recovery_serial_bytes": len(header_recovery_text.encode("utf-8")),
+            "boot6_payload_recovery_serial_bytes": len(payload_recovery_text.encode("utf-8")),
         }
         (work / "result.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8", newline="\n")
-        print("Persistent x86-64 NVMe four-boot fsync/fdatasync session passed.")
+        print("Persistent x86-64 NVMe four-boot fsync/fdatasync plus block-corruption recovery session passed.")
         print("  boot 1: slot A generation 1, records 8")
         print("  boot 2 crash: slot B generation 2, records 8 (fsync data and metadata)")
         print("  boot 3 crash: slot A generation 3, records 8 (fdatasync data only)")
         print(f"  boot 4: slot B generation {header_b.generation}, records {header_b.record_count}")
+        print(f"  G250 header corruption: LBA {header_lba} byte 40 -> generation 3 recovery, corrupt_headers 1")
+        print(f"  G250 payload corruption: LBA {payload_lba} byte 4 -> generation 3 recovery, corrupt_headers 0")
         print(f"  image SHA-256: {initial_hash[:12]} -> {after_first_hash[:12]} -> {after_second_hash[:12]} -> {after_third_hash[:12]} -> {after_fourth_hash[:12]}")
         return 0
     finally:
