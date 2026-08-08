@@ -61,6 +61,7 @@ The model does not currently defend against malicious kernel code, compromised f
 - Directory notification storage is globally bounded to 64 VFS mutation records; each watch consumes only an existing descriptor/open-description slot and reports overflow when retention is exceeded.
 - Shutdown validation requires zero retained userspace contexts, descriptors and owned pages.
 - The diagnostic shutdown path performs a bounded quiescence and terminal-child reap rather than accepting delayed lifecycle leaks.
+- G258 makes shell command status explicit control data. Foreground children contribute their exact 32-bit kernel wait status; shell-generated failures use bounded 0/1/2/127 values, and the `status` builtin exposes only the immediately previous parsed command status. This status is not an authorization signal, is not persisted, and currently drives no conditional execution because `&&`/`||` and command lists remain separate later goals.
 
 ### Filesystem and persistence
 

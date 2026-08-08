@@ -222,6 +222,13 @@ def main() -> int:
             send(client, process, serial, "rm /persist/shell-state/renamed.txt", PROMPT_ROOT)
             send(client, process, serial, "rmdir /persist/shell-state", PROMPT_ROOT)
             send(client, process, serial, "run hello", b"process 3 exited 42", 40)
+            send(client, process, serial, "status", b"\r\n42\r\n")
+            send(client, process, serial, "missing-g258-command", b"run: not found")
+            send(client, process, serial, "status", b"\r\n127\r\n")
+            send(client, process, serial, "cd /missing-g258-directory", b"cd: not found")
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            send(client, process, serial, "pwd", b"\r\n/\r\n")
+            send(client, process, serial, "status", b"\r\n0\r\n")
             send(client, process, serial, "cp /bin/sdk.elf /persist/persist-sdk.elf", sdk_copy_marker.encode("ascii"), 40)
             send(client, process, serial, "sync", b"writable mounts synchronized", 40)
             send(client, process, serial, "persist-sdk alpha beta", b"process 4 exited 86", 40)
@@ -240,6 +247,9 @@ def main() -> int:
                 "ZigOs userspace shell PID 2",
                 "hello from VFS-loaded CPL3 ELF64",
                 "process 3 exited 42",
+                "status               print previous command status",
+                "run: not found",
+                "cd: not found",
                 sdk_copy_marker,
                 "writable mounts synchronized",
                 "zig-sdk: envp/auxv passed",

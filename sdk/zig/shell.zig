@@ -3,6 +3,10 @@ const zigos = @import("zigos.zig");
 const maximum_line: usize = 512;
 const maximum_words: usize = 8;
 const maximum_path: usize = 255;
+const status_success: u32 = 0;
+const status_failure: u32 = 1;
+const status_usage: u32 = 2;
+const status_command_not_found: u32 = 127;
 
 var startup_environment: [*]const usize = undefined;
 
@@ -46,6 +50,7 @@ const help_text =
     "chmod MODE PATH      change permission bits\r\n" ++
     "sync                 commit /persist to NVMe\r\n" ++
     "pid                  print the shell PID\r\n" ++
+    "status               print previous command status\r\n" ++
     "run PROGRAM [ARGS]   spawn with argv/env and wait\r\n" ++
     "shutdown             exit PID 2 and stop ZigOs\r\n";
 
@@ -64,11 +69,12 @@ pub export fn zigos_main(
 }
 
 fn shellLoop() void {
+    var last_status: u32 = status_success;
     while (true) {
         printPrompt();
         var command: Command = .{};
         const count = zigos.read(0, command.storage[0..maximum_line]) catch |err| {
-            printError("read", err);
+            _ = printError("read", err);
             continue;
         };
         if (count == 0) {
@@ -77,7 +83,7 @@ fn shellLoop() void {
         }
         parseCommand(&command, count);
         if (command.count == 0) continue;
-        execute(&command);
+        last_status = execute(&command, last_status);
     }
 }
 
@@ -112,75 +118,87 @@ fn parseCommand(command: *Command, received: usize) void {
     }
 }
 
-fn execute(command: *const Command) void {
+fn execute(command: *const Command, previous_status: u32) u32 {
     const name = command.slice(0);
     if (equal(name, "help")) {
-        zigos.writeAll(1, help_text) catch {};
+        zigos.writeAll(1, help_text) catch return status_failure;
+        return status_success;
     } else if (equal(name, "echo")) {
-        commandEcho(command);
+        return commandEcho(command);
     } else if (equal(name, "pwd")) {
-        commandPwd();
+        return commandPwd();
     } else if (equal(name, "cd")) {
         if (command.count != 2) return usage("cd PATH");
         zigos.chdir(command.sentinel(1)) catch |err| return printError("cd", err);
+        return status_success;
     } else if (equal(name, "ls")) {
         if (command.count > 2) return usage("ls [PATH]");
-        commandLs(if (command.count == 2) command.sentinel(1) else ".");
+        return commandLs(if (command.count == 2) command.sentinel(1) else ".");
     } else if (equal(name, "cat")) {
         if (command.count != 2) return usage("cat PATH");
-        commandCat(command.sentinel(1));
+        return commandCat(command.sentinel(1));
     } else if (equal(name, "cp")) {
         if (command.count != 3) return usage("cp SOURCE DESTINATION");
-        commandCp(command.sentinel(1), command.sentinel(2));
+        return commandCp(command.sentinel(1), command.sentinel(2));
     } else if (equal(name, "write") or equal(name, "append")) {
         if (command.count < 3) return usage(if (equal(name, "append")) "append PATH TEXT..." else "write PATH TEXT...");
-        commandWrite(command, equal(name, "append"));
+        return commandWrite(command, equal(name, "append"));
     } else if (equal(name, "mkdir")) {
         if (command.count != 2) return usage("mkdir PATH");
         zigos.mkdir(command.sentinel(1), 0o755) catch |err| return printError("mkdir", err);
+        return status_success;
     } else if (equal(name, "rm")) {
         if (command.count != 2) return usage("rm PATH");
         zigos.unlink(command.sentinel(1)) catch |err| return printError("rm", err);
+        return status_success;
     } else if (equal(name, "rmdir")) {
         if (command.count != 2) return usage("rmdir PATH");
         zigos.rmdir(command.sentinel(1)) catch |err| return printError("rmdir", err);
+        return status_success;
     } else if (equal(name, "mv")) {
         if (command.count != 3) return usage("mv SOURCE DESTINATION");
         zigos.rename(command.sentinel(1), command.sentinel(2)) catch |err| return printError("mv", err);
+        return status_success;
     } else if (equal(name, "chmod")) {
         if (command.count != 3) return usage("chmod MODE PATH");
         const mode = parseOctal(command.slice(1)) orelse return usage("chmod MODE PATH");
         zigos.chmod(command.sentinel(2), mode) catch |err| return printError("chmod", err);
+        return status_success;
     } else if (equal(name, "sync")) {
-        commandSync();
+        return commandSync();
     } else if (equal(name, "pid")) {
-        commandPid();
+        return commandPid();
+    } else if (equal(name, "status")) {
+        if (command.count != 1) return usage("status");
+        return commandStatus(previous_status);
     } else if (equal(name, "run")) {
         if (command.count < 2) return usage("run PROGRAM [ARGS...]");
-        commandRun(command, 1);
+        return commandRun(command, 1);
     } else if (equal(name, "shutdown") or equal(name, "exit")) {
         requestShutdown();
     } else {
-        commandRun(command, 0);
+        return commandRun(command, 0);
     }
 }
 
-fn commandEcho(command: *const Command) void {
+fn commandEcho(command: *const Command) u32 {
     for (1..command.count) |index| {
-        if (index != 1) zigos.writeAll(1, " ") catch {};
-        zigos.writeAll(1, command.slice(index)) catch {};
+        if (index != 1) zigos.writeAll(1, " ") catch return status_failure;
+        zigos.writeAll(1, command.slice(index)) catch return status_failure;
     }
-    zigos.writeAll(1, "\r\n") catch {};
+    zigos.writeAll(1, "\r\n") catch return status_failure;
+    return status_success;
 }
 
-fn commandPwd() void {
+fn commandPwd() u32 {
     var path: [maximum_path + 1]u8 = @splat(0);
     const cwd = zigos.getcwd(&path) catch |err| return printError("pwd", err);
-    zigos.writeAll(1, cwd) catch {};
-    zigos.writeAll(1, "\r\n") catch {};
+    zigos.writeAll(1, cwd) catch return status_failure;
+    zigos.writeAll(1, "\r\n") catch return status_failure;
+    return status_success;
 }
 
-fn commandLs(path: [*:0]const u8) void {
+fn commandLs(path: [*:0]const u8) u32 {
     const fd = zigos.open(path, .{ .read = true }, 0) catch |err| return printError("ls", err);
     defer zigos.close(fd) catch {};
     var entries: [8]zigos.DirectoryEntry = undefined;
@@ -188,25 +206,27 @@ fn commandLs(path: [*:0]const u8) void {
         const count = zigos.getdents(fd, &entries) catch |err| return printError("ls", err);
         if (count == 0) break;
         for (entries[0..count]) |entry| {
-            zigos.writeAll(1, entry.name[0..entry.name_length]) catch {};
-            if (entry.kind == 1) zigos.writeAll(1, "/") catch {};
-            zigos.writeAll(1, "\r\n") catch {};
+            zigos.writeAll(1, entry.name[0..entry.name_length]) catch return status_failure;
+            if (entry.kind == 1) zigos.writeAll(1, "/") catch return status_failure;
+            zigos.writeAll(1, "\r\n") catch return status_failure;
         }
     }
+    return status_success;
 }
 
-fn commandCat(path: [*:0]const u8) void {
+fn commandCat(path: [*:0]const u8) u32 {
     const fd = zigos.open(path, .{ .read = true }, 0) catch |err| return printError("cat", err);
     defer zigos.close(fd) catch {};
     var bytes: [512]u8 = undefined;
     while (true) {
         const count = zigos.read(fd, &bytes) catch |err| return printError("cat", err);
         if (count == 0) break;
-        zigos.writeAll(1, bytes[0..count]) catch return;
+        zigos.writeAll(1, bytes[0..count]) catch return status_failure;
     }
+    return status_success;
 }
 
-fn commandCp(source: [*:0]const u8, destination: [*:0]const u8) void {
+fn commandCp(source: [*:0]const u8, destination: [*:0]const u8) u32 {
     const source_fd = zigos.open(source, .{ .read = true }, 0) catch |err| return printError("cp", err);
     defer zigos.close(source_fd) catch {};
     var info: zigos.Stat = undefined;
@@ -226,12 +246,13 @@ fn commandCp(source: [*:0]const u8, destination: [*:0]const u8) void {
         zigos.writeAll(destination_fd, bytes[0..count]) catch |err| return printError("cp", err);
         total += count;
     }
-    zigos.writeAll(1, "copied ") catch {};
+    zigos.writeAll(1, "copied ") catch return status_failure;
     writeDecimal(total);
-    zigos.writeAll(1, " bytes\r\n") catch {};
+    zigos.writeAll(1, " bytes\r\n") catch return status_failure;
+    return status_success;
 }
 
-fn commandWrite(command: *const Command, append: bool) void {
+fn commandWrite(command: *const Command, append: bool) u32 {
     const fd = zigos.open(
         command.sentinel(1),
         .{ .write = true, .create = true, .truncate = !append, .append = append },
@@ -243,42 +264,58 @@ fn commandWrite(command: *const Command, append: bool) void {
         zigos.writeAll(fd, command.slice(index)) catch |err| return printError("write", err);
     }
     zigos.writeAll(fd, "\n") catch |err| return printError("write", err);
+    return status_success;
 }
 
-fn commandSync() void {
+fn commandSync() u32 {
     zigos.sync() catch |err| return printError("sync", err);
-    zigos.writeAll(1, "writable mounts synchronized\r\n") catch {};
+    zigos.writeAll(1, "writable mounts synchronized\r\n") catch return status_failure;
+    return status_success;
 }
 
-fn commandPid() void {
+fn commandPid() u32 {
     const pid = zigos.getpid() catch |err| return printError("pid", err);
     writeDecimal(pid);
-    zigos.writeAll(1, "\r\n") catch {};
+    zigos.writeAll(1, "\r\n") catch return status_failure;
+    return status_success;
 }
 
-fn commandRun(command: *const Command, program_index: usize) void {
+fn commandStatus(previous_status: u32) u32 {
+    writeDecimal(previous_status);
+    zigos.writeAll(1, "\r\n") catch return status_failure;
+    return status_success;
+}
+
+fn commandRun(command: *const Command, program_index: usize) u32 {
     const program = command.slice(program_index);
     const extra_count = command.count - program_index - 1;
     if (extra_count + 1 > zigos.constants.maximum_arguments) {
         zigos.writeAll(2, "run: too many arguments\r\n") catch {};
-        return;
+        return status_usage;
     }
     var arguments: [zigos.constants.maximum_arguments][]const u8 = undefined;
     for (0..extra_count) |index| arguments[index + 1] = command.slice(program_index + 1 + index);
     var environment_storage: [zigos.constants.maximum_environment][]const u8 = undefined;
     const environment = zigos.collectEnvironment(startup_environment, &environment_storage) orelse {
         zigos.writeAll(2, "run: invalid inherited environment\r\n") catch {};
-        return;
+        return status_failure;
     };
     var path_storage: [maximum_path + 1]u8 = @splat(0);
-    const pid = spawnFromPath(program, &path_storage, &arguments, extra_count, environment) catch |err| return printError("run", err);
+    const pid = spawnFromPath(program, &path_storage, &arguments, extra_count, environment) catch |err| {
+        _ = printError("run", err);
+        return switch (err) {
+            error.NotFound => status_command_not_found,
+            else => status_failure,
+        };
+    };
     var status: zigos.WaitStatus = undefined;
     _ = zigos.wait(pid, false, &status) catch |err| return printError("wait", err);
-    zigos.writeAll(1, "process ") catch {};
+    zigos.writeAll(1, "process ") catch return status_failure;
     writeDecimal(status.pid);
-    zigos.writeAll(1, " exited ") catch {};
+    zigos.writeAll(1, " exited ") catch return status_failure;
     writeDecimal(status.exit_status);
-    zigos.writeAll(1, "\r\n") catch {};
+    zigos.writeAll(1, "\r\n") catch return status_failure;
+    return status.exit_status;
 }
 
 fn executableName(path: []const u8) []const u8 {
@@ -349,23 +386,25 @@ fn indexOfScalar(bytes: []const u8, value: u8) ?usize {
 fn requestShutdown() noreturn {
     zigos.writeAll(1, "userspace shell requested shutdown\r\n") catch {};
     zigos.shutdown() catch |err| {
-        printError("shutdown", err);
+        _ = printError("shutdown", err);
         while (true) zigos.yield() catch {};
     };
     while (true) asm volatile ("pause");
 }
 
-fn usage(text: []const u8) void {
+fn usage(text: []const u8) u32 {
     zigos.writeAll(2, "usage: ") catch {};
     zigos.writeAll(2, text) catch {};
     zigos.writeAll(2, "\r\n") catch {};
+    return status_usage;
 }
 
-fn printError(operation: []const u8, err: zigos.Error) void {
+fn printError(operation: []const u8, err: zigos.Error) u32 {
     zigos.writeAll(2, operation) catch {};
     zigos.writeAll(2, ": ") catch {};
     zigos.writeAll(2, errorName(err)) catch {};
     zigos.writeAll(2, "\r\n") catch {};
+    return status_failure;
 }
 
 fn errorName(err: zigos.Error) []const u8 {
