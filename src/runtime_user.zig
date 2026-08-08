@@ -283,6 +283,20 @@ pub fn spawnWithEnvironment(
     tick: u64,
     registers: SpawnRegisters,
 ) !u64 {
+    return spawnWithEnvironmentGroup(parent_handle, name, arguments, environment, cwd_node, image_bytes, tick, registers, .inherit);
+}
+
+fn spawnWithEnvironmentGroup(
+    parent_handle: u64,
+    name: []const u8,
+    arguments: []const []const u8,
+    environment: []const []const u8,
+    cwd_node: u16,
+    image_bytes: []const u8,
+    tick: u64,
+    registers: SpawnRegisters,
+    group: runtime_process.SpawnGroup,
+) !u64 {
     if (!initialized) return error.NotInitialized;
     if (arguments.len == 0 or arguments.len > syscall.maximum_arguments) return error.TooManyArguments;
     if (environment.len > syscall.maximum_environment) return error.TooManyArguments;
@@ -293,23 +307,17 @@ pub fn spawnWithEnvironment(
     const parent = try processes.get(parent_handle);
     // G242 stores setuid/setgid as inode metadata only. Process creation never
     // consumes executable mode/owner metadata; children inherit caller credentials.
-    const handle = try processes.spawn(
-        parent_handle,
-        .userspace,
-        name,
-        arguments,
-        cwd_node,
-        parent.uid,
-        parent.gid,
-        tick,
-        .{
-            .maximum_pages = maximum_mappings + maximum_page_tables + 3,
-            .maximum_descriptors = runtime_fd.maximum_descriptors_per_process,
-            .maximum_sockets = maximum_socket_slots,
-            .maximum_children = maximum_contexts - 1,
-            .maximum_cpu_ticks = 100_000,
-        },
-    );
+    const limits = runtime_process.Limits{
+        .maximum_pages = maximum_mappings + maximum_page_tables + 3,
+        .maximum_descriptors = runtime_fd.maximum_descriptors_per_process,
+        .maximum_sockets = maximum_socket_slots,
+        .maximum_children = maximum_contexts - 1,
+        .maximum_cpu_ticks = 100_000,
+    };
+    const handle = switch (group) {
+        .inherit => try processes.spawn(parent_handle, .userspace, name, arguments, cwd_node, parent.uid, parent.gid, tick, limits),
+        .new_pipeline, .join_pipeline => try processes.spawnPipeline(parent_handle, .userspace, name, arguments, cwd_node, parent.uid, parent.gid, tick, limits, group),
+    };
     errdefer rollbackProcess(parent_handle, handle);
     _ = try activeDescriptors().cloneProcess(processes, parent_handle, handle);
 
@@ -2343,7 +2351,38 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_fault);
         return 0;
     }
-    if (request.flags != 0 or request.path_length == 0) {
+    const spawn_group: runtime_process.SpawnGroup = switch (request.flags) {
+        0 => blk: {
+            if (frame.rsi != 0) {
+                frame.rax = reject(errno_invalid);
+                return 0;
+            }
+            break :blk .inherit;
+        },
+        runtime_abi.spawn_new_process_group => blk: {
+            if (frame.rsi != 0) {
+                frame.rax = reject(errno_invalid);
+                return 0;
+            }
+            break :blk .new_pipeline;
+        },
+        runtime_abi.spawn_join_process_group => blk: {
+            const requested_group = std.math.cast(u32, frame.rsi) orelse {
+                frame.rax = reject(errno_invalid);
+                return 0;
+            };
+            if (requested_group == 0) {
+                frame.rax = reject(errno_invalid);
+                return 0;
+            }
+            break :blk .{ .join_pipeline = requested_group };
+        },
+        else => {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        },
+    };
+    if (request.path_length == 0) {
         frame.rax = reject(errno_invalid);
         return 0;
     }
@@ -2456,7 +2495,7 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     }
-    const handle = spawnWithEnvironment(
+    const handle = spawnWithEnvironmentGroup(
         context.handle,
         name,
         arguments[0..request.argument_count],
@@ -2465,6 +2504,7 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
         image_bytes,
         current_tick,
         .{},
+        spawn_group,
     ) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;

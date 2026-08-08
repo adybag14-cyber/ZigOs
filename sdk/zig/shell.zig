@@ -4,6 +4,7 @@ const maximum_line: usize = 512;
 const maximum_words: usize = 8;
 const maximum_conditional_commands: usize = 4;
 const maximum_sequential_lists: usize = 4;
+const maximum_pipeline_stages: usize = 4;
 const maximum_path: usize = 255;
 const status_success: u32 = 0;
 const status_failure: u32 = 1;
@@ -13,8 +14,8 @@ const status_command_not_found: u32 = 127;
 var startup_environment: [*]const usize = undefined;
 
 const Word = struct {
-    start: usize = 0,
-    length: usize = 0,
+    start: u16 = 0,
+    length: u16 = 0,
 };
 
 const Command = struct {
@@ -24,11 +25,13 @@ const Command = struct {
 
     fn slice(self: *const Command, index: usize) []const u8 {
         const word = self.words[index];
-        return self.storage[word.start .. word.start + word.length];
+        const start: usize = word.start;
+        const length: usize = word.length;
+        return self.storage[start .. start + length];
     }
 
     fn sentinel(self: *const Command, index: usize) [*:0]const u8 {
-        return @ptrCast(&self.storage[self.words[index].start]);
+        return @ptrCast(&self.storage[@as(usize, self.words[index].start)]);
     }
 };
 
@@ -38,9 +41,14 @@ const ConditionalOperator = enum {
     or_if,
 };
 
+const Pipeline = struct {
+    stages: [maximum_pipeline_stages]Command = @splat(.{}),
+    count: usize = 0,
+};
+
 const ConditionalCommand = struct {
     operator: ConditionalOperator = .always,
-    command: Command = .{},
+    pipeline: Pipeline = .{},
 };
 
 const ConditionalList = struct {
@@ -178,19 +186,40 @@ fn parseConditionalList(list: *ConditionalList, storage: []u8, segment_start: us
         if (list.count >= maximum_conditional_commands - 1) return false;
         storage[scan] = 0;
         storage[scan + 1] = 0;
-        var command: Command = .{ .storage = storage };
-        if (!parseCommandSegment(&command, command_start, scan)) return false;
-        list.commands[list.count] = .{ .operator = next_operator, .command = command };
+        var pipeline: Pipeline = .{};
+        if (!parsePipelineSegment(&pipeline, storage, command_start, scan)) return false;
+        list.commands[list.count] = .{ .operator = next_operator, .pipeline = pipeline };
         list.count += 1;
         next_operator = operator.?;
         scan += 2;
         command_start = scan;
     }
 
-    var command: Command = .{ .storage = storage };
-    if (!parseCommandSegment(&command, command_start, segment_end)) return false;
-    list.commands[list.count] = .{ .operator = next_operator, .command = command };
+    var pipeline: Pipeline = .{};
+    if (!parsePipelineSegment(&pipeline, storage, command_start, segment_end)) return false;
+    list.commands[list.count] = .{ .operator = next_operator, .pipeline = pipeline };
     list.count += 1;
+    return true;
+}
+
+fn parsePipelineSegment(pipeline: *Pipeline, storage: []u8, segment_start: usize, segment_end: usize) bool {
+    if (!segmentHasContent(storage, segment_start, segment_end)) return false;
+    var stage_start = segment_start;
+    var scan = segment_start;
+    while (scan < segment_end) : (scan += 1) {
+        if (storage[scan] != '|') continue;
+        if (pipeline.count >= maximum_pipeline_stages - 1) return false;
+        storage[scan] = 0;
+        var command: Command = .{ .storage = storage };
+        if (!parseCommandSegment(&command, stage_start, scan)) return false;
+        pipeline.stages[pipeline.count] = command;
+        pipeline.count += 1;
+        stage_start = scan + 1;
+    }
+    var command: Command = .{ .storage = storage };
+    if (!parseCommandSegment(&command, stage_start, segment_end)) return false;
+    pipeline.stages[pipeline.count] = command;
+    pipeline.count += 1;
     return true;
 }
 
@@ -205,7 +234,7 @@ fn parseCommandSegment(command: *Command, segment_start: usize, segment_end: usi
         if (command.count == maximum_words) return false;
         const start = index;
         while (index < segment_end and !isSpace(command.storage[index])) : (index += 1) {}
-        command.words[command.count] = .{ .start = start, .length = index - start };
+        command.words[command.count] = .{ .start = @intCast(start), .length = @intCast(index - start) };
         command.count += 1;
         if (index < segment_end) {
             command.storage[index] = 0;
@@ -231,9 +260,93 @@ fn executeConditionalList(list: *const ConditionalList, previous_status: u32) u3
             .and_if => status == status_success,
             .or_if => status != status_success,
         };
-        if (should_execute) status = execute(&entry.command, status);
+        if (should_execute) status = executePipeline(&entry.pipeline, status);
     }
     return status;
+}
+
+fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
+    if (pipeline.count == 1) return execute(&pipeline.stages[0], previous_status);
+    for (pipeline.stages[0..pipeline.count]) |stage| {
+        if (isBuiltin(stage.slice(0))) {
+            zigos.writeAll(2, "pipeline: external stages only until descriptor pipelines land\r\n") catch {};
+            return status_usage;
+        }
+    }
+
+    var environment_storage: [zigos.constants.maximum_environment][]const u8 = undefined;
+    const environment = zigos.collectEnvironment(startup_environment, &environment_storage) orelse {
+        zigos.writeAll(2, "pipeline: invalid inherited environment\r\n") catch {};
+        return status_failure;
+    };
+    var pids: [maximum_pipeline_stages]u32 = @splat(0);
+    var process_group: u32 = 0;
+    var spawned: usize = 0;
+    for (pipeline.stages[0..pipeline.count], 0..) |*stage, stage_index| {
+        var arguments: [zigos.constants.maximum_arguments][]const u8 = undefined;
+        if (stage.count > arguments.len) {
+            reapPipelineChildren(&pids, spawned);
+            return usage("pipeline stage [ARGS...]");
+        }
+        for (stage.words[0..stage.count], 0..) |_, index| arguments[index] = stage.slice(index);
+        var path_storage: [maximum_path + 1]u8 = @splat(0);
+        const pid = spawnFromPathPipeline(
+            stage.slice(0),
+            &path_storage,
+            &arguments,
+            stage.count - 1,
+            environment,
+            if (stage_index == 0) null else process_group,
+        ) catch |err| {
+            reapPipelineChildren(&pids, spawned);
+            _ = printError("pipeline", err);
+            return if (err == error.NotFound) status_command_not_found else status_failure;
+        };
+        pids[stage_index] = pid;
+        spawned += 1;
+        if (stage_index == 0) process_group = pid;
+    }
+
+    zigos.writeAll(1, "pipeline group ") catch {
+        reapPipelineChildren(&pids, spawned);
+        return status_failure;
+    };
+    writeDecimal(process_group);
+    zigos.writeAll(1, " stages ") catch {
+        reapPipelineChildren(&pids, spawned);
+        return status_failure;
+    };
+    writeDecimal(pipeline.count);
+    zigos.writeAll(1, "\r\n") catch {
+        reapPipelineChildren(&pids, spawned);
+        return status_failure;
+    };
+
+    var final_status: u32 = status_success;
+    for (pids[0..spawned], 0..) |pid, index| {
+        var status: zigos.WaitStatus = undefined;
+        _ = zigos.wait(pid, false, &status) catch |err| {
+            _ = printError("pipeline wait", err);
+            return status_failure;
+        };
+        if (index + 1 == spawned) final_status = status.exit_status;
+    }
+    return final_status;
+}
+
+fn reapPipelineChildren(pids: *const [maximum_pipeline_stages]u32, count: usize) void {
+    for (pids[0..count]) |pid| {
+        var status: zigos.WaitStatus = undefined;
+        _ = zigos.wait(pid, false, &status) catch {};
+    }
+}
+
+fn isBuiltin(name: []const u8) bool {
+    return equal(name, "help") or equal(name, "echo") or equal(name, "pwd") or equal(name, "cd") or
+        equal(name, "ls") or equal(name, "cat") or equal(name, "cp") or equal(name, "write") or
+        equal(name, "append") or equal(name, "mkdir") or equal(name, "rm") or equal(name, "rmdir") or
+        equal(name, "mv") or equal(name, "chmod") or equal(name, "sync") or equal(name, "pid") or
+        equal(name, "status") or equal(name, "run") or equal(name, "shutdown") or equal(name, "exit");
 }
 
 fn conditionalSyntaxError() u32 {
@@ -472,6 +585,47 @@ fn spawnFromPath(
             const path = buildExecutablePath(directory, program, path_storage) orelse return error.NameTooLong;
             arguments[0] = executableName(path);
             const candidate: ?u32 = zigos.spawnv(path, arguments[0 .. extra_count + 1], environment) catch |err| switch (err) {
+                error.NotFound => null,
+                else => return err,
+            };
+            if (candidate) |pid| return pid;
+        }
+        if (separator == remaining.len) break;
+        start += separator + 1;
+    }
+    return error.NotFound;
+}
+
+fn spawnFromPathPipeline(
+    program: []const u8,
+    path_storage: *[maximum_path + 1]u8,
+    arguments: *[zigos.constants.maximum_arguments][]const u8,
+    extra_count: usize,
+    environment: []const []const u8,
+    process_group: ?u32,
+) zigos.Error!u32 {
+    if (program.len == 0) return error.InvalidArgument;
+    if (containsScalar(program, '/')) {
+        const path = buildExecutablePath("", program, path_storage) orelse return error.NameTooLong;
+        arguments[0] = executableName(path);
+        return if (process_group) |group|
+            zigos.spawnvInProcessGroup(path, arguments[0 .. extra_count + 1], environment, group)
+        else
+            zigos.spawnvNewProcessGroup(path, arguments[0 .. extra_count + 1], environment);
+    }
+    const path_value = zigos.environmentValue(startup_environment, "PATH") orelse "/bin:/persist";
+    var start: usize = 0;
+    while (start <= path_value.len) {
+        const remaining = path_value[start..];
+        const separator = indexOfScalar(remaining, ':') orelse remaining.len;
+        const directory = remaining[0..separator];
+        if (directory.len != 0) {
+            const path = buildExecutablePath(directory, program, path_storage) orelse return error.NameTooLong;
+            arguments[0] = executableName(path);
+            const candidate: ?u32 = (if (process_group) |group|
+                zigos.spawnvInProcessGroup(path, arguments[0 .. extra_count + 1], environment, group)
+            else
+                zigos.spawnvNewProcessGroup(path, arguments[0 .. extra_count + 1], environment)) catch |err| switch (err) {
                 error.NotFound => null,
                 else => return err,
             };

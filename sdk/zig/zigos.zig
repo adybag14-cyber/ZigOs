@@ -241,10 +241,25 @@ pub fn spawn(path: []const u8) Error!u32 {
 }
 
 pub fn spawnv(path: []const u8, arguments: []const []const u8, environment: []const []const u8) Error!u32 {
+    return spawnvWithGroup(path, arguments, environment, 0, 0);
+}
+
+pub fn spawnvNewProcessGroup(path: []const u8, arguments: []const []const u8, environment: []const []const u8) Error!u32 {
+    return spawnvWithGroup(path, arguments, environment, abi.spawn_new_process_group, 0);
+}
+
+pub fn spawnvInProcessGroup(path: []const u8, arguments: []const []const u8, environment: []const []const u8, process_group: u32) Error!u32 {
+    if (process_group == 0) return Error.InvalidArgument;
+    return spawnvWithGroup(path, arguments, environment, abi.spawn_join_process_group, process_group);
+}
+
+fn spawnvWithGroup(path: []const u8, arguments: []const []const u8, environment: []const []const u8, flags: u16, process_group: u32) Error!u32 {
     if (path.len == 0) return Error.InvalidArgument;
     if (path.len > 255) return Error.NameTooLong;
     if (arguments.len == 0 or arguments.len > abi.maximum_arguments or
         environment.len > abi.maximum_environment) return Error.TooBig;
+    if (flags != 0 and flags != abi.spawn_new_process_group and flags != abi.spawn_join_process_group) return Error.InvalidArgument;
+    if ((flags == abi.spawn_join_process_group) != (process_group != 0)) return Error.InvalidArgument;
     var argument_descriptors: [abi.maximum_arguments]UserString = @splat(.{ .pointer = 0, .length = 0 });
     var environment_descriptors: [abi.maximum_environment]UserString = @splat(.{ .pointer = 0, .length = 0 });
     for (arguments, 0..) |argument, index| {
@@ -263,8 +278,9 @@ pub fn spawnv(path: []const u8, arguments: []const []const u8, environment: []co
         .path_length = @intCast(path.len),
         .argument_count = @intCast(arguments.len),
         .environment_count = @intCast(environment.len),
+        .flags = flags,
     };
-    return @intCast(try result(zigos_syscall6(abi.syscall_spawnv, ptrValue(&request), 0, 0, 0, 0, 0)));
+    return @intCast(try result(zigos_syscall6(abi.syscall_spawnv, ptrValue(&request), process_group, 0, 0, 0, 0)));
 }
 
 pub fn wait(pid: u32, nohang: bool, status: *WaitStatus) Error!u32 {

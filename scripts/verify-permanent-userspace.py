@@ -277,7 +277,7 @@ def main() -> int:
     require(normal_boot_test, "ZigOs userspace init PID 1", "normal QEMU gate requires a real CPL3 PID 1")
     require(normal_boot_test, "userspace init reaped shell PID 2 status 0", "normal QEMU gate requires PID 1 supervision and reap")
     require(normal_boot_test, "process 3 exited 42", "normal QEMU gate proves userspace shell spawn/wait")
-    require(normal_boot_test, "alloc/free 140/140 cache-released 13 storage persistent clean yes", "normal QEMU gate requires exact physical reclamation and persistent mode")
+    require(normal_boot_test, "alloc/free 179/179 cache-released 16 storage persistent clean yes", "normal QEMU gate requires exact physical reclamation and persistent mode")
     require(normal_boot_test, "forbidden", "normal QEMU gate rejects diagnostic proof markers")
     require(kernel, "continuing normal boot with embedded assets and RAM-backed root", "normal boot no longer hard-fails without permanent storage")
     require(runtime, "diskless-ram-root", "normal shutdown distinguishes the diskless recovery profile")
@@ -287,8 +287,8 @@ def main() -> int:
     require(diskless_normal_boot_test, '"sync: unsupported",', "diskless gate forbids regression to persistence-gated global sync")
     require(diskless_normal_boot_test, "storage diskless-ram-root cleanup yes", "diskless QEMU gate requires clean resource reclamation")
     require(runtime, "ZigOs shutdown drain:", "diagnostic shutdown drains and reaps delayed terminal userspace")
-    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 20:
-        raise SystemExit("permanent-userspace contract missing: ABI version 1.20")
+    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 21:
+        raise SystemExit("permanent-userspace contract missing: ABI version 1.21")
     expected_fs_syscalls = {"lseek": 98, "mkdir": 99, "unlink": 100, "rmdir": 101, "rename": 102, "chmod": 103}
     expected_network_syscalls = {"sendto": 104, "recvfrom": 105, "getpeername": 106, "setnonblock": 107}
     expected_platform_syscalls = {"ioctl": 108, "stat": 109, "openat": 110, "fsync": 111, "symlink": 112, "readlink": 113, "link": 114, "fallocate": 115, "readv": 116, "writev": 117, "fdatasync": 118, "mount": 119, "umount": 120, "statfs": 121, "stattimes": 122, "statowner": 123, "umask": 124, "flock": 125, "lockrange": 126, "watchdir": 127}
@@ -298,9 +298,11 @@ def main() -> int:
     network_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_network_syscalls.items())
     platform_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_platform_syscalls.items())
     if not core_numbering_valid or not fs_numbering_valid or not network_numbering_valid or not platform_numbering_valid:
-        raise SystemExit("permanent-userspace contract missing: ABI 1.20 syscall numbering")
+        raise SystemExit("permanent-userspace contract missing: ABI 1.21 syscall numbering")
     if abi_spec.get("message_flags") != {"dontwait": 1}:
         raise SystemExit("permanent-userspace contract missing: bounded MSG_DONTWAIT value")
+    if abi_spec.get("spawn_flags") != {"new_process_group": 0, "join_process_group": 1}:
+        raise SystemExit("permanent-userspace contract missing: ABI 1.21 pipeline spawn flag values")
     if abi_spec.get("fallocate_flags") != {"keep_size": 0, "punch_hole": 1}:
         raise SystemExit("permanent-userspace contract missing: bounded fallocate mode values")
     if abi_spec.get("mount_flags") != {"read_only": 0}:
@@ -577,7 +579,7 @@ def main() -> int:
     require(io_error_boot_test, "metadata/file/block reads 112/3/113 failures 1", "QEMU requires exact failed-read and retry accounting")
     require(io_error_boot_test, 'str(work / "zig-cache")', "FAT EIO private-prefix build isolates its local Zig cache")
     require(readonly_remount_boot_test, 'str(work / "zig-cache")', "persistent fail-stop private-prefix build isolates its local Zig cache")
-    require(io_error_boot_test, "10916/5195/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes", "G247 EIO recovery retains measured private-build FAT ownership")
+    require(io_error_boot_test, "10933/5178/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes", "G247 EIO recovery retains measured private-build FAT ownership")
     require(build_graph, '"nvme-write-fault-lba"', "build graph exposes the disabled-by-default persistent write-error target")
     require(kernel, "NVMe one-shot write error armed:", "test build arms persistent write failure only after boot-time inspection")
     require(runtime, "fn persistenceDamageClean", "normal shutdown accepts one classified contained persistent write failure at any prior generation")
@@ -598,16 +600,16 @@ def main() -> int:
     require(readonly_remount_boot_test, "append: read-only filesystem", "retained mutation paths are rejected after fail-stop remount")
     require(readonly_remount_boot_test, "damaged yes reason payload_write remounts/failures 1/0 discarded/rejected 1/1", "QEMU requires exact damage and remount conservation")
     require(readonly_remount_boot_test, "vfs-remount/discard 1/1 mount-readonly yes clean yes", "VFS and persistence remount accounting must agree exactly")
-    require(readonly_remount_boot_test, "10916/5195/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G247 contained persistent-write profile retains measured private-build FAT ownership")
-    require(readonly_remount_boot_test, "alloc/free 60/60 cache-released 10 storage persistent-read-only clean yes", "contained normal boot balances every measured resource")
+    require(readonly_remount_boot_test, "10933/5178/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G247 contained persistent-write profile retains measured private-build FAT ownership")
+    require(readonly_remount_boot_test, "alloc/free 64/64 cache-released 12 storage persistent-read-only clean yes", "contained normal boot balances every measured resource")
     require(runtime_test, "cat /boot/README.TXT", "diagnostic QEMU reads a root file after NVMe handoff")
     require(runtime_test, "cat /boot/EFI/BOOT/BOOT.CFG", "diagnostic QEMU reads a nested file after NVMe handoff")
     require(runtime_test, "stat /boot/EFI/BOOT/BOOTX64.EFI", "diagnostic QEMU stats the multi-mebibyte boot image without RAM-copying it")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 54 failed 0", "offline diagnostic profile requires the expanded block-backed FAT command matrix")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 56 failed 0", "live diagnostic profile requires the expanded block-backed FAT command matrix")
-    require(runtime_test, "11015/5096/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both G247 diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
+    require(runtime_test, "11034/5077/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both G247 diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
     require(normal_boot_test, "ZigOs boot FAT: block-backed yes files/directories 3/2", "persistent normal boot requires a clean real block-backed /boot")
-    require(normal_boot_test, "10916/5195/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G250 normal QEMU requires exact FAT ownership with zero classified corruption")
+    require(normal_boot_test, "10933/5178/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G250 normal QEMU requires exact FAT ownership with zero classified corruption")
     require(diskless_normal_boot_test, "ZigOs boot FAT: block-backed no files/directories 0/0", "diskless normal boot requires an explicitly absent backend and fallback namespace")
     require(diskless_normal_boot_test, "0/0/0/0/0 lock tickets/outstanding 0/0 quarantine state/reason/events no/none/0 clean yes", "diskless fallback has no FAT ownership or classified corruption state")
     for script_text, profile in (
@@ -721,7 +723,11 @@ def main() -> int:
     require(build_graph, "sdk/c/conformance.c", "build graph compiles an independent freestanding C conformance program")
     require(build_graph, '"artifacts/c-sdk.elf"', "C SDK conformance is installed as a standalone artifact")
     require(runtime, '"/bin/c-sdk.elf"', "C SDK conformance is installed in the runtime VFS")
-    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(20)", "generated C header publishes ABI 1.20")
+    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(21)", "generated C header publishes ABI 1.21")
+    require(c_header, "ZIGOS_SPAWN_NEW_PROCESS_GROUP", "generated C header publishes the ABI 1.21 new-pipeline-group flag")
+    require(c_header, "ZIGOS_SPAWN_JOIN_PROCESS_GROUP", "generated C header publishes the ABI 1.21 join-pipeline-group flag")
+    require(sdk_abi, "pub const SpawnRequest = extern struct", "ABI 1.21 retains the generated public spawn request structure")
+    require(sdk_abi, "environment_pointer: u64,\n    path_length: u16,\n    argument_count: u16,\n    environment_count: u16,\n    flags: u16 = 0,", "ABI 1.21 keeps the 24-byte pointer prefix plus 8-byte scalar tail of the 32-byte SpawnRequest")
     require(c_header, "ZIGOS_MAP_SHARED", "generated C header publishes shared file-mapping flags")
     require(c_header, "zigos_mmap_file", "generated C header declares file-backed mmap")
     require(c_library, "zigos_mmap_file", "C wrapper library exposes file-backed mmap")
@@ -1212,8 +1218,8 @@ def main() -> int:
     require(workflow, "test-boot-fat-io-error.py --boot-timeout 240", "hosted integration runs the block-read EIO and retry gate")
     require(workflow, "test-persistent-readonly-remount.py --boot-timeout 240", "hosted integration runs the persistent fail-stop read-only remount gate")
     require(readme, "248/248 canonical host-test executions across all 102 unique isolated-test declarations", "README carries the clean canonical execution and declaration counts")
-    require(readme, "Size:    5,637,632 bytes", "README carries the reproducible G260 ABI 1.20 EFI size")
-    require(readme, "SHA-256: 5B1E036A759EC105A5984CFA4DAE03A6F7AB7FDEB9A19C51576ED070D1D1F6EC", "README carries the reproducible G260 ABI 1.20 EFI hash")
+    require(readme, "Size:    5,647,360 bytes", "README carries the reproducible G261 ABI 1.21 EFI size")
+    require(readme, "SHA-256: 71A7F6949B256EE6FAA3909467F9663654E3F44E49703079D61AD0DD58541958", "README carries the reproducible G261 ABI 1.21 EFI hash")
     require(readme, "Persistent NVMe write-error read-only-remount profile", "README documents the required fail-stop profile")
     require(readme, "discarded/rejected 1/1 vfs-remount/discard 1/1 mount-readonly yes clean yes", "README freezes exact G229 containment telemetry")
     require(priority, "248/248 canonical host-test executions across 102 unique isolated Zig test declarations", "priority remediation carries the canonical execution and declaration counts")
@@ -1282,10 +1288,10 @@ def main() -> int:
     require(c_conformance, "sizeof(exact_path_boundary) != 256", "C CPL3 fixture proves the exact 255-byte C-string payload")
     require(c_conformance, "sizeof(overlong_path_boundary) != 257", "C CPL3 fixture proves the 256-byte C-string payload")
     require(c_conformance, "pathname length/component bounds", "C CPL3 fixture fails closed on G247 boundary regressions")
-    require(runtime_test, "bytes 5637700 metadata/file/block reads 112/4/114 failures 0 clusters claimed/free/loop/cross/range 11015/5096/0/0/0", "G247 diagnostic harness freezes the measured FAT geometry")
-    require(normal_boot_test, "10916/5195/0/0/0 lock tickets/outstanding 1/0", "G250 normal harness freezes the measured FAT geometry")
-    require(io_error_boot_test, "bytes 5587012 metadata/file/block reads 112/3/113 failures 1 clusters claimed/free/loop/cross/range 10916/5195/0/0/0", "G247 read-EIO harness freezes its private fault-injection geometry")
-    require(readonly_remount_boot_test, "bytes 5587012 metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10916/5195/0/0/0", "G247 write-EIO harness freezes its private fault-injection geometry")
+    require(runtime_test, "bytes 5647428 metadata/file/block reads 112/4/114 failures 0 clusters claimed/free/loop/cross/range 11034/5077/0/0/0", "G247 diagnostic harness freezes the measured FAT geometry")
+    require(normal_boot_test, "10933/5178/0/0/0 lock tickets/outstanding 1/0", "G250 normal harness freezes the measured FAT geometry")
+    require(io_error_boot_test, "bytes 5595716 metadata/file/block reads 112/3/113 failures 1 clusters claimed/free/loop/cross/range 10933/5178/0/0/0", "G247 read-EIO harness freezes its private fault-injection geometry")
+    require(readonly_remount_boot_test, "bytes 5595716 metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10933/5178/0/0/0", "G247 write-EIO harness freezes its private fault-injection geometry")
     require(readme, "user path payloads may be at most 255 bytes", "README documents the G247 pathname bound")
     require(priority, "G247 closes the user-path length/classification gap", "priority remediation records G247 bounds and errno classification")
     require(threat_model, "User pathname payloads are capped at 255 bytes", "threat model records the fixed G247 pathname security boundary")
@@ -1460,7 +1466,37 @@ def main() -> int:
     require(readme, "G260 keeps ABI 1.20 and implements bounded sequential command lists with semicolons", "README documents G260 sequential lists")
     require(priority, "G260 completes bounded sequential semicolon lists without changing ABI 1.20", "priority remediation records G260")
     require(threat_model, "G260 extends the same side-effect boundary to sequential lists", "threat model bounds G260 sequential parsing")
-    require(roadmap, "214 complete, 286 open", "roadmap arithmetic includes G260")
+    require(process_source, "pub const SpawnGroup = union(enum)", "G261 models restricted spawn-time pipeline groups")
+    require(process_source, "pub fn spawnPipeline(", "G261 exposes a restricted internal pipeline-spawn path")
+    require(process_source, ".new_pipeline => blk:", "G261 creates a child-led process group during spawn")
+    require(process_source, ".join_pipeline => |requested_group| blk:", "G261 validates requested follower process groups during spawn")
+    require(process_source, "leader.parent_slot != parent_slot", "G261 rejects cross-parent pipeline-group joins")
+    require(process_source, "leader.session != self.processes[parent_slot].session", "G261 rejects cross-session pipeline-group joins")
+    require(process_source, "leader.process_group != requested_group or leader.pid != requested_group", "G261 requires a real sibling group leader")
+    require(process_source, 'test "process groups support directed group signals"', "G261 folds atomic grouped-spawn proof into the existing process-group test declaration")
+    forbid(process_source, 'test "pipeline spawn groups are assigned atomically', "G261 preserves the frozen host-test declaration count")
+    require(executor, "runtime_abi.spawn_new_process_group => blk:", "ABI 1.21 spawnv dispatch accepts new pipeline groups")
+    require(executor, "runtime_abi.spawn_join_process_group => blk:", "ABI 1.21 spawnv dispatch accepts restricted joins")
+    require(executor, "std.math.cast(u32, frame.rsi)", "ABI 1.21 carries the join PGID in syscall argument 2")
+    require(sdk_source, "pub fn spawnvNewProcessGroup", "Zig SDK exposes new pipeline-group spawn")
+    require(sdk_source, "pub fn spawnvInProcessGroup", "Zig SDK exposes restricted pipeline-group join")
+    require(sdk_source, "zigos_syscall6(abi.syscall_spawnv, ptrValue(&request), process_group", "Zig SDK retains syscall 96 and passes the PGID separately")
+    require(sdk_shell, "const maximum_pipeline_stages: usize = 4;", "G261 bounds pipeline syntax to four stages")
+    require(sdk_shell, "fn parsePipelineSegment(pipeline: *Pipeline", "G261 parses pipeline stages before execution")
+    require(sdk_shell, "fn executePipeline(pipeline: *const Pipeline", "G261 has a dedicated grouped pipeline execution path")
+    require(sdk_shell, "pipeline: external stages only until descriptor pipelines land", "G261 rejects builtin pipeline stages before G262")
+    require(sdk_shell, "zigos.spawnvNewProcessGroup", "G261 shell launches the first pipeline stage as group leader")
+    require(sdk_shell, "zigos.spawnvInProcessGroup", "G261 shell joins later stages to the same PGID")
+    require(sdk_shell, "reapPipelineChildren", "G261 reaps already-launched children on partial spawn failure")
+    require(normal_boot_test, r'send(client, process, serial, "hello|hello", PROMPT_ROOT, 60)', "normal QEMU launches a two-stage external pipeline")
+    require(normal_boot_test, '"pipeline group 7 stages 2"', "normal QEMU freezes the accepted two-child PGID")
+    require(normal_boot_test, 'text.count("hello from VFS-loaded CPL3 ELF64") < 3', "normal QEMU requires both G261 external stages to execute")
+    require(normal_boot_test, r'send(client, process, serial, "echo G261_BUILTIN_SHOULD_NOT_RUN|hello", b"pipeline: external stages only until descriptor pipelines land")', "normal QEMU proves builtin pipeline rejection before spawn")
+    require(normal_boot_test, r'send(client, process, serial, "hello|", b"syntax: invalid conditional list")', "normal QEMU proves trailing-stage syntax rejection")
+    require(readme, "G261 advances the public ABI to 1.21", "README documents G261 pipeline-group semantics")
+    require(priority, "G261 advances the generated public ABI to 1.21", "priority remediation records G261")
+    require(threat_model, "G261 treats pipeline process-group membership as spawn-time process metadata", "threat model bounds G261 process-group semantics")
+    require(roadmap, "215 complete, 285 open", "roadmap arithmetic includes G261")
     require(roadmap, "- [x] **G229** " + chr(0x2014) + " Remount a damaged writable filesystem read-only.", "roadmap marks G229 complete with the canonical separator")
     require(roadmap, "- [x] **G230** " + chr(0x2014) + " Expose mount and unmount syscalls.", "roadmap marks G230 complete with the canonical separator")
     require(roadmap, "- [x] **G231** " + chr(0x2014) + " Reject unmount while paths or descriptors remain busy.", "roadmap marks G231 complete with the canonical separator")
@@ -1487,9 +1523,10 @@ def main() -> int:
     require(roadmap, "- [x] **G258** " + chr(0x2014) + " Implement shell exit-status propagation.", "roadmap marks G258 complete with the canonical separator")
     require(roadmap, "- [x] **G259** " + chr(0x2014) + " Implement conditional execution with && and ||.", "roadmap marks G259 complete with the canonical separator")
     require(roadmap, "- [x] **G260** " + chr(0x2014) + " Implement sequential command lists with semicolons.", "roadmap marks G260 complete with the canonical separator")
+    require(roadmap, "- [x] **G261** " + chr(0x2014) + " Implement subshell process groups for pipelines.", "roadmap marks G261 complete with the canonical separator")
     roadmap_items = re.findall(r"^- \[([ x])\] \*\*G\d{3}\*\*", roadmap, flags=re.MULTILINE)
-    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 214:
-        raise SystemExit("roadmap must contain 500 goals with exactly 214 complete after G260")
+    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 215:
+        raise SystemExit("roadmap must contain 500 goals with exactly 215 complete after G261")
     require(workflow, "Cross-platform artifact identity gate", "hosted cross-platform reproducibility gate")
     require(workflow, "cmp --", "artifact bytes are compared instead of only printed")
     require(asset_builder, '"schema": 2', "host-independent generated-asset manifest schema")
@@ -1553,7 +1590,7 @@ def main() -> int:
         "c-sdk: advisory whole-file flock passed",
         "zig-sdk: directory watch notifications passed",
         "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/watchdir passed",
-        "c-sdk: ABI 1.20 discovery passed",
+        "c-sdk: ABI 1.21 discovery passed",
         "c-sdk: directory watch notifications passed",
         "c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/watchdir/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
         "ZigOs block-backed FAT16 runtime mount",
@@ -1598,7 +1635,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.20 Zig/C SDKs with process umask, inert setuid/setgid metadata, sticky-directory removal rules, advisory whole-file flock, bounded advisory byte-range locking and bounded directory-change notifications, statfs, four-field inode timestamps, persistent UID/GID ownership metadata and owner/group/other VFS enforcement, with root-only tmpfs mount/umount and busy-path protection, fixed live devfs/procfs/netfs registries, retained read-only block-backed FAT16 boot files with staged validation, classified quarantine fallback, recoverable block-read EIO propagation and fail-stop persistent write-error read-only remount, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/degraded/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.21 Zig/C SDKs with process umask, inert setuid/setgid metadata, sticky-directory removal rules, advisory whole-file flock, bounded advisory byte-range locking and bounded directory-change notifications, statfs, four-field inode timestamps, persistent UID/GID ownership metadata and owner/group/other VFS enforcement, with root-only tmpfs mount/umount and busy-path protection, fixed live devfs/procfs/netfs registries, retained read-only block-backed FAT16 boot files with staged validation, classified quarantine fallback, recoverable block-read EIO propagation and fail-stop persistent write-error read-only remount, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/degraded/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

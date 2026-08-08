@@ -52,6 +52,12 @@ pub const Kind = enum(u8) {
     userspace,
 };
 
+pub const SpawnGroup = union(enum) {
+    inherit,
+    new_pipeline,
+    join_pipeline: u32,
+};
+
 pub const Limits = struct {
     maximum_pages: u32 = 256,
     maximum_descriptors: u16 = 32,
@@ -169,7 +175,7 @@ pub const Table = struct {
 
     pub fn initialize(self: *Table, tick: u64) void {
         self.* = .{};
-        const handle = self.spawnInternal(null, .kernel, "init", &.{"init"}, 0, 0, 0, tick, .{}) catch unreachable;
+        const handle = self.spawnInternal(null, .kernel, "init", &.{"init"}, 0, 0, 0, tick, .{}, .inherit) catch unreachable;
         self.init_handle = handle;
         const slot = self.resolve(handle) catch unreachable;
         self.processes[slot].state = .running;
@@ -224,7 +230,24 @@ pub const Table = struct {
         tick: u64,
         limits: Limits,
     ) Error!u64 {
-        return self.spawnInternal(parent_handle, kind, name, arguments, cwd_node, uid, gid, tick, limits);
+        return self.spawnInternal(parent_handle, kind, name, arguments, cwd_node, uid, gid, tick, limits, .inherit);
+    }
+
+    pub fn spawnPipeline(
+        self: *Table,
+        parent_handle: u64,
+        kind: Kind,
+        name: []const u8,
+        arguments: []const []const u8,
+        cwd_node: u16,
+        uid: u32,
+        gid: u32,
+        tick: u64,
+        limits: Limits,
+        group: SpawnGroup,
+    ) Error!u64 {
+        if (group == .inherit) return Error.InvalidState;
+        return self.spawnInternal(parent_handle, kind, name, arguments, cwd_node, uid, gid, tick, limits, group);
     }
 
     pub fn get(self: *const Table, handle: u64) Error!Process {
@@ -613,6 +636,7 @@ pub const Table = struct {
         gid: u32,
         tick: u64,
         limits: Limits,
+        group: SpawnGroup,
     ) Error!u64 {
         if (name.len == 0 or name.len > maximum_name_length) return Error.NameTooLong;
         if (arguments.len > maximum_arguments) return Error.TooManyArguments;
@@ -626,6 +650,22 @@ pub const Table = struct {
         const pid = self.next_pid;
         self.next_pid +%= 1;
         if (self.next_pid == 0) self.next_pid = 1;
+        const process_group = switch (group) {
+            .inherit => if (parent_slot == invalid_slot) pid else self.processes[parent_slot].process_group,
+            .new_pipeline => blk: {
+                if (parent_slot == invalid_slot) return Error.InvalidState;
+                break :blk pid;
+            },
+            .join_pipeline => |requested_group| blk: {
+                if (parent_slot == invalid_slot or requested_group == 0) return Error.InvalidState;
+                const leader_slot = self.findPid(requested_group) orelse return Error.NoProcess;
+                const leader = &self.processes[leader_slot];
+                if (leader.parent_slot != parent_slot or leader.session != self.processes[parent_slot].session or
+                    leader.process_group != requested_group or leader.pid != requested_group)
+                    return Error.PermissionDenied;
+                break :blk requested_group;
+            },
+        };
         var process = Process{
             .used = true,
             .generation = generation,
@@ -633,7 +673,7 @@ pub const Table = struct {
             .pid = pid,
             .ppid = if (parent_slot == invalid_slot) 0 else self.processes[parent_slot].pid,
             .parent_slot = parent_slot,
-            .process_group = if (parent_slot == invalid_slot) pid else self.processes[parent_slot].process_group,
+            .process_group = process_group,
             .session = if (parent_slot == invalid_slot) pid else self.processes[parent_slot].session,
             .uid = uid,
             .gid = gid,
@@ -872,6 +912,16 @@ test "process groups support directed group signals" {
     try std.testing.expectEqual(@as(usize, 2), try table.sendGroupSignal(root, 77, 15));
     try std.testing.expectEqual(@as(?u8, 15), try table.takeSignal(a));
     try std.testing.expectEqual(@as(?u8, 15), try table.takeSignal(b));
+
+    const parent = try table.spawn(root, .userspace, "shell", &.{"shell"}, 0, 1000, 1000, 1, .{});
+    const other_parent = try table.spawn(root, .userspace, "other", &.{"other"}, 0, 1000, 1000, 1, .{});
+    const leader = try table.spawnPipeline(parent, .userspace, "left", &.{"left"}, 0, 1000, 1000, 2, .{}, .new_pipeline);
+    const leader_process = try table.get(leader);
+    try std.testing.expectEqual(leader_process.pid, leader_process.process_group);
+    const follower = try table.spawnPipeline(parent, .userspace, "right", &.{"right"}, 0, 1000, 1000, 2, .{}, .{ .join_pipeline = leader_process.pid });
+    try std.testing.expectEqual(leader_process.pid, (try table.get(follower)).process_group);
+    try std.testing.expectError(error.PermissionDenied, table.spawnPipeline(other_parent, .userspace, "foreign", &.{"foreign"}, 0, 1000, 1000, 2, .{}, .{ .join_pipeline = leader_process.pid }));
+    try std.testing.expectError(error.NoProcess, table.spawnPipeline(parent, .userspace, "missing", &.{"missing"}, 0, 1000, 1000, 2, .{}, .{ .join_pipeline = leader_process.pid + 1000 }));
 }
 
 test "fault status preserves vector address and counters" {

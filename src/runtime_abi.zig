@@ -60,6 +60,10 @@ pub const map_allowed: u64 = map_private | map_anonymous | map_fixed | map_fixed
 pub const message_dontwait: u64 = constants.message_dontwait;
 pub const message_allowed: u64 = message_dontwait;
 
+pub const spawn_new_process_group: u16 = constants.spawn_new_process_group;
+pub const spawn_join_process_group: u16 = constants.spawn_join_process_group;
+pub const spawn_allowed: u16 = spawn_new_process_group | spawn_join_process_group;
+
 pub const fallocate_keep_size: u64 = constants.fallocate_keep_size;
 pub const fallocate_punch_hole: u64 = constants.fallocate_punch_hole;
 pub const fallocate_allowed: u64 = fallocate_keep_size | fallocate_punch_hole;
