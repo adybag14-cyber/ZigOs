@@ -2,6 +2,7 @@ const zigos = @import("zigos.zig");
 
 const maximum_line: usize = 512;
 const maximum_words: usize = 8;
+const maximum_conditional_commands: usize = 4;
 const maximum_path: usize = 255;
 const status_success: u32 = 0;
 const status_failure: u32 = 1;
@@ -16,7 +17,7 @@ const Word = struct {
 };
 
 const Command = struct {
-    storage: [maximum_line + 1]u8 = @splat(0),
+    storage: []u8 = &.{},
     words: [maximum_words]Word = @splat(.{}),
     count: usize = 0,
 
@@ -28,6 +29,23 @@ const Command = struct {
     fn sentinel(self: *const Command, index: usize) [*:0]const u8 {
         return @ptrCast(&self.storage[self.words[index].start]);
     }
+};
+
+const ConditionalOperator = enum {
+    always,
+    and_if,
+    or_if,
+};
+
+const ConditionalCommand = struct {
+    operator: ConditionalOperator = .always,
+    command: Command = .{},
+};
+
+const ConditionalList = struct {
+    storage: [maximum_line + 1]u8 = @splat(0),
+    commands: [maximum_conditional_commands]ConditionalCommand = @splat(.{}),
+    count: usize = 0,
 };
 
 const banner =
@@ -72,8 +90,8 @@ fn shellLoop() void {
     var last_status: u32 = status_success;
     while (true) {
         printPrompt();
-        var command: Command = .{};
-        const count = zigos.read(0, command.storage[0..maximum_line]) catch |err| {
+        var list: ConditionalList = .{};
+        const count = zigos.read(0, list.storage[0..maximum_line]) catch |err| {
             _ = printError("read", err);
             continue;
         };
@@ -81,9 +99,12 @@ fn shellLoop() void {
             zigos.writeAll(1, "\r\n") catch {};
             requestShutdown();
         }
-        parseCommand(&command, count);
-        if (command.count == 0) continue;
-        last_status = execute(&command, last_status);
+        if (!parseConditionalList(&list, count)) {
+            last_status = conditionalSyntaxError();
+            continue;
+        }
+        if (list.count == 0) continue;
+        last_status = executeConditionalList(&list, last_status);
     }
 }
 
@@ -95,27 +116,92 @@ fn printPrompt() void {
     zigos.writeAll(1, "$ ") catch {};
 }
 
-fn parseCommand(command: *Command, received: usize) void {
+fn parseConditionalList(list: *ConditionalList, received: usize) bool {
     var length = @min(received, maximum_line);
-    while (length != 0 and (command.storage[length - 1] == '\r' or command.storage[length - 1] == '\n')) {
+    while (length != 0 and (list.storage[length - 1] == '\r' or list.storage[length - 1] == '\n')) {
         length -= 1;
     }
-    command.storage[length] = 0;
-    var index: usize = 0;
-    while (index < length and command.count < maximum_words) {
-        while (index < length and isSpace(command.storage[index])) {
+    list.storage[length] = 0;
+
+    var non_space = false;
+    for (list.storage[0..length]) |byte| {
+        if (!isSpace(byte)) {
+            non_space = true;
+            break;
+        }
+    }
+    if (!non_space) return true;
+
+    var segment_start: usize = 0;
+    var scan: usize = 0;
+    var next_operator: ConditionalOperator = .always;
+    while (scan + 1 < length) {
+        const operator: ?ConditionalOperator = if (list.storage[scan] == '&' and list.storage[scan + 1] == '&')
+            .and_if
+        else if (list.storage[scan] == '|' and list.storage[scan + 1] == '|')
+            .or_if
+        else
+            null;
+        if (operator == null) {
+            scan += 1;
+            continue;
+        }
+        if (list.count >= maximum_conditional_commands - 1) return false;
+        list.storage[scan] = 0;
+        list.storage[scan + 1] = 0;
+        var command: Command = .{ .storage = list.storage[0..] };
+        if (!parseCommandSegment(&command, segment_start, scan)) return false;
+        list.commands[list.count] = .{ .operator = next_operator, .command = command };
+        list.count += 1;
+        next_operator = operator.?;
+        scan += 2;
+        segment_start = scan;
+    }
+
+    var command: Command = .{ .storage = list.storage[0..] };
+    if (!parseCommandSegment(&command, segment_start, length)) return false;
+    list.commands[list.count] = .{ .operator = next_operator, .command = command };
+    list.count += 1;
+    return true;
+}
+
+fn parseCommandSegment(command: *Command, segment_start: usize, segment_end: usize) bool {
+    var index = segment_start;
+    while (index < segment_end) {
+        while (index < segment_end and isSpace(command.storage[index])) {
             command.storage[index] = 0;
             index += 1;
         }
-        if (index == length) break;
+        if (index == segment_end) break;
+        if (command.count == maximum_words) return false;
         const start = index;
-        while (index < length and !isSpace(command.storage[index])) : (index += 1) {}
-        const word_length = index - start;
-        command.words[command.count] = .{ .start = start, .length = word_length };
+        while (index < segment_end and !isSpace(command.storage[index])) : (index += 1) {}
+        command.words[command.count] = .{ .start = start, .length = index - start };
         command.count += 1;
-        if (index < command.storage.len) command.storage[index] = 0;
-        index += @intFromBool(index < length);
+        if (index < segment_end) {
+            command.storage[index] = 0;
+            index += 1;
+        }
     }
+    return command.count != 0;
+}
+
+fn executeConditionalList(list: *const ConditionalList, previous_status: u32) u32 {
+    var status = previous_status;
+    for (list.commands[0..list.count]) |entry| {
+        const should_execute = switch (entry.operator) {
+            .always => true,
+            .and_if => status == status_success,
+            .or_if => status != status_success,
+        };
+        if (should_execute) status = execute(&entry.command, status);
+    }
+    return status;
+}
+
+fn conditionalSyntaxError() u32 {
+    zigos.writeAll(2, "syntax: invalid conditional list\r\n") catch {};
+    return status_usage;
 }
 
 fn execute(command: *const Command, previous_status: u32) u32 {

@@ -229,6 +229,18 @@ def main() -> int:
             send(client, process, serial, "status", b"\r\n1\r\n")
             send(client, process, serial, "pwd", b"\r\n/\r\n")
             send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "pwd&&echo G259_AND_RAN", b"G259_AND_RAN")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "missing-g259-and&&echo G259_AND_SHOULD_NOT_RUN", b"run: not found")
+            send(client, process, serial, "status", b"\r\n127\r\n")
+            send(client, process, serial, "pwd||echo G259_OR_SHOULD_NOT_RUN", b"\r\n/\r\n")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "missing-g259-or||echo G259_OR_RAN", b"G259_OR_RAN")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "missing-g259-mixed&&echo G259_MIXED_BAD||echo G259_MIXED_RECOVERED", b"G259_MIXED_RECOVERED")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "echo G259_TRAILING&&", b"syntax: invalid conditional list")
+            send(client, process, serial, "status", b"\r\n2\r\n")
             send(client, process, serial, "cp /bin/sdk.elf /persist/persist-sdk.elf", sdk_copy_marker.encode("ascii"), 40)
             send(client, process, serial, "sync", b"writable mounts synchronized", 40)
             send(client, process, serial, "persist-sdk alpha beta", b"process 4 exited 86", 40)
@@ -250,6 +262,10 @@ def main() -> int:
                 "status               print previous command status",
                 "run: not found",
                 "cd: not found",
+                "G259_AND_RAN",
+                "G259_OR_RAN",
+                "G259_MIXED_RECOVERED",
+                "syntax: invalid conditional list",
                 sdk_copy_marker,
                 "writable mounts synchronized",
                 "zig-sdk: envp/auxv passed",
@@ -271,9 +287,9 @@ def main() -> int:
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10908/5203/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10916/5195/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 138/138 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 140/140 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (
@@ -284,6 +300,10 @@ def main() -> int:
                 "ZigOs x86-64 Capstone 16 verified:",
                 "init PID 1; serial shell PID 2",
                 "ZigOs normal boot profile: init PID 1; userspace shell PID 2",
+                "\r\nG259_AND_SHOULD_NOT_RUN\r\n",
+                "\r\nG259_OR_SHOULD_NOT_RUN\r\n",
+                "\r\nG259_MIXED_BAD\r\n",
+                "\r\nG259_TRAILING\r\n",
             )
             for marker in required:
                 if marker not in text:
