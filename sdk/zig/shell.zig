@@ -3,6 +3,7 @@ const zigos = @import("zigos.zig");
 const maximum_line: usize = 512;
 const maximum_words: usize = 8;
 const maximum_conditional_commands: usize = 4;
+const maximum_sequential_lists: usize = 4;
 const maximum_path: usize = 255;
 const status_success: u32 = 0;
 const status_failure: u32 = 1;
@@ -43,8 +44,13 @@ const ConditionalCommand = struct {
 };
 
 const ConditionalList = struct {
-    storage: [maximum_line + 1]u8 = @splat(0),
     commands: [maximum_conditional_commands]ConditionalCommand = @splat(.{}),
+    count: usize = 0,
+};
+
+const CommandLine = struct {
+    storage: [maximum_line + 1]u8 = @splat(0),
+    lists: [maximum_sequential_lists]ConditionalList = @splat(.{}),
     count: usize = 0,
 };
 
@@ -90,8 +96,8 @@ fn shellLoop() void {
     var last_status: u32 = status_success;
     while (true) {
         printPrompt();
-        var list: ConditionalList = .{};
-        const count = zigos.read(0, list.storage[0..maximum_line]) catch |err| {
+        var line: CommandLine = .{};
+        const count = zigos.read(0, line.storage[0..maximum_line]) catch |err| {
             _ = printError("read", err);
             continue;
         };
@@ -99,12 +105,12 @@ fn shellLoop() void {
             zigos.writeAll(1, "\r\n") catch {};
             requestShutdown();
         }
-        if (!parseConditionalList(&list, count)) {
+        if (!parseCommandLine(&line, count)) {
             last_status = conditionalSyntaxError();
             continue;
         }
-        if (list.count == 0) continue;
-        last_status = executeConditionalList(&list, last_status);
+        if (line.count == 0) continue;
+        last_status = executeCommandLine(&line, last_status);
     }
 }
 
@@ -116,29 +122,52 @@ fn printPrompt() void {
     zigos.writeAll(1, "$ ") catch {};
 }
 
-fn parseConditionalList(list: *ConditionalList, received: usize) bool {
+fn parseCommandLine(line: *CommandLine, received: usize) bool {
     var length = @min(received, maximum_line);
-    while (length != 0 and (list.storage[length - 1] == '\r' or list.storage[length - 1] == '\n')) {
+    while (length != 0 and (line.storage[length - 1] == '\r' or line.storage[length - 1] == '\n')) {
         length -= 1;
     }
-    list.storage[length] = 0;
-
-    var non_space = false;
-    for (list.storage[0..length]) |byte| {
-        if (!isSpace(byte)) {
-            non_space = true;
-            break;
-        }
-    }
-    if (!non_space) return true;
+    line.storage[length] = 0;
+    if (!segmentHasContent(line.storage[0..], 0, length)) return true;
 
     var segment_start: usize = 0;
     var scan: usize = 0;
+    while (scan < length) : (scan += 1) {
+        if (line.storage[scan] != ';') continue;
+        if (line.count == maximum_sequential_lists) return false;
+        line.storage[scan] = 0;
+        if (!parseConditionalList(&line.lists[line.count], line.storage[0..], segment_start, scan)) return false;
+        line.count += 1;
+        segment_start = scan + 1;
+    }
+
+    if (segmentHasContent(line.storage[0..], segment_start, length)) {
+        if (line.count == maximum_sequential_lists) return false;
+        if (!parseConditionalList(&line.lists[line.count], line.storage[0..], segment_start, length)) return false;
+        line.count += 1;
+    } else if (line.count == 0) {
+        return false;
+    }
+    return true;
+}
+
+fn segmentHasContent(storage: []const u8, segment_start: usize, segment_end: usize) bool {
+    for (storage[segment_start..segment_end]) |byte| {
+        if (!isSpace(byte)) return true;
+    }
+    return false;
+}
+
+fn parseConditionalList(list: *ConditionalList, storage: []u8, segment_start: usize, segment_end: usize) bool {
+    if (!segmentHasContent(storage, segment_start, segment_end)) return false;
+
+    var command_start = segment_start;
+    var scan = segment_start;
     var next_operator: ConditionalOperator = .always;
-    while (scan + 1 < length) {
-        const operator: ?ConditionalOperator = if (list.storage[scan] == '&' and list.storage[scan + 1] == '&')
+    while (scan + 1 < segment_end) {
+        const operator: ?ConditionalOperator = if (storage[scan] == '&' and storage[scan + 1] == '&')
             .and_if
-        else if (list.storage[scan] == '|' and list.storage[scan + 1] == '|')
+        else if (storage[scan] == '|' and storage[scan + 1] == '|')
             .or_if
         else
             null;
@@ -147,19 +176,19 @@ fn parseConditionalList(list: *ConditionalList, received: usize) bool {
             continue;
         }
         if (list.count >= maximum_conditional_commands - 1) return false;
-        list.storage[scan] = 0;
-        list.storage[scan + 1] = 0;
-        var command: Command = .{ .storage = list.storage[0..] };
-        if (!parseCommandSegment(&command, segment_start, scan)) return false;
+        storage[scan] = 0;
+        storage[scan + 1] = 0;
+        var command: Command = .{ .storage = storage };
+        if (!parseCommandSegment(&command, command_start, scan)) return false;
         list.commands[list.count] = .{ .operator = next_operator, .command = command };
         list.count += 1;
         next_operator = operator.?;
         scan += 2;
-        segment_start = scan;
+        command_start = scan;
     }
 
-    var command: Command = .{ .storage = list.storage[0..] };
-    if (!parseCommandSegment(&command, segment_start, length)) return false;
+    var command: Command = .{ .storage = storage };
+    if (!parseCommandSegment(&command, command_start, segment_end)) return false;
     list.commands[list.count] = .{ .operator = next_operator, .command = command };
     list.count += 1;
     return true;
@@ -184,6 +213,14 @@ fn parseCommandSegment(command: *Command, segment_start: usize, segment_end: usi
         }
     }
     return command.count != 0;
+}
+
+fn executeCommandLine(line: *const CommandLine, previous_status: u32) u32 {
+    var status = previous_status;
+    for (line.lists[0..line.count]) |list| {
+        status = executeConditionalList(&list, status);
+    }
+    return status;
 }
 
 fn executeConditionalList(list: *const ConditionalList, previous_status: u32) u32 {

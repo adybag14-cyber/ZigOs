@@ -241,6 +241,20 @@ def main() -> int:
             send(client, process, serial, "status", b"\r\n0\r\n")
             send(client, process, serial, "echo G259_TRAILING&&", b"syntax: invalid conditional list")
             send(client, process, serial, "status", b"\r\n2\r\n")
+            send(client, process, serial, "echo G260_FIRST;echo G260_SECOND", b"G260_SECOND")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "missing-g260;echo G260_AFTER_FAILURE", b"G260_AFTER_FAILURE")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "missing-g260-status;status", b"\r\n127\r\n")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "missing-g260-and&&echo G260_COND_SKIP;echo G260_AFTER_COND", b"G260_AFTER_COND")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "echo G260_TRAILING_OK;", b"G260_TRAILING_OK")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "echo G260_PREFIX_SHOULD_NOT_RUN;;echo G260_SUFFIX_SHOULD_NOT_RUN", b"syntax: invalid conditional list")
+            send(client, process, serial, "status", b"\r\n2\r\n")
+            send(client, process, serial, "echo G260_OVER1;echo G260_OVER2;echo G260_OVER3;echo G260_OVER4;echo G260_OVER5", b"syntax: invalid conditional list")
+            send(client, process, serial, "status", b"\r\n2\r\n")
             send(client, process, serial, "cp /bin/sdk.elf /persist/persist-sdk.elf", sdk_copy_marker.encode("ascii"), 40)
             send(client, process, serial, "sync", b"writable mounts synchronized", 40)
             send(client, process, serial, "persist-sdk alpha beta", b"process 4 exited 86", 40)
@@ -266,6 +280,11 @@ def main() -> int:
                 "G259_OR_RAN",
                 "G259_MIXED_RECOVERED",
                 "syntax: invalid conditional list",
+                "G260_FIRST",
+                "G260_SECOND",
+                "G260_AFTER_FAILURE",
+                "G260_AFTER_COND",
+                "G260_TRAILING_OK",
                 sdk_copy_marker,
                 "writable mounts synchronized",
                 "zig-sdk: envp/auxv passed",
@@ -304,6 +323,14 @@ def main() -> int:
                 "\r\nG259_OR_SHOULD_NOT_RUN\r\n",
                 "\r\nG259_MIXED_BAD\r\n",
                 "\r\nG259_TRAILING\r\n",
+                "\r\nG260_COND_SKIP\r\n",
+                "\r\nG260_PREFIX_SHOULD_NOT_RUN\r\n",
+                "\r\nG260_SUFFIX_SHOULD_NOT_RUN\r\n",
+                "\r\nG260_OVER1\r\n",
+                "\r\nG260_OVER2\r\n",
+                "\r\nG260_OVER3\r\n",
+                "\r\nG260_OVER4\r\n",
+                "\r\nG260_OVER5\r\n",
             )
             for marker in required:
                 if marker not in text:
