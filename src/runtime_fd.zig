@@ -1266,6 +1266,13 @@ pub const System = struct {
                     if (!terminal.setModeFlags(argument)) return Error.InvalidOperation;
                     break :blk 0;
                 }
+                if (request == runtime_abi.constants.ioctl_tty_get_foreground_group)
+                    break :blk try terminal.foregroundGroup(processes, process_handle);
+                if (request == runtime_abi.constants.ioctl_tty_set_foreground_group) {
+                    const process_group = std.math.cast(u32, argument) orelse return Error.InvalidOperation;
+                    try terminal.setForegroundGroup(processes, process_handle, process_group);
+                    break :blk 0;
+                }
                 return Error.UnsupportedOperation;
             },
             .vfs => vfs.ioctlOpen(description.vfs_owner, description.vfs_handle, request, argument),
@@ -1865,6 +1872,41 @@ test "VFS console opens as a terminal and supports ioctl state" {
         runtime_abi.constants.tty_echo,
     ));
     try std.testing.expectEqual(runtime_abi.constants.tty_echo, tty.modeFlags());
+    const pipeline_leader = try processes.spawnPipeline(process, .userspace, "tty-pipeline", &.{}, 0, 0, 0, 1, .{}, .new_pipeline);
+    const pipeline_group = (try processes.get(pipeline_leader)).pid;
+    try std.testing.expectEqual(@as(u64, 0), try system.ioctl(
+        &fs,
+        &processes,
+        process,
+        fd,
+        runtime_abi.constants.ioctl_tty_set_foreground_group,
+        pipeline_group,
+    ));
+    try std.testing.expectEqual(@as(u64, pipeline_group), try system.ioctl(
+        &fs,
+        &processes,
+        process,
+        fd,
+        runtime_abi.constants.ioctl_tty_get_foreground_group,
+        0,
+    ));
+    const controller_group = (try processes.get(process)).process_group;
+    try std.testing.expectEqual(@as(u64, 0), try system.ioctl(
+        &fs,
+        &processes,
+        process,
+        fd,
+        runtime_abi.constants.ioctl_tty_set_foreground_group,
+        controller_group,
+    ));
+    try std.testing.expectEqual(@as(u64, controller_group), try system.ioctl(
+        &fs,
+        &processes,
+        process,
+        fd,
+        runtime_abi.constants.ioctl_tty_get_foreground_group,
+        0,
+    ));
     try std.testing.expectEqual(@as(usize, 7), (try system.write(&fs, &processes, process, fd, "console", 0)).count);
     try system.close(&fs, &processes, process, fd);
     try std.testing.expect(system.validate(&fs, &processes));

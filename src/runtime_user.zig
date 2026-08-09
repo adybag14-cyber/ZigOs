@@ -50,6 +50,8 @@ const errno_invalid = runtime_abi.errno_invalid;
 const errno_no_memory = runtime_abi.errno_no_memory;
 const errno_no_syscall = runtime_abi.errno_no_syscall;
 const wait_nohang: u64 = runtime_abi.wait_nohang;
+const wait_process_group: u64 = runtime_abi.wait_process_group;
+const wait_allowed: u64 = runtime_abi.wait_allowed;
 
 const fault_trampoline = [_]u8{
     0xB8, @truncate(syscall.syscall_fault_return), 0x00, 0x00, 0x00, // mov eax, SYS_FAULT_RETURN
@@ -2601,7 +2603,8 @@ fn syscallWait(
     frame: *interrupt_context.Frame,
     fx_state: *align(16) interrupt_context.FxState,
 ) u64 {
-    if ((frame.rsi & ~wait_nohang) != 0) {
+    const flags = frame.rsi;
+    if ((flags & ~wait_allowed) != 0) {
         frame.rax = reject(errno_invalid);
         return 0;
     }
@@ -2609,11 +2612,19 @@ fn syscallWait(
         frame.rax = reject(errno_fault);
         return 0;
     }
-    const target_pid: u32 = std.math.cast(u32, frame.rdi) orelse {
+    const target: u32 = std.math.cast(u32, frame.rdi) orelse {
         frame.rax = reject(errno_invalid);
         return 0;
     };
-    const target_handle = activeProcesses().childForWait(context.handle, target_pid) catch |err| {
+    const group_wait = (flags & wait_process_group) != 0;
+    if (group_wait and target == 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const target_handle = (if (group_wait)
+        activeProcesses().childForWaitGroup(context.handle, target)
+    else
+        activeProcesses().childForWait(context.handle, target)) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
@@ -2651,15 +2662,22 @@ fn syscallWait(
             return 0;
         }
     }
-    if ((frame.rsi & wait_nohang) != 0) {
+    if ((flags & wait_nohang) != 0) {
         frame.rax = 0;
         return 0;
     }
-    const blocking_target: ?u64 = if (target_pid == 0) null else target_handle;
-    _ = activeProcesses().wait(context.handle, blocking_target, false) catch |err| {
-        frame.rax = reject(runtime_abi.fromError(err));
-        return 0;
-    };
+    if (group_wait) {
+        _ = activeProcesses().waitGroup(context.handle, target, false) catch |err| {
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        };
+    } else {
+        const blocking_target: ?u64 = if (target == 0) null else target_handle;
+        _ = activeProcesses().wait(context.handle, blocking_target, false) catch |err| {
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        };
+    }
     return blockAndRetry(context, frame, fx_state);
 }
 

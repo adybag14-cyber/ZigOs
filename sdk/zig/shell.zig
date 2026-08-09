@@ -354,16 +354,64 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
         return status_failure;
     };
 
-    var final_status: u32 = status_success;
-    for (pids[0..spawned], 0..) |pid, index| {
+    const shell_group = zigos.ttyForegroundProcessGroup(0) catch |err| {
+        reapPipelineChildren(&pids, spawned);
+        _ = printError("pipeline foreground query", err);
+        return status_failure;
+    };
+    zigos.ttySetForegroundProcessGroup(0, process_group) catch |err| {
+        reapPipelineChildren(&pids, spawned);
+        _ = printError("pipeline foreground", err);
+        return status_failure;
+    };
+    const observed_group = zigos.ttyForegroundProcessGroup(0) catch |err| {
+        _ = restorePipelineForeground(shell_group);
+        reapPipelineChildren(&pids, spawned);
+        _ = printError("pipeline foreground query", err);
+        return status_failure;
+    };
+    if (observed_group != process_group) {
+        _ = restorePipelineForeground(shell_group);
+        reapPipelineChildren(&pids, spawned);
+        zigos.writeAll(2, "pipeline: foreground group mismatch\r\n") catch {};
+        return status_failure;
+    }
+    zigos.writeAll(1, "pipeline foreground group ") catch {};
+    writeDecimal(observed_group);
+    zigos.writeAll(1, "\r\n") catch {};
+
+    var final_status: u32 = status_failure;
+    var remaining = spawned;
+    while (remaining != 0) : (remaining -= 1) {
         var status: zigos.WaitStatus = undefined;
-        _ = zigos.wait(pid, false, &status) catch |err| {
-            _ = printError("pipeline wait", err);
+        _ = zigos.waitProcessGroup(process_group, false, &status) catch |err| {
+            _ = restorePipelineForeground(shell_group);
+            _ = printError("pipeline group wait", err);
             return status_failure;
         };
-        if (index + 1 == spawned) final_status = status.exit_status;
+        if (status.pid == pids[spawned - 1]) final_status = status.exit_status;
     }
+    if (!restorePipelineForeground(shell_group)) return status_failure;
     return final_status;
+}
+
+fn restorePipelineForeground(shell_group: u32) bool {
+    zigos.ttySetForegroundProcessGroup(0, shell_group) catch |err| {
+        _ = printError("pipeline foreground restore", err);
+        return false;
+    };
+    const observed = zigos.ttyForegroundProcessGroup(0) catch |err| {
+        _ = printError("pipeline foreground query", err);
+        return false;
+    };
+    if (observed != shell_group) {
+        zigos.writeAll(2, "pipeline: foreground restore mismatch\r\n") catch {};
+        return false;
+    }
+    zigos.writeAll(1, "pipeline foreground restored ") catch {};
+    writeDecimal(observed);
+    zigos.writeAll(1, "\r\n") catch {};
+    return true;
 }
 
 fn closePipelinePipeEnds(

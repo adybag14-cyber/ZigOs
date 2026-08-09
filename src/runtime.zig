@@ -2434,6 +2434,7 @@ fn configureNormalChild(parent_handle: u64, child_handle: u64) bool {
     const child = state.processes.get(child_handle) catch return false;
     if (child.pid != 2 or !std.mem.eql(u8, child.nameSlice(), "sh.elf")) return false;
     state.processes.setProcessGroup(init_handle, child_handle, 0) catch return false;
+    state.tty.transferController(&state.processes, init_handle, child_handle) catch return false;
     state.shell_handle = child_handle;
     state.tty.setForeground(&state.processes, child_handle) catch return false;
     return true;

@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 22,
+    "minor": 23,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -154,12 +154,18 @@
   "spawn_io": {
     "inherit_descriptor": 65535
   },
+  "wait_flags": {
+    "nohang": 0,
+    "process_group": 1
+  },
   "directory_fds": {
     "cwd": -100
   },
   "ioctl_requests": {
     "tty_get_flags": 21505,
-    "tty_set_flags": 21506
+    "tty_set_flags": 21506,
+    "tty_get_foreground_group": 21507,
+    "tty_set_foreground_group": 21508
   },
   "tty_flags": {
     "echo": 0,

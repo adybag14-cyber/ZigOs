@@ -114,6 +114,7 @@ pub const Process = struct {
     socket_count: u16 = 0,
     child_count: u16 = 0,
     wait_target: u64 = 0,
+    wait_group: bool = false,
     limits: Limits = .{},
 
     pub fn nameSlice(self: *const Process) []const u8 {
@@ -282,6 +283,7 @@ pub const Table = struct {
         self.processes[target].wait_reason = .none;
         self.processes[target].wake_tick = 0;
         self.processes[target].wait_target = 0;
+        self.processes[target].wait_group = false;
         self.processes[target].context_switches +%= 1;
         self.total_context_switches +%= 1;
     }
@@ -294,6 +296,7 @@ pub const Table = struct {
         process.wait_reason = .none;
         process.wake_tick = 0;
         process.wait_target = 0;
+        process.wait_group = false;
     }
 
     pub fn scheduleNext(self: *Table, current_handle: ?u64) ?u64 {
@@ -374,6 +377,7 @@ pub const Table = struct {
         process.state = .blocked;
         process.wait_reason = reason;
         process.wait_target = target;
+        process.wait_group = false;
     }
 
     pub fn wakeExpired(self: *Table, tick: u64) usize {
@@ -459,6 +463,8 @@ pub const Table = struct {
             self.processes[target_slot].state = .runnable;
             self.processes[target_slot].wait_reason = .none;
             self.processes[target_slot].wake_tick = 0;
+            self.processes[target_slot].wait_target = 0;
+            self.processes[target_slot].wait_group = false;
         }
     }
 
@@ -516,6 +522,25 @@ pub const Table = struct {
         return earliest_terminal orelse first_child;
     }
 
+    pub fn childForWaitGroup(self: *const Table, parent_handle: u64, process_group: u32) Error!?u64 {
+        if (process_group == 0) return Error.InvalidState;
+        const parent_slot = try self.resolve(parent_handle);
+        var first_child: ?u64 = null;
+        var earliest_terminal: ?u64 = null;
+        var earliest_sequence: u64 = std.math.maxInt(u64);
+        for (0..self.processes.len) |slot| {
+            const process = &self.processes[slot];
+            if (!process.used or process.parent_slot != parent_slot or process.process_group != process_group) continue;
+            if (first_child == null) first_child = process.handle;
+            if (process.terminal() and process.terminal_sequence < earliest_sequence) {
+                earliest_terminal = process.handle;
+                earliest_sequence = process.terminal_sequence;
+            }
+        }
+        if (first_child == null) return Error.NotChild;
+        return earliest_terminal orelse first_child;
+    }
+
     pub fn wait(self: *Table, parent_handle: u64, target_handle: ?u64, nonblocking: bool) Error!?Status {
         const parent_slot = try self.resolve(parent_handle);
         var candidate: ?usize = null;
@@ -545,6 +570,33 @@ pub const Table = struct {
         self.processes[parent_slot].state = .blocked;
         self.processes[parent_slot].wait_reason = .child;
         self.processes[parent_slot].wait_target = target_handle orelse 0;
+        self.processes[parent_slot].wait_group = false;
+        return null;
+    }
+
+    pub fn waitGroup(self: *Table, parent_handle: u64, process_group: u32, nonblocking: bool) Error!?Status {
+        if (process_group == 0) return Error.InvalidState;
+        const parent_slot = try self.resolve(parent_handle);
+        var candidate: ?usize = null;
+        var earliest_sequence: u64 = std.math.maxInt(u64);
+        var has_child = false;
+        for (0..self.processes.len) |slot| {
+            const process = &self.processes[slot];
+            if (!process.used or process.parent_slot != parent_slot or process.process_group != process_group) continue;
+            has_child = true;
+            if (!process.terminal()) continue;
+            if (process.terminal_sequence < earliest_sequence) {
+                candidate = slot;
+                earliest_sequence = process.terminal_sequence;
+            }
+        }
+        if (candidate) |slot| return @as(?Status, try self.reapSlot(parent_slot, slot));
+        if (!has_child) return Error.NotChild;
+        if (nonblocking) return null;
+        self.processes[parent_slot].state = .blocked;
+        self.processes[parent_slot].wait_reason = .child;
+        self.processes[parent_slot].wait_target = process_group;
+        self.processes[parent_slot].wait_group = true;
         return null;
     }
 
@@ -733,10 +785,15 @@ pub const Table = struct {
         if (parent_slot == invalid_slot or parent_slot >= self.processes.len or !self.processes[parent_slot].used) return;
         var parent = &self.processes[parent_slot];
         if (parent.state != .blocked or parent.wait_reason != .child) return;
-        if (parent.wait_target != 0 and parent.wait_target != self.processes[child_slot].handle) return;
+        if (parent.wait_target != 0) {
+            if (parent.wait_group) {
+                if (parent.wait_target != self.processes[child_slot].process_group) return;
+            } else if (parent.wait_target != self.processes[child_slot].handle) return;
+        }
         parent.state = .runnable;
         parent.wait_reason = .none;
         parent.wait_target = 0;
+        parent.wait_group = false;
     }
 
     fn reapSlot(self: *Table, parent_slot: usize, child_slot: usize) Error!Status {
@@ -966,4 +1023,23 @@ test "childForWait selects exact and terminal children without a process snapsho
     try table.exit(first, 8);
     try std.testing.expectEqual(second, (try table.childForWait(parent, 0)).?);
     try std.testing.expectError(Error.NotChild, table.childForWait(first, 0));
+
+    const leader = try table.spawnPipeline(parent, .userspace, "group-leader", &.{}, 0, 0, 0, 2, .{}, .new_pipeline);
+    const group = (try table.get(leader)).pid;
+    const follower = try table.spawnPipeline(parent, .userspace, "group-follower", &.{}, 0, 0, 0, 2, .{}, .{ .join_pipeline = group });
+    try std.testing.expectEqual(leader, (try table.childForWaitGroup(parent, group)).?);
+    try table.exit(follower, 23);
+    try std.testing.expectEqual(follower, (try table.childForWaitGroup(parent, group)).?);
+    const follower_status = (try table.waitGroup(parent, group, true)).?;
+    try std.testing.expectEqual(@as(u32, 23), follower_status.exit_status);
+    try std.testing.expectEqual(@as(?Status, null), try table.waitGroup(parent, group, false));
+    const blocked_parent = try table.get(parent);
+    try std.testing.expectEqual(State.blocked, blocked_parent.state);
+    try std.testing.expect(blocked_parent.wait_group);
+    try std.testing.expectEqual(@as(u64, group), blocked_parent.wait_target);
+    try table.exit(leader, 17);
+    try std.testing.expectEqual(State.runnable, (try table.get(parent)).state);
+    const leader_status = (try table.waitGroup(parent, group, true)).?;
+    try std.testing.expectEqual(@as(u32, 17), leader_status.exit_status);
+    try std.testing.expectError(Error.NotChild, table.childForWaitGroup(parent, group));
 }

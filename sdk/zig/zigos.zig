@@ -327,7 +327,16 @@ fn spawnvWithGroup(
 }
 
 pub fn wait(pid: u32, nohang: bool, status: *WaitStatus) Error!u32 {
-    return @intCast(try result(zigos_syscall6(abi.syscall_wait, pid, @intFromBool(nohang), ptrValue(status), 0, 0, 0)));
+    return waitWithFlags(pid, if (nohang) abi.wait_nohang else 0, status);
+}
+
+pub fn waitProcessGroup(process_group: u32, nohang: bool, status: *WaitStatus) Error!u32 {
+    if (process_group == 0) return Error.InvalidArgument;
+    return waitWithFlags(process_group, abi.wait_process_group | if (nohang) abi.wait_nohang else 0, status);
+}
+
+fn waitWithFlags(target: u32, flags: u64, status: *WaitStatus) Error!u32 {
+    return @intCast(try result(zigos_syscall6(abi.syscall_wait, target, flags, ptrValue(status), 0, 0, 0)));
 }
 
 pub fn queryAbi(info: *AbiInfo) Error!void {
@@ -395,6 +404,15 @@ pub fn statfs(path: [*:0]const u8, info: *FilesystemStat) Error!void {
 
 pub fn ioctl(fd: u16, request: u64, argument: u64) Error!u64 {
     return result(zigos_syscall6(abi.syscall_ioctl, fd, request, argument, 0, 0, 0));
+}
+
+pub fn ttyForegroundProcessGroup(fd: u16) Error!u32 {
+    return @intCast(try ioctl(fd, abi.ioctl_tty_get_foreground_group, 0));
+}
+
+pub fn ttySetForegroundProcessGroup(fd: u16, process_group: u32) Error!void {
+    if (process_group == 0) return Error.InvalidArgument;
+    _ = try ioctl(fd, abi.ioctl_tty_set_foreground_group, process_group);
 }
 
 pub fn openat(directory_fd: i64, path: [*:0]const u8, flags: OpenFlags, mode: u16) Error!u16 {

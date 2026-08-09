@@ -94,6 +94,62 @@ pub const Tty = struct {
         self.ignore_next_lf = false;
     }
 
+    pub fn transferController(
+        self: *Tty,
+        processes: *const runtime_process.Table,
+        current_handle: u64,
+        next_handle: u64,
+    ) runtime_process.Error!void {
+        if (current_handle != self.controller_handle) return runtime_process.Error.PermissionDenied;
+        const current = try processes.get(current_handle);
+        const next = try processes.get(next_handle);
+        if (next.ppid != current.pid or next.session != current.session or next.terminal())
+            return runtime_process.Error.PermissionDenied;
+        self.controller_handle = next_handle;
+    }
+
+    pub fn foregroundGroup(
+        self: *const Tty,
+        processes: *const runtime_process.Table,
+        caller_handle: u64,
+    ) runtime_process.Error!u32 {
+        if (caller_handle != self.controller_handle) return runtime_process.Error.PermissionDenied;
+        const caller = try processes.get(caller_handle);
+        if (caller.session == 0 or caller.session != self.foreground_session or self.foreground_process_group == 0)
+            return runtime_process.Error.InvalidState;
+        return self.foreground_process_group;
+    }
+
+    pub fn setForegroundGroup(
+        self: *Tty,
+        processes: *const runtime_process.Table,
+        caller_handle: u64,
+        process_group: u32,
+    ) runtime_process.Error!void {
+        if (caller_handle != self.controller_handle or process_group == 0)
+            return runtime_process.Error.PermissionDenied;
+        const caller = try processes.get(caller_handle);
+        if (caller.session == 0 or caller.process_group == 0) return runtime_process.Error.InvalidState;
+
+        if (process_group != caller.process_group) {
+            var found_leader = false;
+            for (0..runtime_process.maximum_processes) |slot| {
+                const process = processes.processAt(slot) orelse continue;
+                if (process.pid != process_group or process.process_group != process_group) continue;
+                found_leader = true;
+                if (process.ppid != caller.pid or process.session != caller.session or process.terminal())
+                    return runtime_process.Error.PermissionDenied;
+                break;
+            }
+            if (!found_leader) return runtime_process.Error.NoProcess;
+        }
+
+        self.foreground_process_group = process_group;
+        self.foreground_session = caller.session;
+        self.edit_length = 0;
+        self.ignore_next_lf = false;
+    }
+
     pub fn foregroundMatches(self: *const Tty, processes: *const runtime_process.Table, process_handle: u64) runtime_process.Error!bool {
         const process = try processes.get(process_handle);
         return self.foreground_process_group != 0 and
@@ -341,6 +397,12 @@ test "terminal foreground isolation eof and interrupt semantics" {
     try processes.setProcessGroup(root, background, 0);
     var tty = Tty.init(root);
     try tty.setForeground(&processes, foreground);
+    const foreground_pid = (try processes.get(foreground)).pid;
+    try std.testing.expectEqual(foreground_pid, try tty.foregroundGroup(&processes, root));
+    try std.testing.expectError(runtime_process.Error.PermissionDenied, tty.setForegroundGroup(&processes, background, (try processes.get(background)).pid));
+    try tty.setForegroundGroup(&processes, root, (try processes.get(background)).pid);
+    try std.testing.expectEqual((try processes.get(background)).pid, try tty.foregroundGroup(&processes, root));
+    try tty.setForegroundGroup(&processes, root, foreground_pid);
 
     var byte: [1]u8 = undefined;
     try std.testing.expectError(runtime_process.Error.PermissionDenied, tty.read(&processes, background, &byte));

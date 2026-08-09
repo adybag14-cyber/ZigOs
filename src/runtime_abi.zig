@@ -35,7 +35,9 @@ pub const errno_address_in_use = constants.errno_address_in_use;
 pub const errno_not_connected = constants.errno_not_connected;
 pub const errno_connection_refused = constants.errno_connection_refused;
 
-pub const wait_nohang: u64 = 1;
+pub const wait_nohang: u64 = constants.wait_nohang;
+pub const wait_process_group: u64 = constants.wait_process_group;
+pub const wait_allowed: u64 = wait_nohang | wait_process_group;
 
 pub const open_read: u8 = 1 << 0;
 pub const open_write: u8 = 1 << 1;

@@ -63,6 +63,9 @@ def generate(spec: dict) -> tuple[str, str, str]:
     for name, value in spec.get("spawn_io", {}).items():
         zig.append(f"pub const spawn_io_{name}: u16 = {value};\n")
         nasm.append(f"%define ZIGOS_SPAWN_IO_{name.upper()} {value}\n")
+    for name, value in spec.get("wait_flags", {}).items():
+        zig.append(f"pub const wait_{name}: u64 = @as(u64, 1) << {value};\n")
+        nasm.append(f"%define ZIGOS_WAIT_{name.upper()} (1 << {value})\n")
     for name, value in spec.get("directory_fds", {}).items():
         zig.append(f"pub const directory_fd_{name}: i64 = {value};\n")
         nasm.append(f"%define ZIGOS_AT_{name.upper()} {value}\n")
@@ -108,7 +111,6 @@ def generate(spec: dict) -> tuple[str, str, str]:
     nasm.append(f"\n%define ZIGOS_SYSCALL_COUNT {max(syscall_values) - min(syscall_values) + 1}\n")
     sdk = list(zig)
     sdk.extend([
-        "\npub const wait_nohang: u64 = 1;\n",
         "pub const open_read: u64 = 1 << 0;\n",
         "pub const open_write: u64 = 1 << 1;\n",
         "pub const open_create: u64 = 1 << 2;\n",
@@ -290,6 +292,9 @@ def generate_c(spec: dict) -> str:
         lines.append(f"#define ZIGOS_FS_STAT_{name.upper()} (UINT16_C(1) << {value})\n")
     for name, value in spec.get("flock_operations", {}).items():
         lines.append(f"#define ZIGOS_LOCK_{name.upper()} UINT64_C({value})\n")
+    for name, value in spec.get("wait_flags", {}).items():
+        lines.append(f"#define ZIGOS_WAIT_{name.upper()} (UINT64_C(1) << {value})\n")
+    lines.append("\n")
     for name, value in spec.get("directory_event_flags", {}).items():
         lines.append(f"#define ZIGOS_DIRECTORY_EVENT_{name.upper()} (UINT8_C(1) << {value})\n")
     lines.append("\n")
@@ -302,7 +307,6 @@ def generate_c(spec: dict) -> str:
     for name, value in spec["errno"].items():
         lines.append(f"#define ZIGOS_ERRNO_{name.upper()} INT64_C({value})\n")
     lines.extend([
-        "\n#define ZIGOS_WAIT_NOHANG UINT64_C(1)\n",
         "#define ZIGOS_OPEN_READ (UINT64_C(1) << 0)\n",
         "#define ZIGOS_OPEN_WRITE (UINT64_C(1) << 1)\n",
         "#define ZIGOS_OPEN_CREATE (UINT64_C(1) << 2)\n",
