@@ -60,6 +60,9 @@ def generate(spec: dict) -> tuple[str, str, str]:
     for name, value in spec.get("spawn_flags", {}).items():
         zig.append(f"pub const spawn_{name}: u16 = @as(u16, 1) << {value};\n")
         nasm.append(f"%define ZIGOS_SPAWN_{name.upper()} (1 << {value})\n")
+    for name, value in spec.get("spawn_io", {}).items():
+        zig.append(f"pub const spawn_io_{name}: u16 = {value};\n")
+        nasm.append(f"%define ZIGOS_SPAWN_IO_{name.upper()} {value}\n")
     for name, value in spec.get("directory_fds", {}).items():
         zig.append(f"pub const directory_fd_{name}: i64 = {value};\n")
         nasm.append(f"%define ZIGOS_AT_{name.upper()} {value}\n")
@@ -269,6 +272,8 @@ def generate_c(spec: dict) -> str:
         lines.append(f"#define ZIGOS_MSG_{name.upper()} UINT64_C({value})\n")
     for name, value in spec.get("spawn_flags", {}).items():
         lines.append(f"#define ZIGOS_SPAWN_{name.upper()} (UINT16_C(1) << {value})\n")
+    for name, value in spec.get("spawn_io", {}).items():
+        lines.append(f"#define ZIGOS_SPAWN_IO_{name.upper()} UINT16_C({value})\n")
     for name, value in spec.get("directory_fds", {}).items():
         lines.append(f"#define ZIGOS_AT_{name.upper()} INT64_C({value})\n")
     for name, value in spec.get("ioctl_requests", {}).items():

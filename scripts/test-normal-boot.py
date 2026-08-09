@@ -262,10 +262,12 @@ def main() -> int:
             send(client, process, serial, "fs verify-live", b"process 6 exited 89", 60)
             send(client, process, serial, "hello|hello", PROMPT_ROOT, 60)
             send(client, process, serial, "status", b"\r\n42\r\n")
-            send(client, process, serial, "echo G261_BUILTIN_SHOULD_NOT_RUN|hello", b"pipeline: external stages only until descriptor pipelines land")
+            send(client, process, serial, "echo G261_BUILTIN_SHOULD_NOT_RUN|hello", b"pipeline: external stages only")
             send(client, process, serial, "status", b"\r\n2\r\n")
             send(client, process, serial, "hello|", b"syntax: invalid conditional list")
             send(client, process, serial, "status", b"\r\n2\r\n")
+            send(client, process, serial, "pipe-writer.elf|pipe-reader.elf", PROMPT_ROOT, 60)
+            send(client, process, serial, "status", b"\r\n0\r\n")
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")
@@ -309,14 +311,16 @@ def main() -> int:
                 "fs-api: baseline/mode/seek/hard-link/symlink/fallocate/sparse/cleanup passed",
                 "process 6 exited 89",
                 "pipeline group 7 stages 2",
-                "pipeline: external stages only until descriptor pipelines land",
+                "pipeline: external stages only",
+                "pipeline group 9 stages 2",
+                "PIPE-CPL",
                 "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10933/5178/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10935/5176/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 179/179 cache-released 16 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 217/217 cache-released 16 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (
@@ -347,8 +351,8 @@ def main() -> int:
             for marker in forbidden:
                 if marker in text:
                     raise RuntimeError(f"normal boot unexpectedly ran diagnostic marker: {marker}")
-            if text.count("hello from VFS-loaded CPL3 ELF64") < 3:
-                raise RuntimeError("G261 pipeline did not execute both external stages")
+            if text.count("hello from VFS-loaded CPL3 ELF64") < 2:
+                raise RuntimeError("G261 grouped pipeline did not retain visible final-stage execution")
             if "ZigOs normal userspace resources:" not in text or "clean yes" not in text:
                 raise RuntimeError("normal boot did not report clean resource reclamation")
         finally:

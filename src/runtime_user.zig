@@ -64,6 +64,12 @@ pub const SpawnRegisters = struct {
     rdx: u64 = 0,
 };
 
+const SpawnDescriptorMap = struct {
+    enabled: bool = false,
+    stdin_source: ?u16 = null,
+    stdout_source: ?u16 = null,
+};
+
 pub const Report = struct {
     page_limit: usize,
     used_pages: usize,
@@ -283,7 +289,7 @@ pub fn spawnWithEnvironment(
     tick: u64,
     registers: SpawnRegisters,
 ) !u64 {
-    return spawnWithEnvironmentGroup(parent_handle, name, arguments, environment, cwd_node, image_bytes, tick, registers, .inherit);
+    return spawnWithEnvironmentGroup(parent_handle, name, arguments, environment, cwd_node, image_bytes, tick, registers, .inherit, .{});
 }
 
 fn spawnWithEnvironmentGroup(
@@ -296,6 +302,7 @@ fn spawnWithEnvironmentGroup(
     tick: u64,
     registers: SpawnRegisters,
     group: runtime_process.SpawnGroup,
+    descriptor_map: SpawnDescriptorMap,
 ) !u64 {
     if (!initialized) return error.NotInitialized;
     if (arguments.len == 0 or arguments.len > syscall.maximum_arguments) return error.TooManyArguments;
@@ -320,6 +327,15 @@ fn spawnWithEnvironmentGroup(
     };
     errdefer rollbackProcess(parent_handle, handle);
     _ = try activeDescriptors().cloneProcess(processes, parent_handle, handle);
+    if (descriptor_map.enabled) {
+        _ = try activeDescriptors().configurePipelineChild(
+            activeVfs(),
+            processes,
+            handle,
+            descriptor_map.stdin_source,
+            descriptor_map.stdout_source,
+        );
+    }
 
     try installContext(
         context_index,
@@ -2351,7 +2367,12 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_fault);
         return 0;
     }
-    const spawn_group: runtime_process.SpawnGroup = switch (request.flags) {
+    if ((request.flags & ~runtime_abi.spawn_allowed) != 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const group_flags = request.flags & runtime_abi.spawn_group_allowed;
+    const spawn_group: runtime_process.SpawnGroup = switch (group_flags) {
         0 => blk: {
             if (frame.rsi != 0) {
                 frame.rax = reject(errno_invalid);
@@ -2382,6 +2403,40 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
             return 0;
         },
     };
+
+    var descriptor_map = SpawnDescriptorMap{};
+    if ((request.flags & runtime_abi.spawn_pipeline_io) != 0) {
+        if (group_flags == 0 or (frame.rdx >> 32) != 0) {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        }
+        const raw_stdin: u16 = @truncate(frame.rdx);
+        const raw_stdout: u16 = @truncate(frame.rdx >> 16);
+        const stdin_source: ?u16 = if (raw_stdin == runtime_abi.spawn_io_inherit_descriptor)
+            null
+        else if (raw_stdin < runtime_fd.maximum_descriptors_per_process)
+            raw_stdin
+        else {
+            frame.rax = reject(errno_bad_fd);
+            return 0;
+        };
+        const stdout_source: ?u16 = if (raw_stdout == runtime_abi.spawn_io_inherit_descriptor)
+            null
+        else if (raw_stdout < runtime_fd.maximum_descriptors_per_process)
+            raw_stdout
+        else {
+            frame.rax = reject(errno_bad_fd);
+            return 0;
+        };
+        if (stdin_source == null and stdout_source == null) {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        }
+        descriptor_map = .{ .enabled = true, .stdin_source = stdin_source, .stdout_source = stdout_source };
+    } else if (frame.rdx != 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
     if (request.path_length == 0) {
         frame.rax = reject(errno_invalid);
         return 0;
@@ -2505,6 +2560,7 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
         current_tick,
         .{},
         spawn_group,
+        descriptor_map,
     ) catch |err| {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;

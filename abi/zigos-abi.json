@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 21,
+    "minor": 22,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -148,7 +148,11 @@
   },
   "spawn_flags": {
     "new_process_group": 0,
-    "join_process_group": 1
+    "join_process_group": 1,
+    "pipeline_io": 2
+  },
+  "spawn_io": {
+    "inherit_descriptor": 65535
   },
   "directory_fds": {
     "cwd": -100

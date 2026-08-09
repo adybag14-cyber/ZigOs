@@ -8,7 +8,13 @@ ORG 0
 %define SYS_READ  66
 
 entry:
+    test rdx, rdx
+    jnz .standard_stream
     mov r12d, edi
+    jmp .read
+.standard_stream:
+    xor r12d, r12d
+.read:
 
     mov eax, SYS_READ
     mov edi, r12d

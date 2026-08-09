@@ -583,6 +583,46 @@ pub const System = struct {
         return target_fd;
     }
 
+    pub fn configurePipelineChild(
+        self: *System,
+        vfs: *runtime_vfs.Vfs,
+        processes: *runtime_process.Table,
+        process_handle: u64,
+        stdin_source: ?u16,
+        stdout_source: ?u16,
+    ) Error!usize {
+        _ = try processes.get(process_handle);
+        const namespace_slot = try self.resolveNamespace(process_handle);
+        if (stdin_source == null and stdout_source == null) return Error.InvalidOperation;
+
+        if (stdin_source) |fd| {
+            if (fd < 3) return Error.InvalidOperation;
+            const open_index = try self.resolveDescriptor(namespace_slot, fd);
+            const description = self.open_descriptions[open_index];
+            if (description.kind != .pipe_read or !description.readable) return Error.NotReadable;
+            if (description.references == std.math.maxInt(u16)) return Error.ReferenceOverflow;
+        }
+        if (stdout_source) |fd| {
+            if (fd < 3) return Error.InvalidOperation;
+            const open_index = try self.resolveDescriptor(namespace_slot, fd);
+            const description = self.open_descriptions[open_index];
+            if (description.kind != .pipe_write or !description.writable) return Error.NotWritable;
+            if (description.references == std.math.maxInt(u16)) return Error.ReferenceOverflow;
+        }
+
+        if (stdin_source) |fd| _ = try self.duplicateTo(vfs, processes, process_handle, fd, 0);
+        if (stdout_source) |fd| _ = try self.duplicateTo(vfs, processes, process_handle, fd, 1);
+
+        var closed: usize = 0;
+        for (3..maximum_descriptors_per_process) |fd| {
+            if (!self.namespaces[namespace_slot].descriptors[fd].used) continue;
+            try self.closeDescriptorAt(vfs, processes, namespace_slot, fd);
+            closed += 1;
+        }
+        try self.syncDescriptorCount(processes, process_handle);
+        return closed;
+    }
+
     pub fn setCloseOnExec(
         self: *System,
         processes: *runtime_process.Table,
@@ -2227,6 +2267,34 @@ test "cloned process namespaces inherit shared descriptions and close-on-exec" {
     _ = try system.releaseProcess(&fs, &processes, child);
     try processes.exit(child, 0);
     _ = (try processes.wait(parent, child, false)).?;
+
+    // G262 keeps spawn-time pipeline I/O deliberately narrower than generic
+    // descriptor actions: only inherited pipe ends may replace stdin/stdout,
+    // then every non-standard child descriptor is closed before dispatch.
+    const pipe_pair = try system.createPipe(&processes, parent);
+    try std.testing.expectEqual(@as(u16, 3), pipe_pair[0]);
+    try std.testing.expectEqual(@as(u16, 4), pipe_pair[1]);
+    const pipeline_child = try initializeTestProcess(&processes, "pipeline-child", 16);
+    try std.testing.expectEqual(@as(usize, 5), try system.cloneProcess(&processes, parent, pipeline_child));
+    try std.testing.expectError(Error.NotReadable, system.configurePipelineChild(&fs, &processes, pipeline_child, pipe_pair[1], null));
+    try std.testing.expectError(Error.NotWritable, system.configurePipelineChild(&fs, &processes, pipeline_child, null, pipe_pair[0]));
+    try std.testing.expectEqual(@as(usize, 5), (try system.snapshot(&fs, &processes, pipeline_child)).count);
+    try std.testing.expectEqual(@as(usize, 2), try system.configurePipelineChild(&fs, &processes, pipeline_child, pipe_pair[0], pipe_pair[1]));
+    const pipeline_snapshot = try system.snapshot(&fs, &processes, pipeline_child);
+    try std.testing.expectEqual(@as(usize, 3), pipeline_snapshot.count);
+    try std.testing.expectEqual(@as(u16, 0), pipeline_snapshot.entries[0].fd);
+    try std.testing.expectEqual(DescriptionKind.pipe_read, pipeline_snapshot.entries[0].kind);
+    try std.testing.expectEqual(@as(u16, 1), pipeline_snapshot.entries[1].fd);
+    try std.testing.expectEqual(DescriptionKind.pipe_write, pipeline_snapshot.entries[1].kind);
+    try std.testing.expectEqual(@as(u16, 2), pipeline_snapshot.entries[2].fd);
+    try std.testing.expectEqual(DescriptionKind.terminal, pipeline_snapshot.entries[2].kind);
+    try std.testing.expectEqual(@as(usize, 5), (try system.snapshot(&fs, &processes, parent)).count);
+    try system.close(&fs, &processes, parent, pipe_pair[0]);
+    try system.close(&fs, &processes, parent, pipe_pair[1]);
+    _ = try system.releaseProcess(&fs, &processes, pipeline_child);
+    try processes.exit(pipeline_child, 0);
+    _ = (try processes.wait(parent, pipeline_child, false)).?;
+    try std.testing.expectEqual(@as(usize, 0), system.report().pipes);
     try std.testing.expect(system.validate(&fs, &processes));
 }
 

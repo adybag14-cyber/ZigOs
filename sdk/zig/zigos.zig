@@ -241,25 +241,62 @@ pub fn spawn(path: []const u8) Error!u32 {
 }
 
 pub fn spawnv(path: []const u8, arguments: []const []const u8, environment: []const []const u8) Error!u32 {
-    return spawnvWithGroup(path, arguments, environment, 0, 0);
+    return spawnvWithGroup(path, arguments, environment, 0, 0, null, null);
 }
 
 pub fn spawnvNewProcessGroup(path: []const u8, arguments: []const []const u8, environment: []const []const u8) Error!u32 {
-    return spawnvWithGroup(path, arguments, environment, abi.spawn_new_process_group, 0);
+    return spawnvWithGroup(path, arguments, environment, abi.spawn_new_process_group, 0, null, null);
 }
 
 pub fn spawnvInProcessGroup(path: []const u8, arguments: []const []const u8, environment: []const []const u8, process_group: u32) Error!u32 {
     if (process_group == 0) return Error.InvalidArgument;
-    return spawnvWithGroup(path, arguments, environment, abi.spawn_join_process_group, process_group);
+    return spawnvWithGroup(path, arguments, environment, abi.spawn_join_process_group, process_group, null, null);
 }
 
-fn spawnvWithGroup(path: []const u8, arguments: []const []const u8, environment: []const []const u8, flags: u16, process_group: u32) Error!u32 {
+pub fn spawnvNewProcessGroupWithPipelineIo(
+    path: []const u8,
+    arguments: []const []const u8,
+    environment: []const []const u8,
+    stdin_source: ?u16,
+    stdout_source: ?u16,
+) Error!u32 {
+    return spawnvWithGroup(path, arguments, environment, abi.spawn_new_process_group | abi.spawn_pipeline_io, 0, stdin_source, stdout_source);
+}
+
+pub fn spawnvInProcessGroupWithPipelineIo(
+    path: []const u8,
+    arguments: []const []const u8,
+    environment: []const []const u8,
+    process_group: u32,
+    stdin_source: ?u16,
+    stdout_source: ?u16,
+) Error!u32 {
+    if (process_group == 0) return Error.InvalidArgument;
+    return spawnvWithGroup(path, arguments, environment, abi.spawn_join_process_group | abi.spawn_pipeline_io, process_group, stdin_source, stdout_source);
+}
+
+fn spawnvWithGroup(
+    path: []const u8,
+    arguments: []const []const u8,
+    environment: []const []const u8,
+    flags: u16,
+    process_group: u32,
+    stdin_source: ?u16,
+    stdout_source: ?u16,
+) Error!u32 {
     if (path.len == 0) return Error.InvalidArgument;
     if (path.len > 255) return Error.NameTooLong;
     if (arguments.len == 0 or arguments.len > abi.maximum_arguments or
         environment.len > abi.maximum_environment) return Error.TooBig;
-    if (flags != 0 and flags != abi.spawn_new_process_group and flags != abi.spawn_join_process_group) return Error.InvalidArgument;
-    if ((flags == abi.spawn_join_process_group) != (process_group != 0)) return Error.InvalidArgument;
+    const allowed = abi.spawn_new_process_group | abi.spawn_join_process_group | abi.spawn_pipeline_io;
+    if ((flags & ~allowed) != 0) return Error.InvalidArgument;
+    const group_flags = flags & (abi.spawn_new_process_group | abi.spawn_join_process_group);
+    if (group_flags != 0 and group_flags != abi.spawn_new_process_group and group_flags != abi.spawn_join_process_group)
+        return Error.InvalidArgument;
+    if ((group_flags == abi.spawn_join_process_group) != (process_group != 0)) return Error.InvalidArgument;
+    const pipeline_io = (flags & abi.spawn_pipeline_io) != 0;
+    if (pipeline_io and group_flags == 0) return Error.InvalidArgument;
+    if (pipeline_io != (stdin_source != null or stdout_source != null)) return Error.InvalidArgument;
     var argument_descriptors: [abi.maximum_arguments]UserString = @splat(.{ .pointer = 0, .length = 0 });
     var environment_descriptors: [abi.maximum_environment]UserString = @splat(.{ .pointer = 0, .length = 0 });
     for (arguments, 0..) |argument, index| {
@@ -280,7 +317,13 @@ fn spawnvWithGroup(path: []const u8, arguments: []const []const u8, environment:
         .environment_count = @intCast(environment.len),
         .flags = flags,
     };
-    return @intCast(try result(zigos_syscall6(abi.syscall_spawnv, ptrValue(&request), process_group, 0, 0, 0, 0)));
+    const stdin_raw: u16 = stdin_source orelse abi.spawn_io_inherit_descriptor;
+    const stdout_raw: u16 = stdout_source orelse abi.spawn_io_inherit_descriptor;
+    const pipeline_descriptors: u64 = if (pipeline_io)
+        @as(u64, stdin_raw) | (@as(u64, stdout_raw) << 16)
+    else
+        0;
+    return @intCast(try result(zigos_syscall6(abi.syscall_spawnv, ptrValue(&request), process_group, pipeline_descriptors, 0, 0, 0)));
 }
 
 pub fn wait(pid: u32, nohang: bool, status: *WaitStatus) Error!u32 {

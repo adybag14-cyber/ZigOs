@@ -6,7 +6,13 @@ ORG 0
 %define SYS_WRITE 65
 
 entry:
+    test rdx, rdx
+    jnz .standard_stream
     mov r12d, esi
+    jmp .write
+.standard_stream:
+    mov r12d, 1
+.write:
 
     mov eax, SYS_WRITE
     mov edi, r12d

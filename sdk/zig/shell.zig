@@ -269,7 +269,7 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
     if (pipeline.count == 1) return execute(&pipeline.stages[0], previous_status);
     for (pipeline.stages[0..pipeline.count]) |stage| {
         if (isBuiltin(stage.slice(0))) {
-            zigos.writeAll(2, "pipeline: external stages only until descriptor pipelines land\r\n") catch {};
+            zigos.writeAll(2, "pipeline: external stages only\r\n") catch {};
             return status_usage;
         }
     }
@@ -279,6 +279,19 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
         zigos.writeAll(2, "pipeline: invalid inherited environment\r\n") catch {};
         return status_failure;
     };
+    var pipe_pairs: [maximum_pipeline_stages - 1][2]u32 = @splat(@splat(0));
+    var pipe_open: [maximum_pipeline_stages - 1][2]bool = @splat(@splat(false));
+    var pipe_count: usize = 0;
+    while (pipe_count + 1 < pipeline.count) : (pipe_count += 1) {
+        zigos.pipe(&pipe_pairs[pipe_count]) catch |err| {
+            closePipelinePipeEnds(&pipe_pairs, &pipe_open, pipe_count);
+            _ = printError("pipeline pipe", err);
+            return status_failure;
+        };
+        pipe_open[pipe_count] = .{ true, true };
+    }
+    defer closePipelinePipeEnds(&pipe_pairs, &pipe_open, pipe_count);
+
     var pids: [maximum_pipeline_stages]u32 = @splat(0);
     var process_group: u32 = 0;
     var spawned: usize = 0;
@@ -290,6 +303,14 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
         }
         for (stage.words[0..stage.count], 0..) |_, index| arguments[index] = stage.slice(index);
         var path_storage: [maximum_path + 1]u8 = @splat(0);
+        const stdin_source: ?u16 = if (stage_index == 0)
+            null
+        else
+            @intCast(pipe_pairs[stage_index - 1][0]);
+        const stdout_source: ?u16 = if (stage_index + 1 == pipeline.count)
+            null
+        else
+            @intCast(pipe_pairs[stage_index][1]);
         const pid = spawnFromPathPipeline(
             stage.slice(0),
             &path_storage,
@@ -297,7 +318,10 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
             stage.count - 1,
             environment,
             if (stage_index == 0) null else process_group,
+            stdin_source,
+            stdout_source,
         ) catch |err| {
+            closePipelinePipeEnds(&pipe_pairs, &pipe_open, pipe_count);
             reapPipelineChildren(&pids, spawned);
             _ = printError("pipeline", err);
             return if (err == error.NotFound) status_command_not_found else status_failure;
@@ -305,6 +329,14 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
         pids[stage_index] = pid;
         spawned += 1;
         if (stage_index == 0) process_group = pid;
+        if (stage_index != 0 and pipe_open[stage_index - 1][0]) {
+            zigos.close(@intCast(pipe_pairs[stage_index - 1][0])) catch {};
+            pipe_open[stage_index - 1][0] = false;
+        }
+        if (stage_index + 1 < pipeline.count and pipe_open[stage_index][1]) {
+            zigos.close(@intCast(pipe_pairs[stage_index][1])) catch {};
+            pipe_open[stage_index][1] = false;
+        }
     }
 
     zigos.writeAll(1, "pipeline group ") catch {
@@ -332,6 +364,20 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
         if (index + 1 == spawned) final_status = status.exit_status;
     }
     return final_status;
+}
+
+fn closePipelinePipeEnds(
+    pipe_pairs: *const [maximum_pipeline_stages - 1][2]u32,
+    pipe_open: *[maximum_pipeline_stages - 1][2]bool,
+    count: usize,
+) void {
+    for (0..count) |index| {
+        for (0..2) |end| {
+            if (!pipe_open[index][end]) continue;
+            zigos.close(@intCast(pipe_pairs[index][end])) catch {};
+            pipe_open[index][end] = false;
+        }
+    }
 }
 
 fn reapPipelineChildren(pids: *const [maximum_pipeline_stages]u32, count: usize) void {
@@ -603,15 +649,17 @@ fn spawnFromPathPipeline(
     extra_count: usize,
     environment: []const []const u8,
     process_group: ?u32,
+    stdin_source: ?u16,
+    stdout_source: ?u16,
 ) zigos.Error!u32 {
     if (program.len == 0) return error.InvalidArgument;
     if (containsScalar(program, '/')) {
         const path = buildExecutablePath("", program, path_storage) orelse return error.NameTooLong;
         arguments[0] = executableName(path);
         return if (process_group) |group|
-            zigos.spawnvInProcessGroup(path, arguments[0 .. extra_count + 1], environment, group)
+            zigos.spawnvInProcessGroupWithPipelineIo(path, arguments[0 .. extra_count + 1], environment, group, stdin_source, stdout_source)
         else
-            zigos.spawnvNewProcessGroup(path, arguments[0 .. extra_count + 1], environment);
+            zigos.spawnvNewProcessGroupWithPipelineIo(path, arguments[0 .. extra_count + 1], environment, stdin_source, stdout_source);
     }
     const path_value = zigos.environmentValue(startup_environment, "PATH") orelse "/bin:/persist";
     var start: usize = 0;
@@ -623,9 +671,9 @@ fn spawnFromPathPipeline(
             const path = buildExecutablePath(directory, program, path_storage) orelse return error.NameTooLong;
             arguments[0] = executableName(path);
             const candidate: ?u32 = (if (process_group) |group|
-                zigos.spawnvInProcessGroup(path, arguments[0 .. extra_count + 1], environment, group)
+                zigos.spawnvInProcessGroupWithPipelineIo(path, arguments[0 .. extra_count + 1], environment, group, stdin_source, stdout_source)
             else
-                zigos.spawnvNewProcessGroup(path, arguments[0 .. extra_count + 1], environment)) catch |err| switch (err) {
+                zigos.spawnvNewProcessGroupWithPipelineIo(path, arguments[0 .. extra_count + 1], environment, stdin_source, stdout_source)) catch |err| switch (err) {
                 error.NotFound => null,
                 else => return err,
             };
