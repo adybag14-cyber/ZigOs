@@ -271,13 +271,12 @@ def main() -> int:
 
             foreground_start = len(serial)
             client.sendall(b"pipe-reader.elf|pipe-reader.elf\r")
-            wait_for(client, process, serial, b"pipeline foreground group 11", foreground_start, 60)
+            wait_for(client, process, serial, b"pipeline group 11 stages 2", foreground_start, 60)
             time.sleep(0.2)
             read_available(client, serial)
             if PROMPT_ROOT in serial[foreground_start:]:
                 raise RuntimeError("G263 shell prompt returned before foreground pipeline received terminal input")
             client.sendall(b"TTYPIPE\r")
-            wait_for(client, process, serial, b"pipeline foreground restored 2", foreground_start, 60)
             wait_for(client, process, serial, PROMPT_ROOT, foreground_start, 60)
             send(client, process, serial, "status", b"\r\n0\r\n")
 
@@ -292,6 +291,39 @@ def main() -> int:
             wait_for(client, process, serial, PROMPT_ROOT, background_start, 20)
             send(client, process, serial, "status", b"\r\n0\r\n")
             send(client, process, serial, "echo G264_BUILTIN_SHOULD_NOT_RUN &", b"syntax: invalid conditional list")
+            send(client, process, serial, "status", b"\r\n2\r\n")
+
+            fg_launch = len(serial)
+            client.sendall(b"sleep &\r")
+            wait_for(client, process, serial, PROMPT_ROOT, fg_launch, 20)
+            read_available(client, serial)
+            if b"[1] done 7" in serial[fg_launch:]:
+                raise RuntimeError("G265 fg fixture completed before adoption")
+            fg_wait = len(serial)
+            client.sendall(b"fg 1\r")
+            wait_for(client, process, serial, b"sleep: after", fg_wait, 20)
+            after_index = bytes(serial).find(b"sleep: after", fg_wait)
+            if after_index < 0 or PROMPT_ROOT in serial[fg_wait:after_index]:
+                raise RuntimeError("G265 fg returned the shell prompt before the adopted job completed")
+            wait_for(client, process, serial, PROMPT_ROOT, after_index, 20)
+            send(client, process, serial, "status", b"\r\n7\r\n")
+
+            bg_launch = len(serial)
+            client.sendall(b"sleep &\r")
+            wait_for(client, process, serial, PROMPT_ROOT, bg_launch, 20)
+            bg_command = len(serial)
+            client.sendall(b"bg 1\r")
+            wait_for(client, process, serial, PROMPT_ROOT, bg_command, 20)
+            time.sleep(0.02)
+            read_available(client, serial)
+            if b"[1] done 7" in serial[bg_command:]:
+                raise RuntimeError("G265 bg job completed before detached prompt return")
+            wait_for(client, process, serial, b"[1] done 7", bg_command, 20)
+            wait_for(client, process, serial, PROMPT_ROOT, bg_command, 20)
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "fg 4", PROMPT_ROOT)
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            send(client, process, serial, "bg 0", PROMPT_ROOT)
             send(client, process, serial, "status", b"\r\n2\r\n")
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
@@ -339,9 +371,8 @@ def main() -> int:
                 "pipeline: external stages only",
                 "pipeline group 9 stages 2",
                 "PIPE-CPL",
-                "pipeline foreground group 11",
+                "pipeline group 11 stages 2",
                 "TTYPIPE",
-                "pipeline foreground restored 2",
                 "[1] done 7",
                 "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
@@ -349,7 +380,7 @@ def main() -> int:
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
                 " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10938/5173/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 268/268 cache-released 16 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 300/300 cache-released 16 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

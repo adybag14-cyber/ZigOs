@@ -406,60 +406,53 @@ fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, backgrou
         return status_success;
     }
 
-    zigos.writeAll(1, "pipeline group ") catch {
-        reapPipelineChildren(&pids, spawned);
-        return status_failure;
-    };
+    zigos.writeAll(1, "pipeline group ") catch {};
     writeDecimal(process_group);
-    zigos.writeAll(1, " stages ") catch {
-        reapPipelineChildren(&pids, spawned);
-        return status_failure;
-    };
+    zigos.writeAll(1, " stages ") catch {};
     writeDecimal(pipeline.count);
-    zigos.writeAll(1, "\r\n") catch {
-        reapPipelineChildren(&pids, spawned);
-        return status_failure;
-    };
-
-    const shell_group = zigos.ttyForegroundProcessGroup(0) catch |err| {
-        reapPipelineChildren(&pids, spawned);
-        _ = printError("pipeline foreground query", err);
-        return status_failure;
-    };
-    zigos.ttySetForegroundProcessGroup(0, process_group) catch |err| {
-        reapPipelineChildren(&pids, spawned);
-        _ = printError("pipeline foreground", err);
-        return status_failure;
-    };
-    const observed_group = zigos.ttyForegroundProcessGroup(0) catch |err| {
-        _ = restorePipelineForeground(shell_group);
-        reapPipelineChildren(&pids, spawned);
-        _ = printError("pipeline foreground query", err);
-        return status_failure;
-    };
-    if (observed_group != process_group) {
-        _ = restorePipelineForeground(shell_group);
-        reapPipelineChildren(&pids, spawned);
-        zigos.writeAll(2, "pipeline: foreground group mismatch\r\n") catch {};
-        return status_failure;
-    }
-    zigos.writeAll(1, "pipeline foreground group ") catch {};
-    writeDecimal(observed_group);
     zigos.writeAll(1, "\r\n") catch {};
 
-    var final_status: u32 = status_failure;
-    var remaining = spawned;
-    while (remaining != 0) : (remaining -= 1) {
-        var status: zigos.WaitStatus = undefined;
-        _ = zigos.waitProcessGroup(process_group, false, &status) catch |err| {
-            _ = restorePipelineForeground(shell_group);
-            _ = printError("pipeline group wait", err);
-            return status_failure;
-        };
-        if (status.pid == pids[spawned - 1]) final_status = status.exit_status;
+    var foreground_job: BackgroundJob = .{
+        .process_group = process_group,
+        .remaining = @intCast(spawned),
+        .final_pid = pids[spawned - 1],
+    };
+    return waitForegroundJob(&foreground_job) orelse {
+        reapPipelineChildren(&pids, spawned);
+        return status_failure;
+    };
+}
+
+fn waitForegroundJob(job: *BackgroundJob) ?u32 {
+    const shell_group = zigos.ttyForegroundProcessGroup(0) catch |err| {
+        _ = printError("foreground", err);
+        return null;
+    };
+    zigos.ttySetForegroundProcessGroup(0, job.process_group) catch |err| {
+        _ = printError("foreground", err);
+        return null;
+    };
+    const observed = zigos.ttyForegroundProcessGroup(0) catch |err| {
+        _ = restorePipelineForeground(shell_group);
+        _ = printError("foreground", err);
+        return null;
+    };
+    if (observed != job.process_group) {
+        _ = restorePipelineForeground(shell_group);
+        return null;
     }
-    if (!restorePipelineForeground(shell_group)) return status_failure;
-    return final_status;
+    while (job.remaining != 0) {
+        var status: zigos.WaitStatus = undefined;
+        _ = zigos.waitProcessGroup(job.process_group, false, &status) catch |err| {
+            _ = restorePipelineForeground(shell_group);
+            _ = printError("foreground wait", err);
+            return null;
+        };
+        job.remaining -= 1;
+        if (status.pid == job.final_pid) job.final_status = status.exit_status;
+    }
+    if (!restorePipelineForeground(shell_group)) return null;
+    return job.final_status;
 }
 
 fn restorePipelineForeground(shell_group: u32) bool {
@@ -475,9 +468,6 @@ fn restorePipelineForeground(shell_group: u32) bool {
         zigos.writeAll(2, "pipeline: foreground restore mismatch\r\n") catch {};
         return false;
     }
-    zigos.writeAll(1, "pipeline foreground restored ") catch {};
-    writeDecimal(observed);
-    zigos.writeAll(1, "\r\n") catch {};
     return true;
 }
 
@@ -551,7 +541,8 @@ fn isBuiltin(name: []const u8) bool {
         equal(name, "ls") or equal(name, "cat") or equal(name, "cp") or equal(name, "write") or
         equal(name, "append") or equal(name, "mkdir") or equal(name, "rm") or equal(name, "rmdir") or
         equal(name, "mv") or equal(name, "chmod") or equal(name, "sync") or equal(name, "pid") or
-        equal(name, "status") or equal(name, "run") or equal(name, "shutdown") or equal(name, "exit");
+        equal(name, "status") or equal(name, "fg") or equal(name, "bg") or equal(name, "run") or
+        equal(name, "shutdown") or equal(name, "exit");
 }
 
 fn conditionalSyntaxError() u32 {
@@ -612,6 +603,8 @@ fn execute(command: *const Command, previous_status: u32) u32 {
     } else if (equal(name, "status")) {
         if (command.count != 1) return usage("status");
         return commandStatus(previous_status);
+    } else if (equal(name, "fg") or equal(name, "bg")) {
+        return commandJob(command, equal(name, "fg"));
     } else if (equal(name, "run")) {
         if (command.count < 2) return usage("run PROGRAM [ARGS...]");
         return commandRun(command, 1);
@@ -729,6 +722,28 @@ fn commandStatus(previous_status: u32) u32 {
     writeDecimal(previous_status);
     zigos.writeAll(1, "\r\n") catch return status_failure;
     return status_success;
+}
+
+fn commandJob(command: *const Command, foreground: bool) u32 {
+    if (command.count > 2) return status_usage;
+    const slot: usize = if (command.count == 2) blk: {
+        const value = command.slice(1);
+        if (value.len != 1 or value[0] < '1' or value[0] > '0' + maximum_background_jobs) return status_usage;
+        break :blk value[0] - '1';
+    } else findActiveJobSlot() orelse return status_failure;
+    const job = &background_jobs[slot];
+    if (job.process_group == 0) return status_failure;
+    if (!foreground) return status_success;
+    const final_status = waitForegroundJob(job) orelse return status_failure;
+    job.* = .{};
+    return final_status;
+}
+
+fn findActiveJobSlot() ?usize {
+    for (background_jobs, 0..) |job, slot| {
+        if (job.process_group != 0) return slot;
+    }
+    return null;
 }
 
 fn commandRun(command: *const Command, program_index: usize) u32 {
