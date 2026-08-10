@@ -629,6 +629,7 @@ fn consumeForegroundInput(byte: u8) void {
         },
         .newline => emit("\r\n"),
         .interrupt => emit("^C\r\n"),
+        .suspended => emit("^Z\r\n"),
         .bell => emit("\x07"),
     }
 }
@@ -3102,10 +3103,12 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(tty_report.blocked_reads);
     emit("/");
     emitDecimal(tty_report.reader_wakeups);
-    emit(" erase/interrupt/overflow ");
+    emit(" erase/interrupt/suspend/overflow ");
     emitDecimal(tty_report.erase_events);
     emit("/");
     emitDecimal(tty_report.interrupt_events);
+    emit("/");
+    emitDecimal(tty_report.suspend_events);
     emit("/");
     emitDecimal(tty_report.overflow_events);
     emit(" clean ");

@@ -13,6 +13,7 @@ pub const EchoAction = enum(u8) {
     erase_line,
     newline,
     interrupt,
+    suspended,
     bell,
 };
 
@@ -48,6 +49,7 @@ pub const Report = struct {
     reader_wakeups: u64,
     erase_events: u64,
     interrupt_events: u64,
+    suspend_events: u64,
     overflow_events: u64,
 };
 
@@ -73,6 +75,7 @@ pub const Tty = struct {
     reader_wakeups: u64 = 0,
     erase_events: u64 = 0,
     interrupt_events: u64 = 0,
+    suspend_events: u64 = 0,
     overflow_events: u64 = 0,
 
     pub fn init(controller_handle: u64) Tty {
@@ -165,16 +168,24 @@ pub const Tty = struct {
         self.ignore_next_lf = byte == '\r';
         const normalized = if (byte == '\r') '\n' else byte;
 
-        if (self.signals_enabled and normalized == 0x03) {
+        if (self.signals_enabled and (normalized == 0x03 or normalized == 0x1A)) {
             self.edit_length = 0;
-            self.interrupt_events +%= 1;
+            const is_suspend = normalized == 0x1A;
+            if (is_suspend)
+                self.suspend_events +%= 1
+            else
+                self.interrupt_events +%= 1;
             const signalled = if (self.foreground_process_group == 0)
                 0
             else
-                processes.sendGroupSignal(self.controller_handle, self.foreground_process_group, 2) catch 0;
-            if (signalled != 0) self.applyInterruptDefault(processes);
+                processes.sendGroupSignal(
+                    self.controller_handle,
+                    self.foreground_process_group,
+                    if (is_suspend) 19 else 2,
+                ) catch 0;
+            if (!is_suspend and signalled != 0) self.applyInterruptDefault(processes);
             return .{
-                .echo = if (self.echo_enabled) .interrupt else .none,
+                .echo = if (self.echo_enabled) if (is_suspend) .suspended else .interrupt else .none,
                 .signalled = signalled,
             };
         }
@@ -269,6 +280,7 @@ pub const Tty = struct {
             .reader_wakeups = self.reader_wakeups,
             .erase_events = self.erase_events,
             .interrupt_events = self.interrupt_events,
+            .suspend_events = self.suspend_events,
             .overflow_events = self.overflow_events,
         };
     }
@@ -408,6 +420,15 @@ test "terminal foreground isolation eof and interrupt semantics" {
     try std.testing.expectError(runtime_process.Error.PermissionDenied, tty.read(&processes, background, &byte));
     _ = tty.feed(&processes, 0x04);
     try std.testing.expectEqual(ReadStatus.eof, (try tty.read(&processes, foreground, &byte)).status);
+
+    _ = tty.feed(&processes, 'x');
+    const suspended = tty.feed(&processes, 0x1A);
+    try std.testing.expectEqual(EchoAction.suspended, suspended.echo);
+    try std.testing.expectEqual(@as(usize, 1), suspended.signalled);
+    try std.testing.expectEqual(runtime_process.State.stopped, (try processes.get(foreground)).state);
+    try std.testing.expectEqual(@as(usize, 1), try processes.sendGroupSignal(root, foreground_pid, 18));
+    try std.testing.expectEqual(runtime_process.State.runnable, (try processes.get(foreground)).state);
+    try std.testing.expectEqual(@as(u64, 1), tty.report().suspend_events);
 
     const interrupted = tty.feed(&processes, 0x03);
     try std.testing.expectEqual(EchoAction.interrupt, interrupted.echo);

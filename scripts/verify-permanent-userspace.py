@@ -131,7 +131,7 @@ def main() -> int:
     require(tty_source, "wakeMatching(.terminal_read", "committed lines wake terminal readers")
     require(tty_source, "process.process_group == self.foreground_process_group", "background process groups cannot read the terminal")
     require(tty_source, "0x08, 0x7F", "canonical erase accepts Backspace and DEL")
-    require(tty_source, "sendGroupSignal(self.controller_handle, self.foreground_process_group, 2)", "Ctrl-C targets the foreground process group")
+    require(tty_source, "self.foreground_process_group,\n                    if (is_suspend) 19 else 2", "Ctrl-C and Ctrl-Z target the foreground process group")
     require(nvme_image_builder, "ZIGOS_DATA_PARTITION_GUID", "deterministic GPT image contains a dedicated ZigOs data partition")
     require(nvme_image_builder, "data_partition_first_lba", "data partition geometry is exported to test metadata")
     require(gpt_source, "isZigOsDataPartition", "kernel GPT parser identifies the dedicated persistence partition")
@@ -615,7 +615,7 @@ def main() -> int:
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 56 failed 0", "live diagnostic profile requires the expanded block-backed FAT command matrix")
     require(runtime_test, "11039/5072/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both G247 diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
     require(normal_boot_test, "ZigOs boot FAT: block-backed yes files/directories 3/2", "persistent normal boot requires a clean real block-backed /boot")
-    require(normal_boot_test, "10938/5173/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G250 normal QEMU requires exact FAT ownership with zero classified corruption")
+    require(normal_boot_test, "10939/5172/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G266 normal QEMU requires exact FAT ownership with zero classified corruption")
     require(diskless_normal_boot_test, "ZigOs boot FAT: block-backed no files/directories 0/0", "diskless normal boot requires an explicitly absent backend and fallback namespace")
     require(diskless_normal_boot_test, "0/0/0/0/0 lock tickets/outstanding 0/0 quarantine state/reason/events no/none/0 clean yes", "diskless fallback has no FAT ownership or classified corruption state")
     for script_text, profile in (
@@ -1229,8 +1229,8 @@ def main() -> int:
     require(workflow, "test-boot-fat-io-error.py --boot-timeout 240", "hosted integration runs the block-read EIO and retry gate")
     require(workflow, "test-persistent-readonly-remount.py --boot-timeout 240", "hosted integration runs the persistent fail-stop read-only remount gate")
     require(readme, "248/248 canonical host-test executions across all 102 unique isolated-test declarations", "README carries the clean canonical execution and declaration counts")
-    require(readme, "Size:    5,649,920 bytes", "README carries the reproducible G265 ABI 1.23 EFI size")
-    require(readme, "SHA-256: 4D21C5781BBC7634E2660CEA3632C43311A156C6F4CCFFF9C08047B2B84665BE", "README carries the reproducible G265 ABI 1.23 EFI hash")
+    require(readme, "Size:    5,649,920 bytes", "README carries the reproducible G266 ABI 1.23 EFI size")
+    require(readme, "SHA-256: ACF8C5AFB2FFC23944197814BAE6BC6657CEECDB8538AE87EDDB1334F32EE981", "README carries the reproducible G266 ABI 1.23 EFI hash")
     require(readme, "Persistent NVMe write-error read-only-remount profile", "README documents the required fail-stop profile")
     require(readme, "discarded/rejected 1/1 vfs-remount/discard 1/1 mount-readonly yes clean yes", "README freezes exact G229 containment telemetry")
     require(priority, "248/248 canonical host-test executions across 102 unique isolated Zig test declarations", "priority remediation carries the canonical execution and declaration counts")
@@ -1300,7 +1300,7 @@ def main() -> int:
     require(c_conformance, "sizeof(overlong_path_boundary) != 257", "C CPL3 fixture proves the 256-byte C-string payload")
     require(c_conformance, "pathname length/component bounds", "C CPL3 fixture fails closed on G247 boundary regressions")
     require(runtime_test, "bytes 5649988 metadata/file/block reads 112/4/114 failures 0 clusters claimed/free/loop/cross/range 11039/5072/0/0/0", "G247 diagnostic harness freezes the measured FAT geometry")
-    require(normal_boot_test, "10938/5173/0/0/0 lock tickets/outstanding 1/0", "G250 normal harness freezes the measured FAT geometry")
+    require(normal_boot_test, "10939/5172/0/0/0 lock tickets/outstanding 1/0", "G266 normal harness freezes the measured FAT geometry")
     require(io_error_boot_test, "bytes 5599300 metadata/file/block reads 112/3/113 failures 1 clusters claimed/free/loop/cross/range 10940/5171/0/0/0", "G264 read-EIO harness freezes its private fault-injection geometry")
     require(readonly_remount_boot_test, "bytes 5599300 metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10940/5171/0/0/0", "G264 write-EIO harness freezes its private fault-injection geometry")
     require(readme, "user path payloads may be at most 255 bytes", "README documents the G247 pathname bound")
@@ -1609,7 +1609,24 @@ def main() -> int:
     require(readme, "G265 keeps ABI 1.23", "README documents G265 without an ABI bump")
     require(priority, "G265 keeps ABI 1.23", "priority remediation records G265 running-job builtins")
     require(threat_model, "G265 does not add a signal capability", "threat model bounds G265 to retained running jobs")
-    require(roadmap, "219 complete, 281 open", "roadmap arithmetic includes G265")
+    require(tty_source, "suspended,", "G266 gives terminal suspend a distinct echo action")
+    require(tty_source, "suspend_events: u64", "G266 records terminal suspend events independently from interrupts")
+    require(tty_source, "normalized == 0x03 or normalized == 0x1A", "G266 handles Ctrl-C and Ctrl-Z before canonical editing")
+    require(tty_source, "const is_suspend = normalized == 0x1A;", "G266 distinguishes Ctrl-Z from Ctrl-C")
+    require(tty_source, "if (is_suspend) 19 else 2", "G266 directs Ctrl-Z to the existing internal stop signal")
+    require(tty_source, "if (!is_suspend and signalled != 0) self.applyInterruptDefault(processes);", "G266 preserves Ctrl-C default termination without applying it to Ctrl-Z")
+    require(tty_source, ".echo = if (self.echo_enabled) if (is_suspend) .suspended else .interrupt else .none", "G266 reports a distinct echo action for suspend")
+    require(tty_source, "try std.testing.expectEqual(runtime_process.State.stopped", "G266 host proof requires Ctrl-Z to stop the foreground process")
+    require(tty_source, "try processes.sendGroupSignal(root, foreground_pid, 18)", "G266 host proof uses the pre-existing internal resume signal")
+    require(tty_source, "try std.testing.expectEqual(runtime_process.State.runnable", "G266 host proof requires internal resume to restore runnable state")
+    require(tty_source, "try std.testing.expectEqual(@as(u64, 1), tty.report().suspend_events);", "G266 host proof accounts exactly one suspend event")
+    require(runtime, r'.suspended => emit("^Z\r\n")', "G266 renders terminal suspend as caret-Z newline")
+    require(runtime, 'emit(" erase/interrupt/suspend/overflow ")', "G266 diagnostic telemetry publishes suspend separately")
+    require(runtime_test, "erase/interrupt/suspend/overflow 1/0/0/0 clean yes", "offline/live diagnostics require zero accidental suspend events")
+    require(readme, "G266 keeps ABI 1.23", "README documents G266 without an ABI bump")
+    require(priority, "G266 keeps ABI 1.23", "priority remediation records G266 TTY control-key generation")
+    require(threat_model, "G266 recognizes Ctrl-Z only inside the trusted TTY line discipline", "threat model bounds G266 signal authority")
+    require(roadmap, "220 complete, 280 open", "roadmap arithmetic includes G266")
     require(roadmap, "- [x] **G229** " + chr(0x2014) + " Remount a damaged writable filesystem read-only.", "roadmap marks G229 complete with the canonical separator")
     require(roadmap, "- [x] **G230** " + chr(0x2014) + " Expose mount and unmount syscalls.", "roadmap marks G230 complete with the canonical separator")
     require(roadmap, "- [x] **G231** " + chr(0x2014) + " Reject unmount while paths or descriptors remain busy.", "roadmap marks G231 complete with the canonical separator")
@@ -1641,9 +1658,10 @@ def main() -> int:
     require(roadmap, "- [x] **G263** " + chr(0x2014) + " Implement foreground process-group waiting.", "roadmap marks G263 complete with the canonical separator")
     require(roadmap, "- [x] **G264** " + chr(0x2014) + " Implement background job completion notifications.", "roadmap marks G264 complete with the canonical separator")
     require(roadmap, "- [x] **G265** " + chr(0x2014) + " Implement fg and bg builtins.", "roadmap marks G265 complete with the canonical separator")
+    require(roadmap, "- [x] **G266** " + chr(0x2014) + " Implement terminal interrupt and suspend key handling.", "roadmap marks G266 complete with the canonical separator")
     roadmap_items = re.findall(r"^- \[([ x])\] \*\*G\d{3}\*\*", roadmap, flags=re.MULTILINE)
-    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 219:
-        raise SystemExit("roadmap must contain 500 goals with exactly 219 complete after G265")
+    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 220:
+        raise SystemExit("roadmap must contain 500 goals with exactly 220 complete after G266")
     require(workflow, "Cross-platform artifact identity gate", "hosted cross-platform reproducibility gate")
     require(workflow, "cmp --", "artifact bytes are compared instead of only printed")
     require(asset_builder, '"schema": 2', "host-independent generated-asset manifest schema")
@@ -1722,7 +1740,7 @@ def main() -> int:
         " pool-lock tickets/outstanding ",
         " blocks/bytes/holes ",
         "exec: PID 16 state zombie status 0x56",
-        "ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/overflow 1/0/0 clean yes",
+        "ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/suspend/overflow 1/0/0/0 clean yes",
         "sync complete: writable mounts 2 immediate 1 durable 1; ramfs mutations ",
         "fsck ramfs/persist: clean",
         "ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 global/mount/immediate/durable/reject 1/2/1/1/0 writeback active no request/complete/pass 1/1/1 immediate/durable/clean/unsupported/failure/stale 1/0/0/0/0/0 pages queued/completed 6/6 payload/header/flush 1/1/2 NVMe read/write/flush ",
