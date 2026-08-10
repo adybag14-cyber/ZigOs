@@ -280,6 +280,19 @@ def main() -> int:
             wait_for(client, process, serial, b"pipeline foreground restored 2", foreground_start, 60)
             wait_for(client, process, serial, PROMPT_ROOT, foreground_start, 60)
             send(client, process, serial, "status", b"\r\n0\r\n")
+
+            background_start = len(serial)
+            client.sendall(b"sleep &\r")
+            wait_for(client, process, serial, PROMPT_ROOT, background_start, 20)
+            time.sleep(0.05)
+            read_available(client, serial)
+            if b"[1] done 7" in serial[background_start:]:
+                raise RuntimeError("G264 background job completed before the shell returned its prompt")
+            wait_for(client, process, serial, b"[1] done 7", background_start, 20)
+            wait_for(client, process, serial, PROMPT_ROOT, background_start, 20)
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "echo G264_BUILTIN_SHOULD_NOT_RUN &", b"syntax: invalid conditional list")
+            send(client, process, serial, "status", b"\r\n2\r\n")
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")
@@ -329,13 +342,14 @@ def main() -> int:
                 "pipeline foreground group 11",
                 "TTYPIPE",
                 "pipeline foreground restored 2",
+                "[1] done 7",
                 "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
                 " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10938/5173/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 249/249 cache-released 16 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 268/268 cache-released 16 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (
@@ -349,6 +363,7 @@ def main() -> int:
                 "\r\nG259_AND_SHOULD_NOT_RUN\r\n",
                 "\r\nG259_OR_SHOULD_NOT_RUN\r\n",
                 "\r\nG259_MIXED_BAD\r\n",
+                "\r\nG264_BUILTIN_SHOULD_NOT_RUN\r\n",
                 "\r\nG259_TRAILING\r\n",
                 "\r\nG260_COND_SKIP\r\n",
                 "\r\nG260_PREFIX_SHOULD_NOT_RUN\r\n",

@@ -5,6 +5,7 @@ const maximum_words: usize = 8;
 const maximum_conditional_commands: usize = 4;
 const maximum_sequential_lists: usize = 4;
 const maximum_pipeline_stages: usize = 4;
+const maximum_background_jobs: usize = 4;
 const maximum_path: usize = 255;
 const status_success: u32 = 0;
 const status_failure: u32 = 1;
@@ -12,6 +13,14 @@ const status_usage: u32 = 2;
 const status_command_not_found: u32 = 127;
 
 var startup_environment: [*]const usize = undefined;
+var background_jobs: [maximum_background_jobs]BackgroundJob = @splat(.{});
+
+const BackgroundJob = struct {
+    process_group: u32 = 0,
+    remaining: u8 = 0,
+    final_pid: u32 = 0,
+    final_status: u32 = status_failure,
+};
 
 const Word = struct {
     start: u16 = 0,
@@ -60,6 +69,7 @@ const CommandLine = struct {
     storage: [maximum_line + 1]u8 = @splat(0),
     lists: [maximum_sequential_lists]ConditionalList = @splat(.{}),
     count: usize = 0,
+    background: bool = false,
 };
 
 const banner =
@@ -105,7 +115,7 @@ fn shellLoop() void {
     while (true) {
         printPrompt();
         var line: CommandLine = .{};
-        const count = zigos.read(0, line.storage[0..maximum_line]) catch |err| {
+        const count = readLineWithBackgroundNotifications(&line) catch |err| {
             _ = printError("read", err);
             continue;
         };
@@ -119,6 +129,20 @@ fn shellLoop() void {
         }
         if (line.count == 0) continue;
         last_status = executeCommandLine(&line, last_status);
+    }
+}
+
+fn readLineWithBackgroundNotifications(line: *CommandLine) zigos.Error!usize {
+    var descriptors = [_]zigos.PollDescriptor{.{ .fd = 0, .requested = zigos.constants.poll_readable, .returned = 0, .reserved = 0 }};
+    while (true) {
+        if (!hasBackgroundJobs()) return zigos.read(0, line.storage[0..maximum_line]);
+        if (pollBackgroundJobs()) {
+            printPrompt();
+            continue;
+        }
+        descriptors[0].returned = 0;
+        if ((zigos.poll(&descriptors) catch 0) != 0) return zigos.read(0, line.storage[0..maximum_line]);
+        zigos.sleep(1) catch {};
     }
 }
 
@@ -138,9 +162,20 @@ fn parseCommandLine(line: *CommandLine, received: usize) bool {
     line.storage[length] = 0;
     if (!segmentHasContent(line.storage[0..], 0, length)) return true;
 
+    var end = length;
+    while (end != 0 and isSpace(line.storage[end - 1])) : (end -= 1) {}
+    if (end != 0 and line.storage[end - 1] == '&' and
+        (end == 1 or line.storage[end - 2] != '&'))
+    {
+        line.background = true;
+        line.storage[end - 1] = 0;
+        end -= 1;
+        if (!segmentHasContent(line.storage[0..], 0, end)) return false;
+    }
+
     var segment_start: usize = 0;
     var scan: usize = 0;
-    while (scan < length) : (scan += 1) {
+    while (scan < end) : (scan += 1) {
         if (line.storage[scan] != ';') continue;
         if (line.count == maximum_sequential_lists) return false;
         line.storage[scan] = 0;
@@ -149,12 +184,21 @@ fn parseCommandLine(line: *CommandLine, received: usize) bool {
         segment_start = scan + 1;
     }
 
-    if (segmentHasContent(line.storage[0..], segment_start, length)) {
+    if (segmentHasContent(line.storage[0..], segment_start, end)) {
         if (line.count == maximum_sequential_lists) return false;
-        if (!parseConditionalList(&line.lists[line.count], line.storage[0..], segment_start, length)) return false;
+        if (!parseConditionalList(&line.lists[line.count], line.storage[0..], segment_start, end)) return false;
         line.count += 1;
     } else if (line.count == 0) {
         return false;
+    }
+    return !line.background or validBackgroundList(&line.lists[line.count - 1]);
+}
+
+fn validBackgroundList(list: *const ConditionalList) bool {
+    if (list.count != 1 or list.commands[0].operator != .always) return false;
+    const pipeline = &list.commands[0].pipeline;
+    for (pipeline.stages[0..pipeline.count]) |stage| {
+        if (isBuiltin(stage.slice(0))) return false;
     }
     return true;
 }
@@ -179,6 +223,7 @@ fn parseConditionalList(list: *ConditionalList, storage: []u8, segment_start: us
             .or_if
         else
             null;
+        if (storage[scan] == '&' and operator == null) return false;
         if (operator == null) {
             scan += 1;
             continue;
@@ -246,8 +291,11 @@ fn parseCommandSegment(command: *Command, segment_start: usize, segment_end: usi
 
 fn executeCommandLine(line: *const CommandLine, previous_status: u32) u32 {
     var status = previous_status;
-    for (line.lists[0..line.count]) |list| {
-        status = executeConditionalList(&list, status);
+    for (line.lists[0..line.count], 0..) |list, index| {
+        status = if (line.background and index + 1 == line.count)
+            executePipelineMode(&list.commands[0].pipeline, status, true)
+        else
+            executeConditionalList(&list, status);
     }
     return status;
 }
@@ -266,7 +314,11 @@ fn executeConditionalList(list: *const ConditionalList, previous_status: u32) u3
 }
 
 fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
-    if (pipeline.count == 1) return execute(&pipeline.stages[0], previous_status);
+    return executePipelineMode(pipeline, previous_status, false);
+}
+
+fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, background: bool) u32 {
+    if (!background and pipeline.count == 1) return execute(&pipeline.stages[0], previous_status);
     for (pipeline.stages[0..pipeline.count]) |stage| {
         if (isBuiltin(stage.slice(0))) {
             zigos.writeAll(2, "pipeline: external stages only\r\n") catch {};
@@ -279,6 +331,11 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
         zigos.writeAll(2, "pipeline: invalid inherited environment\r\n") catch {};
         return status_failure;
     };
+    const background_slot: ?usize = if (background) findBackgroundJobSlot() else null;
+    if (background and background_slot == null) {
+        zigos.writeAll(2, "background: job limit reached\r\n") catch {};
+        return status_failure;
+    }
     var pipe_pairs: [maximum_pipeline_stages - 1][2]u32 = @splat(@splat(0));
     var pipe_open: [maximum_pipeline_stages - 1][2]bool = @splat(@splat(false));
     var pipe_count: usize = 0;
@@ -337,6 +394,16 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
             zigos.close(@intCast(pipe_pairs[stage_index][1])) catch {};
             pipe_open[stage_index][1] = false;
         }
+    }
+
+    if (background) {
+        const slot = background_slot.?;
+        background_jobs[slot] = .{
+            .process_group = process_group,
+            .remaining = @intCast(spawned),
+            .final_pid = pids[spawned - 1],
+        };
+        return status_success;
     }
 
     zigos.writeAll(1, "pipeline group ") catch {
@@ -412,6 +479,50 @@ fn restorePipelineForeground(shell_group: u32) bool {
     writeDecimal(observed);
     zigos.writeAll(1, "\r\n") catch {};
     return true;
+}
+
+fn findBackgroundJobSlot() ?usize {
+    for (background_jobs, 0..) |job, index| {
+        if (job.process_group == 0) return index;
+    }
+    return null;
+}
+
+fn hasBackgroundJobs() bool {
+    for (background_jobs) |job| {
+        if (job.process_group != 0) return true;
+    }
+    return false;
+}
+
+fn pollBackgroundJobs() bool {
+    var notified = false;
+    for (&background_jobs, 0..) |*job, slot| {
+        if (job.process_group == 0) continue;
+        while (job.remaining != 0) {
+            var status: zigos.WaitStatus = undefined;
+            const pid = zigos.waitProcessGroup(job.process_group, true, &status) catch {
+                job.* = .{};
+                notified = true;
+                break;
+            };
+            if (pid == 0) break;
+            job.remaining -= 1;
+            if (status.pid == job.final_pid) {
+                job.final_status = status.exit_status;
+            }
+        }
+        if (job.process_group == 0 or job.remaining != 0) continue;
+        if (!notified) zigos.writeAll(1, "\r\n") catch {};
+        zigos.writeAll(1, "[") catch {};
+        writeDecimal(slot + 1);
+        zigos.writeAll(1, "] done ") catch {};
+        writeDecimal(job.final_status);
+        zigos.writeAll(1, "\r\n") catch {};
+        job.* = .{};
+        notified = true;
+    }
+    return notified;
 }
 
 fn closePipelinePipeEnds(
@@ -505,6 +616,10 @@ fn execute(command: *const Command, previous_status: u32) u32 {
         if (command.count < 2) return usage("run PROGRAM [ARGS...]");
         return commandRun(command, 1);
     } else if (equal(name, "shutdown") or equal(name, "exit")) {
+        if (hasBackgroundJobs()) {
+            zigos.writeAll(2, "shutdown: background active\r\n") catch {};
+            return status_failure;
+        }
         requestShutdown();
     } else {
         return commandRun(command, 0);
@@ -704,10 +819,7 @@ fn spawnFromPathPipeline(
     if (containsScalar(program, '/')) {
         const path = buildExecutablePath("", program, path_storage) orelse return error.NameTooLong;
         arguments[0] = executableName(path);
-        return if (process_group) |group|
-            zigos.spawnvInProcessGroupWithPipelineIo(path, arguments[0 .. extra_count + 1], environment, group, stdin_source, stdout_source)
-        else
-            zigos.spawnvNewProcessGroupWithPipelineIo(path, arguments[0 .. extra_count + 1], environment, stdin_source, stdout_source);
+        return spawnResolvedGroup(path, arguments[0 .. extra_count + 1], environment, process_group, stdin_source, stdout_source);
     }
     const path_value = zigos.environmentValue(startup_environment, "PATH") orelse "/bin:/persist";
     var start: usize = 0;
@@ -718,10 +830,14 @@ fn spawnFromPathPipeline(
         if (directory.len != 0) {
             const path = buildExecutablePath(directory, program, path_storage) orelse return error.NameTooLong;
             arguments[0] = executableName(path);
-            const candidate: ?u32 = (if (process_group) |group|
-                zigos.spawnvInProcessGroupWithPipelineIo(path, arguments[0 .. extra_count + 1], environment, group, stdin_source, stdout_source)
-            else
-                zigos.spawnvNewProcessGroupWithPipelineIo(path, arguments[0 .. extra_count + 1], environment, stdin_source, stdout_source)) catch |err| switch (err) {
+            const candidate: ?u32 = spawnResolvedGroup(
+                path,
+                arguments[0 .. extra_count + 1],
+                environment,
+                process_group,
+                stdin_source,
+                stdout_source,
+            ) catch |err| switch (err) {
                 error.NotFound => null,
                 else => return err,
             };
@@ -731,6 +847,26 @@ fn spawnFromPathPipeline(
         start += separator + 1;
     }
     return error.NotFound;
+}
+
+fn spawnResolvedGroup(
+    path: []const u8,
+    arguments: []const []const u8,
+    environment: []const []const u8,
+    process_group: ?u32,
+    stdin_source: ?u16,
+    stdout_source: ?u16,
+) zigos.Error!u32 {
+    const remap = stdin_source != null or stdout_source != null;
+    return if (process_group) |group|
+        if (remap)
+            zigos.spawnvInProcessGroupWithPipelineIo(path, arguments, environment, group, stdin_source, stdout_source)
+        else
+            zigos.spawnvInProcessGroup(path, arguments, environment, group)
+    else if (remap)
+        zigos.spawnvNewProcessGroupWithPipelineIo(path, arguments, environment, stdin_source, stdout_source)
+    else
+        zigos.spawnvNewProcessGroup(path, arguments, environment);
 }
 
 fn buildExecutablePath(directory: []const u8, program: []const u8, output: *[maximum_path + 1]u8) ?[]const u8 {
