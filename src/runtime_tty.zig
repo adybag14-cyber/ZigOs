@@ -140,7 +140,11 @@ pub const Tty = struct {
                 const process = processes.processAt(slot) orelse continue;
                 if (process.pid != process_group or process.process_group != process_group) continue;
                 found_leader = true;
-                if (process.ppid != caller.pid or process.session != caller.session or process.terminal())
+                // A short-lived pipeline leader may become a zombie before the controller
+                // completes foreground handoff. Until it is reaped, its PID/PGID and parent/
+                // session identity remain authoritative process-group metadata, so rejecting
+                // terminal leaders creates a scheduler-dependent tcsetpgrp race.
+                if (process.ppid != caller.pid or process.session != caller.session)
                     return runtime_process.Error.PermissionDenied;
                 break;
             }
@@ -435,4 +439,11 @@ test "terminal foreground isolation eof and interrupt semantics" {
     try std.testing.expectEqual(@as(usize, 1), interrupted.signalled);
     try std.testing.expectEqual(runtime_process.State.zombie, (try processes.get(foreground)).state);
     try std.testing.expectEqual(@as(u32, 130), (try processes.get(foreground)).exit_status);
+
+    // Foreground transfer must remain valid while a direct-child group leader is
+    // terminal but unreaped; otherwise fast pipelines race the controller handoff.
+    const background_pid = (try processes.get(background)).pid;
+    try tty.setForegroundGroup(&processes, root, background_pid);
+    try tty.setForegroundGroup(&processes, root, foreground_pid);
+    try std.testing.expectEqual(foreground_pid, try tty.foregroundGroup(&processes, root));
 }
