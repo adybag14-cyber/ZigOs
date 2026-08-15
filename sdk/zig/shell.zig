@@ -7,6 +7,7 @@ const maximum_sequential_lists: usize = 4;
 const maximum_pipeline_stages: usize = 4;
 const maximum_background_jobs: usize = 4;
 const maximum_shell_variables: usize = 4;
+const maximum_substitution_output: usize = zigos.constants.maximum_argument_bytes;
 const maximum_path: usize = 255;
 const status_success: u32 = 0;
 const status_failure: u32 = 1;
@@ -83,26 +84,7 @@ const CommandLine = struct {
 const banner =
     "ZigOs userspace shell PID 2\r\n" ++
     "Type 'help' for commands.\r\n";
-const help_text =
-    "help\r\n" ++
-    "echo [TEXT...]\r\n" ++
-    "pwd\r\n" ++
-    "cd PATH\r\n" ++
-    "ls [PATH]\r\n" ++
-    "cat PATH\r\n" ++
-    "cp SOURCE DEST\r\n" ++
-    "write PATH TEXT\r\n" ++
-    "append PATH TEXT\r\n" ++
-    "mkdir PATH\r\n" ++
-    "rm PATH\r\n" ++
-    "rmdir PATH\r\n" ++
-    "mv SOURCE DEST\r\n" ++
-    "chmod MODE PATH\r\n" ++
-    "sync\r\n" ++
-    "pid\r\n" ++
-    "status               print previous command status\r\n" ++
-    "run PROGRAM [ARGS]\r\n" ++
-    "shutdown\r\n";
+const help_text = "help echo pwd cd ls cat cp write append mkdir rm rmdir mv chmod sync pid status fg bg run shutdown\r\n";
 
 pub export fn zigos_main(
     _: usize,
@@ -206,7 +188,7 @@ fn validBackgroundList(list: *const ConditionalList) bool {
     if (list.count != 1 or list.commands[0].operator != .always) return false;
     const pipeline = &list.commands[0].pipeline;
     for (pipeline.stages[0..pipeline.count]) |stage| {
-        if (isBuiltin(stage.slice(0)) or assignmentNameLength(stage.slice(0)) != null) return false;
+        if (isBuiltin(stage.slice(0)) or assignmentNameLength(stage.slice(0)) != null or commandHasSubstitution(&stage)) return false;
     }
     return true;
 }
@@ -328,7 +310,7 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
 fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, background: bool) u32 {
     if (!background and pipeline.count == 1) return execute(&pipeline.stages[0], previous_status);
     for (pipeline.stages[0..pipeline.count]) |stage| {
-        if (isBuiltin(stage.slice(0)) or assignmentNameLength(stage.slice(0)) != null) {
+        if (isBuiltin(stage.slice(0)) or assignmentNameLength(stage.slice(0)) != null or commandHasSubstitution(&stage)) {
             zigos.writeAll(2, "pipeline: external stages only\r\n") catch {};
             return status_usage;
         }
@@ -361,7 +343,7 @@ fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, backgrou
         var arguments: [zigos.constants.maximum_arguments][]const u8 = undefined;
         if (stage.count > arguments.len) {
             reapPipelineChildren(&pids, spawned);
-            return usage("pipeline stage [ARGS...]");
+            return usage();
         }
         for (stage.words[0..stage.count], 0..) |_, index| arguments[index] = stage.slice(index);
         var path_storage: [maximum_path + 1]u8 = @splat(0);
@@ -561,6 +543,14 @@ fn execute(command: *const Command, previous_status: u32) u32 {
     if (command.count == 1) {
         if (assignmentNameLength(name)) |name_length| return assignVariable(name, name_length);
     }
+    if (!commandHasSubstitution(command)) return executeExpanded(command, previous_status);
+    var storage: [maximum_line + 1]u8 = @splat(0);
+    var expanded = expandCommand(command, &storage) orelse return status_failure;
+    return executeExpanded(&expanded, previous_status);
+}
+
+fn executeExpanded(command: *const Command, previous_status: u32) u32 {
+    const name = command.slice(0);
     if (equal(name, "help")) {
         zigos.writeAll(1, help_text) catch return status_failure;
         return status_success;
@@ -569,40 +559,40 @@ fn execute(command: *const Command, previous_status: u32) u32 {
     } else if (equal(name, "pwd")) {
         return commandPwd();
     } else if (equal(name, "cd")) {
-        if (command.count != 2) return usage("cd PATH");
+        if (command.count != 2) return usage();
         zigos.chdir(command.sentinel(1)) catch |err| return printError("cd", err);
         return status_success;
     } else if (equal(name, "ls")) {
-        if (command.count > 2) return usage("ls [PATH]");
+        if (command.count > 2) return usage();
         return commandLs(if (command.count == 2) command.sentinel(1) else ".");
     } else if (equal(name, "cat")) {
-        if (command.count != 2) return usage("cat PATH");
+        if (command.count != 2) return usage();
         return commandCat(command.sentinel(1));
     } else if (equal(name, "cp")) {
-        if (command.count != 3) return usage("cp SOURCE DESTINATION");
+        if (command.count != 3) return usage();
         return commandCp(command.sentinel(1), command.sentinel(2));
     } else if (equal(name, "write") or equal(name, "append")) {
-        if (command.count < 3) return usage(if (equal(name, "append")) "append PATH TEXT..." else "write PATH TEXT...");
+        if (command.count < 3) return usage();
         return commandWrite(command, equal(name, "append"));
     } else if (equal(name, "mkdir")) {
-        if (command.count != 2) return usage("mkdir PATH");
+        if (command.count != 2) return usage();
         zigos.mkdir(command.sentinel(1), 0o755) catch |err| return printError("mkdir", err);
         return status_success;
     } else if (equal(name, "rm")) {
-        if (command.count != 2) return usage("rm PATH");
+        if (command.count != 2) return usage();
         zigos.unlink(command.sentinel(1)) catch |err| return printError("rm", err);
         return status_success;
     } else if (equal(name, "rmdir")) {
-        if (command.count != 2) return usage("rmdir PATH");
+        if (command.count != 2) return usage();
         zigos.rmdir(command.sentinel(1)) catch |err| return printError("rmdir", err);
         return status_success;
     } else if (equal(name, "mv")) {
-        if (command.count != 3) return usage("mv SOURCE DESTINATION");
+        if (command.count != 3) return usage();
         zigos.rename(command.sentinel(1), command.sentinel(2)) catch |err| return printError("mv", err);
         return status_success;
     } else if (equal(name, "chmod")) {
-        if (command.count != 3) return usage("chmod MODE PATH");
-        const mode = parseOctal(command.slice(1)) orelse return usage("chmod MODE PATH");
+        if (command.count != 3) return usage();
+        const mode = parseOctal(command.slice(1)) orelse return usage();
         zigos.chmod(command.sentinel(2), mode) catch |err| return printError("chmod", err);
         return status_success;
     } else if (equal(name, "sync")) {
@@ -610,12 +600,12 @@ fn execute(command: *const Command, previous_status: u32) u32 {
     } else if (equal(name, "pid")) {
         return commandPid();
     } else if (equal(name, "status")) {
-        if (command.count != 1) return usage("status");
+        if (command.count != 1) return usage();
         return commandStatus(previous_status);
     } else if (equal(name, "fg") or equal(name, "bg")) {
         return commandJob(command, equal(name, "fg"));
     } else if (equal(name, "run")) {
-        if (command.count < 2) return usage("run PROGRAM [ARGS...]");
+        if (command.count < 2) return usage();
         return commandRun(command, 1);
     } else if (equal(name, "shutdown") or equal(name, "exit")) {
         if (hasBackgroundJobs()) {
@@ -784,6 +774,85 @@ fn commandRun(command: *const Command, program_index: usize) u32 {
     return status.exit_status;
 }
 
+fn commandHasSubstitution(command: *const Command) bool {
+    for (command.words[0..command.count]) |word| {
+        const start: usize = word.start;
+        const length: usize = word.length;
+        if (substitutionProgram(command.storage[start .. start + length]) != null) return true;
+    }
+    return false;
+}
+
+fn substitutionProgram(word: []const u8) ?[]const u8 {
+    if (word.len < 4 or word[0] != '$' or word[1] != '(' or word[word.len - 1] != ')') return null;
+    const program = word[2 .. word.len - 1];
+    if (program.len == 0 or containsScalar(program, '(') or containsScalar(program, ')')) return null;
+    return program;
+}
+
+fn expandCommand(command: *const Command, storage: *[maximum_line + 1]u8) ?Command {
+    var result: Command = .{ .storage = storage };
+    var cursor: usize = 0;
+    for (command.words[0..command.count], 0..) |_, index| {
+        const word = command.slice(index);
+        var captured: [maximum_substitution_output]u8 = undefined;
+        const replacement = if (substitutionProgram(word)) |program| blk: {
+            if (index == 0) return null;
+            const count = captureSubstitution(program, &captured) orelse return null;
+            break :blk captured[0..count];
+        } else word;
+        if (replacement.len == 0 or cursor + replacement.len + 1 > storage.len) return null;
+        @memcpy(storage[cursor .. cursor + replacement.len], replacement);
+        storage[cursor + replacement.len] = 0;
+        result.words[result.count] = .{ .start = @intCast(cursor), .length = @intCast(replacement.len) };
+        result.count += 1;
+        cursor += replacement.len + 1;
+    }
+    return result;
+}
+
+fn captureSubstitution(program: []const u8, output: []u8) ?usize {
+    var environment_storage: [zigos.constants.maximum_environment][]const u8 = undefined;
+    const environment = collectShellEnvironment(&environment_storage) orelse return null;
+    var pair: [2]u32 = undefined;
+    zigos.pipe(&pair) catch return null;
+    defer zigos.close(@intCast(pair[0])) catch {};
+    defer zigos.close(@intCast(pair[1])) catch {};
+    var arguments: [zigos.constants.maximum_arguments][]const u8 = undefined;
+    var path_storage: [maximum_path + 1]u8 = @splat(0);
+    const pid = spawnFromPath(program, &path_storage, &arguments, 0, environment, true, null, null, @intCast(pair[1])) catch return null;
+    zigos.close(@intCast(pair[1])) catch return null;
+    var total: usize = 0;
+    while (total < output.len) {
+        const count = zigos.read(@intCast(pair[0]), output[total..]) catch {
+            reapSubstitution(pid);
+            return null;
+        };
+        if (count == 0) break;
+        total += count;
+    }
+    if (total == output.len) {
+        var extra: [1]u8 = undefined;
+        if ((zigos.read(@intCast(pair[0]), &extra) catch 1) != 0) {
+            zigos.close(@intCast(pair[0])) catch {};
+            reapSubstitution(pid);
+            return null;
+        }
+    }
+    var status: zigos.WaitStatus = undefined;
+    _ = zigos.wait(pid, false, &status) catch return null;
+    if (status.exit_status != 0) return null;
+    while (total != 0 and (output[total - 1] == '\n' or output[total - 1] == '\r')) total -= 1;
+    if (total == 0) return null;
+    for (output[0..total]) |byte| if (byte == 0) return null;
+    return total;
+}
+
+fn reapSubstitution(pid: u32) void {
+    var status: zigos.WaitStatus = undefined;
+    _ = zigos.wait(pid, false, &status) catch {};
+}
+
 fn assignmentNameLength(value: []const u8) ?usize {
     const name_length = indexOfScalar(value, '=') orelse return null;
     if (name_length == 0) return null;
@@ -950,10 +1019,8 @@ fn requestShutdown() noreturn {
     while (true) asm volatile ("pause");
 }
 
-fn usage(text: []const u8) u32 {
-    zigos.writeAll(2, "usage: ") catch {};
-    zigos.writeAll(2, text) catch {};
-    zigos.writeAll(2, "\r\n") catch {};
+fn usage() u32 {
+    zigos.writeAll(2, "usage\r\n") catch {};
     return status_usage;
 }
 
@@ -968,20 +1035,10 @@ fn printError(operation: []const u8, err: zigos.Error) u32 {
 fn errorName(err: zigos.Error) []const u8 {
     return switch (err) {
         error.NotFound => "not found",
-        error.NotDirectory => "not a directory",
-        error.IsDirectory => "is a directory",
-        error.BadDescriptor => "bad descriptor",
-        error.AccessDenied, error.PermissionDenied => "permission denied",
-        error.WouldBlock => "would block",
-        error.OutOfMemory, error.NoSpace => "no space",
-        error.NameTooLong => "name too long",
         error.Unsupported => "unsupported",
-        error.AlreadyExists => "already exists",
-        error.NotEmpty => "directory not empty",
-        error.CrossDevice => "cross-device operation",
-        error.ReadOnly => "read-only filesystem",
         error.InputOutput => "input/output error",
-        else => "operation failed",
+        error.ReadOnly => "read-only filesystem",
+        else => "error",
     };
 }
 

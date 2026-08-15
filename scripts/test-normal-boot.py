@@ -205,7 +205,7 @@ def main() -> int:
             wait_for(client, process, serial, b"ZigOs userspace init PID 1", 0, args.boot_timeout)
             wait_for(client, process, serial, b"ZigOs userspace shell PID 2", 0, 20)
             wait_for(client, process, serial, PROMPT_HOME, 0, 20)
-            send(client, process, serial, "help", b"status               print previous command status")
+            send(client, process, serial, "help", b"help echo pwd cd ls cat cp write append mkdir rm rmdir mv chmod sync pid status fg bg run shutdown")
             send(client, process, serial, "pwd", b"\r\n/home/root\r\n")
             send(client, process, serial, "cd /", PROMPT_ROOT)
             send(client, process, serial, "pwd", b"\r\n/\r\n")
@@ -346,6 +346,26 @@ def main() -> int:
             send(client, process, serial, "status", b"\r\n2\r\n")
             send(client, process, serial, "hello", b"hello from VFS-loaded CPL3 ELF64", 40)
             send(client, process, serial, "status", b"\r\n42\r\n")
+
+            send(client, process, serial, "write /tmp/g268.txt $(pipe-writer.elf)", PROMPT_ROOT)
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "cat /tmp/g268.txt", b"PIPE-CPL")
+            send(client, process, serial, "rm /tmp/g268.txt", PROMPT_ROOT)
+            overflow_start = len(serial)
+            send(client, process, serial, "echo $(hello)", PROMPT_ROOT)
+            if b"hello from VFS-loaded CPL3 ELF64" in serial[overflow_start:]:
+                raise RuntimeError("G268 overflow capture leaked child stdout to the terminal")
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            background_substitution = len(serial)
+            send(client, process, serial, "hello $(pipe-writer.elf) &", b"syntax: invalid conditional list")
+            if b"hello from VFS-loaded CPL3 ELF64" in serial[background_substitution:] or b"PIPE-CPL" in serial[background_substitution:]:
+                raise RuntimeError("G268 background substitution executed before rejection")
+            send(client, process, serial, "status", b"\r\n2\r\n")
+            pipeline_substitution = len(serial)
+            send(client, process, serial, "hello $(pipe-writer.elf)|hello", b"pipeline: external stages only")
+            if b"hello from VFS-loaded CPL3 ELF64" in serial[pipeline_substitution:] or b"PIPE-CPL" in serial[pipeline_substitution:]:
+                raise RuntimeError("G268 pipeline substitution executed before rejection")
+            send(client, process, serial, "status", b"\r\n2\r\n")
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")
@@ -359,7 +379,7 @@ def main() -> int:
                 "ZigOs userspace shell PID 2",
                 "hello from VFS-loaded CPL3 ELF64",
                 "process 3 exited 42",
-                "status               print previous command status",
+                "help echo pwd cd ls cat cp write append mkdir rm rmdir mv chmod sync pid status fg bg run shutdown",
                 "run: not found",
                 "cd: not found",
                 "G259_AND_RAN",
@@ -402,7 +422,7 @@ def main() -> int:
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
                 " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10939/5172/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 344/344 cache-released 16 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 380/380 cache-released 15 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

@@ -279,7 +279,7 @@ def main() -> int:
             wait_for(client, process, serial, b"ZigOs userspace init PID 1", 0, args.boot_timeout)
             wait_for(client, process, serial, b"ZigOs userspace shell PID 2", 0, 20)
             wait_for(client, process, serial, PROMPT_HOME, 0, 20)
-            send(client, process, serial, "help", b"status               print previous command status")
+            send(client, process, serial, "help", b"help echo pwd cd ls cat cp write append mkdir rm rmdir mv chmod sync pid status fg bg run shutdown")
             send(client, process, serial, "pwd", b"\r\n/home/root\r\n")
             send(client, process, serial, "cd /", PROMPT_ROOT)
             send(client, process, serial, "pwd", b"\r\n/\r\n")
