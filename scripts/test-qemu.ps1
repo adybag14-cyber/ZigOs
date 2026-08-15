@@ -1367,7 +1367,7 @@ if (-not $output.Contains("NVMe EFI System Partition: index 0, LBA $($nvmeMetada
 if (-not $output.Contains("NVMe ZigOs Data Partition: index 1, LBA $($nvmeMetadata.data_partition_first_lba) + $($nvmeMetadata.data_partition_sectors) sectors, name `"ZigOs Data`"")) {
     throw 'The NVMe ZigOs data partition discovery marker was not observed.'
 }
-if (-not $output.Contains("NVMe retained for permanent runtime: polling I/O, data LBA $($nvmeMetadata.data_partition_first_lba) + $($nvmeMetadata.data_partition_sectors) sectors")) {
+if (-not $output.Contains("NVMe retained for permanent runtime: polling I/O, boot/data LBA $($nvmeMetadata.partition_first_lba)/$($nvmeMetadata.data_partition_first_lba) + $($nvmeMetadata.data_partition_sectors) sectors")) {
     throw 'The NVMe permanent-runtime polling handoff marker was not observed.'
 }
 if (-not $output.Contains("NVMe FAT volume verified: FAT16, label `"ZIGOSNVME`", filesystem `"FAT16`", $($nvmeMetadata.partition_sectors) sectors, first FAT LBA $($nvmeMetadata.first_fat_lba), root LBA $($nvmeMetadata.root_directory_lba)")) {
