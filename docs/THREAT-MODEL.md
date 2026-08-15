@@ -80,6 +80,8 @@ The model does not currently defend against malicious kernel code, compromised f
 
 - G269 treats wildcard expansion as bounded namespace enumeration under the shell's existing filesystem authority. Only one `*` in the final path component is interpreted; the directory prefix is opened through the normal VFS permission path and matching names come only from `getdents`, so expansion cannot bypass traversal/open authorization. Matches are bounded by the existing 31-byte argument and eight-word command limits, and no-match/second-star/overflow conditions fail closed rather than passing attacker-controlled wildcard text through literally. Wildcard-bearing background and multi-stage pipeline stages are rejected before any child launch. There is no recursive glob, bracket/question syntax, sorting guarantee, command-name wildcarding or special hidden-file policy.
 
+- G270 treats tilde expansion as fixed root-account pathname shorthand, not environment- or account-database authority. Only `~` and `~/...` map to the already-known `/home/root`; `~user` is rejected, the resulting argument remains capped at 31 bytes, and no lookup or privilege decision is derived from the expansion. Background and multi-stage pipeline forms are rejected before launch. The size-recovery changes used to keep the shell below 32 KiB remove only zero-initialization for scratch bytes that are overwritten before any read; C-string paths retain explicit terminators and the expanded command buffer is protected by a compile-time capacity inequality. There is no multi-user home lookup, parameter expansion, or composed tilde/wildcard/substitution evaluation.
+
 ### Filesystem and persistence
 
 - Paths are bounded and normalized; traversal, rename cycles and cross-mount rename are rejected.

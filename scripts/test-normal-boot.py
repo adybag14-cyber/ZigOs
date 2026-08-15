@@ -408,6 +408,35 @@ def main() -> int:
             send(client, process, serial, "rm /tmp/g269-list.txt", PROMPT_ROOT)
             send(client, process, serial, "rm /tmp/g269-a.txt", PROMPT_ROOT)
             send(client, process, serial, "rm /tmp/g269-b.txt", PROMPT_ROOT)
+
+            send(client, process, serial, "cd ~", PROMPT_HOME)
+            send(client, process, serial, "pwd", b"\r\n/home/root\r\n")
+            send(client, process, serial, "cd /", PROMPT_ROOT)
+            send(client, process, serial, "cd ~/..", b"root@zigos:/home$ ")
+            send(client, process, serial, "pwd", b"\r\n/home\r\n")
+            send(client, process, serial, "cd /", PROMPT_ROOT)
+            named_tilde_start = len(serial)
+            send(client, process, serial, "echo ~nobody", PROMPT_ROOT)
+            if serial[named_tilde_start:].count(b"~nobody") != 1:
+                raise RuntimeError("G270 named-user tilde escaped failure-closed validation")
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            long_tilde = "~/123456789012345678901"
+            tilde_overflow_start = len(serial)
+            send(client, process, serial, f"echo {long_tilde}", PROMPT_ROOT)
+            if serial[tilde_overflow_start:].count(long_tilde.encode("ascii")) != 1:
+                raise RuntimeError("G270 overlong tilde expansion escaped the 31-byte argument bound")
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            background_tilde = len(serial)
+            send(client, process, serial, "hello ~ &", b"syntax: invalid conditional list")
+            if b"hello from VFS-loaded CPL3 ELF64" in serial[background_tilde:]:
+                raise RuntimeError("G270 background tilde expansion executed before rejection")
+            send(client, process, serial, "status", b"\r\n2\r\n")
+            pipeline_tilde = len(serial)
+            send(client, process, serial, "hello ~|hello", b"pipeline: external stages only")
+            if b"hello from VFS-loaded CPL3 ELF64" in serial[pipeline_tilde:]:
+                raise RuntimeError("G270 pipeline tilde expansion executed before rejection")
+            send(client, process, serial, "status", b"\r\n2\r\n")
+
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")

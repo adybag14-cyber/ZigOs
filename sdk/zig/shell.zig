@@ -14,6 +14,11 @@ const status_failure: u32 = 1;
 const status_usage: u32 = 2;
 const status_command_not_found: u32 = 127;
 
+comptime {
+    if (maximum_words * (zigos.constants.maximum_argument_bytes + 1) > maximum_line + 1)
+        @compileError("expanded command storage bound is invalid");
+}
+
 var startup_environment: [*]const usize = undefined;
 var background_jobs: [maximum_background_jobs]BackgroundJob = @splat(.{});
 var shell_variables: [maximum_shell_variables]ShellVariable = @splat(.{});
@@ -75,7 +80,7 @@ const ConditionalList = struct {
 };
 
 const CommandLine = struct {
-    storage: [maximum_line + 1]u8 = @splat(0),
+    storage: [maximum_line + 1]u8 = undefined,
     lists: [maximum_sequential_lists]ConditionalList = @splat(.{}),
     count: usize = 0,
     background: bool = false,
@@ -132,7 +137,7 @@ fn readLineWithBackgroundNotifications(line: *CommandLine) zigos.Error!usize {
 }
 
 fn printPrompt() void {
-    var path: [maximum_path + 1]u8 = @splat(0);
+    var path: [maximum_path + 1]u8 = undefined;
     const cwd = zigos.getcwd(&path) catch "?";
     zigos.writeAll(1, "root@zigos:") catch {};
     zigos.writeAll(1, cwd) catch {};
@@ -315,7 +320,7 @@ fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, backgrou
     const environment = collectShellEnvironment(&environment_storage) orelse return status_failure;
     const background_slot: ?usize = if (background) findBackgroundJobSlot() else null;
     if (background and background_slot == null) return status_failure;
-    var pipe_pairs: [maximum_pipeline_stages - 1][2]u32 = @splat(@splat(0));
+    var pipe_pairs: [maximum_pipeline_stages - 1][2]u32 = undefined;
     var pipe_open: [maximum_pipeline_stages - 1][2]bool = @splat(@splat(false));
     var pipe_count: usize = 0;
     while (pipe_count + 1 < pipeline.count) : (pipe_count += 1) {
@@ -327,7 +332,7 @@ fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, backgrou
     }
     defer closePipelinePipeEnds(&pipe_pairs, &pipe_open, pipe_count);
 
-    var pids: [maximum_pipeline_stages]u32 = @splat(0);
+    var pids: [maximum_pipeline_stages]u32 = undefined;
     var process_group: u32 = 0;
     var spawned: usize = 0;
     for (pipeline.stages[0..pipeline.count], 0..) |*stage, stage_index| {
@@ -337,7 +342,7 @@ fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, backgrou
             return usage();
         }
         for (stage.words[0..stage.count], 0..) |_, index| arguments[index] = stage.slice(index);
-        var path_storage: [maximum_path + 1]u8 = @splat(0);
+        var path_storage: [maximum_path + 1]u8 = undefined;
         const stdin_source: ?u16 = if (stage_index == 0)
             null
         else
@@ -517,7 +522,7 @@ fn execute(command: *const Command, previous_status: u32) u32 {
         if (assignmentNameLength(name)) |name_length| return assignVariable(name, name_length);
     }
     if (!commandHasExpansion(command)) return executeExpanded(command, previous_status);
-    var storage: [maximum_line + 1]u8 = @splat(0);
+    var storage: [maximum_line + 1]u8 = undefined;
     var expanded = expandCommand(command, &storage) orelse return status_failure;
     return executeExpanded(&expanded, previous_status);
 }
@@ -601,7 +606,7 @@ fn commandEcho(command: *const Command) u32 {
 }
 
 fn commandPwd() u32 {
-    var path: [maximum_path + 1]u8 = @splat(0);
+    var path: [maximum_path + 1]u8 = undefined;
     const cwd = zigos.getcwd(&path) catch |err| return printError("pwd", err);
     zigos.writeAll(1, cwd) catch return status_failure;
     zigos.writeAll(1, "\r\n") catch return status_failure;
@@ -721,7 +726,7 @@ fn commandRun(command: *const Command, program_index: usize) u32 {
     for (0..extra_count) |index| arguments[index + 1] = command.slice(program_index + 1 + index);
     var environment_storage: [zigos.constants.maximum_environment][]const u8 = undefined;
     const environment = collectShellEnvironment(&environment_storage) orelse return status_failure;
-    var path_storage: [maximum_path + 1]u8 = @splat(0);
+    var path_storage: [maximum_path + 1]u8 = undefined;
     const pid = spawnFromPath(program, &path_storage, &arguments, extra_count, environment, false, null, null, null) catch |err| {
         _ = printError("run", err);
         return switch (err) {
@@ -743,7 +748,7 @@ fn commandHasExpansion(command: *const Command) bool {
     for (command.words[0..command.count]) |word| {
         const start: usize = word.start;
         const value = command.storage[start .. start + @as(usize, word.length)];
-        if (substitutionProgram(value) != null or containsScalar(value, '*')) return true;
+        if (substitutionProgram(value) != null or containsScalar(value, '*') or value[0] == '~') return true;
     }
     return false;
 }
@@ -767,13 +772,22 @@ fn expandCommand(command: *const Command, storage: *[maximum_line + 1]u8) ?Comma
             if (!appendExpandedWord(&result, storage, &cursor, captured[0..count])) return null;
         } else if (containsScalar(word, '*')) {
             if (index == 0 or !expandWildcard(word, &result, storage, &cursor)) return null;
+        } else if (word[0] == '~') {
+            if (word.len != 1 and word[1] != '/') return null;
+            const home = "/home/root";
+            var expanded: [zigos.constants.maximum_argument_bytes]u8 = undefined;
+            const length = home.len + word.len - 1;
+            if (length > expanded.len) return null;
+            @memcpy(expanded[0..home.len], home);
+            @memcpy(expanded[home.len..length], word[1..]);
+            if (!appendExpandedWord(&result, storage, &cursor, expanded[0..length])) return null;
         } else if (!appendExpandedWord(&result, storage, &cursor, word)) return null;
     }
     return result;
 }
 
 fn appendExpandedWord(result: *Command, storage: *[maximum_line + 1]u8, cursor: *usize, word: []const u8) bool {
-    if (word.len == 0 or word.len > zigos.constants.maximum_argument_bytes or result.count == result.words.len or cursor.* + word.len + 1 > storage.len) return false;
+    if (word.len == 0 or word.len > zigos.constants.maximum_argument_bytes or result.count == result.words.len) return false;
     @memcpy(storage[cursor.* .. cursor.* + word.len], word);
     storage[cursor.* + word.len] = 0;
     result.words[result.count] = .{ .start = @intCast(cursor.*), .length = @intCast(word.len) };
@@ -795,10 +809,11 @@ fn expandWildcard(word: []const u8, result: *Command, storage: *[maximum_line + 
     const pattern_star = star - component_start;
     const prefix = pattern[0..pattern_star];
     const suffix = pattern[pattern_star + 1 ..];
-    var directory: [maximum_path + 1]u8 = @splat(0);
+    var directory: [maximum_path + 1]u8 = undefined;
     const directory_path: [*:0]const u8 = if (slash) |index| blk: {
         const length = if (index == 0) 1 else index;
         @memcpy(directory[0..length], word[0..length]);
+        directory[length] = 0;
         break :blk @ptrCast(&directory);
     } else ".";
     const fd = zigos.open(directory_path, .{ .read = true }, 0) catch return false;
@@ -831,7 +846,7 @@ fn captureSubstitution(program: []const u8, output: []u8) ?usize {
     defer zigos.close(@intCast(pair[0])) catch {};
     defer zigos.close(@intCast(pair[1])) catch {};
     var arguments: [zigos.constants.maximum_arguments][]const u8 = undefined;
-    var path_storage: [maximum_path + 1]u8 = @splat(0);
+    var path_storage: [maximum_path + 1]u8 = undefined;
     const pid = spawnFromPath(program, &path_storage, &arguments, 0, environment, true, null, null, @intCast(pair[1])) catch return null;
     zigos.close(@intCast(pair[1])) catch return null;
     var total: usize = 0;
