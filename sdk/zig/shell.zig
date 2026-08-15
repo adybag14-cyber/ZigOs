@@ -6,6 +6,7 @@ const maximum_conditional_commands: usize = 4;
 const maximum_sequential_lists: usize = 4;
 const maximum_pipeline_stages: usize = 4;
 const maximum_background_jobs: usize = 4;
+const maximum_shell_variables: usize = 4;
 const maximum_path: usize = 255;
 const status_success: u32 = 0;
 const status_failure: u32 = 1;
@@ -14,12 +15,19 @@ const status_command_not_found: u32 = 127;
 
 var startup_environment: [*]const usize = undefined;
 var background_jobs: [maximum_background_jobs]BackgroundJob = @splat(.{});
+var shell_variables: [maximum_shell_variables]ShellVariable = @splat(.{});
 
 const BackgroundJob = struct {
     process_group: u32 = 0,
     remaining: u8 = 0,
     final_pid: u32 = 0,
     final_status: u32 = status_failure,
+};
+
+const ShellVariable = struct {
+    length: u8 = 0,
+    name_length: u8 = 0,
+    bytes: [zigos.constants.maximum_environment_bytes]u8 = @splat(0),
 };
 
 const Word = struct {
@@ -76,25 +84,25 @@ const banner =
     "ZigOs userspace shell PID 2\r\n" ++
     "Type 'help' for commands.\r\n";
 const help_text =
-    "help                 show this command list\r\n" ++
-    "echo [TEXT...]       write text\r\n" ++
-    "pwd                  print working directory\r\n" ++
-    "cd PATH              change working directory\r\n" ++
-    "ls [PATH]            list a directory\r\n" ++
-    "cat PATH             stream a file\r\n" ++
-    "cp SOURCE DEST       copy through descriptors\r\n" ++
-    "write PATH TEXT      replace a file\r\n" ++
-    "append PATH TEXT     append to a file\r\n" ++
-    "mkdir PATH           create a directory\r\n" ++
-    "rm PATH              remove a file\r\n" ++
-    "rmdir PATH           remove an empty directory\r\n" ++
-    "mv SOURCE DEST       rename within a mount\r\n" ++
-    "chmod MODE PATH      change permission bits\r\n" ++
-    "sync                 commit /persist to NVMe\r\n" ++
-    "pid                  print the shell PID\r\n" ++
+    "help\r\n" ++
+    "echo [TEXT...]\r\n" ++
+    "pwd\r\n" ++
+    "cd PATH\r\n" ++
+    "ls [PATH]\r\n" ++
+    "cat PATH\r\n" ++
+    "cp SOURCE DEST\r\n" ++
+    "write PATH TEXT\r\n" ++
+    "append PATH TEXT\r\n" ++
+    "mkdir PATH\r\n" ++
+    "rm PATH\r\n" ++
+    "rmdir PATH\r\n" ++
+    "mv SOURCE DEST\r\n" ++
+    "chmod MODE PATH\r\n" ++
+    "sync\r\n" ++
+    "pid\r\n" ++
     "status               print previous command status\r\n" ++
-    "run PROGRAM [ARGS]   spawn with argv/env and wait\r\n" ++
-    "shutdown             exit PID 2 and stop ZigOs\r\n";
+    "run PROGRAM [ARGS]\r\n" ++
+    "shutdown\r\n";
 
 pub export fn zigos_main(
     _: usize,
@@ -198,7 +206,7 @@ fn validBackgroundList(list: *const ConditionalList) bool {
     if (list.count != 1 or list.commands[0].operator != .always) return false;
     const pipeline = &list.commands[0].pipeline;
     for (pipeline.stages[0..pipeline.count]) |stage| {
-        if (isBuiltin(stage.slice(0))) return false;
+        if (isBuiltin(stage.slice(0)) or assignmentNameLength(stage.slice(0)) != null) return false;
     }
     return true;
 }
@@ -320,17 +328,14 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
 fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, background: bool) u32 {
     if (!background and pipeline.count == 1) return execute(&pipeline.stages[0], previous_status);
     for (pipeline.stages[0..pipeline.count]) |stage| {
-        if (isBuiltin(stage.slice(0))) {
+        if (isBuiltin(stage.slice(0)) or assignmentNameLength(stage.slice(0)) != null) {
             zigos.writeAll(2, "pipeline: external stages only\r\n") catch {};
             return status_usage;
         }
     }
 
     var environment_storage: [zigos.constants.maximum_environment][]const u8 = undefined;
-    const environment = zigos.collectEnvironment(startup_environment, &environment_storage) orelse {
-        zigos.writeAll(2, "pipeline: invalid inherited environment\r\n") catch {};
-        return status_failure;
-    };
+    const environment = collectShellEnvironment(&environment_storage) orelse return status_failure;
     const background_slot: ?usize = if (background) findBackgroundJobSlot() else null;
     if (background and background_slot == null) {
         zigos.writeAll(2, "background: job limit reached\r\n") catch {};
@@ -368,12 +373,13 @@ fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, backgrou
             null
         else
             @intCast(pipe_pairs[stage_index][1]);
-        const pid = spawnFromPathPipeline(
+        const pid = spawnFromPath(
             stage.slice(0),
             &path_storage,
             &arguments,
             stage.count - 1,
             environment,
+            true,
             if (stage_index == 0) null else process_group,
             stdin_source,
             stdout_source,
@@ -552,6 +558,9 @@ fn conditionalSyntaxError() u32 {
 
 fn execute(command: *const Command, previous_status: u32) u32 {
     const name = command.slice(0);
+    if (command.count == 1) {
+        if (assignmentNameLength(name)) |name_length| return assignVariable(name, name_length);
+    }
     if (equal(name, "help")) {
         zigos.writeAll(1, help_text) catch return status_failure;
         return status_success;
@@ -756,12 +765,9 @@ fn commandRun(command: *const Command, program_index: usize) u32 {
     var arguments: [zigos.constants.maximum_arguments][]const u8 = undefined;
     for (0..extra_count) |index| arguments[index + 1] = command.slice(program_index + 1 + index);
     var environment_storage: [zigos.constants.maximum_environment][]const u8 = undefined;
-    const environment = zigos.collectEnvironment(startup_environment, &environment_storage) orelse {
-        zigos.writeAll(2, "run: invalid inherited environment\r\n") catch {};
-        return status_failure;
-    };
+    const environment = collectShellEnvironment(&environment_storage) orelse return status_failure;
     var path_storage: [maximum_path + 1]u8 = @splat(0);
-    const pid = spawnFromPath(program, &path_storage, &arguments, extra_count, environment) catch |err| {
+    const pid = spawnFromPath(program, &path_storage, &arguments, extra_count, environment, false, null, null, null) catch |err| {
         _ = printError("run", err);
         return switch (err) {
             error.NotFound => status_command_not_found,
@@ -778,6 +784,64 @@ fn commandRun(command: *const Command, program_index: usize) u32 {
     return status.exit_status;
 }
 
+fn assignmentNameLength(value: []const u8) ?usize {
+    const name_length = indexOfScalar(value, '=') orelse return null;
+    if (name_length == 0) return null;
+    for (value[0..name_length], 0..) |byte, index| {
+        const alpha = (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or byte == '_';
+        if (!alpha and (index == 0 or byte < '0' or byte > '9')) return null;
+    }
+    return name_length;
+}
+
+fn assignVariable(entry: []const u8, name_length: usize) u32 {
+    if (entry.len > zigos.constants.maximum_environment_bytes) return status_usage;
+    var free: ?*ShellVariable = null;
+    for (&shell_variables) |*variable| {
+        if (variable.length == 0) {
+            if (free == null) free = variable;
+        } else if (variable.name_length == name_length and equal(variable.bytes[0..name_length], entry[0..name_length])) {
+            free = variable;
+            break;
+        }
+    }
+    const variable = free orelse return status_failure;
+    @memcpy(variable.bytes[0..entry.len], entry);
+    variable.length = @intCast(entry.len);
+    variable.name_length = @intCast(name_length);
+    return status_success;
+}
+
+fn shellEnvironmentValue(key: []const u8) ?[]const u8 {
+    for (&shell_variables) |*variable| {
+        if (variable.length != 0 and variable.name_length == key.len and equal(variable.bytes[0..key.len], key))
+            return variable.bytes[key.len + 1 .. variable.length];
+    }
+    return zigos.environmentValue(startup_environment, key);
+}
+
+fn collectShellEnvironment(output: *[zigos.constants.maximum_environment][]const u8) ?[]const []const u8 {
+    const inherited = zigos.collectEnvironment(startup_environment, output) orelse return null;
+    var count = inherited.len;
+    for (&shell_variables) |*variable| {
+        if (variable.length == 0) continue;
+        var replaced = false;
+        for (0..inherited.len) |index| {
+            const name_length = indexOfScalar(output[index], '=') orelse continue;
+            if (variable.name_length == name_length and equal(variable.bytes[0..name_length], output[index][0..name_length])) {
+                output[index] = variable.bytes[0..variable.length];
+                replaced = true;
+                break;
+            }
+        }
+        if (replaced) continue;
+        if (count == output.len) return null;
+        output[count] = variable.bytes[0..variable.length];
+        count += 1;
+    }
+    return output[0..count];
+}
+
 fn executableName(path: []const u8) []const u8 {
     var last: usize = 0;
     for (path, 0..) |byte, index| {
@@ -792,40 +856,7 @@ fn spawnFromPath(
     arguments: *[zigos.constants.maximum_arguments][]const u8,
     extra_count: usize,
     environment: []const []const u8,
-) zigos.Error!u32 {
-    if (program.len == 0) return error.InvalidArgument;
-    if (containsScalar(program, '/')) {
-        const path = buildExecutablePath("", program, path_storage) orelse return error.NameTooLong;
-        arguments[0] = executableName(path);
-        return zigos.spawnv(path, arguments[0 .. extra_count + 1], environment);
-    }
-    const path_value = zigos.environmentValue(startup_environment, "PATH") orelse "/bin:/persist";
-    var start: usize = 0;
-    while (start <= path_value.len) {
-        const remaining = path_value[start..];
-        const separator = indexOfScalar(remaining, ':') orelse remaining.len;
-        const directory = remaining[0..separator];
-        if (directory.len != 0) {
-            const path = buildExecutablePath(directory, program, path_storage) orelse return error.NameTooLong;
-            arguments[0] = executableName(path);
-            const candidate: ?u32 = zigos.spawnv(path, arguments[0 .. extra_count + 1], environment) catch |err| switch (err) {
-                error.NotFound => null,
-                else => return err,
-            };
-            if (candidate) |pid| return pid;
-        }
-        if (separator == remaining.len) break;
-        start += separator + 1;
-    }
-    return error.NotFound;
-}
-
-fn spawnFromPathPipeline(
-    program: []const u8,
-    path_storage: *[maximum_path + 1]u8,
-    arguments: *[zigos.constants.maximum_arguments][]const u8,
-    extra_count: usize,
-    environment: []const []const u8,
+    grouped: bool,
     process_group: ?u32,
     stdin_source: ?u16,
     stdout_source: ?u16,
@@ -834,9 +865,9 @@ fn spawnFromPathPipeline(
     if (containsScalar(program, '/')) {
         const path = buildExecutablePath("", program, path_storage) orelse return error.NameTooLong;
         arguments[0] = executableName(path);
-        return spawnResolvedGroup(path, arguments[0 .. extra_count + 1], environment, process_group, stdin_source, stdout_source);
+        return spawnResolved(path, arguments[0 .. extra_count + 1], environment, grouped, process_group, stdin_source, stdout_source);
     }
-    const path_value = zigos.environmentValue(startup_environment, "PATH") orelse "/bin:/persist";
+    const path_value = shellEnvironmentValue("PATH") orelse "/bin:/persist";
     var start: usize = 0;
     while (start <= path_value.len) {
         const remaining = path_value[start..];
@@ -845,10 +876,11 @@ fn spawnFromPathPipeline(
         if (directory.len != 0) {
             const path = buildExecutablePath(directory, program, path_storage) orelse return error.NameTooLong;
             arguments[0] = executableName(path);
-            const candidate: ?u32 = spawnResolvedGroup(
+            const candidate: ?u32 = spawnResolved(
                 path,
                 arguments[0 .. extra_count + 1],
                 environment,
+                grouped,
                 process_group,
                 stdin_source,
                 stdout_source,
@@ -864,14 +896,16 @@ fn spawnFromPathPipeline(
     return error.NotFound;
 }
 
-fn spawnResolvedGroup(
+fn spawnResolved(
     path: []const u8,
     arguments: []const []const u8,
     environment: []const []const u8,
+    grouped: bool,
     process_group: ?u32,
     stdin_source: ?u16,
     stdout_source: ?u16,
 ) zigos.Error!u32 {
+    if (!grouped) return zigos.spawnv(path, arguments, environment);
     const remap = stdin_source != null or stdout_source != null;
     return if (process_group) |group|
         if (remap)

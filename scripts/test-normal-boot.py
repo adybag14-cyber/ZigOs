@@ -205,7 +205,7 @@ def main() -> int:
             wait_for(client, process, serial, b"ZigOs userspace init PID 1", 0, args.boot_timeout)
             wait_for(client, process, serial, b"ZigOs userspace shell PID 2", 0, 20)
             wait_for(client, process, serial, PROMPT_HOME, 0, 20)
-            send(client, process, serial, "help", b"shutdown             exit PID 2 and stop ZigOs")
+            send(client, process, serial, "help", b"status               print previous command status")
             send(client, process, serial, "pwd", b"\r\n/home/root\r\n")
             send(client, process, serial, "cd /", PROMPT_ROOT)
             send(client, process, serial, "pwd", b"\r\n/\r\n")
@@ -325,6 +325,27 @@ def main() -> int:
             send(client, process, serial, "status", b"\r\n1\r\n")
             send(client, process, serial, "bg 0", PROMPT_ROOT)
             send(client, process, serial, "status", b"\r\n2\r\n")
+
+            send(client, process, serial, "PATH=/missing", PROMPT_ROOT)
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "/bin/sdk.elf alpha beta", b"zig-sdk: bad envp/auxv", 40)
+            send(client, process, serial, "status", b"\r\n233\r\n")
+            send(client, process, serial, "hello", b"run: not found")
+            send(client, process, serial, "status", b"\r\n127\r\n")
+            send(client, process, serial, "PATH=/bin:/persist", PROMPT_ROOT)
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "G267_A=one", PROMPT_ROOT)
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "G267_A=two", PROMPT_ROOT)
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "G267_B=two", PROMPT_ROOT)
+            send(client, process, serial, "G267_C=three", PROMPT_ROOT)
+            send(client, process, serial, "G267_D=four", PROMPT_ROOT)
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            send(client, process, serial, "PATH=/blocked &", b"syntax: invalid conditional list")
+            send(client, process, serial, "status", b"\r\n2\r\n")
+            send(client, process, serial, "hello", b"hello from VFS-loaded CPL3 ELF64", 40)
+            send(client, process, serial, "status", b"\r\n42\r\n")
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")
@@ -374,13 +395,14 @@ def main() -> int:
                 "pipeline group 11 stages 2",
                 "TTYPIPE",
                 "[1] done 7",
+                "zig-sdk: bad envp/auxv",
                 "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
                 " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10939/5172/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 300/300 cache-released 16 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 344/344 cache-released 16 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

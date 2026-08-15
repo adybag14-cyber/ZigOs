@@ -296,7 +296,7 @@ def main() -> int:
                 wait_for(client, process, serial, b"ZigOs userspace init PID 1", 0, args.boot_timeout)
                 wait_for(client, process, serial, b"ZigOs userspace shell PID 2", 0, 20)
                 wait_for(client, process, serial, PROMPT_HOME, 0, 20)
-                send(client, process, serial, "help", b"shutdown             exit PID 2 and stop ZigOs")
+                send(client, process, serial, "help", b"status               print previous command status")
                 send(client, process, serial, "cd /", PROMPT_ROOT)
                 send(client, process, serial, "run hello", b"process 3 exited 42", 40)
                 send(client, process, serial, "mkdir /persist/damaged", PROMPT_ROOT)
