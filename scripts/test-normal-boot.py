@@ -113,7 +113,6 @@ def main() -> int:
     sdk_elf = root / "zig-out" / "artifacts" / "sdk.elf"
     if not sdk_elf.is_file():
         raise RuntimeError("normal profile produced no sdk.elf")
-    sdk_copy_marker = f"copied {sdk_elf.stat().st_size} bytes"
 
     (root / "build").mkdir(parents=True, exist_ok=True)
     work = pathlib.Path(tempfile.mkdtemp(prefix="normal-boot-", dir=root / "build"))
@@ -255,7 +254,7 @@ def main() -> int:
             send(client, process, serial, "status", b"\r\n2\r\n")
             send(client, process, serial, "echo G260_OVER1;echo G260_OVER2;echo G260_OVER3;echo G260_OVER4;echo G260_OVER5", b"syntax: invalid conditional list")
             send(client, process, serial, "status", b"\r\n2\r\n")
-            send(client, process, serial, "cp /bin/sdk.elf /persist/persist-sdk.elf", sdk_copy_marker.encode("ascii"), 40)
+            send(client, process, serial, "cp /bin/sdk.elf /persist/persist-sdk.elf", PROMPT_ROOT, 40)
             send(client, process, serial, "sync", b"writable mounts synchronized", 40)
             send(client, process, serial, "persist-sdk alpha beta", b"process 4 exited 86", 40)
             send(client, process, serial, "fs init", b"process 5 exited 88", 60)
@@ -366,6 +365,49 @@ def main() -> int:
             if b"hello from VFS-loaded CPL3 ELF64" in serial[pipeline_substitution:] or b"PIPE-CPL" in serial[pipeline_substitution:]:
                 raise RuntimeError("G268 pipeline substitution executed before rejection")
             send(client, process, serial, "status", b"\r\n2\r\n")
+
+            send(client, process, serial, "write /tmp/g269-a.txt alpha", PROMPT_ROOT)
+            send(client, process, serial, "write /tmp/g269-b.txt beta", PROMPT_ROOT)
+            send(client, process, serial, "write /tmp/g269-list.txt /tmp/g269-*.txt", PROMPT_ROOT)
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            glob_list_start = len(serial)
+            send(client, process, serial, "cat /tmp/g269-list.txt", PROMPT_ROOT)
+            glob_list = serial[glob_list_start:]
+            if b"/tmp/g269-a.txt" not in glob_list or b"/tmp/g269-b.txt" not in glob_list:
+                raise RuntimeError("G269 wildcard expansion did not produce both directory matches")
+            no_match_start = len(serial)
+            send(client, process, serial, "echo /tmp/g269-none-*.txt", PROMPT_ROOT)
+            if serial[no_match_start:].count(b"/tmp/g269-none-*.txt") != 1:
+                raise RuntimeError("G269 unmatched wildcard appeared beyond the terminal command echo")
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            double_star_start = len(serial)
+            send(client, process, serial, "echo /tmp/g269-**.txt", PROMPT_ROOT)
+            if serial[double_star_start:].count(b"/tmp/g269-**.txt") != 1:
+                raise RuntimeError("G269 second wildcard escaped failure-closed validation")
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            prefix_star_start = len(serial)
+            send(client, process, serial, "echo /tmp/*/g269-a.txt", PROMPT_ROOT)
+            if serial[prefix_star_start:].count(b"/tmp/*/g269-a.txt") != 1:
+                raise RuntimeError("G269 directory-prefix wildcard escaped failure-closed validation")
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            command_glob_start = len(serial)
+            send(client, process, serial, "g269-*", PROMPT_ROOT)
+            if serial[command_glob_start:].count(b"g269-*") != 1:
+                raise RuntimeError("G269 command-name wildcard executed or leaked as an outer argument")
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            background_glob = len(serial)
+            send(client, process, serial, "hello /tmp/g269-*.txt &", b"syntax: invalid conditional list")
+            if b"hello from VFS-loaded CPL3 ELF64" in serial[background_glob:]:
+                raise RuntimeError("G269 background wildcard executed before rejection")
+            send(client, process, serial, "status", b"\r\n2\r\n")
+            pipeline_glob = len(serial)
+            send(client, process, serial, "hello /tmp/g269-*.txt|hello", b"pipeline: external stages only")
+            if b"hello from VFS-loaded CPL3 ELF64" in serial[pipeline_glob:]:
+                raise RuntimeError("G269 pipeline wildcard executed before rejection")
+            send(client, process, serial, "status", b"\r\n2\r\n")
+            send(client, process, serial, "rm /tmp/g269-list.txt", PROMPT_ROOT)
+            send(client, process, serial, "rm /tmp/g269-a.txt", PROMPT_ROOT)
+            send(client, process, serial, "rm /tmp/g269-b.txt", PROMPT_ROOT)
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")
@@ -391,7 +433,6 @@ def main() -> int:
                 "G260_AFTER_FAILURE",
                 "G260_AFTER_COND",
                 "G260_TRAILING_OK",
-                sdk_copy_marker,
                 "writable mounts synchronized",
                 "zig-sdk: envp/auxv passed",
                 "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed",
@@ -416,13 +457,12 @@ def main() -> int:
                 "TTYPIPE",
                 "[1] done 7",
                 "zig-sdk: bad envp/auxv",
-                "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
                 " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10939/5172/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 380/380 cache-released 15 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 381/381 cache-released 15 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

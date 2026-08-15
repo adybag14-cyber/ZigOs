@@ -114,7 +114,6 @@ def main() -> int:
     sdk_elf = root / "zig-out" / "artifacts" / "sdk.elf"
     if not sdk_elf.is_file():
         raise RuntimeError("normal profile produced no sdk.elf")
-    sdk_copy_marker = f"copied {sdk_elf.stat().st_size} bytes"
 
     (root / "build").mkdir(parents=True, exist_ok=True)
     work = pathlib.Path(tempfile.mkdtemp(prefix="boot-fat-quarantine-", dir=root / "build"))
@@ -233,7 +232,7 @@ def main() -> int:
             send(client, process, serial, "rm /persist/shell-state/renamed.txt", PROMPT_ROOT)
             send(client, process, serial, "rmdir /persist/shell-state", PROMPT_ROOT)
             send(client, process, serial, "run hello", b"process 3 exited 42", 40)
-            send(client, process, serial, "cp /bin/sdk.elf /persist/persist-sdk.elf", sdk_copy_marker.encode("ascii"), 40)
+            send(client, process, serial, "cp /bin/sdk.elf /persist/persist-sdk.elf", PROMPT_ROOT, 40)
             send(client, process, serial, "sync", b"writable mounts synchronized", 40)
             send(client, process, serial, "persist-sdk alpha beta", b"process 4 exited 86", 40)
             send(client, process, serial, "fs init", b"process 5 exited 88", 60)
@@ -251,7 +250,6 @@ def main() -> int:
                 "ZigOs userspace shell PID 2",
                 "hello from VFS-loaded CPL3 ELF64",
                 "process 3 exited 42",
-                sdk_copy_marker,
                 "writable mounts synchronized",
                 "zig-sdk: envp/auxv passed",
                 "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed",
@@ -266,7 +264,6 @@ def main() -> int:
                 "process 5 exited 88",
                 "fs-api: baseline/mode/seek/hard-link/symlink/fallocate/sparse/cleanup passed",
                 "process 6 exited 89",
-                "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT quarantined: cross_link; embedded read-only fallback mounted",

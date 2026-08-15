@@ -142,7 +142,8 @@ def send_command(
     start = len(output)
     client.sendall(command.encode("ascii") + b"\r")
     if marker is None:
-        time.sleep(0.45)
+        wait_for(client, process, output, PROMPT, start, timeout_seconds)
+        time.sleep(0.1)
         read_available(client, output)
         return
     wait_for(client, process, output, marker.encode("ascii"), start, timeout_seconds)
@@ -404,7 +405,6 @@ def main() -> int:
         sdk_elf = root / "zig-out" / "artifacts" / "sdk.elf"
         if not sdk_elf.is_file():
             raise RuntimeError("installed sdk.elf is missing")
-        sdk_copy_marker = f"copied {sdk_elf.stat().st_size} bytes"
 
         if work.exists():
             for child in work.iterdir():
@@ -447,7 +447,7 @@ def main() -> int:
             commands=[
                 ("mkdir /persist/config", None),
                 ("write /persist/config/message.txt survived-generation-one", None),
-                ("cp /bin/sdk.elf /persist/persist-sdk.elf", sdk_copy_marker),
+                ("cp /bin/sdk.elf /persist/persist-sdk.elf", None),
                 ("exec /bin/fs.elf init", "exec: PID 3 state zombie status 0x58"),
                 ("fsck", "fsck ramfs/persist: clean"),
                 ("cat /persist/config/message.txt", "survived-generation-one"),

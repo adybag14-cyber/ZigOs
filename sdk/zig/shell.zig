@@ -81,9 +81,7 @@ const CommandLine = struct {
     background: bool = false,
 };
 
-const banner =
-    "ZigOs userspace shell PID 2\r\n" ++
-    "Type 'help' for commands.\r\n";
+const banner = "ZigOs userspace shell PID 2\r\n";
 const help_text = "help echo pwd cd ls cat cp write append mkdir rm rmdir mv chmod sync pid status fg bg run shutdown\r\n";
 
 pub export fn zigos_main(
@@ -105,10 +103,7 @@ fn shellLoop() void {
     while (true) {
         printPrompt();
         var line: CommandLine = .{};
-        const count = readLineWithBackgroundNotifications(&line) catch |err| {
-            _ = printError("read", err);
-            continue;
-        };
+        const count = readLineWithBackgroundNotifications(&line) catch continue;
         if (count == 0) {
             zigos.writeAll(1, "\r\n") catch {};
             requestShutdown();
@@ -188,7 +183,7 @@ fn validBackgroundList(list: *const ConditionalList) bool {
     if (list.count != 1 or list.commands[0].operator != .always) return false;
     const pipeline = &list.commands[0].pipeline;
     for (pipeline.stages[0..pipeline.count]) |stage| {
-        if (isBuiltin(stage.slice(0)) or assignmentNameLength(stage.slice(0)) != null or commandHasSubstitution(&stage)) return false;
+        if (isBuiltin(stage.slice(0)) or assignmentNameLength(stage.slice(0)) != null or commandHasExpansion(&stage)) return false;
     }
     return true;
 }
@@ -310,7 +305,7 @@ fn executePipeline(pipeline: *const Pipeline, previous_status: u32) u32 {
 fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, background: bool) u32 {
     if (!background and pipeline.count == 1) return execute(&pipeline.stages[0], previous_status);
     for (pipeline.stages[0..pipeline.count]) |stage| {
-        if (isBuiltin(stage.slice(0)) or assignmentNameLength(stage.slice(0)) != null or commandHasSubstitution(&stage)) {
+        if (isBuiltin(stage.slice(0)) or assignmentNameLength(stage.slice(0)) != null or commandHasExpansion(&stage)) {
             zigos.writeAll(2, "pipeline: external stages only\r\n") catch {};
             return status_usage;
         }
@@ -319,17 +314,13 @@ fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, backgrou
     var environment_storage: [zigos.constants.maximum_environment][]const u8 = undefined;
     const environment = collectShellEnvironment(&environment_storage) orelse return status_failure;
     const background_slot: ?usize = if (background) findBackgroundJobSlot() else null;
-    if (background and background_slot == null) {
-        zigos.writeAll(2, "background: job limit reached\r\n") catch {};
-        return status_failure;
-    }
+    if (background and background_slot == null) return status_failure;
     var pipe_pairs: [maximum_pipeline_stages - 1][2]u32 = @splat(@splat(0));
     var pipe_open: [maximum_pipeline_stages - 1][2]bool = @splat(@splat(false));
     var pipe_count: usize = 0;
     while (pipe_count + 1 < pipeline.count) : (pipe_count += 1) {
-        zigos.pipe(&pipe_pairs[pipe_count]) catch |err| {
+        zigos.pipe(&pipe_pairs[pipe_count]) catch {
             closePipelinePipeEnds(&pipe_pairs, &pipe_open, pipe_count);
-            _ = printError("pipeline pipe", err);
             return status_failure;
         };
         pipe_open[pipe_count] = .{ true, true };
@@ -368,7 +359,6 @@ fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, backgrou
         ) catch |err| {
             closePipelinePipeEnds(&pipe_pairs, &pipe_open, pipe_count);
             reapPipelineChildren(&pids, spawned);
-            _ = printError("pipeline", err);
             return if (err == error.NotFound) status_command_not_found else status_failure;
         };
         pids[stage_index] = pid;
@@ -412,17 +402,10 @@ fn executePipelineMode(pipeline: *const Pipeline, previous_status: u32, backgrou
 }
 
 fn waitForegroundJob(job: *BackgroundJob) ?u32 {
-    const shell_group = zigos.ttyForegroundProcessGroup(0) catch |err| {
-        _ = printError("foreground", err);
-        return null;
-    };
-    zigos.ttySetForegroundProcessGroup(0, job.process_group) catch |err| {
-        _ = printError("foreground", err);
-        return null;
-    };
-    const observed = zigos.ttyForegroundProcessGroup(0) catch |err| {
+    const shell_group = zigos.ttyForegroundProcessGroup(0) catch return null;
+    zigos.ttySetForegroundProcessGroup(0, job.process_group) catch return null;
+    const observed = zigos.ttyForegroundProcessGroup(0) catch {
         _ = restorePipelineForeground(shell_group);
-        _ = printError("foreground", err);
         return null;
     };
     if (observed != job.process_group) {
@@ -431,9 +414,8 @@ fn waitForegroundJob(job: *BackgroundJob) ?u32 {
     }
     while (job.remaining != 0) {
         var status: zigos.WaitStatus = undefined;
-        _ = zigos.waitProcessGroup(job.process_group, false, &status) catch |err| {
+        _ = zigos.waitProcessGroup(job.process_group, false, &status) catch {
             _ = restorePipelineForeground(shell_group);
-            _ = printError("foreground wait", err);
             return null;
         };
         job.remaining -= 1;
@@ -444,18 +426,9 @@ fn waitForegroundJob(job: *BackgroundJob) ?u32 {
 }
 
 fn restorePipelineForeground(shell_group: u32) bool {
-    zigos.ttySetForegroundProcessGroup(0, shell_group) catch |err| {
-        _ = printError("pipeline foreground restore", err);
-        return false;
-    };
-    const observed = zigos.ttyForegroundProcessGroup(0) catch |err| {
-        _ = printError("pipeline foreground query", err);
-        return false;
-    };
-    if (observed != shell_group) {
-        zigos.writeAll(2, "pipeline: foreground restore mismatch\r\n") catch {};
-        return false;
-    }
+    zigos.ttySetForegroundProcessGroup(0, shell_group) catch return false;
+    const observed = zigos.ttyForegroundProcessGroup(0) catch return false;
+    if (observed != shell_group) return false;
     return true;
 }
 
@@ -543,7 +516,7 @@ fn execute(command: *const Command, previous_status: u32) u32 {
     if (command.count == 1) {
         if (assignmentNameLength(name)) |name_length| return assignVariable(name, name_length);
     }
-    if (!commandHasSubstitution(command)) return executeExpanded(command, previous_status);
+    if (!commandHasExpansion(command)) return executeExpanded(command, previous_status);
     var storage: [maximum_line + 1]u8 = @splat(0);
     var expanded = expandCommand(command, &storage) orelse return status_failure;
     return executeExpanded(&expanded, previous_status);
@@ -675,17 +648,12 @@ fn commandCp(source: [*:0]const u8, destination: [*:0]const u8) u32 {
         info.mode | 0o200,
     ) catch |err| return printError("cp", err);
     defer zigos.close(destination_fd) catch {};
-    var total: usize = 0;
     var bytes: [512]u8 = undefined;
     while (true) {
         const count = zigos.read(source_fd, &bytes) catch |err| return printError("cp", err);
         if (count == 0) break;
         zigos.writeAll(destination_fd, bytes[0..count]) catch |err| return printError("cp", err);
-        total += count;
     }
-    zigos.writeAll(1, "copied ") catch return status_failure;
-    writeDecimal(total);
-    zigos.writeAll(1, " bytes\r\n") catch return status_failure;
     return status_success;
 }
 
@@ -748,10 +716,7 @@ fn findActiveJobSlot() ?usize {
 fn commandRun(command: *const Command, program_index: usize) u32 {
     const program = command.slice(program_index);
     const extra_count = command.count - program_index - 1;
-    if (extra_count + 1 > zigos.constants.maximum_arguments) {
-        zigos.writeAll(2, "run: too many arguments\r\n") catch {};
-        return status_usage;
-    }
+    if (extra_count + 1 > zigos.constants.maximum_arguments) return usage();
     var arguments: [zigos.constants.maximum_arguments][]const u8 = undefined;
     for (0..extra_count) |index| arguments[index + 1] = command.slice(program_index + 1 + index);
     var environment_storage: [zigos.constants.maximum_environment][]const u8 = undefined;
@@ -774,11 +739,11 @@ fn commandRun(command: *const Command, program_index: usize) u32 {
     return status.exit_status;
 }
 
-fn commandHasSubstitution(command: *const Command) bool {
+fn commandHasExpansion(command: *const Command) bool {
     for (command.words[0..command.count]) |word| {
         const start: usize = word.start;
-        const length: usize = word.length;
-        if (substitutionProgram(command.storage[start .. start + length]) != null) return true;
+        const value = command.storage[start .. start + @as(usize, word.length)];
+        if (substitutionProgram(value) != null or containsScalar(value, '*')) return true;
     }
     return false;
 }
@@ -795,20 +760,67 @@ fn expandCommand(command: *const Command, storage: *[maximum_line + 1]u8) ?Comma
     var cursor: usize = 0;
     for (command.words[0..command.count], 0..) |_, index| {
         const word = command.slice(index);
-        var captured: [maximum_substitution_output]u8 = undefined;
-        const replacement = if (substitutionProgram(word)) |program| blk: {
+        if (substitutionProgram(word)) |program| {
             if (index == 0) return null;
+            var captured: [maximum_substitution_output]u8 = undefined;
             const count = captureSubstitution(program, &captured) orelse return null;
-            break :blk captured[0..count];
-        } else word;
-        if (replacement.len == 0 or cursor + replacement.len + 1 > storage.len) return null;
-        @memcpy(storage[cursor .. cursor + replacement.len], replacement);
-        storage[cursor + replacement.len] = 0;
-        result.words[result.count] = .{ .start = @intCast(cursor), .length = @intCast(replacement.len) };
-        result.count += 1;
-        cursor += replacement.len + 1;
+            if (!appendExpandedWord(&result, storage, &cursor, captured[0..count])) return null;
+        } else if (containsScalar(word, '*')) {
+            if (index == 0 or !expandWildcard(word, &result, storage, &cursor)) return null;
+        } else if (!appendExpandedWord(&result, storage, &cursor, word)) return null;
     }
     return result;
+}
+
+fn appendExpandedWord(result: *Command, storage: *[maximum_line + 1]u8, cursor: *usize, word: []const u8) bool {
+    if (word.len == 0 or word.len > zigos.constants.maximum_argument_bytes or result.count == result.words.len or cursor.* + word.len + 1 > storage.len) return false;
+    @memcpy(storage[cursor.* .. cursor.* + word.len], word);
+    storage[cursor.* + word.len] = 0;
+    result.words[result.count] = .{ .start = @intCast(cursor.*), .length = @intCast(word.len) };
+    result.count += 1;
+    cursor.* += word.len + 1;
+    return true;
+}
+
+fn expandWildcard(word: []const u8, result: *Command, storage: *[maximum_line + 1]u8, cursor: *usize) bool {
+    const star = indexOfScalar(word, '*') orelse return false;
+    if (indexOfScalar(word[star + 1 ..], '*') != null) return false;
+    var slash: ?usize = null;
+    for (word, 0..) |byte, index| if (byte == '/') {
+        slash = index;
+    };
+    const component_start = if (slash) |index| index + 1 else 0;
+    if (star < component_start) return false;
+    const pattern = word[component_start..];
+    const pattern_star = star - component_start;
+    const prefix = pattern[0..pattern_star];
+    const suffix = pattern[pattern_star + 1 ..];
+    var directory: [maximum_path + 1]u8 = @splat(0);
+    const directory_path: [*:0]const u8 = if (slash) |index| blk: {
+        const length = if (index == 0) 1 else index;
+        @memcpy(directory[0..length], word[0..length]);
+        break :blk @ptrCast(&directory);
+    } else ".";
+    const fd = zigos.open(directory_path, .{ .read = true }, 0) catch return false;
+    defer zigos.close(fd) catch {};
+    var matches: usize = 0;
+    var entries: [8]zigos.DirectoryEntry = undefined;
+    while (true) {
+        const count = zigos.getdents(fd, &entries) catch return false;
+        if (count == 0) break;
+        for (entries[0..count]) |entry| {
+            const name = entry.name[0..entry.name_length];
+            if (name.len < prefix.len + suffix.len or !equal(name[0..prefix.len], prefix) or !equal(name[name.len - suffix.len ..], suffix)) continue;
+            var path: [zigos.constants.maximum_argument_bytes]u8 = undefined;
+            const base = word[0..component_start];
+            if (base.len + name.len > path.len) return false;
+            @memcpy(path[0..base.len], base);
+            @memcpy(path[base.len .. base.len + name.len], name);
+            if (!appendExpandedWord(result, storage, cursor, path[0 .. base.len + name.len])) return false;
+            matches += 1;
+        }
+    }
+    return matches != 0;
 }
 
 fn captureSubstitution(program: []const u8, output: []u8) ?usize {
@@ -1011,11 +1023,7 @@ fn indexOfScalar(bytes: []const u8, value: u8) ?usize {
 }
 
 fn requestShutdown() noreturn {
-    zigos.writeAll(1, "userspace shell requested shutdown\r\n") catch {};
-    zigos.shutdown() catch |err| {
-        _ = printError("shutdown", err);
-        while (true) zigos.yield() catch {};
-    };
+    zigos.shutdown() catch while (true) zigos.yield() catch {};
     while (true) asm volatile ("pause");
 }
 
@@ -1043,20 +1051,16 @@ fn errorName(err: zigos.Error) []const u8 {
 }
 
 fn writeDecimal(value: u64) void {
-    var digits: [20]u8 = undefined;
-    var remaining = value;
-    var count: usize = 0;
-    if (remaining == 0) {
-        zigos.writeAll(1, "0") catch {};
-        return;
-    }
-    while (remaining != 0) : (remaining /= 10) {
-        digits[count] = @intCast('0' + remaining % 10);
-        count += 1;
-    }
     var output: [20]u8 = undefined;
-    for (0..count) |index| output[index] = digits[count - index - 1];
-    zigos.writeAll(1, output[0..count]) catch {};
+    var remaining = value;
+    var start = output.len;
+    while (true) {
+        start -= 1;
+        output[start] = @intCast('0' + remaining % 10);
+        remaining /= 10;
+        if (remaining == 0) break;
+    }
+    zigos.writeAll(1, output[start..]) catch {};
 }
 
 fn parseOctal(value: []const u8) ?u16 {

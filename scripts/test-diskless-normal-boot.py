@@ -191,7 +191,6 @@ def main() -> int:
                 "c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/watchdir/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
                 "process 3 exited 87",
                 "writable mounts synchronized",
-                "userspace shell requested shutdown",
                 "userspace init reaped shell PID 2 status 0",
                 "storage diskless-ram-root clean yes",
                 "ZigOs boot FAT: block-backed no files/directories 0/0 bytes 0 metadata/file/block reads 0/0/0 failures 0 clusters claimed/free/loop/cross/range 0/0/0/0/0 lock tickets/outstanding 0/0 quarantine state/reason/events no/none/0 clean yes",
