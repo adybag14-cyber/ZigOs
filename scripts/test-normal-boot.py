@@ -464,6 +464,12 @@ def main() -> int:
                 raise RuntimeError("G274 standalone cat reported an unexpected filesystem error")
             send(client, process, serial, "status", b"\r\n0\r\n")
 
+            echo_start = len(serial)
+            client.sendall(b"/bin/echo.elf G275_ALPHA G275_BETA\r")
+            wait_for(client, process, serial, b"\r\nG275_ALPHA G275_BETA\r\n", echo_start, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, echo_start, 40)
+            send(client, process, serial, "status", b"\r\n0\r\n")
+
             send(client, process, serial, "write /etc/shrc write /tmp/g271-order SYSTEM", PROMPT_ROOT)
             send(client, process, serial, "write /home/root/.shrc append /tmp/g271-order USER", PROMPT_ROOT)
             send(client, process, serial, "append /home/root/.shrc echo G271US", PROMPT_ROOT)
@@ -538,9 +544,9 @@ def main() -> int:
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10967/5144/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10979/5132/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 484/484 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 501/501 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

@@ -121,6 +121,25 @@ pub fn build(b: *std.Build) void {
     fs_conformance.setLinkerScript(b.path("sdk/zig/linker.ld"));
     fs_conformance.step.dependOn(&assets.step);
 
+    const echo_module = b.createModule(.{
+        .root_source_file = b.path("sdk/zig/echo.zig"),
+        .target = sdk_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+        .code_model = .large,
+        .pic = false,
+        .stack_protector = false,
+        .stack_check = false,
+    });
+    echo_module.addObjectFile(b.path("build/sdk/syscall.o"));
+    const userspace_echo = b.addExecutable(.{
+        .name = "echo",
+        .root_module = echo_module,
+    });
+    userspace_echo.entry = .{ .symbol_name = "_start" };
+    userspace_echo.setLinkerScript(b.path("sdk/zig/linker.ld"));
+    userspace_echo.step.dependOn(&assets.step);
+
     const cat_module = b.createModule(.{
         .root_source_file = b.path("sdk/zig/cat.zig"),
         .target = sdk_target,
@@ -206,6 +225,7 @@ pub fn build(b: *std.Build) void {
     _ = sdk_embed.addCopyFile(userspace_init.getEmittedBin(), "init.elf");
     _ = sdk_embed.addCopyFile(userspace_shell.getEmittedBin(), "sh.elf");
     _ = sdk_embed.addCopyFile(fs_conformance.getEmittedBin(), "fs.elf");
+    _ = sdk_embed.addCopyFile(userspace_echo.getEmittedBin(), "echo.elf");
     _ = sdk_embed.addCopyFile(userspace_cat.getEmittedBin(), "cat.elf");
     _ = sdk_embed.addCopyFile(userspace_ls.getEmittedBin(), "ls.elf");
     _ = sdk_embed.addCopyFile(dns_conformance.getEmittedBin(), "dns.elf");
@@ -216,6 +236,7 @@ pub fn build(b: *std.Build) void {
             "pub const init = @embedFile(\"init.elf\");\n" ++
             "pub const shell = @embedFile(\"sh.elf\");\n" ++
             "pub const fs = @embedFile(\"fs.elf\");\n" ++
+            "pub const echo = @embedFile(\"echo.elf\");\n" ++
             "pub const cat = @embedFile(\"cat.elf\");\n" ++
             "pub const ls = @embedFile(\"ls.elf\");\n" ++
             "pub const dns = @embedFile(\"dns.elf\");\n" ++
@@ -286,6 +307,10 @@ pub fn build(b: *std.Build) void {
         fs_conformance.getEmittedBin(),
         "artifacts/fs.elf",
     );
+    const install_echo = b.addInstallFile(
+        userspace_echo.getEmittedBin(),
+        "artifacts/echo.elf",
+    );
     const install_cat = b.addInstallFile(
         userspace_cat.getEmittedBin(),
         "artifacts/cat.elf",
@@ -321,6 +346,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_init.step);
     b.getInstallStep().dependOn(&install_shell.step);
     b.getInstallStep().dependOn(&install_fs.step);
+    b.getInstallStep().dependOn(&install_echo.step);
     b.getInstallStep().dependOn(&install_cat.step);
     b.getInstallStep().dependOn(&install_ls.step);
     b.getInstallStep().dependOn(&install_dns.step);
@@ -336,6 +362,8 @@ pub fn build(b: *std.Build) void {
     verify_shell.addFileArg(userspace_shell.getEmittedBin());
     const verify_fs = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_fs.addFileArg(fs_conformance.getEmittedBin());
+    const verify_echo = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
+    verify_echo.addFileArg(userspace_echo.getEmittedBin());
     const verify_cat = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_cat.addFileArg(userspace_cat.getEmittedBin());
     const verify_ls = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
@@ -405,6 +433,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&verify_init.step);
     check_step.dependOn(&verify_shell.step);
     check_step.dependOn(&verify_fs.step);
+    check_step.dependOn(&verify_echo.step);
     check_step.dependOn(&verify_cat.step);
     check_step.dependOn(&verify_ls.step);
     check_step.dependOn(&verify_dns.step);

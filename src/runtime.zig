@@ -38,6 +38,7 @@ const runtime_sdk_elf = @import("runtime_sdk").sdk;
 const runtime_init_elf = @import("runtime_sdk").init;
 const runtime_shell_elf = @import("runtime_sdk").shell;
 const runtime_fs_elf = @import("runtime_sdk").fs;
+const runtime_echo_elf = @import("runtime_sdk").echo;
 const runtime_cat_elf = @import("runtime_sdk").cat;
 const runtime_ls_elf = @import("runtime_sdk").ls;
 const runtime_dns_elf = @import("runtime_sdk").dns;
@@ -460,6 +461,7 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/init.elf", runtime_init_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/sh.elf", runtime_shell_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/fs.elf", runtime_fs_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/echo.elf", runtime_echo_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/cat.elf", runtime_cat_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/ls.elf", runtime_ls_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/dns.elf", runtime_dns_elf, 0o555, false, 0);
