@@ -24,6 +24,7 @@ comptime {
 var startup_environment: [*]const usize = undefined;
 var background_jobs: [maximum_background_jobs]BackgroundJob = @splat(.{});
 var shell_variables: [maximum_shell_variables]ShellVariable = @splat(.{});
+var history_dirty = false;
 
 const BackgroundJob = struct {
     process_group: u32 = 0,
@@ -140,6 +141,7 @@ fn shellLoop() void {
             zigos.writeAll(1, "\r\n") catch {};
             requestShutdown();
         }
+        persistHistory(&line, count);
         if (!parseCommandLine(&line, count)) {
             last_status = conditionalSyntaxError();
             continue;
@@ -147,6 +149,38 @@ fn shellLoop() void {
         if (line.count == 0) continue;
         last_status = executeCommandLine(&line, last_status);
     }
+}
+
+fn persistHistory(line: *CommandLine, received: usize) void {
+    var length = @min(received, maximum_line);
+    while (length != 0 and (line.storage[length - 1] == '\r' or line.storage[length - 1] == '\n')) length -= 1;
+    if (!segmentHasContent(line.storage[0..], 0, length)) return;
+    line.storage[length] = '\n';
+    const entry = line.storage[0 .. length + 1];
+
+    const fd = zigos.open("/persist/.sh_history", .{ .write = true, .create = true, .append = true }, 0o600) catch return;
+    zigos.writeAll(fd, entry) catch |err| {
+        zigos.close(fd) catch {};
+        if (err != error.FileTooLarge) return;
+        const replacement = zigos.open("/persist/.sh_history", .{ .write = true, .create = true, .truncate = true }, 0o600) catch return;
+        defer zigos.close(replacement) catch {};
+        zigos.writeAll(replacement, entry) catch return;
+        history_dirty = true;
+        return;
+    };
+    zigos.close(fd) catch {};
+    history_dirty = true;
+}
+
+fn flushHistory() void {
+    if (!history_dirty) return;
+    const fd = zigos.open("/persist/.sh_history", .{ .write = true }, 0) catch return;
+    defer zigos.close(fd) catch {};
+    zigos.fsync(fd) catch |err| {
+        if (err != error.Unsupported) return;
+        zigos.sync() catch return;
+    };
+    history_dirty = false;
 }
 
 fn readLineWithBackgroundNotifications(line: *CommandLine) zigos.Error!usize {
@@ -1070,6 +1104,7 @@ fn indexOfScalar(bytes: []const u8, value: u8) ?usize {
 }
 
 fn requestShutdown() noreturn {
+    flushHistory();
     zigos.shutdown() catch while (true) zigos.yield() catch {};
     while (true) asm volatile ("pause");
 }

@@ -443,6 +443,11 @@ def main() -> int:
                 raise RuntimeError("G270 pipeline tilde expansion executed before rejection")
             send(client, process, serial, "status", b"\r\n2\r\n")
 
+            history_start = len(serial)
+            send(client, process, serial, "cat /persist/.sh_history", PROMPT_ROOT)
+            if b"cd ~" not in serial[history_start:]:
+                raise RuntimeError("G272 persistent history did not contain an earlier interactive command")
+
             send(client, process, serial, "write /etc/shrc write /tmp/g271-order SYSTEM", PROMPT_ROOT)
             send(client, process, serial, "write /home/root/.shrc append /tmp/g271-order USER", PROMPT_ROOT)
             send(client, process, serial, "append /home/root/.shrc echo G271US", PROMPT_ROOT)
@@ -517,9 +522,9 @@ def main() -> int:
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10933/5178/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10941/5170/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 444/444 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 449/449 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (
@@ -561,6 +566,73 @@ def main() -> int:
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=10)
+
+    # G272: reboot the exact same persistent NVMe image and prove that a command
+    # from the first PID-2 shell session was durably recovered. Use a fresh OVMF
+    # variable store so firmware state cannot masquerade as filesystem persistence.
+    history_vars_image = work / "history-vars.fd"
+    shutil.copyfile(vars_source, history_vars_image)
+    history_port = free_tcp_port()
+    history_debug_log = work / "history-debug.log"
+    history_serial_log = work / "history-serial.log"
+    history_stdout_log = work / "history-qemu-stdout.log"
+    history_stderr_log = work / "history-qemu-stderr.log"
+    history_command = [
+        str(qemu),
+        "-machine", "q35,i8042=off,hpet=off",
+        "-m", "256M",
+        "-cpu", "max",
+        "-smp", "1",
+        "-device", "qemu-xhci,id=xhci",
+        "-drive", f"file={image.as_posix()},if=none,id=nvme0,format=raw,cache=unsafe",
+        "-device", "nvme,drive=nvme0,serial=ZIGOSNVME,logical_block_size=512,physical_block_size=512",
+        "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code_image.as_posix()}",
+        "-drive", f"if=pflash,format=raw,unit=1,file={history_vars_image.as_posix()}",
+        "-debugcon", f"file:{history_debug_log.as_posix()}",
+        "-global", "isa-debugcon.iobase=0xe9",
+        "-display", "none",
+        "-vga", "none",
+        "-serial", f"tcp:127.0.0.1:{history_port},server=on,wait=off",
+        "-monitor", "none",
+        "-no-reboot",
+        "-net", "none",
+    ]
+    history_serial = bytearray()
+    history_client: socket.socket | None = None
+    with history_stdout_log.open("wb") as stdout_stream, history_stderr_log.open("wb") as stderr_stream:
+        history_process = subprocess.Popen(history_command, stdout=stdout_stream, stderr=stderr_stream)
+        try:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    history_client = socket.create_connection(("127.0.0.1", history_port), timeout=0.5)
+                    history_client.settimeout(0.15)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            if history_client is None:
+                raise RuntimeError("G272 history-recovery serial connection failed")
+            wait_for(history_client, history_process, history_serial, b"ZigOs userspace init PID 1", 0, args.boot_timeout)
+            wait_for(history_client, history_process, history_serial, PROMPT_HOME, 0, 20)
+            history_start = len(history_serial)
+            send(history_client, history_process, history_serial, "cat /persist/.sh_history", b"cd ~", 40)
+            recovered = bytes(history_serial[history_start:])
+            if b"cd ~" not in recovered:
+                raise RuntimeError("G272 reboot did not recover first-session shell history")
+            send(history_client, history_process, history_serial, "sync", b"writable mounts synchronized", 40)
+            send(history_client, history_process, history_serial, "hello", b"process 3 exited 42", 40)
+            send(history_client, history_process, history_serial, "shutdown", b"ZigOs normal boot verified:", 40)
+            read_available(history_client, history_serial)
+            history_text = bytes(history_serial).decode("ascii", errors="replace")
+            if "storage persistent cleanup yes" not in history_text or "clean yes" not in history_text:
+                raise RuntimeError("G272 recovery boot did not finish with clean persistent shutdown")
+            history_serial_log.write_bytes(history_serial)
+        finally:
+            if history_client is not None:
+                history_client.close()
+            if history_process.poll() is None:
+                history_process.kill()
+                history_process.wait(timeout=10)
 
     print("Normal x86-64 userspace-shell boot passed.")
     print(f"  serial log: {serial_log}")
