@@ -184,7 +184,7 @@ def main() -> int:
                 "ZigOs normal boot profile: userspace init PID 1 supervises userspace shell PID 2; diagnostic software suite skipped",
                 "ZigOs userspace init PID 1",
                 "ZigOs userspace shell PID 2",
-                "c-sdk: ABI 1.23 discovery passed",
+                "c-sdk: ABI 1.24 discovery passed",
                 "c-sdk: advisory whole-file flock passed",
                 "c-sdk: advisory byte-range lock passed",
                 "c-sdk: directory watch notifications passed",

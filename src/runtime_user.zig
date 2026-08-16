@@ -2406,6 +2406,12 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
         },
     };
 
+    const foreground_group = (request.flags & runtime_abi.spawn_foreground_process_group) != 0;
+    if (foreground_group and group_flags != runtime_abi.spawn_new_process_group) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+
     var descriptor_map = SpawnDescriptorMap{};
     if ((request.flags & runtime_abi.spawn_pipeline_io) != 0) {
         if (group_flags == 0 or (frame.rdx >> 32) != 0) {
@@ -2567,15 +2573,30 @@ fn syscallSpawnv(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
+    const child = activeProcesses().get(handle) catch |err| {
+        discardSpawnedChild(context.handle, handle);
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
     if (!notifyChildSpawn(context.handle, handle)) {
         discardSpawnedChild(context.handle, handle);
         frame.rax = reject(runtime_abi.errno_io);
         return 0;
     }
-    const child = activeProcesses().get(handle) catch |err| {
-        frame.rax = reject(runtime_abi.fromError(err));
-        return 0;
-    };
+    if (foreground_group) {
+        _ = activeDescriptors().ioctl(
+            activeVfs(),
+            activeProcesses(),
+            context.handle,
+            0,
+            runtime_abi.constants.ioctl_tty_set_foreground_group,
+            child.pid,
+        ) catch |err| {
+            discardSpawnedChild(context.handle, handle);
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        };
+    }
     frame.rax = child.pid;
     return 0;
 }

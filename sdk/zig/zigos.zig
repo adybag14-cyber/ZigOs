@@ -263,6 +263,16 @@ pub fn spawnvNewProcessGroupWithPipelineIo(
     return spawnvWithGroup(path, arguments, environment, abi.spawn_new_process_group | abi.spawn_pipeline_io, 0, stdin_source, stdout_source);
 }
 
+pub fn spawnvNewForegroundProcessGroupWithPipelineIo(
+    path: []const u8,
+    arguments: []const []const u8,
+    environment: []const []const u8,
+    stdin_source: ?u16,
+    stdout_source: ?u16,
+) Error!u32 {
+    return spawnvWithGroup(path, arguments, environment, abi.spawn_new_process_group | abi.spawn_pipeline_io | abi.spawn_foreground_process_group, 0, stdin_source, stdout_source);
+}
+
 pub fn spawnvInProcessGroupWithPipelineIo(
     path: []const u8,
     arguments: []const []const u8,
@@ -288,12 +298,13 @@ fn spawnvWithGroup(
     if (path.len > 255) return Error.NameTooLong;
     if (arguments.len == 0 or arguments.len > abi.maximum_arguments or
         environment.len > abi.maximum_environment) return Error.TooBig;
-    const allowed = abi.spawn_new_process_group | abi.spawn_join_process_group | abi.spawn_pipeline_io;
+    const allowed = abi.spawn_new_process_group | abi.spawn_join_process_group | abi.spawn_pipeline_io | abi.spawn_foreground_process_group;
     if ((flags & ~allowed) != 0) return Error.InvalidArgument;
     const group_flags = flags & (abi.spawn_new_process_group | abi.spawn_join_process_group);
     if (group_flags != 0 and group_flags != abi.spawn_new_process_group and group_flags != abi.spawn_join_process_group)
         return Error.InvalidArgument;
     if ((group_flags == abi.spawn_join_process_group) != (process_group != 0)) return Error.InvalidArgument;
+    if ((flags & abi.spawn_foreground_process_group) != 0 and group_flags != abi.spawn_new_process_group) return Error.InvalidArgument;
     const pipeline_io = (flags & abi.spawn_pipeline_io) != 0;
     if (pipeline_io and group_flags == 0) return Error.InvalidArgument;
     if (pipeline_io != (stdin_source != null or stdout_source != null)) return Error.InvalidArgument;

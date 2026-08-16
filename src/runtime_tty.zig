@@ -125,7 +125,7 @@ pub const Tty = struct {
 
     pub fn setForegroundGroup(
         self: *Tty,
-        processes: *const runtime_process.Table,
+        processes: *runtime_process.Table,
         caller_handle: u64,
         process_group: u32,
     ) runtime_process.Error!void {
@@ -155,6 +155,8 @@ pub const Tty = struct {
         self.foreground_session = caller.session;
         self.edit_length = 0;
         self.ignore_next_lf = false;
+        const wakeups = processes.wakeMatching(.terminal_read, terminal_wait_key, true);
+        self.reader_wakeups +%= wakeups;
     }
 
     pub fn foregroundMatches(self: *const Tty, processes: *const runtime_process.Table, process_handle: u64) runtime_process.Error!bool {
@@ -414,6 +416,7 @@ test "terminal foreground isolation eof and interrupt semantics" {
     var tty = Tty.init(root);
     try tty.setForeground(&processes, foreground);
     const foreground_pid = (try processes.get(foreground)).pid;
+    const background_pid = (try processes.get(background)).pid;
     try std.testing.expectEqual(foreground_pid, try tty.foregroundGroup(&processes, root));
     try std.testing.expectError(runtime_process.Error.PermissionDenied, tty.setForegroundGroup(&processes, background, (try processes.get(background)).pid));
     try tty.setForegroundGroup(&processes, root, (try processes.get(background)).pid);
@@ -421,6 +424,12 @@ test "terminal foreground isolation eof and interrupt semantics" {
     try tty.setForegroundGroup(&processes, root, foreground_pid);
 
     var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(ReadStatus.blocked, (try tty.read(&processes, foreground, &byte)).status);
+    try std.testing.expectEqual(runtime_process.State.blocked, (try processes.get(foreground)).state);
+    try tty.setForegroundGroup(&processes, root, background_pid);
+    try std.testing.expectEqual(runtime_process.State.runnable, (try processes.get(foreground)).state);
+    try std.testing.expectError(runtime_process.Error.PermissionDenied, tty.read(&processes, foreground, &byte));
+    try tty.setForegroundGroup(&processes, root, foreground_pid);
     try std.testing.expectError(runtime_process.Error.PermissionDenied, tty.read(&processes, background, &byte));
     _ = tty.feed(&processes, 0x04);
     try std.testing.expectEqual(ReadStatus.eof, (try tty.read(&processes, foreground, &byte)).status);
@@ -442,7 +451,6 @@ test "terminal foreground isolation eof and interrupt semantics" {
 
     // Foreground transfer must remain valid while a direct-child group leader is
     // terminal but unreaped; otherwise fast pipelines race the controller handoff.
-    const background_pid = (try processes.get(background)).pid;
     try tty.setForegroundGroup(&processes, root, background_pid);
     try tty.setForegroundGroup(&processes, root, foreground_pid);
     try std.testing.expectEqual(foreground_pid, try tty.foregroundGroup(&processes, root));

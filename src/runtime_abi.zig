@@ -65,9 +65,10 @@ pub const message_allowed: u64 = message_dontwait;
 pub const spawn_new_process_group: u16 = constants.spawn_new_process_group;
 pub const spawn_join_process_group: u16 = constants.spawn_join_process_group;
 pub const spawn_pipeline_io: u16 = constants.spawn_pipeline_io;
+pub const spawn_foreground_process_group: u16 = constants.spawn_foreground_process_group;
 pub const spawn_io_inherit_descriptor: u16 = constants.spawn_io_inherit_descriptor;
 pub const spawn_group_allowed: u16 = spawn_new_process_group | spawn_join_process_group;
-pub const spawn_allowed: u16 = spawn_group_allowed | spawn_pipeline_io;
+pub const spawn_allowed: u16 = spawn_group_allowed | spawn_pipeline_io | spawn_foreground_process_group;
 
 pub const fallocate_keep_size: u64 = constants.fallocate_keep_size;
 pub const fallocate_punch_hole: u64 = constants.fallocate_punch_hole;

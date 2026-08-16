@@ -270,7 +270,7 @@ def main() -> int:
 
             foreground_start = len(serial)
             client.sendall(b"pipe-reader.elf|pipe-reader.elf\r")
-            wait_for(client, process, serial, b"pipeline group 11 stages 2", foreground_start, 60)
+            wait_for(client, process, serial, b"pipeline\r\n", foreground_start, 60)
             time.sleep(0.2)
             read_available(client, serial)
             if PROMPT_ROOT in serial[foreground_start:]:
@@ -278,6 +278,12 @@ def main() -> int:
             client.sendall(b"TTYPIPE\r")
             wait_for(client, process, serial, PROMPT_ROOT, foreground_start, 60)
             send(client, process, serial, "status", b"\r\n0\r\n")
+
+            rollback_start = len(serial)
+            send(client, process, serial, "pipe-reader.elf|missing-g263-rollback", PROMPT_ROOT, 60)
+            if PROMPT_ROOT not in serial[rollback_start:]:
+                raise RuntimeError("G263 partial foreground pipeline did not restore the shell prompt")
+            send(client, process, serial, "status", b"\r\n127\r\n")
 
             background_start = len(serial)
             client.sendall(b"sleep &\r")
@@ -437,6 +443,27 @@ def main() -> int:
                 raise RuntimeError("G270 pipeline tilde expansion executed before rejection")
             send(client, process, serial, "status", b"\r\n2\r\n")
 
+            send(client, process, serial, "write /etc/shrc write /tmp/g271-order SYSTEM", PROMPT_ROOT)
+            send(client, process, serial, "write /home/root/.shrc append /tmp/g271-order USER", PROMPT_ROOT)
+            send(client, process, serial, "append /home/root/.shrc echo G271US", PROMPT_ROOT)
+            startup = len(serial)
+            client.sendall(b"sh|pipe-reader.elf\r")
+            wait_for(client, process, serial, b"pipeline\r\n", startup, 20)
+            wait_for(client, process, serial, b"G271US\r\n", startup, 20)
+            client.sendall(b"\x03")
+            wait_for(client, process, serial, PROMPT_ROOT, startup, 20)
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            order_start = len(serial)
+            send(client, process, serial, "cat /tmp/g271-order", PROMPT_ROOT)
+            order_output = serial[order_start:]
+            system_index = order_output.find(b"SYSTEM")
+            user_index = order_output.find(b"USER")
+            if system_index < 0 or user_index < 0 or system_index >= user_index:
+                raise RuntimeError("G271 startup files did not execute system-before-user side effects")
+            send(client, process, serial, "rm /etc/shrc", PROMPT_ROOT)
+            send(client, process, serial, "rm /home/root/.shrc", PROMPT_ROOT)
+            send(client, process, serial, "rm /tmp/g271-order", PROMPT_ROOT)
+
             send(client, process, serial, "shutdown", b"ZigOs normal boot verified:", 40)
             read_available(client, serial)
             text = bytes(serial).decode("ascii", errors="replace")
@@ -478,20 +505,21 @@ def main() -> int:
                 "process 5 exited 88",
                 "fs-api: baseline/mode/seek/hard-link/symlink/fallocate/sparse/cleanup passed",
                 "process 6 exited 89",
-                "pipeline group 7 stages 2",
+                "pipeline",
                 "pipeline: external stages only",
-                "pipeline group 9 stages 2",
+                "pipeline",
                 "PIPE-CPL",
-                "pipeline group 11 stages 2",
+                "pipeline",
                 "TTYPIPE",
                 "[1] done 7",
                 "zig-sdk: bad envp/auxv",
+                "G271US",
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10939/5172/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 111/0/111 failures 0 clusters claimed/free/loop/cross/range 10933/5178/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 381/381 cache-released 15 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 444/444 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (
