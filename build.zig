@@ -178,6 +178,25 @@ pub fn build(b: *std.Build) void {
     userspace_mount.setLinkerScript(b.path("sdk/zig/linker.ld"));
     userspace_mount.step.dependOn(&assets.step);
 
+    const df_module = b.createModule(.{
+        .root_source_file = b.path("sdk/zig/df.zig"),
+        .target = sdk_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+        .code_model = .large,
+        .pic = false,
+        .stack_protector = false,
+        .stack_check = false,
+    });
+    df_module.addObjectFile(b.path("build/sdk/syscall.o"));
+    const userspace_df = b.addExecutable(.{
+        .name = "df",
+        .root_module = df_module,
+    });
+    userspace_df.entry = .{ .symbol_name = "_start" };
+    userspace_df.setLinkerScript(b.path("sdk/zig/linker.ld"));
+    userspace_df.step.dependOn(&assets.step);
+
     const ps_module = b.createModule(.{
         .root_source_file = b.path("sdk/zig/ps.zig"),
         .target = sdk_target,
@@ -532,6 +551,7 @@ pub fn build(b: *std.Build) void {
     _ = sdk_embed.addCopyFile(userspace_kill.getEmittedBin(), "kill.elf");
     _ = sdk_embed.addCopyFile(userspace_sleep.getEmittedBin(), "sleep.elf");
     _ = sdk_embed.addCopyFile(userspace_mount.getEmittedBin(), "mount.elf");
+    _ = sdk_embed.addCopyFile(userspace_df.getEmittedBin(), "df.elf");
     _ = sdk_embed.addCopyFile(userspace_ps.getEmittedBin(), "ps.elf");
     _ = sdk_embed.addCopyFile(userspace_hexdump.getEmittedBin(), "hexdump.elf");
     _ = sdk_embed.addCopyFile(userspace_head.getEmittedBin(), "head.elf");
@@ -559,6 +579,7 @@ pub fn build(b: *std.Build) void {
             "pub const kill = @embedFile(\"kill.elf\");\n" ++
             "pub const sleep = @embedFile(\"sleep.elf\");\n" ++
             "pub const mount = @embedFile(\"mount.elf\");\n" ++
+            "pub const df = @embedFile(\"df.elf\");\n" ++
             "pub const ps = @embedFile(\"ps.elf\");\n" ++
             "pub const hexdump = @embedFile(\"hexdump.elf\");\n" ++
             "pub const head = @embedFile(\"head.elf\");\n" ++
@@ -655,6 +676,10 @@ pub fn build(b: *std.Build) void {
         userspace_mount.getEmittedBin(),
         "artifacts/mount.elf",
     );
+    const install_df = b.addInstallFile(
+        userspace_df.getEmittedBin(),
+        "artifacts/df.elf",
+    );
     const install_ps = b.addInstallFile(
         userspace_ps.getEmittedBin(),
         "artifacts/ps.elf",
@@ -749,6 +774,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_kill.step);
     b.getInstallStep().dependOn(&install_sleep.step);
     b.getInstallStep().dependOn(&install_mount.step);
+    b.getInstallStep().dependOn(&install_df.step);
     b.getInstallStep().dependOn(&install_ps.step);
     b.getInstallStep().dependOn(&install_hexdump.step);
     b.getInstallStep().dependOn(&install_head.step);
@@ -784,6 +810,8 @@ pub fn build(b: *std.Build) void {
     verify_sleep.addFileArg(userspace_sleep.getEmittedBin());
     const verify_mount = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_mount.addFileArg(userspace_mount.getEmittedBin());
+    const verify_df = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
+    verify_df.addFileArg(userspace_df.getEmittedBin());
     const verify_ps = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_ps.addFileArg(userspace_ps.getEmittedBin());
     const verify_hexdump = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
@@ -884,6 +912,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&verify_kill.step);
     check_step.dependOn(&verify_sleep.step);
     check_step.dependOn(&verify_mount.step);
+    check_step.dependOn(&verify_df.step);
     check_step.dependOn(&verify_ps.step);
     check_step.dependOn(&verify_hexdump.step);
     check_step.dependOn(&verify_head.step);

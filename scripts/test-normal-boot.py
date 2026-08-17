@@ -700,6 +700,29 @@ def main() -> int:
                 raise RuntimeError("G285 standalone mount reported an unexpected procfs error")
             send(client, process, serial, "status", b"\r\n0\r\n")
 
+            df_start = len(serial)
+            client.sendall(b"/bin/df.elf /\r")
+            wait_for(client, process, serial, b"type ramfs\r\n", df_start, 40)
+            wait_for(client, process, serial, b"block-size 4096\r\n", df_start, 40)
+            wait_for(client, process, serial, b"blocks 256\r\n", df_start, 40)
+            wait_for(client, process, serial, b"nodes 96\r\n", df_start, 40)
+            wait_for(client, process, serial, b"mount 1\r\n", df_start, 40)
+            wait_for(client, process, serial, b"flags rw shared-blocks shared-nodes\r\n", df_start, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, df_start, 40)
+            df_output = bytes(serial[df_start:]).splitlines()
+            df_values = {}
+            for row in df_output:
+                fields = row.strip().split()
+                if len(fields) == 2 and fields[0] in (b"free", b"available", b"free-nodes"):
+                    df_values[fields[0]] = int(fields[1])
+            if df_values.get(b"free") is None or df_values.get(b"available") != df_values[b"free"] or df_values[b"free"] > 256:
+                raise RuntimeError("G286 standalone df reported invalid shared block availability")
+            if df_values.get(b"free-nodes") is None or df_values[b"free-nodes"] > 96:
+                raise RuntimeError("G286 standalone df reported invalid node availability")
+            if b"df: " in serial[df_start:]:
+                raise RuntimeError("G286 standalone df reported an unexpected statfs error")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+
             send(client, process, serial, "write /etc/shrc write /tmp/g271-order SYSTEM", PROMPT_ROOT)
             send(client, process, serial, "write /home/root/.shrc append /tmp/g271-order USER", PROMPT_ROOT)
             send(client, process, serial, "append /home/root/.shrc echo G271US", PROMPT_ROOT)
@@ -774,9 +797,9 @@ def main() -> int:
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11197/4914/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11211/4900/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 837/837 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 854/854 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (
