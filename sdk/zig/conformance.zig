@@ -17,7 +17,7 @@ const flock_message = "zig-sdk: advisory whole-file flock passed\r\n";
 const lockrange_message = "zig-sdk: advisory byte-range lock passed\r\n";
 const watchdir_message = "zig-sdk: directory watch notifications passed\r\n";
 const mount_message = "zig-sdk: tmpfs mount/umount isolation, statfs and busy policy passed\r\n";
-const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/watchdir passed\r\n";
+const pass_message = "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/watchdir/kill passed\r\n";
 const fail_message = "zig-sdk: failed\r\n";
 
 pub export fn zigos_main(argc: usize, argv: [*]const usize, envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) callconv(.c) u32 {
@@ -83,6 +83,13 @@ fn startupVectorsValid(envp: [*]const usize, auxv: [*]const zigos.AuxvEntry) boo
 fn run(auxv: [*]const zigos.AuxvEntry) zigos.Error!void {
     var info: zigos.AbiInfo = undefined;
     try zigos.queryAbi(&info);
+    const self_pid = try zigos.getpid();
+    var kill_rejected = false;
+    zigos.kill(self_pid, 0) catch |err| {
+        if (err != error.InvalidArgument) return err;
+        kill_rejected = true;
+    };
+    if (!kill_rejected) return error.InvalidArgument;
     if (info.magic != zigos.constants.abi_magic or info.major != zigos.constants.abi_major or
         info.page_size != zigos.constants.abi_page_size or info.size != @sizeOf(zigos.AbiInfo) or
         (info.capabilities & zigos.constants.capability_vfs) == 0 or

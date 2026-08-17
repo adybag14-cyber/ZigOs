@@ -43,7 +43,7 @@ def runtime_wait_data() -> bytes:
     fields = {
         0: b"wait-api: start\r\n",
         32: b"wait-api: concurrent wait-any ordering passed\r\n",
-        128: b"/bin/sleep.elf",
+        128: b"/bin/runtime-sleep.elf",
         160: b"/bin/wait-short.elf",
     }
     for offset, value in fields.items():

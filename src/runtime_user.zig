@@ -672,6 +672,7 @@ pub fn handleSyscall(
         syscall.syscall_flock => return syscallFlock(context, frame, fx_state),
         syscall.syscall_lockrange => return syscallLockRange(context, frame, fx_state),
         syscall.syscall_watchdir => return syscallWatchDir(context, frame),
+        syscall.syscall_kill => return syscallKill(context, frame, fx_state),
         syscall.syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
@@ -1192,6 +1193,44 @@ fn syscallShutdown(
     exits +%= 1;
     saveContext(context, frame, fx_state);
     return 1;
+}
+
+fn syscallKill(context: *Context, frame: *interrupt_context.Frame, fx_state: *align(16) interrupt_context.FxState) u64 {
+    const pid = std.math.cast(u32, frame.rdi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const signal = std.math.cast(u8, frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (pid == 0 or signal == 0 or signal >= 64) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const target_handle = activeProcesses().handleForPid(pid) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    activeProcesses().sendSignal(context.handle, target_handle, signal) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    const target = activeProcesses().get(target_handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    frame.rax = 0;
+    if (!target.terminal()) return 0;
+    if (target_handle == context.handle) {
+        saveContext(context, frame, fx_state);
+        return 1;
+    }
+    finalize(target_handle) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    return 0;
 }
 
 fn syscallGetcwd(context: *Context, frame: *interrupt_context.Frame) u64 {

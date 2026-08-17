@@ -208,6 +208,10 @@ pub fn sleep(duration_ticks: u64) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_sleep, duration_ticks, 0, 0, 0, 0, 0));
 }
 
+pub fn kill(pid: u32, signal: u8) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_kill, pid, signal, 0, 0, 0, 0));
+}
+
 pub fn yield() Error!void {
     _ = try result(zigos_syscall6(abi.syscall_yield, 0, 0, 0, 0, 0, 0));
 }

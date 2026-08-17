@@ -10,7 +10,7 @@ ORG 0x0000008000000000
 
 %define START_LENGTH    17
 %define PASS_LENGTH     47
-%define SLEEP_PATH_LEN  14
+%define SLEEP_PATH_LEN  22
 %define SHORT_PATH_LEN  19
 
 %define SYS_EXIT        64

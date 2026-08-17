@@ -286,7 +286,7 @@ def main() -> int:
             send(client, process, serial, "status", b"\r\n127\r\n")
 
             background_start = len(serial)
-            client.sendall(b"sleep &\r")
+            client.sendall(b"runtime-sleep.elf &\r")
             wait_for(client, process, serial, PROMPT_ROOT, background_start, 20)
             time.sleep(0.05)
             read_available(client, serial)
@@ -299,7 +299,7 @@ def main() -> int:
             send(client, process, serial, "status", b"\r\n2\r\n")
 
             fg_launch = len(serial)
-            client.sendall(b"sleep &\r")
+            client.sendall(b"runtime-sleep.elf &\r")
             wait_for(client, process, serial, PROMPT_ROOT, fg_launch, 20)
             read_available(client, serial)
             if b"[1] done 7" in serial[fg_launch:]:
@@ -314,7 +314,7 @@ def main() -> int:
             send(client, process, serial, "status", b"\r\n7\r\n")
 
             bg_launch = len(serial)
-            client.sendall(b"sleep &\r")
+            client.sendall(b"runtime-sleep.elf &\r")
             wait_for(client, process, serial, PROMPT_ROOT, bg_launch, 20)
             bg_command = len(serial)
             client.sendall(b"bg 1\r")
@@ -661,6 +661,36 @@ def main() -> int:
                 raise RuntimeError("G283 standalone ps reported an unexpected procfs error")
             send(client, process, serial, "status", b"\r\n0\r\n")
 
+            sleep_start = len(serial)
+            client.sendall(b"/bin/sleep.elf 2\r")
+            wait_for(client, process, serial, PROMPT_ROOT, sleep_start, 40)
+            if b"sleep: " in serial[sleep_start:]:
+                raise RuntimeError("G284 standalone sleep reported an unexpected syscall error")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+
+            background_start = len(serial)
+            client.sendall(b"/bin/sleep.elf 1000 &\r")
+            wait_for(client, process, serial, PROMPT_ROOT, background_start, 40)
+            ps_kill_start = len(serial)
+            client.sendall(b"/bin/ps.elf\r")
+            wait_for(client, process, serial, b" sleep.elf\r\n", ps_kill_start, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, ps_kill_start, 40)
+            sleep_pid = None
+            for row in bytes(serial[ps_kill_start:]).splitlines():
+                fields = row.strip().split()
+                if len(fields) >= 7 and fields[1] == b"2" and fields[-1] == b"sleep.elf":
+                    sleep_pid = int(fields[0])
+                    break
+            if sleep_pid is None or sleep_pid <= 2:
+                raise RuntimeError("G284 could not discover the live standalone sleep PID through procfs")
+            kill_start = len(serial)
+            client.sendall(f"/bin/kill.elf {sleep_pid}\r".encode("ascii"))
+            wait_for(client, process, serial, b"] done 137\r\n", kill_start, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, kill_start, 40)
+            if b"kill: " in serial[kill_start:]:
+                raise RuntimeError("G284 standalone kill reported an unexpected signal error")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+
             send(client, process, serial, "write /etc/shrc write /tmp/g271-order SYSTEM", PROMPT_ROOT)
             send(client, process, serial, "write /home/root/.shrc append /tmp/g271-order USER", PROMPT_ROOT)
             send(client, process, serial, "append /home/root/.shrc echo G271US", PROMPT_ROOT)
@@ -717,7 +747,7 @@ def main() -> int:
                 "zig-sdk: advisory whole-file flock passed",
                 "zig-sdk: advisory byte-range lock passed",
                 "zig-sdk: directory watch notifications passed",
-                "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/watchdir passed",
+                "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/watchdir/kill passed",
                 "process 4 exited 86",
                 "fs-api: init/mkdir/write/seek/replace-rename/chmod/link/nlink/symlink/readlink/fallocate/sparse/open-unlink/rmdir/sync passed",
                 "process 5 exited 88",
@@ -735,9 +765,9 @@ def main() -> int:
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11157/4954/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11183/4928/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 756/756 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 820/820 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (
