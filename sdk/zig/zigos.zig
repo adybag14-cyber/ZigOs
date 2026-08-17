@@ -212,6 +212,11 @@ pub fn kill(pid: u32, signal: u8) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_kill, pid, signal, 0, 0, 0, 0));
 }
 
+pub fn fscheck() Error!bool {
+    const value = try result(zigos_syscall6(abi.syscall_fscheck, 0, 0, 0, 0, 0, 0));
+    return value == 0;
+}
+
 pub fn yield() Error!void {
     _ = try result(zigos_syscall6(abi.syscall_yield, 0, 0, 0, 0, 0, 0));
 }

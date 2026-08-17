@@ -84,6 +84,10 @@ int64_t zigos_kill(uint32_t pid, uint8_t signal) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_KILL, pid, signal, 0, 0, 0, 0);
 }
 
+int64_t zigos_fscheck(void) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_FSCHECK, 0, 0, 0, 0, 0, 0);
+}
+
 int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_IOCTL, fd, request, argument, 0, 0, 0);
 }

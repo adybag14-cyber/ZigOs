@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 25,
+    "minor": 26,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -84,7 +84,8 @@
     "flock": 125,
     "lockrange": 126,
     "watchdir": 127,
-    "kill": 128
+    "kill": 128,
+    "fscheck": 129
   },
   "errno": {
     "permission": -1,

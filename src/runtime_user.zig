@@ -190,11 +190,13 @@ var syscall_count: u64 = 0;
 pub const ShutdownFn = *const fn (context: ?*anyopaque, process_handle: u64) bool;
 pub const SyncFn = *const fn (context: ?*anyopaque) i64;
 pub const SyncFileFn = *const fn (context: ?*anyopaque, node: u16, include_metadata: bool) i64;
+pub const FscheckFn = *const fn (context: ?*anyopaque) i64;
 pub const ChildSpawnFn = *const fn (parent_handle: u64, child_handle: u64) bool;
 var system_context: ?*anyopaque = null;
 var shutdown_fn: ?ShutdownFn = null;
 var sync_fn: ?SyncFn = null;
 var sync_file_fn: ?SyncFileFn = null;
+var fscheck_fn: ?FscheckFn = null;
 var child_spawn_fn: ?ChildSpawnFn = null;
 var normal_boot_capability: bool = false;
 var persistent_storage_capability: bool = false;
@@ -204,6 +206,7 @@ pub fn setSystemBackend(
     shutdown_callback: ?ShutdownFn,
     sync_callback: ?SyncFn,
     sync_file_callback: ?SyncFileFn,
+    fscheck_callback: ?FscheckFn,
     normal_boot: bool,
     persistent_storage: bool,
 ) void {
@@ -211,6 +214,7 @@ pub fn setSystemBackend(
     shutdown_fn = shutdown_callback;
     sync_fn = sync_callback;
     sync_file_fn = sync_file_callback;
+    fscheck_fn = fscheck_callback;
     normal_boot_capability = normal_boot;
     persistent_storage_capability = persistent_storage;
 }
@@ -248,6 +252,7 @@ pub fn initialize(
     shutdown_fn = null;
     sync_fn = null;
     sync_file_fn = null;
+    fscheck_fn = null;
     child_spawn_fn = null;
     normal_boot_capability = false;
     persistent_storage_capability = false;
@@ -673,6 +678,7 @@ pub fn handleSyscall(
         syscall.syscall_lockrange => return syscallLockRange(context, frame, fx_state),
         syscall.syscall_watchdir => return syscallWatchDir(context, frame),
         syscall.syscall_kill => return syscallKill(context, frame, fx_state),
+        syscall.syscall_fscheck => return syscallFscheck(context, frame, fx_state),
         syscall.syscall_fault_return => {
             if (!context.pending_fault) return forceFault(frame, fx_state, 13, frame.rip);
             activeProcesses().fault(context.handle, context.fault_vector, context.fault_address) catch {};
@@ -1149,6 +1155,35 @@ fn syscallSync(
     fx_state: *align(16) interrupt_context.FxState,
 ) u64 {
     const callback = sync_fn orelse {
+        frame.rax = reject(runtime_abi.errno_no_syscall);
+        return 0;
+    };
+    const user_root = context.space.pml4_address;
+    if (paging.currentCr3Address() != user_root or !paging.activateKernelAddressSpace()) {
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    }
+    const result = callback(system_context);
+    if (!paging.activateAddressSpace(user_root)) {
+        saveContext(context, frame, fx_state);
+        activeProcesses().fault(context.handle, 13, user_root) catch {};
+        faults +%= 1;
+        return 1;
+    }
+    frame.rax = if (result < 0) reject(result) else @intCast(result);
+    return 0;
+}
+
+fn syscallFscheck(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    if (frame.rdi != 0 or frame.rsi != 0 or frame.rdx != 0 or frame.r10 != 0 or frame.r8 != 0 or frame.r9 != 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const callback = fscheck_fn orelse {
         frame.rax = reject(runtime_abi.errno_no_syscall);
         return 0;
     };

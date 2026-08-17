@@ -7,10 +7,10 @@
 
 #define ZIGOS_ABI_MAGIC UINT32_C(0x4942415A)
 #define ZIGOS_ABI_MAJOR UINT16_C(1)
-#define ZIGOS_ABI_MINOR UINT16_C(25)
+#define ZIGOS_ABI_MINOR UINT16_C(26)
 #define ZIGOS_PAGE_SIZE UINT32_C(4096)
 #define ZIGOS_SYSCALL_BASE UINT16_C(64)
-#define ZIGOS_SYSCALL_COUNT UINT16_C(65)
+#define ZIGOS_SYSCALL_COUNT UINT16_C(66)
 #define ZIGOS_MAX_IOVECS UINT64_C(8)
 
 #define ZIGOS_AUX_NULL UINT64_C(0)
@@ -143,6 +143,7 @@
 #define ZIGOS_SYS_LOCKRANGE UINT64_C(126)
 #define ZIGOS_SYS_WATCHDIR UINT64_C(127)
 #define ZIGOS_SYS_KILL UINT64_C(128)
+#define ZIGOS_SYS_FSCHECK UINT64_C(129)
 
 #define ZIGOS_ERRNO_PERMISSION INT64_C(-1)
 #define ZIGOS_ERRNO_NOT_FOUND INT64_C(-2)
@@ -264,6 +265,7 @@ int64_t zigos_flock(uint16_t fd, uint64_t operation);
 int64_t zigos_lockrange(uint16_t fd, uint64_t start, uint64_t length, uint64_t operation);
 int64_t zigos_watchdir(uint16_t directory_fd);
 int64_t zigos_kill(uint32_t pid, uint8_t signal);
+int64_t zigos_fscheck(void);
 int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);
 int64_t zigos_fsync(uint16_t fd);
 int64_t zigos_fdatasync(uint16_t fd);

@@ -71,7 +71,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.25 discovery passed\r\n")) {
+    if (!emit("c-sdk: ABI 1.26 discovery passed\r\n")) {
         return 0xC4;
     }
 

@@ -42,6 +42,7 @@ const runtime_kill_elf = @import("runtime_sdk").kill;
 const runtime_sleep_elf = @import("runtime_sdk").sleep;
 const runtime_mount_elf = @import("runtime_sdk").mount;
 const runtime_df_elf = @import("runtime_sdk").df;
+const runtime_fsck_elf = @import("runtime_sdk").fsck;
 const runtime_ps_elf = @import("runtime_sdk").ps;
 const runtime_hexdump_elf = @import("runtime_sdk").hexdump;
 const runtime_head_elf = @import("runtime_sdk").head;
@@ -365,12 +366,12 @@ fn initialize(configuration: Configuration) !void {
             state.tty.initialize(state.shell_handle);
             try state.tty.setForeground(&state.processes, state.shell_handle);
             try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
-            runtime_user.setSystemBackend(null, null, syncAllWritableMounts, syncPersistentFile, false, state.persistence.report().mounted);
+            runtime_user.setSystemBackend(null, null, syncAllWritableMounts, syncPersistentFile, checkFilesystems, false, state.persistence.report().mounted);
         },
         .normal => {
             try state.descriptors.bindProcess(&state.processes, init_handle, true);
             try runtime_user.initialize(configuration.physical_memory, &state.vfs, &state.processes, &state.descriptors);
-            runtime_user.setSystemBackend(null, requestNormalShutdown, syncAllWritableMounts, syncPersistentFile, true, state.persistence.report().mounted);
+            runtime_user.setSystemBackend(null, requestNormalShutdown, syncAllWritableMounts, syncPersistentFile, checkFilesystems, true, state.persistence.report().mounted);
             runtime_user.setChildSpawnCallback(configureNormalChild);
             state.tty.initialize(init_handle);
             try state.processes.configureInitUserspace("init.elf", &.{"init.elf"}, state.cwd);
@@ -482,6 +483,7 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/sleep.elf", runtime_sleep_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/mount.elf", runtime_mount_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/df.elf", runtime_df_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/fsck.elf", runtime_fsck_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/ps.elf", runtime_ps_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/hexdump.elf", runtime_hexdump_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/head.elf", runtime_head_elf, 0o555, false, 0);
@@ -2201,14 +2203,21 @@ fn commandCachePressure(stage: *const runtime_command.Stage, output: *Output) vo
 }
 
 fn commandFsck(output: *Output) void {
-    state.filesystem_checks +%= 1;
-    const ramfs_clean = state.vfs.validate();
-    const persist_clean = blk: {
-        state.persistence.check() catch break :blk false;
-        break :blk true;
-    };
     output.write("fsck ramfs/persist: ");
-    output.line(if (ramfs_clean and persist_clean) "clean" else "corrupt");
+    const result = checkFilesystems(null);
+    output.line(if (result == 0) "clean" else if (result == 1) "corrupt" else "error");
+}
+
+fn checkFilesystems(_: ?*anyopaque) i64 {
+    state.filesystem_checks +%= 1;
+    if (!state.persistence.report().mounted) return runtime_abi.errno_no_syscall;
+    if (!state.vfs.validate()) return 1;
+    state.persistence.check() catch |err| return switch (err) {
+        error.Corrupt, error.InvalidRecord => 1,
+        error.NotConfigured => runtime_abi.errno_no_syscall,
+        else => runtime_abi.errno_io,
+    };
+    return 0;
 }
 
 fn commandHash(stage: *const runtime_command.Stage, input: []const u8, output: *Output) void {

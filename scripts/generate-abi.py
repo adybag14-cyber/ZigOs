@@ -381,6 +381,7 @@ def generate_c(spec: dict) -> str:
         "int64_t zigos_lockrange(uint16_t fd, uint64_t start, uint64_t length, uint64_t operation);\n",
         "int64_t zigos_watchdir(uint16_t directory_fd);\n",
         "int64_t zigos_kill(uint32_t pid, uint8_t signal);\n",
+        "int64_t zigos_fscheck(void);\n",
         "int64_t zigos_ioctl(uint16_t fd, uint64_t request, uint64_t argument);\n",
         "int64_t zigos_fsync(uint16_t fd);\n",
         "int64_t zigos_fdatasync(uint16_t fd);\n",
