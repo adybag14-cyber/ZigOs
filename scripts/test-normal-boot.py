@@ -508,6 +508,44 @@ def main() -> int:
             if b"g278-file" in removed_listing or b"g278-dir" in removed_listing:
                 raise RuntimeError("G278 standalone removal left a proof path visible")
 
+            send(client, process, serial, "write /tmp/g279-source G279_PAYLOAD", PROMPT_ROOT)
+            same_cp_start = len(serial)
+            client.sendall(b"/bin/cp.elf /tmp/g279-source /tmp/g279-source\r")
+            wait_for(client, process, serial, b"cp: same file\r\n", same_cp_start, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, same_cp_start, 40)
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            same_cp_check = len(serial)
+            send(client, process, serial, "cat /tmp/g279-source", PROMPT_ROOT)
+            if b"G279_PAYLOAD" not in serial[same_cp_check:]:
+                raise RuntimeError("G279 standalone cp self-copy guard damaged the source")
+            cp_start = len(serial)
+            client.sendall(b"/bin/cp.elf /tmp/g279-source /tmp/g279-copy\r")
+            wait_for(client, process, serial, PROMPT_ROOT, cp_start, 40)
+            if b"cp: " in serial[cp_start:]:
+                raise RuntimeError("G279 standalone cp reported an unexpected filesystem error")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            cp_check = len(serial)
+            send(client, process, serial, "cat /tmp/g279-copy", PROMPT_ROOT)
+            if b"G279_PAYLOAD" not in serial[cp_check:]:
+                raise RuntimeError("G279 standalone cp did not preserve source bytes")
+            mv_start = len(serial)
+            client.sendall(b"/bin/mv.elf /tmp/g279-copy /tmp/g279-moved\r")
+            wait_for(client, process, serial, PROMPT_ROOT, mv_start, 40)
+            if b"mv: " in serial[mv_start:]:
+                raise RuntimeError("G279 standalone mv reported an unexpected filesystem error")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            mv_check = len(serial)
+            send(client, process, serial, "ls /tmp", PROMPT_ROOT)
+            moved_listing = serial[mv_check:]
+            if b"g279-copy" in moved_listing or b"g279-moved" not in moved_listing:
+                raise RuntimeError("G279 standalone mv did not move the copied namespace entry")
+            moved_check = len(serial)
+            send(client, process, serial, "cat /tmp/g279-moved", PROMPT_ROOT)
+            if b"G279_PAYLOAD" not in serial[moved_check:]:
+                raise RuntimeError("G279 standalone mv did not preserve copied file bytes")
+            send(client, process, serial, "rm /tmp/g279-source", PROMPT_ROOT)
+            send(client, process, serial, "rm /tmp/g279-moved", PROMPT_ROOT)
+
             send(client, process, serial, "write /etc/shrc write /tmp/g271-order SYSTEM", PROMPT_ROOT)
             send(client, process, serial, "write /home/root/.shrc append /tmp/g271-order USER", PROMPT_ROOT)
             send(client, process, serial, "append /home/root/.shrc echo G271US", PROMPT_ROOT)
@@ -582,9 +620,9 @@ def main() -> int:
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11030/5081/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11058/5053/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 569/569 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 620/620 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (
