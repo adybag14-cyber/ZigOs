@@ -38,6 +38,8 @@ const runtime_sdk_elf = @import("runtime_sdk").sdk;
 const runtime_init_elf = @import("runtime_sdk").init;
 const runtime_shell_elf = @import("runtime_sdk").shell;
 const runtime_fs_elf = @import("runtime_sdk").fs;
+const runtime_rm_elf = @import("runtime_sdk").rm;
+const runtime_rmdir_elf = @import("runtime_sdk").rmdir;
 const runtime_mkdir_elf = @import("runtime_sdk").mkdir;
 const runtime_pwd_elf = @import("runtime_sdk").pwd;
 const runtime_echo_elf = @import("runtime_sdk").echo;
@@ -463,6 +465,8 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/init.elf", runtime_init_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/sh.elf", runtime_shell_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/fs.elf", runtime_fs_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/rm.elf", runtime_rm_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/rmdir.elf", runtime_rmdir_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/mkdir.elf", runtime_mkdir_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/pwd.elf", runtime_pwd_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/echo.elf", runtime_echo_elf, 0o555, false, 0);

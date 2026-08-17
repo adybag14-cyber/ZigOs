@@ -121,6 +121,44 @@ pub fn build(b: *std.Build) void {
     fs_conformance.setLinkerScript(b.path("sdk/zig/linker.ld"));
     fs_conformance.step.dependOn(&assets.step);
 
+    const rm_module = b.createModule(.{
+        .root_source_file = b.path("sdk/zig/rm.zig"),
+        .target = sdk_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+        .code_model = .large,
+        .pic = false,
+        .stack_protector = false,
+        .stack_check = false,
+    });
+    rm_module.addObjectFile(b.path("build/sdk/syscall.o"));
+    const userspace_rm = b.addExecutable(.{
+        .name = "rm",
+        .root_module = rm_module,
+    });
+    userspace_rm.entry = .{ .symbol_name = "_start" };
+    userspace_rm.setLinkerScript(b.path("sdk/zig/linker.ld"));
+    userspace_rm.step.dependOn(&assets.step);
+
+    const rmdir_module = b.createModule(.{
+        .root_source_file = b.path("sdk/zig/rmdir.zig"),
+        .target = sdk_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+        .code_model = .large,
+        .pic = false,
+        .stack_protector = false,
+        .stack_check = false,
+    });
+    rmdir_module.addObjectFile(b.path("build/sdk/syscall.o"));
+    const userspace_rmdir = b.addExecutable(.{
+        .name = "rmdir",
+        .root_module = rmdir_module,
+    });
+    userspace_rmdir.entry = .{ .symbol_name = "_start" };
+    userspace_rmdir.setLinkerScript(b.path("sdk/zig/linker.ld"));
+    userspace_rmdir.step.dependOn(&assets.step);
+
     const mkdir_module = b.createModule(.{
         .root_source_file = b.path("sdk/zig/mkdir.zig"),
         .target = sdk_target,
@@ -263,6 +301,8 @@ pub fn build(b: *std.Build) void {
     _ = sdk_embed.addCopyFile(userspace_init.getEmittedBin(), "init.elf");
     _ = sdk_embed.addCopyFile(userspace_shell.getEmittedBin(), "sh.elf");
     _ = sdk_embed.addCopyFile(fs_conformance.getEmittedBin(), "fs.elf");
+    _ = sdk_embed.addCopyFile(userspace_rm.getEmittedBin(), "rm.elf");
+    _ = sdk_embed.addCopyFile(userspace_rmdir.getEmittedBin(), "rmdir.elf");
     _ = sdk_embed.addCopyFile(userspace_mkdir.getEmittedBin(), "mkdir.elf");
     _ = sdk_embed.addCopyFile(userspace_pwd.getEmittedBin(), "pwd.elf");
     _ = sdk_embed.addCopyFile(userspace_echo.getEmittedBin(), "echo.elf");
@@ -276,6 +316,8 @@ pub fn build(b: *std.Build) void {
             "pub const init = @embedFile(\"init.elf\");\n" ++
             "pub const shell = @embedFile(\"sh.elf\");\n" ++
             "pub const fs = @embedFile(\"fs.elf\");\n" ++
+            "pub const rm = @embedFile(\"rm.elf\");\n" ++
+            "pub const rmdir = @embedFile(\"rmdir.elf\");\n" ++
             "pub const mkdir = @embedFile(\"mkdir.elf\");\n" ++
             "pub const pwd = @embedFile(\"pwd.elf\");\n" ++
             "pub const echo = @embedFile(\"echo.elf\");\n" ++
@@ -349,6 +391,14 @@ pub fn build(b: *std.Build) void {
         fs_conformance.getEmittedBin(),
         "artifacts/fs.elf",
     );
+    const install_rm = b.addInstallFile(
+        userspace_rm.getEmittedBin(),
+        "artifacts/rm.elf",
+    );
+    const install_rmdir = b.addInstallFile(
+        userspace_rmdir.getEmittedBin(),
+        "artifacts/rmdir.elf",
+    );
     const install_mkdir = b.addInstallFile(
         userspace_mkdir.getEmittedBin(),
         "artifacts/mkdir.elf",
@@ -396,6 +446,8 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_init.step);
     b.getInstallStep().dependOn(&install_shell.step);
     b.getInstallStep().dependOn(&install_fs.step);
+    b.getInstallStep().dependOn(&install_rm.step);
+    b.getInstallStep().dependOn(&install_rmdir.step);
     b.getInstallStep().dependOn(&install_mkdir.step);
     b.getInstallStep().dependOn(&install_pwd.step);
     b.getInstallStep().dependOn(&install_echo.step);
@@ -414,6 +466,10 @@ pub fn build(b: *std.Build) void {
     verify_shell.addFileArg(userspace_shell.getEmittedBin());
     const verify_fs = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_fs.addFileArg(fs_conformance.getEmittedBin());
+    const verify_rm = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
+    verify_rm.addFileArg(userspace_rm.getEmittedBin());
+    const verify_rmdir = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
+    verify_rmdir.addFileArg(userspace_rmdir.getEmittedBin());
     const verify_mkdir = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_mkdir.addFileArg(userspace_mkdir.getEmittedBin());
     const verify_pwd = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
@@ -489,6 +545,8 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&verify_init.step);
     check_step.dependOn(&verify_shell.step);
     check_step.dependOn(&verify_fs.step);
+    check_step.dependOn(&verify_rm.step);
+    check_step.dependOn(&verify_rmdir.step);
     check_step.dependOn(&verify_mkdir.step);
     check_step.dependOn(&verify_pwd.step);
     check_step.dependOn(&verify_echo.step);

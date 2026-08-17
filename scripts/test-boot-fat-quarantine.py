@@ -269,7 +269,7 @@ def main() -> int:
                 "ZigOs boot FAT quarantined: cross_link; embedded read-only fallback mounted",
                 "process-exec.elf",
                 "cat: not found",
-                "ZigOs boot FAT: block-backed no files/directories 0/0 bytes 0 metadata/file/block reads 48/0/48 failures 0 clusters claimed/free/loop/cross/range 0/0/0/1/0 lock tickets/outstanding 1/0 quarantine state/reason/events yes/cross_link/1 clean yes",
+                "ZigOs boot FAT: block-backed no files/directories 0/0 bytes 0 metadata/file/block reads 49/0/49 failures 0 clusters claimed/free/loop/cross/range 0/0/0/1/0 lock tickets/outstanding 1/0 quarantine state/reason/events yes/cross_link/1 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
                 "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 144/144 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
