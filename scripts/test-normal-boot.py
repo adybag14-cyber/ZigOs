@@ -560,6 +560,65 @@ def main() -> int:
                 raise RuntimeError("G280 standalone stat reported an unexpected metadata error")
             send(client, process, serial, "status", b"\r\n0\r\n")
 
+            send(client, process, serial, "write /tmp/g281-text G281_L01", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g281-text G281_L02", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g281-text G281_MATCH_A", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g281-text G281_L04", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g281-text G281_L05", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g281-text G281_L06", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g281-text G281_L07", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g281-text G281_L08", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g281-text G281_MATCH_B", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g281-text G281_L10", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g281-text G281_L11", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g281-text G281_L12", PROMPT_ROOT)
+
+            head_start = len(serial)
+            client.sendall(b"/bin/head.elf /tmp/g281-text\r")
+            wait_for(client, process, serial, b"G281_L01", head_start, 40)
+            wait_for(client, process, serial, b"G281_L10", head_start, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, head_start, 40)
+            head_output = serial[head_start:]
+            if b"G281_L11" in head_output or b"head: " in head_output:
+                raise RuntimeError("G281 standalone head did not stop after ten lines")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+
+            tail_start = len(serial)
+            client.sendall(b"/bin/tail.elf /tmp/g281-text\r")
+            wait_for(client, process, serial, b"G281_MATCH_A", tail_start, 40)
+            wait_for(client, process, serial, b"G281_L12", tail_start, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, tail_start, 40)
+            tail_output = serial[tail_start:]
+            if b"G281_L02" in tail_output or b"tail: " in tail_output:
+                raise RuntimeError("G281 standalone tail did not emit the final ten lines")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+
+            wc_start = len(serial)
+            client.sendall(b"/bin/wc.elf /tmp/g281-text\r")
+            wait_for(client, process, serial, b"12 12 116\r\n", wc_start, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, wc_start, 40)
+            if b"wc: " in serial[wc_start:]:
+                raise RuntimeError("G281 standalone wc reported an unexpected read error")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+
+            grep_start = len(serial)
+            client.sendall(b"/bin/grep.elf MATCH /tmp/g281-text\r")
+            wait_for(client, process, serial, b"G281_MATCH_A", grep_start, 40)
+            wait_for(client, process, serial, b"G281_MATCH_B", grep_start, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, grep_start, 40)
+            grep_output = serial[grep_start:]
+            if b"G281_L04" in grep_output or b"grep: " in grep_output:
+                raise RuntimeError("G281 standalone grep emitted a nonmatching line")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+
+            grep_none_start = len(serial)
+            client.sendall(b"/bin/grep.elf ABSENT /tmp/g281-text\r")
+            wait_for(client, process, serial, PROMPT_ROOT, grep_none_start, 40)
+            if b"grep: " in serial[grep_none_start:]:
+                raise RuntimeError("G281 standalone grep no-match path reported an error")
+            send(client, process, serial, "status", b"\r\n1\r\n")
+            send(client, process, serial, "rm /tmp/g281-text", PROMPT_ROOT)
+
             send(client, process, serial, "write /etc/shrc write /tmp/g271-order SYSTEM", PROMPT_ROOT)
             send(client, process, serial, "write /home/root/.shrc append /tmp/g271-order USER", PROMPT_ROOT)
             send(client, process, serial, "append /home/root/.shrc echo G271US", PROMPT_ROOT)
@@ -634,9 +693,9 @@ def main() -> int:
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11073/5038/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11130/4981/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 637/637 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 721/721 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (
