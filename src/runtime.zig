@@ -38,6 +38,7 @@ const runtime_sdk_elf = @import("runtime_sdk").sdk;
 const runtime_init_elf = @import("runtime_sdk").init;
 const runtime_shell_elf = @import("runtime_sdk").shell;
 const runtime_fs_elf = @import("runtime_sdk").fs;
+const runtime_hexdump_elf = @import("runtime_sdk").hexdump;
 const runtime_head_elf = @import("runtime_sdk").head;
 const runtime_tail_elf = @import("runtime_sdk").tail;
 const runtime_wc_elf = @import("runtime_sdk").wc;
@@ -472,6 +473,7 @@ fn initializeFilesystem() !void {
     _ = try state.vfs.putFile(0, "/bin/init.elf", runtime_init_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/sh.elf", runtime_shell_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/fs.elf", runtime_fs_elf, 0o555, false, 0);
+    _ = try state.vfs.putFile(0, "/bin/hexdump.elf", runtime_hexdump_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/head.elf", runtime_head_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/tail.elf", runtime_tail_elf, 0o555, false, 0);
     _ = try state.vfs.putFile(0, "/bin/wc.elf", runtime_wc_elf, 0o555, false, 0);

@@ -619,6 +619,36 @@ def main() -> int:
             send(client, process, serial, "status", b"\r\n1\r\n")
             send(client, process, serial, "rm /tmp/g281-text", PROMPT_ROOT)
 
+            send(client, process, serial, "write /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+            send(client, process, serial, "append /tmp/g282-hex ABCDEFGHIJKLMNOP", PROMPT_ROOT)
+
+            hexdump_start = len(serial)
+            client.sendall(b"/bin/hexdump.elf /tmp/g282-hex\r")
+            wait_for(client, process, serial, b"0000  41 42 43 44 45 46 47 48", hexdump_start, 40)
+            wait_for(client, process, serial, b"49 4A 4B 4C 4D 4E 4F 50", hexdump_start, 40)
+            wait_for(client, process, serial, b"ABCDEFGHIJKLMNOP\r\n", hexdump_start, 40)
+            wait_for(client, process, serial, b"00F0  ", hexdump_start, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, hexdump_start, 40)
+            hexdump_output = serial[hexdump_start:]
+            if b"0100  " in hexdump_output or b"hexdump: " in hexdump_output:
+                raise RuntimeError("G282 standalone hexdump exceeded its 256-byte ceiling or reported an error")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            send(client, process, serial, "rm /tmp/g282-hex", PROMPT_ROOT)
+
             send(client, process, serial, "write /etc/shrc write /tmp/g271-order SYSTEM", PROMPT_ROOT)
             send(client, process, serial, "write /home/root/.shrc append /tmp/g271-order USER", PROMPT_ROOT)
             send(client, process, serial, "append /home/root/.shrc echo G271US", PROMPT_ROOT)
@@ -693,9 +723,9 @@ def main() -> int:
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11130/4981/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11144/4967/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 721/721 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 739/739 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

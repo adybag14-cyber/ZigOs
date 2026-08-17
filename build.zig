@@ -121,6 +121,25 @@ pub fn build(b: *std.Build) void {
     fs_conformance.setLinkerScript(b.path("sdk/zig/linker.ld"));
     fs_conformance.step.dependOn(&assets.step);
 
+    const hexdump_module = b.createModule(.{
+        .root_source_file = b.path("sdk/zig/hexdump.zig"),
+        .target = sdk_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+        .code_model = .large,
+        .pic = false,
+        .stack_protector = false,
+        .stack_check = false,
+    });
+    hexdump_module.addObjectFile(b.path("build/sdk/syscall.o"));
+    const userspace_hexdump = b.addExecutable(.{
+        .name = "hexdump",
+        .root_module = hexdump_module,
+    });
+    userspace_hexdump.entry = .{ .symbol_name = "_start" };
+    userspace_hexdump.setLinkerScript(b.path("sdk/zig/linker.ld"));
+    userspace_hexdump.step.dependOn(&assets.step);
+
     const head_module = b.createModule(.{
         .root_source_file = b.path("sdk/zig/head.zig"),
         .target = sdk_target,
@@ -434,6 +453,7 @@ pub fn build(b: *std.Build) void {
     _ = sdk_embed.addCopyFile(userspace_init.getEmittedBin(), "init.elf");
     _ = sdk_embed.addCopyFile(userspace_shell.getEmittedBin(), "sh.elf");
     _ = sdk_embed.addCopyFile(fs_conformance.getEmittedBin(), "fs.elf");
+    _ = sdk_embed.addCopyFile(userspace_hexdump.getEmittedBin(), "hexdump.elf");
     _ = sdk_embed.addCopyFile(userspace_head.getEmittedBin(), "head.elf");
     _ = sdk_embed.addCopyFile(userspace_tail.getEmittedBin(), "tail.elf");
     _ = sdk_embed.addCopyFile(userspace_wc.getEmittedBin(), "wc.elf");
@@ -456,6 +476,7 @@ pub fn build(b: *std.Build) void {
             "pub const init = @embedFile(\"init.elf\");\n" ++
             "pub const shell = @embedFile(\"sh.elf\");\n" ++
             "pub const fs = @embedFile(\"fs.elf\");\n" ++
+            "pub const hexdump = @embedFile(\"hexdump.elf\");\n" ++
             "pub const head = @embedFile(\"head.elf\");\n" ++
             "pub const tail = @embedFile(\"tail.elf\");\n" ++
             "pub const wc = @embedFile(\"wc.elf\");\n" ++
@@ -537,6 +558,10 @@ pub fn build(b: *std.Build) void {
     const install_fs = b.addInstallFile(
         fs_conformance.getEmittedBin(),
         "artifacts/fs.elf",
+    );
+    const install_hexdump = b.addInstallFile(
+        userspace_hexdump.getEmittedBin(),
+        "artifacts/hexdump.elf",
     );
     const install_head = b.addInstallFile(
         userspace_head.getEmittedBin(),
@@ -621,6 +646,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_init.step);
     b.getInstallStep().dependOn(&install_shell.step);
     b.getInstallStep().dependOn(&install_fs.step);
+    b.getInstallStep().dependOn(&install_hexdump.step);
     b.getInstallStep().dependOn(&install_head.step);
     b.getInstallStep().dependOn(&install_tail.step);
     b.getInstallStep().dependOn(&install_wc.step);
@@ -648,6 +674,8 @@ pub fn build(b: *std.Build) void {
     verify_shell.addFileArg(userspace_shell.getEmittedBin());
     const verify_fs = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_fs.addFileArg(fs_conformance.getEmittedBin());
+    const verify_hexdump = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
+    verify_hexdump.addFileArg(userspace_hexdump.getEmittedBin());
     const verify_head = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_head.addFileArg(userspace_head.getEmittedBin());
     const verify_tail = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
@@ -741,6 +769,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&verify_init.step);
     check_step.dependOn(&verify_shell.step);
     check_step.dependOn(&verify_fs.step);
+    check_step.dependOn(&verify_hexdump.step);
     check_step.dependOn(&verify_head.step);
     check_step.dependOn(&verify_tail.step);
     check_step.dependOn(&verify_wc.step);
