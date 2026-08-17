@@ -691,6 +691,15 @@ def main() -> int:
                 raise RuntimeError("G284 standalone kill reported an unexpected signal error")
             send(client, process, serial, "status", b"\r\n0\r\n")
 
+            mount_start = len(serial)
+            client.sendall(b"/bin/mount.elf\r")
+            wait_for(client, process, serial, b"ramfs on / type ramfs (rw)\r\n", mount_start, 40)
+            wait_for(client, process, serial, b"process-table on /proc type procfs (ro)\r\n", mount_start, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, mount_start, 40)
+            if b"mount: " in serial[mount_start:]:
+                raise RuntimeError("G285 standalone mount reported an unexpected procfs error")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+
             send(client, process, serial, "write /etc/shrc write /tmp/g271-order SYSTEM", PROMPT_ROOT)
             send(client, process, serial, "write /home/root/.shrc append /tmp/g271-order USER", PROMPT_ROOT)
             send(client, process, serial, "append /home/root/.shrc echo G271US", PROMPT_ROOT)
@@ -765,9 +774,9 @@ def main() -> int:
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11183/4928/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11197/4914/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 820/820 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 837/837 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (
