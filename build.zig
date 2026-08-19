@@ -989,6 +989,7 @@ pub fn build(b: *std.Build) void {
         "src/runtime_persist.zig",
         "src/elf64.zig",
         "sdk/zig/dns.zig",
+        "sdk/zig/copy_core.zig",
     }) |source_path| {
         const tests = b.addTest(.{
             .root_module = b.createModule(.{

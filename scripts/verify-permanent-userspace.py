@@ -96,6 +96,7 @@ def main() -> int:
     stat_source = text("sdk/zig/stat.zig")
     mv_source = text("sdk/zig/mv.zig")
     cp_source = text("sdk/zig/cp.zig")
+    copy_core_source = text("sdk/zig/copy_core.zig")
     sdk_shell = text("sdk/zig/shell.zig")
     sdk_abi = text("sdk/zig/abi.zig")
     sdk_verifier = text("scripts/verify-zigos-sdk-elf.py")
@@ -759,7 +760,7 @@ def main() -> int:
     require(runtime_test, "stat /boot/EFI/BOOT/BOOTX64.EFI", "diagnostic QEMU stats the multi-mebibyte boot image without RAM-copying it")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 54 failed 0", "offline diagnostic profile requires the expanded block-backed FAT command matrix")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 56 failed 0", "live diagnostic profile requires the expanded block-backed FAT command matrix")
-    require(runtime_test, "11423/4688/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both G290 diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
+    require(runtime_test, "11424/4687/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both G291 diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
     require(normal_boot_test, "ZigOs boot FAT: block-backed yes files/directories 3/2", "persistent normal boot requires a clean real block-backed /boot")
     require(normal_boot_test, "11323/4788/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G290 normal QEMU requires exact FAT ownership with zero classified corruption")
     require(diskless_normal_boot_test, "ZigOs boot FAT: block-backed no files/directories 0/0", "diskless normal boot requires an explicitly absent backend and fallback namespace")
@@ -1361,13 +1362,14 @@ def main() -> int:
         "src/runtime_persist.zig",
         "src/elf64.zig",
         "sdk/zig/dns.zig",
+        "sdk/zig/copy_core.zig",
     )
     declared_tests = sum(
         len(re.findall(r'^test "', text(source_path), flags=re.MULTILINE))
         for source_path in canonical_test_sources
     )
-    if declared_tests != 102:
-        raise SystemExit(f"canonical isolated-test declaration total must be 102, found {declared_tests}")
+    if declared_tests != 104:
+        raise SystemExit(f"canonical isolated-test declaration total must be 104, found {declared_tests}")
 
     for source_path in (
         '"src/runtime_fd.zig"',
@@ -1382,6 +1384,7 @@ def main() -> int:
         '"src/runtime_persist.zig"',
         '"src/elf64.zig"',
         '"sdk/zig/dns.zig"',
+        '"sdk/zig/copy_core.zig"',
     ):
         require(build_graph, source_path, f"isolated test graph includes {source_path}")
 
@@ -1390,12 +1393,12 @@ def main() -> int:
     require(build_graph, 'b.path("src/nvme.zig")', "canonical isolated graph includes the dedicated ReleaseSafe NVMe tests")
     require(workflow, "test-boot-fat-io-error.py --boot-timeout 240", "hosted integration runs the block-read EIO and retry gate")
     require(workflow, "test-persistent-readonly-remount.py --boot-timeout 240", "hosted integration runs the persistent fail-stop read-only remount gate")
-    require(readme, "248/248 canonical host-test executions across all 102 unique isolated-test declarations", "README carries the clean canonical execution and declaration counts")
-    require(readme, "Size:    5,846,528 bytes", "README carries the reproducible G290 ABI 1.26 EFI size")
-    require(readme, "SHA-256: 2A793595721A19BB99D27F16DD5632F53C395751D765BB1B695A580B092767EA", "README carries the reproducible G290 ABI 1.26 EFI hash")
+    require(readme, "250/250 canonical host-test executions across all 104 unique isolated-test declarations", "README carries the clean canonical execution and declaration counts")
+    require(readme, "Size:    5,847,040 bytes", "README carries the reproducible G290 ABI 1.26 EFI size")
+    require(readme, "SHA-256: F70BC2B471323EED99B9CDF1E422A7C7992F3A2683F7221AD62DB081EFAC732F", "README carries the reproducible G290 ABI 1.26 EFI hash")
     require(readme, "Persistent NVMe write-error read-only-remount profile", "README documents the required fail-stop profile")
     require(readme, "discarded/rejected 2/1 vfs-remount/discard 1/2 mount-readonly yes clean yes", "README freezes exact G229 containment telemetry")
-    require(priority, "248/248 canonical host-test executions across 102 unique isolated Zig test declarations", "priority remediation carries the canonical execution and declaration counts")
+    require(priority, "250/250 canonical host-test executions across 104 unique isolated Zig test declarations", "priority remediation carries the canonical execution and declaration counts")
     require(priority, "Persistent journal damage now has a bounded fail-stop policy", "priority remediation distinguishes containment from retry")
     require(threat_model, "remounts the exact `/persist` mount read-only once", "threat model states the fail-stop storage boundary")
     require(readme, "ABI 1.13 root-only `mount`/`umount` for a distinct transient `tmpfs`", "README documents the bounded userspace mount ABI")
@@ -1461,7 +1464,7 @@ def main() -> int:
     require(c_conformance, "sizeof(exact_path_boundary) != 256", "C CPL3 fixture proves the exact 255-byte C-string payload")
     require(c_conformance, "sizeof(overlong_path_boundary) != 257", "C CPL3 fixture proves the 256-byte C-string payload")
     require(c_conformance, "pathname length/component bounds", "C CPL3 fixture fails closed on G247 boundary regressions")
-    require(runtime_test, "bytes 5846596 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11423/4688/0/0/0", "G290 diagnostic harness freezes the measured FAT geometry")
+    require(runtime_test, "bytes 5847108 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11424/4687/0/0/0", "G291 diagnostic harness freezes the measured FAT geometry")
     require(normal_boot_test, "11323/4788/0/0/0 lock tickets/outstanding 1/0", "G290 normal harness freezes the measured FAT geometry")
     require(io_error_boot_test, "bytes 5795396 metadata/file/block reads 114/3/115 failures 1 clusters claimed/free/loop/cross/range 11323/4788/0/0/0", "G290 read-EIO harness freezes its private fault-injection geometry")
     require(readonly_remount_boot_test, "bytes 5795396 metadata/file/block reads 113/0/113 failures 0 clusters claimed/free/loop/cross/range 11323/4788/0/0/0", "G290 write-EIO harness freezes its private fault-injection geometry")
@@ -1807,7 +1810,7 @@ def main() -> int:
     require(readme, "G266 keeps ABI 1.23", "README documents G266 without an ABI bump")
     require(priority, "G266 keeps ABI 1.23", "priority remediation records G266 TTY control-key generation")
     require(threat_model, "G266 recognizes Ctrl-Z only inside the trusted TTY line discipline", "threat model bounds G266 signal authority")
-    require(roadmap, "244 complete, 256 open", "roadmap arithmetic includes G290")
+    require(roadmap, "245 complete, 255 open", "roadmap arithmetic includes G291")
     require(roadmap, "- [x] **G229** " + chr(0x2014) + " Remount a damaged writable filesystem read-only.", "roadmap marks G229 complete with the canonical separator")
     require(roadmap, "- [x] **G230** " + chr(0x2014) + " Expose mount and unmount syscalls.", "roadmap marks G230 complete with the canonical separator")
     require(roadmap, "- [x] **G231** " + chr(0x2014) + " Reject unmount while paths or descriptors remain busy.", "roadmap marks G231 complete with the canonical separator")
@@ -2071,7 +2074,7 @@ def main() -> int:
     require(cp_source, "destination_info.node == source_info.node", "G279 cp compares destination inode identity before truncation")
     require(cp_source, r'"cp: same file\r\n"', "G279 cp fails closed on exact or hard-link self-copy")
     require(cp_source, ".{ .write = true, .create = true, .truncate = true }", "G279 cp creates or truncates only after alias preflight")
-    require(cp_source, "zigos.writeAll(destination_fd, bytes[0..count])", "G279 cp streams bounded chunks through the public descriptor ABI")
+    require(cp_source, "copy_core.copy(&reader, &writer, &bytes)", "G279/G291 cp streams bounded chunks through the shared descriptor copy core")
     require(normal_boot_test, '/bin/cp.elf /tmp/g279-source /tmp/g279-source', "G279 normal QEMU executes the cp self-copy guard")
     require(normal_boot_test, "G279 standalone cp self-copy guard damaged the source", "G279 QEMU proves self-copy rejection preserves source bytes")
     require(normal_boot_test, '/bin/cp.elf /tmp/g279-source /tmp/g279-copy', "G279 normal QEMU executes standalone cp by absolute path")
@@ -2100,7 +2103,7 @@ def main() -> int:
     require(priority, "G280 keeps ABI 1.24", "priority remediation records G280 standalone stat")
     require(threat_model, "G280 gives standalone `stat` observation authority", "threat model bounds G280 metadata observation")
     require(roadmap, "- [x] **G280** " + chr(0x2014) + " Provide a standalone stat userspace program.", "roadmap marks G280 complete with the canonical separator")
-    require(roadmap, "244 complete, 256 open", "roadmap arithmetic includes G290")
+    require(roadmap, "245 complete, 255 open", "roadmap arithmetic includes G291")
     require(head_source, "if (argc != 2)", "G281 standalone head requires exactly one file")
     require(head_source, "const default_lines: usize = 10;", "G281 head fixes the default output at ten lines")
     require(head_source, "var bytes: [512]u8 = undefined;", "G281 head uses one fixed streaming buffer")
@@ -2131,7 +2134,7 @@ def main() -> int:
     require(priority, "G281 keeps ABI 1.24", "priority remediation records G281 standalone text tools")
     require(threat_model, "G281 gives standalone `head`, `tail`, `wc` and `grep`", "threat model bounds G281 text-observation authority")
     require(roadmap, "- [x] **G281** " + chr(0x2014) + " Provide standalone head, tail, wc and grep programs.", "roadmap marks G281 complete with the canonical separator")
-    require(roadmap, "244 complete, 256 open", "roadmap arithmetic includes G290")
+    require(roadmap, "245 complete, 255 open", "roadmap arithmetic includes G291")
     require(hexdump_source, "if (argc != 2)", "G282 standalone hexdump requires exactly one file")
     require(hexdump_source, "const maximum_output_bytes: usize = 256;", "G282 hexdump hard-caps observation at 256 bytes")
     require(hexdump_source, "const row_bytes: usize = 16;", "G282 hexdump uses sixteen-byte rows")
@@ -2292,10 +2295,34 @@ def main() -> int:
     require(priority, "G290 keeps ABI 1.26", "priority remediation records standalone edit")
     require(threat_model, "G290 gives standalone `edit` caller-authorized read/write authority", "threat model bounds G290 authority")
     require(roadmap, "- [x] **G290** " + chr(0x2014) + " Provide a basic text editor suitable for serial consoles.", "roadmap marks G290 complete")
-    require(roadmap, "244 complete, 256 open", "roadmap arithmetic includes G290")
+    require(cp_source, 'const copy_core = @import("copy_core.zig");', "G291 cp imports the independently tested copy core")
+    require(cp_source, "pub fn read(self: *@This(), bytes: []u8) zigos.Error!usize", "G291 descriptor reader delegates through the public read ABI")
+    require(cp_source, "return zigos.read(self.fd, bytes);", "G291 descriptor reader has no private VFS path")
+    require(cp_source, "pub fn write(self: *@This(), bytes: []const u8) zigos.Error!usize", "G291 descriptor writer delegates through the public write ABI")
+    require(cp_source, "return zigos.write(self.fd, bytes);", "G291 descriptor writer has no private VFS path")
+    require(cp_source, "copy_core.copy(&reader, &writer, &bytes)", "G291 standalone cp uses the shared partial-I/O loop")
+    require(cp_source, "if (err == error.WriteZero) return printError(error.InputOutput);", "G291 maps zero write progress to bounded EIO failure")
+    require(copy_core_source, "const count = try reader.read(scratch);", "G291 core repeats caller-supplied reads")
+    require(copy_core_source, "if (count == 0) return;", "G291 core treats only zero read as EOF")
+    require(copy_core_source, "while (offset < count)", "G291 core drains every nonempty read completely")
+    require(copy_core_source, "writer.write(scratch[offset..count])", "G291 core retries the unwritten suffix after a short write")
+    require(copy_core_source, "if (written == 0) return Error.WriteZero;", "G291 core rejects zero-progress writes instead of looping")
+    require(copy_core_source, 'test "copy handles repeated partial reads and writes"', "G291 has a deterministic short-read/short-write host proof")
+    require(copy_core_source, "@min(@min(output.len, 5)", "G291 host reader forces at most five bytes per read")
+    require(copy_core_source, "@min(input.len, 3)", "G291 host writer forces at most three bytes per write")
+    require(copy_core_source, "expectEqualSlices(u8, payload", "G291 host proof requires exact reconstructed bytes")
+    require(copy_core_source, 'test "copy rejects a zero-progress partial write"', "G291 separately proves zero-progress failure")
+    require(copy_core_source, "expectError(Error.WriteZero", "G291 zero-progress test requires the exact bounded error")
+    require(normal_boot_test, '/bin/cp.elf /tmp/g279-source /tmp/g279-copy', "G291 retains real normal-QEMU standalone cp integration")
+    require(readme, "G291 keeps ABI 1.26", "README documents partial-I/O copy strengthening without an ABI bump")
+    require(readme, "Canonical `cp.elf` is 7,560 bytes (RX 3,248, SHA-256 `79BE16EBCFC015108535E734D3618559CECA4985FD10C8F19BA29D82F17D7734`)", "README freezes G291 cp identity")
+    require(priority, "G291 keeps ABI 1.26", "priority remediation records partial-I/O copy semantics")
+    require(threat_model, "G291 does not widen `cp` authority", "threat model bounds G291 to progress handling")
+    require(roadmap, "- [x] **G291** " + chr(0x2014) + " Provide a file-copy utility with partial-I/O handling.", "roadmap marks G291 complete")
+    require(roadmap, "245 complete, 255 open", "roadmap arithmetic includes G291")
     roadmap_items = re.findall(r"^- \[([ x])\] \*\*G\d{3}\*\*", roadmap, flags=re.MULTILINE)
-    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 244:
-        raise SystemExit("roadmap must contain 500 goals with exactly 244 complete after G290")
+    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 245:
+        raise SystemExit("roadmap must contain 500 goals with exactly 245 complete after G291")
     require(workflow, "Cross-platform artifact identity gate", "hosted cross-platform reproducibility gate")
     require(workflow, "cmp --", "artifact bytes are compared instead of only printed")
     require(asset_builder, '"schema": 2', "host-independent generated-asset manifest schema")

@@ -1,8 +1,25 @@
 const zigos = @import("zigos.zig");
+const copy_core = @import("copy_core.zig");
 
 const status_success: u32 = 0;
 const status_failure: u32 = 1;
 const status_usage: u32 = 2;
+
+const DescriptorReader = struct {
+    fd: u16,
+
+    pub fn read(self: *@This(), bytes: []u8) zigos.Error!usize {
+        return zigos.read(self.fd, bytes);
+    }
+};
+
+const DescriptorWriter = struct {
+    fd: u16,
+
+    pub fn write(self: *@This(), bytes: []const u8) zigos.Error!usize {
+        return zigos.write(self.fd, bytes);
+    }
+};
 
 pub export fn zigos_main(
     argc: usize,
@@ -50,12 +67,14 @@ fn copyFile(source: [*:0]const u8, destination: [*:0]const u8) u32 {
     ) catch |err| return printError(err);
     defer zigos.close(destination_fd) catch {};
 
+    var reader = DescriptorReader{ .fd = source_fd };
+    var writer = DescriptorWriter{ .fd = destination_fd };
     var bytes: [512]u8 = undefined;
-    while (true) {
-        const count = zigos.read(source_fd, &bytes) catch |err| return printError(err);
-        if (count == 0) return status_success;
-        zigos.writeAll(destination_fd, bytes[0..count]) catch |err| return printError(err);
-    }
+    copy_core.copy(&reader, &writer, &bytes) catch |err| {
+        if (err == error.WriteZero) return printError(error.InputOutput);
+        return printError(@errorCast(err));
+    };
+    return status_success;
 }
 
 fn printError(err: zigos.Error) u32 {
