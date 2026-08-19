@@ -596,6 +596,29 @@ pub fn build(b: *std.Build) void {
     dns_conformance.setLinkerScript(b.path("sdk/zig/linker.ld"));
     dns_conformance.step.dependOn(&assets.step);
 
+    const c_abi_description_module = b.createModule(.{
+        .target = sdk_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+        .code_model = .large,
+        .pic = false,
+        .stack_protector = false,
+        .stack_check = false,
+    });
+    c_abi_description_module.addIncludePath(b.path("sdk/c/include"));
+    c_abi_description_module.addCSourceFiles(.{
+        .files = &.{"sdk/c/abi_description_conformance.c"},
+        .flags = &.{ "-std=c11", "-ffreestanding", "-fno-builtin", "-fno-stack-protector", "-fno-pic" },
+    });
+    c_abi_description_module.addObjectFile(b.path("build/sdk/syscall.o"));
+    const c_abi_description = b.addExecutable(.{
+        .name = "c-abi-description",
+        .root_module = c_abi_description_module,
+    });
+    c_abi_description.entry = .{ .symbol_name = "_start" };
+    c_abi_description.setLinkerScript(b.path("sdk/zig/linker.ld"));
+    c_abi_description.step.dependOn(&assets.step);
+
     const c_sdk_module = b.createModule(.{
         .target = sdk_target,
         .optimize = .ReleaseSmall,
@@ -607,7 +630,7 @@ pub fn build(b: *std.Build) void {
     });
     c_sdk_module.addIncludePath(b.path("sdk/c/include"));
     c_sdk_module.addCSourceFiles(.{
-        .files = &.{ "sdk/c/zigos.c", "sdk/c/conformance.c" },
+        .files = &.{ "sdk/c/zigos.c", "sdk/c/conformance.c", "sdk/c/abi_header_interop_conformance.c" },
         .flags = &.{ "-std=c11", "-ffreestanding", "-fno-builtin", "-fno-stack-protector", "-fno-pic" },
     });
     c_sdk_module.addObjectFile(b.path("build/sdk/syscall.o"));
@@ -852,6 +875,15 @@ pub fn build(b: *std.Build) void {
         c_sdk_conformance.getEmittedBin(),
         "artifacts/c-sdk.elf",
     );
+    const install_c_abi_description = b.addInstallFile(
+        c_abi_description.getEmittedBin(),
+        "artifacts/c-abi-description.elf",
+    );
+    const install_c_abi_header = b.addInstallFile(
+        b.path("sdk/c/include/zigos_abi.h"),
+        "sdk/include/zigos_abi.h",
+    );
+    install_c_abi_header.step.dependOn(&assets.step);
     install_service.step.dependOn(&assets.step);
     install_process.step.dependOn(&assets.step);
     install_exec.step.dependOn(&assets.step);
@@ -897,6 +929,8 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_ls.step);
     b.getInstallStep().dependOn(&install_dns.step);
     b.getInstallStep().dependOn(&install_c_sdk.step);
+    b.getInstallStep().dependOn(&install_c_abi_description.step);
+    b.getInstallStep().dependOn(&install_c_abi_header.step);
 
     const verify_efi = b.addSystemCommand(&.{ python, "scripts/verify-efi.py" });
     verify_efi.addFileArg(kernel.getEmittedBin());
@@ -960,6 +994,8 @@ pub fn build(b: *std.Build) void {
     verify_dns.addFileArg(dns_conformance.getEmittedBin());
     const verify_c_sdk = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_c_sdk.addFileArg(c_sdk_conformance.getEmittedBin());
+    const verify_c_abi_description = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
+    verify_c_abi_description.addFileArg(c_abi_description.getEmittedBin());
     const verify_permanent_userspace = b.addSystemCommand(&.{ python, "scripts/verify-permanent-userspace.py" });
     verify_permanent_userspace.setCwd(b.path("."));
     verify_permanent_userspace.step.dependOn(&assets.step);
@@ -1048,5 +1084,6 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&verify_ls.step);
     check_step.dependOn(&verify_dns.step);
     check_step.dependOn(&verify_c_sdk.step);
+    check_step.dependOn(&verify_c_abi_description.step);
     check_step.dependOn(&verify_permanent_userspace.step);
 }

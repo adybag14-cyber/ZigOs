@@ -25,7 +25,7 @@ jobs:
         run: bash ./scripts/build.sh --summary all
 
       - name: Record Linux artifact identities
-        run: sha256sum zig-out/EFI/BOOT/BOOTX64.EFI zig-out/artifacts/*.elf
+        run: sha256sum zig-out/EFI/BOOT/BOOTX64.EFI zig-out/artifacts/*.elf zig-out/sdk/include/zigos_abi.h
 
       - name: Upload Linux-built UEFI image
         uses: actions/upload-artifact@v7
@@ -34,6 +34,7 @@ jobs:
           path: |
             zig-out/EFI/BOOT/BOOTX64.EFI
             zig-out/artifacts/*.elf
+            zig-out/sdk/include/zigos_abi.h
             build/assets-manifest.json
           if-no-files-found: error
 
@@ -96,6 +97,7 @@ jobs:
           path: |
             zig-out/EFI/BOOT/BOOTX64.EFI
             zig-out/artifacts/*.elf
+            zig-out/sdk/include/zigos_abi.h
             build/assets-manifest.json
           if-no-files-found: error
 
