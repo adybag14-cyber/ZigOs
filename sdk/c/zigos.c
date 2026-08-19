@@ -28,6 +28,26 @@ int64_t zigos_close(uint16_t fd) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
 }
 
+int64_t zigos_socket(uint16_t domain, uint16_t type, uint16_t protocol) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_SOCKET, domain, type, protocol, 0, 0, 0);
+}
+
+int64_t zigos_bind(uint16_t fd, const zigos_ipv4_socket_address *address) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_BIND, fd, pointer_value(address), sizeof(*address), 0, 0, 0);
+}
+
+int64_t zigos_connect(uint16_t fd, const zigos_ipv4_socket_address *address) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_CONNECT, fd, pointer_value(address), sizeof(*address), 0, 0, 0);
+}
+
+int64_t zigos_getsockname(uint16_t fd, zigos_ipv4_socket_address *address) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_GETSOCKNAME, fd, pointer_value(address), sizeof(*address), 0, 0, 0);
+}
+
+int64_t zigos_getpeername(uint16_t fd, zigos_ipv4_socket_address *address) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_GETPEERNAME, fd, pointer_value(address), sizeof(*address), 0, 0, 0);
+}
+
 int64_t zigos_open(const char *path, uint64_t flags, uint16_t mode) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_OPEN, pointer_value(path), flags, mode, 0, 0, 0);
 }

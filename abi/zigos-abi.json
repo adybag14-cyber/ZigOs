@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 26,
+    "minor": 27,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -17,7 +17,8 @@
     "pseudo_files": 7,
     "udp_sockets": 8,
     "persistent_storage": 9,
-    "normal_boot": 10
+    "normal_boot": 10,
+    "tcp_sockets": 11
   },
   "syscalls": {
     "exit": 64,

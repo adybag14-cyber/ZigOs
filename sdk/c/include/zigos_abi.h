@@ -7,7 +7,7 @@
 
 #define ZIGOS_ABI_MAGIC UINT32_C(0x4942415A)
 #define ZIGOS_ABI_MAJOR UINT16_C(1)
-#define ZIGOS_ABI_MINOR UINT16_C(26)
+#define ZIGOS_ABI_MINOR UINT16_C(27)
 #define ZIGOS_PAGE_SIZE UINT32_C(4096)
 #define ZIGOS_SYSCALL_BASE UINT16_C(64)
 #define ZIGOS_SYSCALL_COUNT UINT16_C(66)
@@ -59,6 +59,11 @@
 #define ZIGOS_LOCK_UNLOCK UINT64_C(8)
 #define ZIGOS_WAIT_NOHANG (UINT64_C(1) << 0)
 #define ZIGOS_WAIT_PROCESS_GROUP (UINT64_C(1) << 1)
+#define ZIGOS_AF_INET UINT16_C(2)
+#define ZIGOS_SOCKET_STREAM UINT16_C(1)
+#define ZIGOS_SOCKET_DATAGRAM UINT16_C(2)
+#define ZIGOS_PROTOCOL_TCP UINT16_C(6)
+#define ZIGOS_PROTOCOL_UDP UINT16_C(17)
 
 #define ZIGOS_DIRECTORY_EVENT_CREATED (UINT8_C(1) << 0)
 #define ZIGOS_DIRECTORY_EVENT_REMOVED (UINT8_C(1) << 1)
@@ -77,6 +82,7 @@
 #define ZIGOS_CAP_UDP_SOCKETS (UINT64_C(1) << 8)
 #define ZIGOS_CAP_PERSISTENT_STORAGE (UINT64_C(1) << 9)
 #define ZIGOS_CAP_NORMAL_BOOT (UINT64_C(1) << 10)
+#define ZIGOS_CAP_TCP_SOCKETS (UINT64_C(1) << 11)
 
 #define ZIGOS_SYS_EXIT UINT64_C(64)
 #define ZIGOS_SYS_WRITE UINT64_C(65)
@@ -234,6 +240,8 @@ typedef struct zigos_iovec { uint64_t pointer; uint64_t length; } zigos_iovec;
 
 typedef struct zigos_auxv_entry { uint64_t kind; uint64_t value; } zigos_auxv_entry;
 
+typedef struct zigos_ipv4_socket_address { uint16_t family; uint16_t port_be; uint32_t address_be; } zigos_ipv4_socket_address;
+
 _Static_assert(sizeof(zigos_abi_info) == 64, "zigos_abi_info layout");
 _Static_assert(sizeof(zigos_stat) == 32, "zigos_stat layout");
 _Static_assert(sizeof(zigos_file_times) == 32, "zigos_file_times layout");
@@ -242,6 +250,7 @@ _Static_assert(sizeof(zigos_filesystem_stat) == 64, "zigos_filesystem_stat layou
 _Static_assert(sizeof(zigos_poll_descriptor) == 8, "zigos_poll_descriptor layout");
 _Static_assert(sizeof(zigos_directory_event) == 64, "zigos_directory_event layout");
 _Static_assert(sizeof(zigos_iovec) == 16, "zigos_iovec layout");
+_Static_assert(sizeof(zigos_ipv4_socket_address) == 8, "zigos_ipv4_socket_address layout");
 
 #ifdef __cplusplus
 extern "C" {

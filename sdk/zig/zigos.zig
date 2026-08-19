@@ -482,7 +482,15 @@ pub fn poll(descriptors: []PollDescriptor) Error!usize {
 }
 
 pub fn socket() Error!u16 {
+    return udpSocket();
+}
+
+pub fn udpSocket() Error!u16 {
     return @intCast(try result(zigos_syscall6(abi.syscall_socket, abi.address_family_ipv4, abi.socket_datagram, abi.protocol_udp, 0, 0, 0)));
+}
+
+pub fn tcpSocket() Error!u16 {
+    return @intCast(try result(zigos_syscall6(abi.syscall_socket, abi.address_family_ipv4, abi.socket_stream, abi.protocol_tcp, 0, 0, 0)));
 }
 
 pub fn bind(fd: u16, address: *const Ipv4SocketAddress) Error!void {

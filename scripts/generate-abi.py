@@ -130,7 +130,9 @@ def generate(spec: dict) -> tuple[str, str, str]:
         "pub const poll_error: u16 = 1 << 2;\n",
         "pub const poll_hangup: u16 = 1 << 3;\n",
         "pub const address_family_ipv4: u16 = 2;\n",
+        "pub const socket_stream: u16 = 1;\n",
         "pub const socket_datagram: u16 = 2;\n",
+        "pub const protocol_tcp: u16 = 6;\n",
         "pub const protocol_udp: u16 = 17;\n",
         "\npub const AbiInfo = extern struct {\n",
         "    magic: u32,\n",
@@ -295,6 +297,13 @@ def generate_c(spec: dict) -> str:
         lines.append(f"#define ZIGOS_LOCK_{name.upper()} UINT64_C({value})\n")
     for name, value in spec.get("wait_flags", {}).items():
         lines.append(f"#define ZIGOS_WAIT_{name.upper()} (UINT64_C(1) << {value})\n")
+    lines.extend([
+        "#define ZIGOS_AF_INET UINT16_C(2)\n",
+        "#define ZIGOS_SOCKET_STREAM UINT16_C(1)\n",
+        "#define ZIGOS_SOCKET_DATAGRAM UINT16_C(2)\n",
+        "#define ZIGOS_PROTOCOL_TCP UINT16_C(6)\n",
+        "#define ZIGOS_PROTOCOL_UDP UINT16_C(17)\n",
+    ])
     lines.append("\n")
     for name, value in spec.get("directory_event_flags", {}).items():
         lines.append(f"#define ZIGOS_DIRECTORY_EVENT_{name.upper()} (UINT8_C(1) << {value})\n")
@@ -354,6 +363,7 @@ def generate_c(spec: dict) -> str:
         "} zigos_directory_event;\n\n",
         "typedef struct zigos_iovec { uint64_t pointer; uint64_t length; } zigos_iovec;\n\n",
         "typedef struct zigos_auxv_entry { uint64_t kind; uint64_t value; } zigos_auxv_entry;\n\n",
+        "typedef struct zigos_ipv4_socket_address { uint16_t family; uint16_t port_be; uint32_t address_be; } zigos_ipv4_socket_address;\n\n",
         '_Static_assert(sizeof(zigos_abi_info) == 64, "zigos_abi_info layout");\n',
         '_Static_assert(sizeof(zigos_stat) == 32, "zigos_stat layout");\n',
         '_Static_assert(sizeof(zigos_file_times) == 32, "zigos_file_times layout");\n',
@@ -361,7 +371,8 @@ def generate_c(spec: dict) -> str:
         '_Static_assert(sizeof(zigos_filesystem_stat) == 64, "zigos_filesystem_stat layout");\n',
         '_Static_assert(sizeof(zigos_poll_descriptor) == 8, "zigos_poll_descriptor layout");\n',
         '_Static_assert(sizeof(zigos_directory_event) == 64, "zigos_directory_event layout");\n',
-        '_Static_assert(sizeof(zigos_iovec) == 16, "zigos_iovec layout");\n\n',
+        '_Static_assert(sizeof(zigos_iovec) == 16, "zigos_iovec layout");\n',
+        '_Static_assert(sizeof(zigos_ipv4_socket_address) == 8, "zigos_ipv4_socket_address layout");\n\n',
         "#endif /* ZIGOS_ABI_H */\n\n",
         '#ifdef __cplusplus\nextern "C" {\n#endif\n',
         "uint64_t zigos_syscall6(uint64_t number, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6);\n",
@@ -371,6 +382,11 @@ def generate_c(spec: dict) -> str:
         "int64_t zigos_readv(uint16_t fd, const zigos_iovec *vectors, size_t count);\n",
         "int64_t zigos_writev(uint16_t fd, const zigos_iovec *vectors, size_t count);\n",
         "int64_t zigos_close(uint16_t fd);\n",
+        "int64_t zigos_socket(uint16_t domain, uint16_t type, uint16_t protocol);\n",
+        "int64_t zigos_bind(uint16_t fd, const zigos_ipv4_socket_address *address);\n",
+        "int64_t zigos_connect(uint16_t fd, const zigos_ipv4_socket_address *address);\n",
+        "int64_t zigos_getsockname(uint16_t fd, zigos_ipv4_socket_address *address);\n",
+        "int64_t zigos_getpeername(uint16_t fd, zigos_ipv4_socket_address *address);\n",
         "int64_t zigos_open(const char *path, uint64_t flags, uint16_t mode);\n",
         "int64_t zigos_openat(int64_t directory_fd, const char *path, uint64_t flags, uint16_t mode);\n",
         "int64_t zigos_fstat(uint16_t fd, zigos_stat *info);\n",

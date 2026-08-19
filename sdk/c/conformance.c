@@ -71,7 +71,12 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
         abi.maximum_sockets > 4) {
         return fail(0xC3, "ABI discovery");
     }
-    if (!emit("c-sdk: ABI 1.26 discovery passed\r\n")) {
+    const uint64_t network_caps = abi.capabilities & (ZIGOS_CAP_UDP_SOCKETS | ZIGOS_CAP_TCP_SOCKETS);
+    if ((abi.maximum_sockets == 0 && network_caps != 0) ||
+        (abi.maximum_sockets != 0 && network_caps != (ZIGOS_CAP_UDP_SOCKETS | ZIGOS_CAP_TCP_SOCKETS))) {
+        return fail(0xC3, "ABI socket capabilities");
+    }
+    if (!emit("c-sdk: ABI 1.27 discovery passed\r\n")) {
         return 0xC4;
     }
 

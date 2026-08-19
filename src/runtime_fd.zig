@@ -51,6 +51,7 @@ pub const DescriptionKind = enum(u8) {
     pipe_read,
     pipe_write,
     udp_socket,
+    tcp_socket,
     directory_watch,
 };
 
@@ -174,6 +175,7 @@ pub const Report = struct {
     pipe_read_descriptions: usize,
     pipe_write_descriptions: usize,
     udp_socket_descriptions: usize,
+    tcp_socket_descriptions: usize,
     directory_watch_descriptions: usize,
     pipes: usize,
     duplicated_descriptors: u64,
@@ -464,7 +466,7 @@ pub const System = struct {
         writable: bool,
         close_on_exec: bool,
     ) Error!u16 {
-        if (kind != .udp_socket or resource.index == invalid_resource or resource.generation == 0) return Error.InvalidOperation;
+        if ((kind != .udp_socket and kind != .tcp_socket) or resource.index == invalid_resource or resource.generation == 0) return Error.InvalidOperation;
         const process = try processes.get(process_handle);
         const namespace_slot = try self.resolveNamespace(process_handle);
         try self.requireDescriptorCapacity(&self.namespaces[namespace_slot], process, 1);
@@ -748,7 +750,7 @@ pub const System = struct {
                     },
                 };
             },
-            .udp_socket => return Error.InvalidOperation,
+            .udp_socket, .tcp_socket => return Error.InvalidOperation,
             .vfs => {
                 const count = if (access_tick) |tick|
                     try vfs.readOpenAtTick(description.vfs_owner, description.vfs_handle, output, tick)
@@ -830,7 +832,7 @@ pub const System = struct {
                 self.bytes_written +%= bytes.len;
                 return .{ .status = .complete, .count = bytes.len };
             },
-            .udp_socket, .directory_watch => return Error.InvalidOperation,
+            .udp_socket, .tcp_socket, .directory_watch => return Error.InvalidOperation,
             .vfs => {
                 const count = try vfs.writeOpen(description.vfs_owner, description.vfs_handle, bytes, tick);
                 self.bytes_written +%= count;
@@ -1058,7 +1060,7 @@ pub const System = struct {
                 };
             },
             .vfs => statFromVfs(try vfs.statOpen(description.vfs_owner, description.vfs_handle)),
-            .udp_socket => .{
+            .udp_socket, .tcp_socket => .{
                 .node = std.math.maxInt(u32) - @as(u32, description.resource_index),
                 .generation = @truncate(description.resource_generation),
                 .kind = @intFromEnum(runtime_vfs.Kind.pseudo),
@@ -1146,7 +1148,7 @@ pub const System = struct {
                 };
                 if (event_ready) ready |= runtime_abi.poll_readable;
             },
-            .udp_socket => {
+            .udp_socket, .tcp_socket => {
                 const poll_fn = self.external_poll orelse return Error.InvalidOperation;
                 ready |= poll_fn(self.external_context, description.resource_index, description.resource_generation, requested);
             },
@@ -1311,7 +1313,7 @@ pub const System = struct {
                     resource_id = (@as(u64, description.watch_generation) << 32) | description.watch_node;
                     offset_or_buffered = @intCast(description.watch_cursor);
                 },
-                .udp_socket => {
+                .udp_socket, .tcp_socket => {
                     resource_id = (@as(u64, description.resource_generation) << 16) | description.resource_index;
                 },
                 .pipe_read, .pipe_write => {
@@ -1346,6 +1348,7 @@ pub const System = struct {
             .pipe_read_descriptions = 0,
             .pipe_write_descriptions = 0,
             .udp_socket_descriptions = 0,
+            .tcp_socket_descriptions = 0,
             .directory_watch_descriptions = 0,
             .pipes = 0,
             .duplicated_descriptors = self.duplicated_descriptors,
@@ -1376,6 +1379,7 @@ pub const System = struct {
                 .pipe_read => result.pipe_read_descriptions += 1,
                 .pipe_write => result.pipe_write_descriptions += 1,
                 .udp_socket => result.udp_socket_descriptions += 1,
+                .tcp_socket => result.tcp_socket_descriptions += 1,
                 .directory_watch => result.directory_watch_descriptions += 1,
             }
         }
@@ -1456,7 +1460,7 @@ pub const System = struct {
                     const current = vfs.directoryEventCursor(description.watch_node, description.watch_generation) catch return false;
                     if (description.watch_cursor > current) return false;
                 },
-                .udp_socket => {
+                .udp_socket, .tcp_socket => {
                     if (description.resource_index == invalid_resource or description.resource_generation == 0) return false;
                 },
                 .pipe_read, .pipe_write => {
@@ -1577,7 +1581,7 @@ pub const System = struct {
         if (description.references == 1) switch (description.kind) {
             .terminal => if (description.vfs_handle != 0) try vfs.close(description.vfs_owner, description.vfs_handle),
             .vfs => try vfs.close(description.vfs_owner, description.vfs_handle),
-            .udp_socket => {
+            .udp_socket, .tcp_socket => {
                 const close_fn = self.external_close orelse return Error.InvalidOperation;
                 if (!close_fn(self.external_context, description.resource_index, description.resource_generation)) return Error.CorruptState;
             },
@@ -1589,7 +1593,7 @@ pub const System = struct {
         if (self.open_descriptions[open_index].references != 0) return;
 
         switch (description.kind) {
-            .terminal, .vfs, .udp_socket, .directory_watch => {},
+            .terminal, .vfs, .udp_socket, .tcp_socket, .directory_watch => {},
             .pipe_read => {
                 const pipe_index = try self.resolvePipe(description);
                 if (self.pipes[pipe_index].readers == 0) return Error.CorruptState;
@@ -1717,7 +1721,10 @@ fn socketDescriptionCount(self: *const System, namespace: *const Namespace) usiz
     for (namespace.descriptors) |descriptor| {
         if (!descriptor.used or descriptor.open_index >= self.open_descriptions.len or seen[descriptor.open_index]) continue;
         seen[descriptor.open_index] = true;
-        if (self.open_descriptions[descriptor.open_index].used and self.open_descriptions[descriptor.open_index].kind == .udp_socket) count += 1;
+        if (self.open_descriptions[descriptor.open_index].used) {
+            const kind = self.open_descriptions[descriptor.open_index].kind;
+            if (kind == .udp_socket or kind == .tcp_socket) count += 1;
+        }
     }
     return count;
 }

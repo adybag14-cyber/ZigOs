@@ -11,6 +11,8 @@ const runtime_process = @import("runtime_process.zig");
 const runtime_page_pool = @import("runtime_page_pool.zig");
 const runtime_vfs = @import("runtime_vfs.zig");
 const serial = @import("serial.zig");
+const tcp = @import("tcp.zig");
+const tcp_connection = @import("tcp_connection.zig");
 
 const cc = std.os.uefi.cc;
 const page_bytes: usize = @intCast(memory.page_size);
@@ -23,6 +25,15 @@ const maximum_io_bytes: usize = 1024;
 const maximum_directory_batch: usize = maximum_io_bytes / @sizeOf(runtime_abi.DirectoryEntry);
 const maximum_poll_descriptors: usize = maximum_io_bytes / @sizeOf(runtime_abi.PollDescriptor);
 const maximum_socket_slots: usize = 8;
+const tcp_ephemeral_port_first: u16 = 49_152;
+const tcp_ephemeral_port_last: u16 = 65_535;
+const tcp_ephemeral_port_count: u32 = @as(u32, tcp_ephemeral_port_last) - tcp_ephemeral_port_first + 1;
+const tcp_receive_window: u16 = 32_768;
+const tcp_retransmission_policy = tcp_connection.RetransmissionPolicy{
+    .initial_timeout_ticks = 10,
+    .maximum_timeout_ticks = 40,
+    .maximum_retries = 3,
+};
 const stack_pages: usize = 8;
 const user_base: usize = 0x0000_0080_0000_0000;
 const user_window_bytes: usize = 1024 * 1024 * 1024;
@@ -121,10 +132,34 @@ const PageTable = struct {
     physical_address: usize = 0,
 };
 
+const SocketProtocol = enum(u8) {
+    udp,
+    tcp,
+};
+
+const TcpConnectStatus = enum(u8) {
+    connecting,
+    established,
+    refused,
+    timed_out,
+    io_failed,
+};
+
+const TcpSocketState = struct {
+    local_port: u16,
+    peer_ipv4: [4]u8,
+    peer_mac: [6]u8,
+    peer_port: u16,
+    control: tcp_connection.ControlBlock,
+    status: TcpConnectStatus = .connecting,
+};
+
 const SocketSlot = struct {
     used: bool = false,
     generation: u32 = 0,
-    socket: ?e1000e.UdpSocket = null,
+    protocol: SocketProtocol = .udp,
+    udp: ?e1000e.UdpSocket = null,
+    tcp: ?TcpSocketState = null,
     nonblocking: bool = false,
 };
 
@@ -176,6 +211,7 @@ var descriptor_pointer: ?*runtime_fd.System = null;
 var page_pool: runtime_page_pool.Pool = .{};
 var contexts: [maximum_contexts]Context = @splat(.{});
 var socket_slots: [maximum_socket_slots]SocketSlot = @splat(.{});
+var next_tcp_ephemeral_port: u16 = tcp_ephemeral_port_first;
 var baseline_fx: interrupt_context.FxState align(16) = std.mem.zeroes(interrupt_context.FxState);
 var current_context: ?usize = null;
 var user_active = false;
@@ -237,6 +273,7 @@ pub fn initialize(
     @memset(std.mem.asBytes(&contexts), 0);
     for (0..contexts.len) |index| initializeContextDefaults(&contexts[index]);
     socket_slots = @splat(.{});
+    next_tcp_ephemeral_port = tcp_ephemeral_port_first;
     descriptors.setExternalBackend(null, closeExternalSocket, pollExternalSocket);
     zigos_fxsave(&baseline_fx);
     current_context = null;
@@ -640,7 +677,7 @@ pub fn handleSyscall(
         syscall.syscall_poll => return syscallPoll(context, frame),
         syscall.syscall_socket => return syscallSocket(context, frame),
         syscall.syscall_bind => return syscallBind(context, frame),
-        syscall.syscall_connect => return syscallConnect(context, frame),
+        syscall.syscall_connect => return syscallConnect(context, frame, fx_state),
         syscall.syscall_send => return syscallSend(context, frame),
         syscall.syscall_recv => return syscallRecv(context, frame, fx_state),
         syscall.syscall_getsockname => return syscallGetSockName(context, frame),
@@ -1326,22 +1363,31 @@ fn syscallChdir(context: *Context, frame: *interrupt_context.Frame) u64 {
 }
 
 fn syscallSocket(context: *Context, frame: *interrupt_context.Frame) u64 {
-    if (frame.rdi != runtime_abi.address_family_ipv4 or frame.rsi != runtime_abi.socket_datagram or
-        (frame.rdx != 0 and frame.rdx != runtime_abi.protocol_udp) or e1000e.activeDevice() == null)
-    {
+    if (frame.rdi != runtime_abi.address_family_ipv4 or e1000e.activeDevice() == null) {
         frame.rax = reject(runtime_abi.errno_connection_refused);
         return 0;
     }
+    const protocol: SocketProtocol = if (frame.rsi == runtime_abi.socket_datagram and
+        (frame.rdx == 0 or frame.rdx == runtime_abi.protocol_udp))
+        .udp
+    else if (frame.rsi == runtime_abi.socket_stream and
+        (frame.rdx == 0 or frame.rdx == runtime_abi.protocol_tcp))
+        .tcp
+    else {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
     const slot_index = findFreeSocketSlot() orelse {
         frame.rax = reject(runtime_abi.errno_system_file_limit);
         return 0;
     };
     const generation = nextSocketGeneration(socket_slots[slot_index].generation);
-    socket_slots[slot_index] = .{ .used = true, .generation = generation };
+    socket_slots[slot_index] = .{ .used = true, .generation = generation, .protocol = protocol };
+    const description_kind: runtime_fd.DescriptionKind = if (protocol == .udp) .udp_socket else .tcp_socket;
     const fd = activeDescriptors().createExternalDescriptor(
         activeProcesses(),
         context.handle,
-        .udp_socket,
+        description_kind,
         .{ .index = @intCast(slot_index), .generation = generation },
         true,
         true,
@@ -1368,7 +1414,11 @@ fn syscallBind(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    if (slot.socket != null) {
+    if (slot.protocol != .udp) {
+        frame.rax = reject(errno_no_syscall);
+        return 0;
+    }
+    if (slot.udp != null) {
         frame.rax = reject(runtime_abi.errno_busy);
         return 0;
     }
@@ -1382,8 +1432,8 @@ fn syscallBind(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     }
     const port = @byteSwap(address.port_be);
-    slot.socket = if (port == 0) e1000e.openEphemeralUdpSocket(device) else e1000e.openUdpSocket(device, port);
-    if (slot.socket == null) {
+    slot.udp = if (port == 0) e1000e.openEphemeralUdpSocket(device) else e1000e.openUdpSocket(device, port);
+    if (slot.udp == null) {
         frame.rax = reject(runtime_abi.errno_address_in_use);
         return 0;
     }
@@ -1391,7 +1441,11 @@ fn syscallBind(context: *Context, frame: *interrupt_context.Frame) u64 {
     return 0;
 }
 
-fn syscallConnect(context: *Context, frame: *interrupt_context.Frame) u64 {
+fn syscallConnect(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
     const fd = runtime_abi.descriptor(frame.rdi) orelse {
         frame.rax = reject(errno_bad_fd);
         return 0;
@@ -1408,21 +1462,98 @@ fn syscallConnect(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.errno_connection_refused);
         return 0;
     };
-    const peer = udpPeerForAddress(device, address) orelse {
+    if (slot.protocol == .udp) {
+        const peer = udpPeerForAddress(device, address) orelse {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        };
+        if (slot.udp == null) slot.udp = e1000e.openEphemeralUdpSocket(device);
+        const socket = slot.udp orelse {
+            frame.rax = reject(runtime_abi.errno_no_space);
+            return 0;
+        };
+        if (!e1000e.connectUdpSocket(device, socket, peer)) {
+            frame.rax = reject(runtime_abi.errno_connection_refused);
+            return 0;
+        }
+        frame.rax = 0;
+        return 0;
+    }
+
+    const peer = tcpPeerForAddress(device, address) orelse {
         frame.rax = reject(errno_invalid);
         return 0;
     };
-    if (slot.socket == null) slot.socket = e1000e.openEphemeralUdpSocket(device);
-    const socket = slot.socket orelse {
-        frame.rax = reject(runtime_abi.errno_no_space);
-        return 0;
-    };
-    if (!e1000e.connectUdpSocket(device, socket, peer)) {
-        frame.rax = reject(runtime_abi.errno_connection_refused);
+    if (slot.tcp == null) {
+        if (!runtimeNetworkReady(device)) {
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        }
+        const local_port = allocateTcpEphemeralPort() orelse {
+            frame.rax = reject(runtime_abi.errno_address_in_use);
+            return 0;
+        };
+        var control = tcp_connection.init(tcp_receive_window) orelse {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        };
+        const slot_index: usize = @intFromPtr(slot) - @intFromPtr(&socket_slots[0]);
+        const index = slot_index / @sizeOf(SocketSlot);
+        const initial_sequence = tcpInitialSequence(@intCast(index), slot.generation);
+        const transition = tcp_connection.beginActiveOpenAt(&control, initial_sequence, current_tick, tcp_retransmission_policy);
+        const outbound = transition.outbound orelse {
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        };
+        var connection = TcpSocketState{
+            .local_port = local_port,
+            .peer_ipv4 = peer.ipv4,
+            .peer_mac = peer.mac,
+            .peer_port = peer.port,
+            .control = control,
+        };
+        if (!sendTcpControl(device, &connection, outbound)) {
+            connection.status = .io_failed;
+            slot.tcp = connection;
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        }
+        slot.tcp = connection;
+    }
+
+    const connection = &slot.tcp.?;
+    if (!tcpPeerMatches(connection, peer)) {
+        frame.rax = reject(runtime_abi.errno_busy);
         return 0;
     }
-    frame.rax = 0;
-    return 0;
+    switch (connection.status) {
+        .established => {
+            frame.rax = 0;
+            return 0;
+        },
+        .refused => {
+            frame.rax = reject(runtime_abi.errno_connection_refused);
+            return 0;
+        },
+        .timed_out, .io_failed => {
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        },
+        .connecting => {},
+    }
+    if (slot.nonblocking) {
+        frame.rax = reject(errno_would_block);
+        return 0;
+    }
+    const resource = socketResourceForSlot(slot) orelse {
+        frame.rax = reject(runtime_abi.errno_not_socket);
+        return 0;
+    };
+    activeProcesses().block(context.handle, .socket_write, socketWaitKey(resource.index, resource.generation)) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    return blockAndRetry(context, frame, fx_state);
 }
 
 fn syscallSend(context: *Context, frame: *interrupt_context.Frame) u64 {
@@ -1451,7 +1582,11 @@ fn syscallSend(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const socket = slot.socket orelse {
+    if (slot.protocol != .udp) {
+        frame.rax = reject(errno_no_syscall);
+        return 0;
+    }
+    const socket = slot.udp orelse {
         frame.rax = reject(runtime_abi.errno_not_connected);
         return 0;
     };
@@ -1501,6 +1636,10 @@ fn syscallSendTo(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
+    if (slot.protocol != .udp) {
+        frame.rax = reject(errno_no_syscall);
+        return 0;
+    }
     const device = e1000e.activeDevice() orelse {
         frame.rax = reject(runtime_abi.errno_connection_refused);
         return 0;
@@ -1509,8 +1648,8 @@ fn syscallSendTo(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     };
-    if (slot.socket == null) slot.socket = e1000e.openEphemeralUdpSocket(device);
-    const socket = slot.socket orelse {
+    if (slot.udp == null) slot.udp = e1000e.openEphemeralUdpSocket(device);
+    const socket = slot.udp orelse {
         frame.rax = reject(runtime_abi.errno_no_space);
         return 0;
     };
@@ -1575,7 +1714,7 @@ fn syscallReceiveDatagram(
         frame.rax = reject(runtime_abi.errno_not_socket);
         return 0;
     };
-    const socket = slot.socket orelse {
+    const socket = slot.udp orelse {
         frame.rax = reject(runtime_abi.errno_not_connected);
         return 0;
     };
@@ -1616,15 +1755,24 @@ fn syscallGetSockName(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const socket = slot.socket orelse {
-        frame.rax = reject(runtime_abi.errno_not_connected);
-        return 0;
-    };
     const device = e1000e.activeDevice() orelse {
         frame.rax = reject(runtime_abi.errno_connection_refused);
         return 0;
     };
-    if (!writeSocketAddress(context, frame.rsi, frame.rdx, device.local_ipv4, socket.local_port)) {
+    const port = if (slot.protocol == .udp) blk: {
+        const socket = slot.udp orelse {
+            frame.rax = reject(runtime_abi.errno_not_connected);
+            return 0;
+        };
+        break :blk socket.local_port;
+    } else blk: {
+        const connection = slot.tcp orelse {
+            frame.rax = reject(runtime_abi.errno_not_connected);
+            return 0;
+        };
+        break :blk connection.local_port;
+    };
+    if (!writeSocketAddress(context, frame.rsi, frame.rdx, device.local_ipv4, port)) {
         frame.rax = reject(errno_fault);
         return 0;
     }
@@ -1641,19 +1789,36 @@ fn syscallGetPeerName(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    const socket = slot.socket orelse {
-        frame.rax = reject(runtime_abi.errno_not_connected);
-        return 0;
-    };
-    const device = e1000e.activeDevice() orelse {
-        frame.rax = reject(runtime_abi.errno_connection_refused);
-        return 0;
-    };
-    const peer = e1000e.udpSocketPeer(device, socket) orelse {
-        frame.rax = reject(runtime_abi.errno_not_connected);
-        return 0;
-    };
-    if (!writeSocketAddress(context, frame.rsi, frame.rdx, peer.ipv4, peer.port)) {
+    var ipv4: [4]u8 = undefined;
+    var port: u16 = 0;
+    if (slot.protocol == .udp) {
+        const socket = slot.udp orelse {
+            frame.rax = reject(runtime_abi.errno_not_connected);
+            return 0;
+        };
+        const device = e1000e.activeDevice() orelse {
+            frame.rax = reject(runtime_abi.errno_connection_refused);
+            return 0;
+        };
+        const peer = e1000e.udpSocketPeer(device, socket) orelse {
+            frame.rax = reject(runtime_abi.errno_not_connected);
+            return 0;
+        };
+        ipv4 = peer.ipv4;
+        port = peer.port;
+    } else {
+        const connection = slot.tcp orelse {
+            frame.rax = reject(runtime_abi.errno_not_connected);
+            return 0;
+        };
+        if (connection.status != .established) {
+            frame.rax = reject(runtime_abi.errno_not_connected);
+            return 0;
+        }
+        ipv4 = connection.peer_ipv4;
+        port = connection.peer_port;
+    }
+    if (!writeSocketAddress(context, frame.rsi, frame.rdx, ipv4, port)) {
         frame.rax = reject(errno_fault);
         return 0;
     }
@@ -1686,10 +1851,10 @@ fn runtimeNetworkReady(device: *e1000e.Device) bool {
 pub fn serviceNetwork() usize {
     const device = e1000e.activeDevice() orelse return 0;
     _ = e1000e.serviceUdpSockets(device, 8);
-    var wakeups: usize = 0;
+    var wakeups = serviceTcpConnects(device, current_tick);
     for (socket_slots, 0..) |slot, index| {
-        if (!slot.used) continue;
-        const socket = slot.socket orelse continue;
+        if (!slot.used or slot.protocol != .udp) continue;
+        const socket = slot.udp orelse continue;
         if (e1000e.udpSocketReadable(device, socket)) {
             wakeups += activeProcesses().wakeMatching(.socket_read, socketWaitKey(@intCast(index), slot.generation), true);
         }
@@ -1763,15 +1928,28 @@ fn resolveSocketSlot(index: u16, generation: u32) ?*SocketSlot {
 }
 
 fn socketSlotForDescriptor(handle: u64, fd: u16) !*SocketSlot {
-    const resource = try activeDescriptors().externalResource(activeProcesses(), handle, fd, .udp_socket);
-    return resolveSocketSlot(resource.index, resource.generation) orelse error.NotSocket;
+    const kind = try activeDescriptors().descriptorKind(activeProcesses(), handle, fd);
+    if (kind != .udp_socket and kind != .tcp_socket) return error.NotSocket;
+    const resource = try activeDescriptors().externalResource(activeProcesses(), handle, fd, kind);
+    const slot = resolveSocketSlot(resource.index, resource.generation) orelse return error.NotSocket;
+    if ((kind == .udp_socket) != (slot.protocol == .udp)) return error.NotSocket;
+    return slot;
+}
+
+fn socketResourceForSlot(slot: *const SocketSlot) ?runtime_fd.ExternalResource {
+    for (&socket_slots, 0..) |*candidate, index| {
+        if (candidate == slot) return .{ .index = @intCast(index), .generation = slot.generation };
+    }
+    return null;
 }
 
 fn closeExternalSocket(_: ?*anyopaque, index: u16, generation: u32) bool {
     const slot = resolveSocketSlot(index, generation) orelse return false;
-    if (slot.socket) |socket| {
-        const device = e1000e.activeDevice() orelse return false;
-        _ = e1000e.closeUdpSocketDiscarding(device, socket) orelse return false;
+    if (slot.protocol == .udp) {
+        if (slot.udp) |socket| {
+            const device = e1000e.activeDevice() orelse return false;
+            _ = e1000e.closeUdpSocketDiscarding(device, socket) orelse return false;
+        }
     }
     slot.* = .{ .generation = generation };
     return true;
@@ -1780,11 +1958,149 @@ fn closeExternalSocket(_: ?*anyopaque, index: u16, generation: u32) bool {
 fn pollExternalSocket(_: ?*anyopaque, index: u16, generation: u32, requested: u16) u16 {
     const slot = resolveSocketSlot(index, generation) orelse return runtime_abi.poll_error | runtime_abi.poll_hangup;
     const device = e1000e.activeDevice() orelse return runtime_abi.poll_error | runtime_abi.poll_hangup;
-    var ready: u16 = runtime_abi.poll_writable;
-    if (slot.socket) |socket| {
-        if (e1000e.udpSocketReadable(device, socket)) ready |= runtime_abi.poll_readable;
+    var ready: u16 = 0;
+    if (slot.protocol == .udp) {
+        ready |= runtime_abi.poll_writable;
+        if (slot.udp) |socket| {
+            if (e1000e.udpSocketReadable(device, socket)) ready |= runtime_abi.poll_readable;
+        }
+    } else if (slot.tcp) |connection| {
+        ready |= switch (connection.status) {
+            .connecting => 0,
+            .established => runtime_abi.poll_writable,
+            .refused, .timed_out, .io_failed => runtime_abi.poll_error | runtime_abi.poll_hangup,
+        };
+    } else {
+        ready |= runtime_abi.poll_writable;
     }
     return ready & requested;
+}
+
+const TcpPeer = struct {
+    mac: [6]u8,
+    ipv4: [4]u8,
+    port: u16,
+};
+
+fn tcpPeerForAddress(device: *const e1000e.Device, address: runtime_abi.Ipv4SocketAddress) ?TcpPeer {
+    const port = @byteSwap(address.port_be);
+    const ipv4 = socketAddressBytes(&address).*;
+    if (port == 0 or allZero(&ipv4)) return null;
+    return .{
+        .mac = if (std.mem.eql(u8, &ipv4, &device.local_ipv4)) device.local_mac else device.gateway_mac,
+        .ipv4 = ipv4,
+        .port = port,
+    };
+}
+
+fn tcpPeerMatches(connection: *const TcpSocketState, peer: TcpPeer) bool {
+    return connection.peer_port == peer.port and std.mem.eql(u8, &connection.peer_ipv4, &peer.ipv4);
+}
+
+fn tcpPortInUse(port: u16) bool {
+    for (socket_slots) |slot| {
+        if (!slot.used or slot.protocol != .tcp) continue;
+        const connection = slot.tcp orelse continue;
+        if (connection.local_port == port) return true;
+    }
+    return false;
+}
+
+fn nextTcpEphemeralPort(port: u16) u16 {
+    return if (port >= tcp_ephemeral_port_last) tcp_ephemeral_port_first else port + 1;
+}
+
+fn allocateTcpEphemeralPort() ?u16 {
+    var candidate = next_tcp_ephemeral_port;
+    if (candidate < tcp_ephemeral_port_first) candidate = tcp_ephemeral_port_first;
+    var attempts: u32 = 0;
+    while (attempts < tcp_ephemeral_port_count) : (attempts += 1) {
+        if (!tcpPortInUse(candidate)) {
+            next_tcp_ephemeral_port = nextTcpEphemeralPort(candidate);
+            return candidate;
+        }
+        candidate = nextTcpEphemeralPort(candidate);
+    }
+    return null;
+}
+
+fn tcpInitialSequence(index: u16, generation: u32) u32 {
+    var value = @as(u32, @truncate(current_tick)) ^ (generation *% 0x9E37_79B9) ^ (@as(u32, index + 1) << 16) ^ 0x5A49_0001;
+    if (value == 0) value = 1;
+    return value;
+}
+
+fn sendTcpControl(device: *e1000e.Device, connection: *const TcpSocketState, outbound: tcp_connection.OutboundSegment) bool {
+    return e1000e.sendTcpSegment(device, .{
+        .destination_mac = connection.peer_mac,
+        .destination_ipv4 = connection.peer_ipv4,
+        .source_port = connection.local_port,
+        .destination_port = connection.peer_port,
+        .sequence_number = outbound.sequence_number,
+        .acknowledgement_number = outbound.acknowledgement_number,
+        .flags = outbound.flags,
+        .window_size = outbound.window_size,
+    }) != null;
+}
+
+fn serviceTcpConnects(device: *e1000e.Device, tick: u64) usize {
+    var wakeups: usize = 0;
+    var examined: u8 = 0;
+    while (examined < 8) : (examined += 1) {
+        const packet = e1000e.dequeueTcpPacket(device) orelse break;
+        const length: usize = packet.length;
+        const segment = tcp.parseFrame(packet.bytes[0..length], .{
+            .destination_mac = device.local_mac,
+            .destination_ipv4 = device.local_ipv4,
+        }) orelse continue;
+        for (&socket_slots, 0..) |*slot, index| {
+            if (!slot.used or slot.protocol != .tcp) continue;
+            const connection = if (slot.tcp) |*value| value else continue;
+            if (connection.status != .connecting or connection.local_port != segment.destination_port or
+                connection.peer_port != segment.source_port or !std.mem.eql(u8, &connection.peer_ipv4, &segment.source_ipv4) or
+                !std.mem.eql(u8, &connection.peer_mac, &segment.source_mac)) continue;
+            const transition = tcp_connection.handleSegment(&connection.control, .{
+                .sequence_number = segment.sequence_number,
+                .acknowledgement_number = segment.acknowledgement_number,
+                .flags = segment.flags,
+                .window_size = segment.window_size,
+                .payload_length = @intCast(segment.payload.len),
+            });
+            if (!transition.accepted) break;
+            if (transition.outbound) |outbound| {
+                if (!sendTcpControl(device, connection, outbound)) connection.status = .io_failed;
+            }
+            if (connection.status != .io_failed) {
+                connection.status = switch (transition.state) {
+                    .established => .established,
+                    .reset => .refused,
+                    .timed_out => .timed_out,
+                    else => .connecting,
+                };
+            }
+            if (connection.status != .connecting) {
+                wakeups += activeProcesses().wakeMatching(.socket_write, socketWaitKey(@intCast(index), slot.generation), true);
+            }
+            break;
+        }
+    }
+    for (&socket_slots, 0..) |*slot, index| {
+        if (!slot.used or slot.protocol != .tcp) continue;
+        const connection = if (slot.tcp) |*value| value else continue;
+        if (connection.status != .connecting) continue;
+        const timer = tcp_connection.onTimer(&connection.control, tick);
+        switch (timer.action) {
+            .none => {},
+            .retransmit_syn => if (timer.outbound) |outbound| {
+                if (!sendTcpControl(device, connection, outbound)) connection.status = .io_failed;
+            },
+            .timed_out => connection.status = .timed_out,
+        }
+        if (connection.status != .connecting) {
+            wakeups += activeProcesses().wakeMatching(.socket_write, socketWaitKey(@intCast(index), slot.generation), true);
+        }
+    }
+    return wakeups;
 }
 
 fn socketWaitKey(index: u16, generation: u32) u64 {
@@ -1916,7 +2232,7 @@ fn availableCapabilities() u64 {
         syscall.capability_virtual_memory |
         syscall.capability_terminal |
         syscall.capability_pseudo_files;
-    if (e1000e.activeDevice() != null) capabilities |= syscall.capability_udp_sockets;
+    if (e1000e.activeDevice() != null) capabilities |= syscall.capability_udp_sockets | syscall.capability_tcp_sockets;
     if (persistent_storage_capability) capabilities |= syscall.capability_persistent_storage;
     if (normal_boot_capability) capabilities |= syscall.capability_normal_boot;
     return capabilities;

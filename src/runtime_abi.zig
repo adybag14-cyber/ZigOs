@@ -80,7 +80,9 @@ pub const poll_error: u16 = 1 << 2;
 pub const poll_hangup: u16 = 1 << 3;
 
 pub const address_family_ipv4: u16 = 2;
+pub const socket_stream: u16 = 1;
 pub const socket_datagram: u16 = 2;
+pub const protocol_tcp: u16 = 6;
 pub const protocol_udp: u16 = 17;
 
 pub const AbiInfo = extern struct {
