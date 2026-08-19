@@ -216,6 +216,25 @@ pub fn build(b: *std.Build) void {
     userspace_fsck.setLinkerScript(b.path("sdk/zig/linker.ld"));
     userspace_fsck.step.dependOn(&assets.step);
 
+    const uname_module = b.createModule(.{
+        .root_source_file = b.path("sdk/zig/uname.zig"),
+        .target = sdk_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+        .code_model = .large,
+        .pic = false,
+        .stack_protector = false,
+        .stack_check = false,
+    });
+    uname_module.addObjectFile(b.path("build/sdk/syscall.o"));
+    const userspace_uname = b.addExecutable(.{
+        .name = "uname",
+        .root_module = uname_module,
+    });
+    userspace_uname.entry = .{ .symbol_name = "_start" };
+    userspace_uname.setLinkerScript(b.path("sdk/zig/linker.ld"));
+    userspace_uname.step.dependOn(&assets.step);
+
     const ps_module = b.createModule(.{
         .root_source_file = b.path("sdk/zig/ps.zig"),
         .target = sdk_target,
@@ -572,6 +591,7 @@ pub fn build(b: *std.Build) void {
     _ = sdk_embed.addCopyFile(userspace_mount.getEmittedBin(), "mount.elf");
     _ = sdk_embed.addCopyFile(userspace_df.getEmittedBin(), "df.elf");
     _ = sdk_embed.addCopyFile(userspace_fsck.getEmittedBin(), "fsck.elf");
+    _ = sdk_embed.addCopyFile(userspace_uname.getEmittedBin(), "uname.elf");
     _ = sdk_embed.addCopyFile(userspace_ps.getEmittedBin(), "ps.elf");
     _ = sdk_embed.addCopyFile(userspace_hexdump.getEmittedBin(), "hexdump.elf");
     _ = sdk_embed.addCopyFile(userspace_head.getEmittedBin(), "head.elf");
@@ -601,6 +621,7 @@ pub fn build(b: *std.Build) void {
             "pub const mount = @embedFile(\"mount.elf\");\n" ++
             "pub const df = @embedFile(\"df.elf\");\n" ++
             "pub const fsck = @embedFile(\"fsck.elf\");\n" ++
+            "pub const uname = @embedFile(\"uname.elf\");\n" ++
             "pub const ps = @embedFile(\"ps.elf\");\n" ++
             "pub const hexdump = @embedFile(\"hexdump.elf\");\n" ++
             "pub const head = @embedFile(\"head.elf\");\n" ++
@@ -705,6 +726,10 @@ pub fn build(b: *std.Build) void {
         userspace_fsck.getEmittedBin(),
         "artifacts/fsck.elf",
     );
+    const install_uname = b.addInstallFile(
+        userspace_uname.getEmittedBin(),
+        "artifacts/uname.elf",
+    );
     const install_ps = b.addInstallFile(
         userspace_ps.getEmittedBin(),
         "artifacts/ps.elf",
@@ -801,6 +826,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_mount.step);
     b.getInstallStep().dependOn(&install_df.step);
     b.getInstallStep().dependOn(&install_fsck.step);
+    b.getInstallStep().dependOn(&install_uname.step);
     b.getInstallStep().dependOn(&install_ps.step);
     b.getInstallStep().dependOn(&install_hexdump.step);
     b.getInstallStep().dependOn(&install_head.step);
@@ -840,6 +866,8 @@ pub fn build(b: *std.Build) void {
     verify_df.addFileArg(userspace_df.getEmittedBin());
     const verify_fsck = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_fsck.addFileArg(userspace_fsck.getEmittedBin());
+    const verify_uname = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
+    verify_uname.addFileArg(userspace_uname.getEmittedBin());
     const verify_ps = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_ps.addFileArg(userspace_ps.getEmittedBin());
     const verify_hexdump = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
@@ -942,6 +970,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&verify_mount.step);
     check_step.dependOn(&verify_df.step);
     check_step.dependOn(&verify_fsck.step);
+    check_step.dependOn(&verify_uname.step);
     check_step.dependOn(&verify_ps.step);
     check_step.dependOn(&verify_hexdump.step);
     check_step.dependOn(&verify_head.step);
