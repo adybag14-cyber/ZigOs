@@ -1,7 +1,7 @@
 const std = @import("std");
 const synchronization = @import("synchronization.zig");
 
-pub const maximum_nodes: usize = 96;
+pub const maximum_nodes: usize = 128;
 pub const maximum_dentries: usize = maximum_nodes * 2;
 pub const maximum_dentry_cache_entries: usize = 16;
 pub const maximum_file_page_cache_entries: usize = 16;

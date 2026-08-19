@@ -705,7 +705,7 @@ def main() -> int:
             wait_for(client, process, serial, b"type ramfs\r\n", df_start, 40)
             wait_for(client, process, serial, b"block-size 4096\r\n", df_start, 40)
             wait_for(client, process, serial, b"blocks 256\r\n", df_start, 40)
-            wait_for(client, process, serial, b"nodes 96\r\n", df_start, 40)
+            wait_for(client, process, serial, b"nodes 128\r\n", df_start, 40)
             wait_for(client, process, serial, b"mount 1\r\n", df_start, 40)
             wait_for(client, process, serial, b"flags rw shared-blocks shared-nodes\r\n", df_start, 40)
             wait_for(client, process, serial, PROMPT_ROOT, df_start, 40)
@@ -756,6 +756,40 @@ def main() -> int:
             if b"G267_D=four" in env_output or b"env: " in env_output:
                 raise RuntimeError("G289 standalone env exposed rejected or malformed environment state")
             send(client, process, serial, "status", b"\r\n0\r\n")
+
+            send(client, process, serial, "write /tmp/g290-edit BASE", PROMPT_ROOT)
+            edit_start = len(serial)
+            client.sendall(b"/bin/edit.elf /tmp/g290-edit\r")
+            wait_for(client, process, serial, b"edit: 5 bytes\r\n", edit_start, 40)
+            wait_for(client, process, serial, b"edit> ", edit_start, 40)
+            edit_print = len(serial)
+            client.sendall(b"p\r")
+            wait_for(client, process, serial, b"BASE\n", edit_print, 40)
+            wait_for(client, process, serial, b"edit> ", edit_print, 40)
+            # Queue several canonical lines at once, including an exact 256-byte command.
+            # G290 must frame commands by newline rather than assuming one read() == one line.
+            edit_burst = len(serial)
+            maximum_append = b"a " + (b"X" * 254) + b"\r"
+            client.sendall(maximum_append + b"d\ra REMOVE\rd\ra FINAL\rwq\r")
+            wait_for(client, process, serial, b"edit: wrote 11 bytes\r\n", edit_burst, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, edit_burst, 40)
+            edit_output = serial[edit_start:]
+            for forbidden_edit in (
+                b"edit: error",
+                b"edit: input/output error",
+                b"edit: command too long",
+                b"edit: command must be",
+            ):
+                if forbidden_edit in edit_output:
+                    raise RuntimeError("G290 standalone editor failed bounded command framing")
+            send(client, process, serial, "status", b"\r\n0\r\n")
+            edit_cat = len(serial)
+            client.sendall(b"cat /tmp/g290-edit\r")
+            wait_for(client, process, serial, b"BASE\nFINAL\n", edit_cat, 40)
+            wait_for(client, process, serial, PROMPT_ROOT, edit_cat, 40)
+            if b"REMOVE" in serial[edit_cat:]:
+                raise RuntimeError("G290 standalone editor failed to delete the discarded line")
+            send(client, process, serial, "rm /tmp/g290-edit", PROMPT_ROOT)
 
             send(client, process, serial, "write /etc/shrc write /tmp/g271-order SYSTEM", PROMPT_ROOT)
             send(client, process, serial, "write /home/root/.shrc append /tmp/g271-order USER", PROMPT_ROOT)
@@ -831,9 +865,9 @@ def main() -> int:
                 "userspace init reaped shell PID 2 status 0",
                 "ZigOs normal userspace shutdown: init PID 1 status 0 shell PID 2 reaped yes",
                 "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes ",
-                " metadata/file/block reads 112/0/112 failures 0 clusters claimed/free/loop/cross/range 11250/4861/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
+                " metadata/file/block reads 113/0/113 failures 0 clusters claimed/free/loop/cross/range 11323/4788/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
-                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 905/905 cache-released 13 storage persistent clean yes",
+                "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 929/929 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",
             )
             forbidden = (

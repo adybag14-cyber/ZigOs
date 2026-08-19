@@ -85,7 +85,7 @@ uint32_t zigos_main(size_t argc, const uintptr_t *argv, const uintptr_t *envp, c
     if (zigos_statfs("/", &root_fs) != 0 || root_fs.filesystem_kind != ZIGOS_FS_TYPE_RAMFS ||
         root_fs.block_size != ZIGOS_PAGE_SIZE || root_fs.total_blocks != 256 ||
         root_fs.free_blocks > root_fs.total_blocks || root_fs.available_blocks != root_fs.free_blocks ||
-        root_fs.total_nodes != 96 || root_fs.free_nodes > root_fs.total_nodes || root_fs.mount_id != 1 ||
+        root_fs.total_nodes != 128 || root_fs.free_nodes > root_fs.total_nodes || root_fs.mount_id != 1 ||
         (root_fs.flags & (ZIGOS_FS_STAT_SHARED_BLOCKS | ZIGOS_FS_STAT_SHARED_NODES)) !=
             (ZIGOS_FS_STAT_SHARED_BLOCKS | ZIGOS_FS_STAT_SHARED_NODES) ||
         zigos_statfs("/dev/null", &dev_fs) != 0 || dev_fs.filesystem_kind != ZIGOS_FS_TYPE_DEVFS ||

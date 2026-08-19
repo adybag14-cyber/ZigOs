@@ -254,6 +254,25 @@ pub fn build(b: *std.Build) void {
     userspace_env.setLinkerScript(b.path("sdk/zig/linker.ld"));
     userspace_env.step.dependOn(&assets.step);
 
+    const edit_module = b.createModule(.{
+        .root_source_file = b.path("sdk/zig/edit.zig"),
+        .target = sdk_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+        .code_model = .large,
+        .pic = false,
+        .stack_protector = false,
+        .stack_check = false,
+    });
+    edit_module.addObjectFile(b.path("build/sdk/syscall.o"));
+    const userspace_edit = b.addExecutable(.{
+        .name = "edit",
+        .root_module = edit_module,
+    });
+    userspace_edit.entry = .{ .symbol_name = "_start" };
+    userspace_edit.setLinkerScript(b.path("sdk/zig/linker.ld"));
+    userspace_edit.step.dependOn(&assets.step);
+
     const ps_module = b.createModule(.{
         .root_source_file = b.path("sdk/zig/ps.zig"),
         .target = sdk_target,
@@ -612,6 +631,7 @@ pub fn build(b: *std.Build) void {
     _ = sdk_embed.addCopyFile(userspace_fsck.getEmittedBin(), "fsck.elf");
     _ = sdk_embed.addCopyFile(userspace_uname.getEmittedBin(), "uname.elf");
     _ = sdk_embed.addCopyFile(userspace_env.getEmittedBin(), "env.elf");
+    _ = sdk_embed.addCopyFile(userspace_edit.getEmittedBin(), "edit.elf");
     _ = sdk_embed.addCopyFile(userspace_ps.getEmittedBin(), "ps.elf");
     _ = sdk_embed.addCopyFile(userspace_hexdump.getEmittedBin(), "hexdump.elf");
     _ = sdk_embed.addCopyFile(userspace_head.getEmittedBin(), "head.elf");
@@ -643,6 +663,7 @@ pub fn build(b: *std.Build) void {
             "pub const fsck = @embedFile(\"fsck.elf\");\n" ++
             "pub const uname = @embedFile(\"uname.elf\");\n" ++
             "pub const env = @embedFile(\"env.elf\");\n" ++
+            "pub const edit = @embedFile(\"edit.elf\");\n" ++
             "pub const ps = @embedFile(\"ps.elf\");\n" ++
             "pub const hexdump = @embedFile(\"hexdump.elf\");\n" ++
             "pub const head = @embedFile(\"head.elf\");\n" ++
@@ -755,6 +776,10 @@ pub fn build(b: *std.Build) void {
         userspace_env.getEmittedBin(),
         "artifacts/env.elf",
     );
+    const install_edit = b.addInstallFile(
+        userspace_edit.getEmittedBin(),
+        "artifacts/edit.elf",
+    );
     const install_ps = b.addInstallFile(
         userspace_ps.getEmittedBin(),
         "artifacts/ps.elf",
@@ -853,6 +878,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_fsck.step);
     b.getInstallStep().dependOn(&install_uname.step);
     b.getInstallStep().dependOn(&install_env.step);
+    b.getInstallStep().dependOn(&install_edit.step);
     b.getInstallStep().dependOn(&install_ps.step);
     b.getInstallStep().dependOn(&install_hexdump.step);
     b.getInstallStep().dependOn(&install_head.step);
@@ -896,6 +922,8 @@ pub fn build(b: *std.Build) void {
     verify_uname.addFileArg(userspace_uname.getEmittedBin());
     const verify_env = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_env.addFileArg(userspace_env.getEmittedBin());
+    const verify_edit = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
+    verify_edit.addFileArg(userspace_edit.getEmittedBin());
     const verify_ps = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
     verify_ps.addFileArg(userspace_ps.getEmittedBin());
     const verify_hexdump = b.addSystemCommand(&.{ python, "scripts/verify-zigos-sdk-elf.py" });
@@ -1000,6 +1028,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&verify_fsck.step);
     check_step.dependOn(&verify_uname.step);
     check_step.dependOn(&verify_env.step);
+    check_step.dependOn(&verify_edit.step);
     check_step.dependOn(&verify_ps.step);
     check_step.dependOn(&verify_hexdump.step);
     check_step.dependOn(&verify_head.step);

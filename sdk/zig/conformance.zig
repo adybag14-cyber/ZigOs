@@ -109,7 +109,7 @@ fn run(auxv: [*]const zigos.AuxvEntry) zigos.Error!void {
     if (root_fs.filesystem_kind != zigos.constants.filesystem_type_ramfs or
         root_fs.block_size != zigos.constants.abi_page_size or root_fs.total_blocks != 256 or
         root_fs.free_blocks > root_fs.total_blocks or root_fs.available_blocks != root_fs.free_blocks or
-        root_fs.total_nodes != 96 or root_fs.free_nodes > root_fs.total_nodes or root_fs.mount_id != 1 or
+        root_fs.total_nodes != 128 or root_fs.free_nodes > root_fs.total_nodes or root_fs.mount_id != 1 or
         (root_fs.flags & (zigos.constants.filesystem_stat_shared_blocks | zigos.constants.filesystem_stat_shared_nodes)) !=
             (zigos.constants.filesystem_stat_shared_blocks | zigos.constants.filesystem_stat_shared_nodes) or
         (root_fs.flags & (zigos.constants.filesystem_stat_read_only | zigos.constants.filesystem_stat_synthetic)) != 0)
