@@ -501,6 +501,10 @@ pub fn connect(fd: u16, address: *const Ipv4SocketAddress) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_connect, fd, ptrValue(address), @sizeOf(Ipv4SocketAddress), 0, 0, 0));
 }
 
+pub fn listen(fd: u16, backlog: u16) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_listen, fd, backlog, 0, 0, 0, 0));
+}
+
 pub fn send(fd: u16, bytes: []const u8) Error!usize {
     return @intCast(try result(zigos_syscall6(abi.syscall_send, fd, ptrValue(bytes.ptr), bytes.len, 0, 0, 0)));
 }

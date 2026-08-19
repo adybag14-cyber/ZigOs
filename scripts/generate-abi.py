@@ -385,6 +385,7 @@ def generate_c(spec: dict) -> str:
         "int64_t zigos_socket(uint16_t domain, uint16_t type, uint16_t protocol);\n",
         "int64_t zigos_bind(uint16_t fd, const zigos_ipv4_socket_address *address);\n",
         "int64_t zigos_connect(uint16_t fd, const zigos_ipv4_socket_address *address);\n",
+        "int64_t zigos_listen(uint16_t fd, uint16_t backlog);\n",
         "int64_t zigos_getsockname(uint16_t fd, zigos_ipv4_socket_address *address);\n",
         "int64_t zigos_getpeername(uint16_t fd, zigos_ipv4_socket_address *address);\n",
         "int64_t zigos_open(const char *path, uint64_t flags, uint16_t mode);\n",

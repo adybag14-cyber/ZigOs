@@ -17,7 +17,7 @@ ORG 0
 %define RECEIVE_BUFFER  (DATA_BASE + 400)
 
 %define START_LENGTH    19
-%define PASS_LENGTH     52
+%define PASS_LENGTH     43
 %define PAYLOAD_LENGTH  8
 %define DNS_QUERY_LENGTH 27
 %define RECEIVE_CAPACITY 512
@@ -44,6 +44,93 @@ _start:
     jz .fail_abi
     cmp word [rbx + 8], 5
     jb .fail_abi
+
+    ; G301: bind a passive TCP listener. G302 remains responsible for accept.
+    mov eax, SYS_SOCKET
+    mov edi, 2                  ; AF_INET
+    mov esi, 1                  ; SOCK_STREAM
+    mov edx, 6                  ; TCP
+    int 0x80
+    test eax, eax
+    js .fail_listen_socket
+    mov r12d, eax
+
+    mov rbx, LOCAL_ADDRESS
+    mov word [rbx + 0], 2
+    mov word [rbx + 2], 0x5A98         ; network-order port 39002
+    mov dword [rbx + 4], 0             ; INADDR_ANY
+    mov eax, SYS_BIND
+    mov edi, r12d
+    mov rsi, LOCAL_ADDRESS
+    mov edx, 8
+    int 0x80
+    test eax, eax
+    jnz .fail_listen_bind
+
+    mov eax, SYS_LISTEN
+    mov edi, r12d
+    mov esi, 1                          ; bounded backlog one for live proof
+    int 0x80
+    test eax, eax
+    jnz .fail_listen_call
+
+    mov eax, SYS_GETSOCKNAME
+    mov edi, r12d
+    mov rsi, LOCAL_ADDRESS
+    mov edx, 8
+    int 0x80
+    cmp eax, 8
+    jne .fail_listen_name
+    mov rbx, LOCAL_ADDRESS
+    cmp word [rbx + 0], 2
+    jne .fail_listen_name
+    cmp word [rbx + 2], 0x5A98
+    jne .fail_listen_name
+    cmp dword [rbx + 4], 0x0F02000A   ; 10.0.2.15 bytes
+    jne .fail_listen_name
+
+    mov r14d, 500                       ; at most five seconds at 100 Hz
+.listen_poll:
+    mov rbx, POLL_BUFFER
+    mov word [rbx + 0], r12w
+    mov word [rbx + 2], 1               ; readable when a pending handshake established
+    mov word [rbx + 4], 0
+    mov word [rbx + 6], 0
+    mov eax, SYS_POLL
+    mov rdi, POLL_BUFFER
+    mov esi, 1
+    xor edx, edx
+    int 0x80
+    cmp eax, 1
+    je .listen_pending_ready
+    test eax, eax
+    jnz .fail_listen_poll
+    mov eax, SYS_SLEEP
+    mov edi, 1
+    int 0x80
+    dec r14d
+    jnz .listen_poll
+    jmp .fail_listen_poll
+
+.listen_pending_ready:
+    mov rbx, POLL_BUFFER
+    test word [rbx + 4], 1
+    jz .fail_listen_poll
+
+    ; G302 boundary: the listener itself has no connected peer before accept.
+    mov eax, SYS_GETPEERNAME
+    mov edi, r12d
+    mov rsi, SOURCE_ADDRESS
+    mov edx, 8
+    int 0x80
+    cmp rax, ERRNO_NOT_CONNECTED
+    jne .fail_listen_boundary
+
+    mov eax, SYS_CLOSE
+    mov edi, r12d
+    int 0x80
+    test eax, eax
+    jnz .fail_listen_close
 
     mov eax, SYS_SOCKET
     mov edi, 2                  ; AF_INET
@@ -380,6 +467,27 @@ _start:
     jmp .exit_failure
 .fail_tcp_close:
     mov edi, 0xC6
+    jmp .exit_failure
+.fail_listen_socket:
+    mov edi, 0xD0
+    jmp .exit_failure
+.fail_listen_bind:
+    mov edi, 0xD1
+    jmp .exit_failure
+.fail_listen_call:
+    mov edi, 0xD2
+    jmp .exit_failure
+.fail_listen_name:
+    mov edi, 0xD3
+    jmp .exit_failure
+.fail_listen_poll:
+    mov edi, 0xD5
+    jmp .exit_failure
+.fail_listen_boundary:
+    mov edi, 0xD6
+    jmp .exit_failure
+.fail_listen_close:
+    mov edi, 0xD7
     jmp .exit_failure
 .fail_pass:
     mov edi, 0xBE

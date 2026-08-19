@@ -4,6 +4,7 @@ const tcp = @import("tcp.zig");
 pub const State = enum(u8) {
     closed,
     syn_sent,
+    syn_received,
     established,
     fin_wait_1,
     fin_wait_2,
@@ -29,6 +30,7 @@ pub const RejectReason = enum(u8) {
 pub const ActionKind = enum(u8) {
     none,
     send_syn,
+    send_syn_ack,
     send_ack,
     send_fin_ack,
     connection_reset,
@@ -46,6 +48,7 @@ pub const TimerReason = enum(u8) {
 pub const TimerAction = enum(u8) {
     none,
     retransmit_syn,
+    retransmit_syn_ack,
     timed_out,
 };
 
@@ -193,6 +196,40 @@ pub fn beginActiveOpenAt(
     return transition;
 }
 
+pub fn beginPassiveOpenAt(
+    control: *ControlBlock,
+    initial_sequence: u32,
+    segment: SegmentView,
+    tick: u64,
+    policy: RetransmissionPolicy,
+) Transition {
+    const previous = control.state;
+    if (previous != .closed) return reject(previous, .invalid_state);
+    if (!policy.valid()) return reject(previous, .invalid_retransmission_policy);
+    if (segment.flags != tcp.flag_syn or segment.payload_length != 0) {
+        return reject(previous, .invalid_segment);
+    }
+
+    control.state = .syn_received;
+    control.initial_send_sequence = initial_sequence;
+    control.send_unacknowledged = initial_sequence;
+    control.send_next = initial_sequence +% 1;
+    control.receive_next = segment.sequence_number +% 1;
+    control.send_window = segment.window_size;
+    control.resets = 0;
+    control.bytes_received = 0;
+    control.fins_received = 0;
+    control.fins_sent = 0;
+    control.retransmission_policy = policy;
+    control.retransmission_active = true;
+    control.retransmission_interval = policy.initial_timeout_ticks;
+    control.retransmission_deadline = saturatingAdd(tick, policy.initial_timeout_ticks);
+    control.retransmissions = 0;
+    control.last_timer_tick = tick;
+
+    return accepted(control, previous, .send_syn_ack, makeSynAck(control));
+}
+
 pub fn beginClose(control: *ControlBlock) Transition {
     const previous = control.state;
     const next_state: State = switch (previous) {
@@ -236,6 +273,7 @@ pub fn expireTimeWait(control: *ControlBlock) Transition {
 pub fn handleSegment(control: *ControlBlock, segment: SegmentView) Transition {
     return switch (control.state) {
         .syn_sent => handleSynSent(control, segment),
+        .syn_received => handleSynReceived(control, segment),
         .established => handleEstablished(control, segment),
         .fin_wait_1 => handleFinWait1(control, segment),
         .fin_wait_2 => handleFinWait2(control, segment),
@@ -249,7 +287,7 @@ pub fn handleSegment(control: *ControlBlock, segment: SegmentView) Transition {
 pub fn onTimer(control: *ControlBlock, tick: u64) TimerResult {
     const previous_state = control.state;
     const previous_deadline = control.retransmission_deadline;
-    if (control.state != .syn_sent) {
+    if (control.state != .syn_sent and control.state != .syn_received) {
         return timerNoop(control, tick, previous_state, previous_deadline, .invalid_state);
     }
     if (!control.retransmission_active) {
@@ -288,7 +326,7 @@ pub fn onTimer(control: *ControlBlock, tick: u64) TimerResult {
     control.retransmission_deadline = saturatingAdd(tick, control.retransmission_interval);
     control.last_timer_tick = tick;
     return .{
-        .action = .retransmit_syn,
+        .action = if (previous_state == .syn_sent) .retransmit_syn else .retransmit_syn_ack,
         .previous_state = previous_state,
         .state = control.state,
         .reason = .none,
@@ -297,7 +335,7 @@ pub fn onTimer(control: *ControlBlock, tick: u64) TimerResult {
         .next_deadline = control.retransmission_deadline,
         .interval = control.retransmission_interval,
         .retransmissions = control.retransmissions,
-        .outbound = makeSyn(control),
+        .outbound = if (previous_state == .syn_sent) makeSyn(control) else makeSynAck(control),
     };
 }
 
@@ -336,6 +374,31 @@ fn handleSynSent(control: *ControlBlock, segment: SegmentView) Transition {
     control.state = .established;
     stopRetransmission(control);
     return accepted(control, previous, .send_ack, makeAck(control));
+}
+
+fn handleSynReceived(control: *ControlBlock, segment: SegmentView) Transition {
+    const previous = control.state;
+    if (segment.flags == tcp.flag_syn and segment.payload_length == 0) {
+        if (segment.sequence_number +% 1 != control.receive_next) {
+            return reject(previous, .unexpected_sequence);
+        }
+        return accepted(control, previous, .send_syn_ack, makeSynAck(control));
+    }
+    if (hasFlag(segment.flags, tcp.flag_rst)) return handleSynchronizedReset(control, segment);
+    if (segment.flags != tcp.flag_ack or segment.payload_length != 0) {
+        return reject(previous, .invalid_segment);
+    }
+    if (segment.sequence_number != control.receive_next) {
+        return reject(previous, .unexpected_sequence);
+    }
+    if (segment.acknowledgement_number != control.send_next) {
+        return reject(previous, .invalid_acknowledgement);
+    }
+    control.send_unacknowledged = segment.acknowledgement_number;
+    control.send_window = segment.window_size;
+    control.state = .established;
+    stopRetransmission(control);
+    return accepted(control, previous, .none, null);
 }
 
 fn handleEstablished(control: *ControlBlock, segment: SegmentView) Transition {
@@ -493,6 +556,15 @@ fn makeSyn(control: *const ControlBlock) OutboundSegment {
     };
 }
 
+fn makeSynAck(control: *const ControlBlock) OutboundSegment {
+    return .{
+        .sequence_number = control.initial_send_sequence,
+        .acknowledgement_number = control.receive_next,
+        .flags = tcp.flag_syn | tcp.flag_ack,
+        .window_size = control.receive_window,
+    };
+}
+
 fn makeAck(control: *const ControlBlock) OutboundSegment {
     return .{
         .sequence_number = control.send_next,
@@ -593,6 +665,48 @@ pub fn nextRetransmissionInterval(current: u64, maximum: u64) u64 {
 
 pub fn saturatingAdd(lhs: u64, rhs: u64) u64 {
     return std.math.add(u64, lhs, rhs) catch std.math.maxInt(u64);
+}
+
+test "passive open completes SYN SYN-ACK ACK and replays duplicate SYN" {
+    var control = init(32_768).?;
+    const policy = RetransmissionPolicy{ .initial_timeout_ticks = 10, .maximum_timeout_ticks = 40, .maximum_retries = 3 };
+    const syn = SegmentView{ .sequence_number = 0x1020_3040, .acknowledgement_number = 0, .flags = tcp.flag_syn, .window_size = 24_000 };
+    const opened = beginPassiveOpenAt(&control, 0x5060_7080, syn, 100, policy);
+    try std.testing.expect(opened.accepted);
+    try std.testing.expectEqual(State.syn_received, control.state);
+    try std.testing.expectEqual(ActionKind.send_syn_ack, opened.action);
+    try std.testing.expectEqual(@as(u32, 0x1020_3041), control.receive_next);
+    try std.testing.expectEqual(tcp.flag_syn | tcp.flag_ack, opened.outbound.?.flags);
+
+    const duplicate = handleSegment(&control, syn);
+    try std.testing.expect(duplicate.accepted);
+    try std.testing.expectEqual(State.syn_received, control.state);
+    try std.testing.expectEqual(ActionKind.send_syn_ack, duplicate.action);
+
+    const ack = handleSegment(&control, .{
+        .sequence_number = control.receive_next,
+        .acknowledgement_number = control.send_next,
+        .flags = tcp.flag_ack,
+        .window_size = 30_000,
+    });
+    try std.testing.expect(ack.accepted);
+    try std.testing.expectEqual(State.established, control.state);
+    try std.testing.expect(!control.retransmission_active);
+}
+
+test "passive SYN-ACK retransmission is bounded" {
+    var control = init(16_384).?;
+    const policy = RetransmissionPolicy{ .initial_timeout_ticks = 5, .maximum_timeout_ticks = 20, .maximum_retries = 2 };
+    const syn = SegmentView{ .sequence_number = 99, .acknowledgement_number = 0, .flags = tcp.flag_syn, .window_size = 4096 };
+    try std.testing.expect(beginPassiveOpenAt(&control, 1234, syn, 50, policy).accepted);
+    const first = onTimer(&control, 55);
+    try std.testing.expectEqual(TimerAction.retransmit_syn_ack, first.action);
+    try std.testing.expectEqual(tcp.flag_syn | tcp.flag_ack, first.outbound.?.flags);
+    const second = onTimer(&control, first.next_deadline);
+    try std.testing.expectEqual(TimerAction.retransmit_syn_ack, second.action);
+    const timed_out = onTimer(&control, second.next_deadline);
+    try std.testing.expectEqual(TimerAction.timed_out, timed_out.action);
+    try std.testing.expectEqual(State.timed_out, control.state);
 }
 
 comptime {

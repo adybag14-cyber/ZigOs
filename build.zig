@@ -1024,6 +1024,7 @@ pub fn build(b: *std.Build) void {
         "src/runtime_page_pool.zig",
         "src/runtime_persist.zig",
         "src/elf64.zig",
+        "src/tcp_connection.zig",
         "sdk/zig/dns.zig",
         "sdk/zig/copy_core.zig",
     }) |source_path| {

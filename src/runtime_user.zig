@@ -25,6 +25,7 @@ const maximum_io_bytes: usize = 1024;
 const maximum_directory_batch: usize = maximum_io_bytes / @sizeOf(runtime_abi.DirectoryEntry);
 const maximum_poll_descriptors: usize = maximum_io_bytes / @sizeOf(runtime_abi.PollDescriptor);
 const maximum_socket_slots: usize = 8;
+const maximum_tcp_backlog: usize = 4;
 const tcp_ephemeral_port_first: u16 = 49_152;
 const tcp_ephemeral_port_last: u16 = 65_535;
 const tcp_ephemeral_port_count: u32 = @as(u32, tcp_ephemeral_port_last) - tcp_ephemeral_port_first + 1;
@@ -154,12 +155,28 @@ const TcpSocketState = struct {
     status: TcpConnectStatus = .connecting,
 };
 
+const TcpPendingConnection = struct {
+    used: bool = false,
+    peer_ipv4: [4]u8 = @splat(0),
+    peer_mac: [6]u8 = @splat(0),
+    peer_port: u16 = 0,
+    control: ?tcp_connection.ControlBlock = null,
+};
+
+const TcpListenerState = struct {
+    local_port: u16,
+    backlog: u8,
+    pending: [maximum_tcp_backlog]TcpPendingConnection = @splat(.{}),
+};
+
 const SocketSlot = struct {
     used: bool = false,
     generation: u32 = 0,
     protocol: SocketProtocol = .udp,
     udp: ?e1000e.UdpSocket = null,
     tcp: ?TcpSocketState = null,
+    tcp_bound_port: u16 = 0,
+    listener: ?TcpListenerState = null,
     nonblocking: bool = false,
 };
 
@@ -678,6 +695,7 @@ pub fn handleSyscall(
         syscall.syscall_socket => return syscallSocket(context, frame),
         syscall.syscall_bind => return syscallBind(context, frame),
         syscall.syscall_connect => return syscallConnect(context, frame, fx_state),
+        syscall.syscall_listen => return syscallListen(context, frame),
         syscall.syscall_send => return syscallSend(context, frame),
         syscall.syscall_recv => return syscallRecv(context, frame, fx_state),
         syscall.syscall_getsockname => return syscallGetSockName(context, frame),
@@ -1414,14 +1432,6 @@ fn syscallBind(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.fromError(err));
         return 0;
     };
-    if (slot.protocol != .udp) {
-        frame.rax = reject(errno_no_syscall);
-        return 0;
-    }
-    if (slot.udp != null) {
-        frame.rax = reject(runtime_abi.errno_busy);
-        return 0;
-    }
     const device = e1000e.activeDevice() orelse {
         frame.rax = reject(runtime_abi.errno_connection_refused);
         return 0;
@@ -1431,12 +1441,72 @@ fn syscallBind(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.errno_access);
         return 0;
     }
-    const port = @byteSwap(address.port_be);
-    slot.udp = if (port == 0) e1000e.openEphemeralUdpSocket(device) else e1000e.openUdpSocket(device, port);
-    if (slot.udp == null) {
-        frame.rax = reject(runtime_abi.errno_address_in_use);
+    const requested_port = @byteSwap(address.port_be);
+    if (slot.protocol == .udp) {
+        if (slot.udp != null) {
+            frame.rax = reject(runtime_abi.errno_busy);
+            return 0;
+        }
+        slot.udp = if (requested_port == 0) e1000e.openEphemeralUdpSocket(device) else e1000e.openUdpSocket(device, requested_port);
+        if (slot.udp == null) {
+            frame.rax = reject(runtime_abi.errno_address_in_use);
+            return 0;
+        }
+        frame.rax = 0;
         return 0;
     }
+
+    if (slot.tcp != null or slot.listener != null or slot.tcp_bound_port != 0) {
+        frame.rax = reject(runtime_abi.errno_busy);
+        return 0;
+    }
+    const local_port = if (requested_port == 0)
+        allocateTcpEphemeralPort() orelse {
+            frame.rax = reject(runtime_abi.errno_address_in_use);
+            return 0;
+        }
+    else blk: {
+        if (tcpPortInUse(requested_port)) {
+            frame.rax = reject(runtime_abi.errno_address_in_use);
+            return 0;
+        }
+        break :blk requested_port;
+    };
+    slot.tcp_bound_port = local_port;
+    frame.rax = 0;
+    return 0;
+}
+
+fn syscallListen(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const backlog: usize = std.math.cast(usize, frame.rsi) orelse {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    if (backlog == 0 or backlog > maximum_tcp_backlog) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (slot.protocol != .tcp) {
+        frame.rax = reject(errno_no_syscall);
+        return 0;
+    }
+    if (slot.tcp != null or slot.listener != null) {
+        frame.rax = reject(runtime_abi.errno_busy);
+        return 0;
+    }
+    if (slot.tcp_bound_port == 0) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    slot.listener = .{ .local_port = slot.tcp_bound_port, .backlog = @intCast(backlog) };
     frame.rax = 0;
     return 0;
 }
@@ -1484,15 +1554,23 @@ fn syscallConnect(
         frame.rax = reject(errno_invalid);
         return 0;
     };
+    if (slot.listener != null) {
+        frame.rax = reject(runtime_abi.errno_busy);
+        return 0;
+    }
     if (slot.tcp == null) {
         if (!runtimeNetworkReady(device)) {
             frame.rax = reject(runtime_abi.errno_io);
             return 0;
         }
-        const local_port = allocateTcpEphemeralPort() orelse {
-            frame.rax = reject(runtime_abi.errno_address_in_use);
-            return 0;
-        };
+        const local_port = if (slot.tcp_bound_port != 0)
+            slot.tcp_bound_port
+        else
+            allocateTcpEphemeralPort() orelse {
+                frame.rax = reject(runtime_abi.errno_address_in_use);
+                return 0;
+            };
+        slot.tcp_bound_port = local_port;
         var control = tcp_connection.init(tcp_receive_window) orelse {
             frame.rax = reject(errno_invalid);
             return 0;
@@ -1766,11 +1844,10 @@ fn syscallGetSockName(context: *Context, frame: *interrupt_context.Frame) u64 {
         };
         break :blk socket.local_port;
     } else blk: {
-        const connection = slot.tcp orelse {
-            frame.rax = reject(runtime_abi.errno_not_connected);
-            return 0;
-        };
-        break :blk connection.local_port;
+        if (slot.tcp) |connection| break :blk connection.local_port;
+        if (slot.tcp_bound_port != 0) break :blk slot.tcp_bound_port;
+        frame.rax = reject(runtime_abi.errno_not_connected);
+        return 0;
     };
     if (!writeSocketAddress(context, frame.rsi, frame.rdx, device.local_ipv4, port)) {
         frame.rax = reject(errno_fault);
@@ -1964,6 +2041,8 @@ fn pollExternalSocket(_: ?*anyopaque, index: u16, generation: u32, requested: u1
         if (slot.udp) |socket| {
             if (e1000e.udpSocketReadable(device, socket)) ready |= runtime_abi.poll_readable;
         }
+    } else if (slot.listener) |*listener| {
+        if (tcpListenerReady(listener)) ready |= runtime_abi.poll_readable;
     } else if (slot.tcp) |connection| {
         ready |= switch (connection.status) {
             .connecting => 0,
@@ -2000,8 +2079,16 @@ fn tcpPeerMatches(connection: *const TcpSocketState, peer: TcpPeer) bool {
 fn tcpPortInUse(port: u16) bool {
     for (socket_slots) |slot| {
         if (!slot.used or slot.protocol != .tcp) continue;
-        const connection = slot.tcp orelse continue;
-        if (connection.local_port == port) return true;
+        if (slot.tcp_bound_port == port) return true;
+        if (slot.tcp) |connection| if (connection.local_port == port) return true;
+    }
+    return false;
+}
+
+fn tcpListenerReady(listener: *const TcpListenerState) bool {
+    for (listener.pending[0..listener.backlog]) |pending| {
+        const control = pending.control orelse continue;
+        if (pending.used and control.state == .established) return true;
     }
     return false;
 }
@@ -2030,17 +2117,51 @@ fn tcpInitialSequence(index: u16, generation: u32) u32 {
     return value;
 }
 
-fn sendTcpControl(device: *e1000e.Device, connection: *const TcpSocketState, outbound: tcp_connection.OutboundSegment) bool {
+fn sendTcpControlToPeer(
+    device: *e1000e.Device,
+    local_port: u16,
+    peer_mac: [6]u8,
+    peer_ipv4: [4]u8,
+    peer_port: u16,
+    outbound: tcp_connection.OutboundSegment,
+) bool {
     return e1000e.sendTcpSegment(device, .{
-        .destination_mac = connection.peer_mac,
-        .destination_ipv4 = connection.peer_ipv4,
-        .source_port = connection.local_port,
-        .destination_port = connection.peer_port,
+        .destination_mac = peer_mac,
+        .destination_ipv4 = peer_ipv4,
+        .source_port = local_port,
+        .destination_port = peer_port,
         .sequence_number = outbound.sequence_number,
         .acknowledgement_number = outbound.acknowledgement_number,
         .flags = outbound.flags,
         .window_size = outbound.window_size,
     }) != null;
+}
+
+fn sendTcpControl(device: *e1000e.Device, connection: *const TcpSocketState, outbound: tcp_connection.OutboundSegment) bool {
+    return sendTcpControlToPeer(
+        device,
+        connection.local_port,
+        connection.peer_mac,
+        connection.peer_ipv4,
+        connection.peer_port,
+        outbound,
+    );
+}
+
+fn sendTcpPendingControl(
+    device: *e1000e.Device,
+    listener: *const TcpListenerState,
+    pending: *const TcpPendingConnection,
+    outbound: tcp_connection.OutboundSegment,
+) bool {
+    return sendTcpControlToPeer(
+        device,
+        listener.local_port,
+        pending.peer_mac,
+        pending.peer_ipv4,
+        pending.peer_port,
+        outbound,
+    );
 }
 
 fn serviceTcpConnects(device: *e1000e.Device, tick: u64) usize {
@@ -2053,6 +2174,8 @@ fn serviceTcpConnects(device: *e1000e.Device, tick: u64) usize {
             .destination_mac = device.local_mac,
             .destination_ipv4 = device.local_ipv4,
         }) orelse continue;
+
+        var handled = false;
         for (&socket_slots, 0..) |*slot, index| {
             if (!slot.used or slot.protocol != .tcp) continue;
             const connection = if (slot.tcp) |*value| value else continue;
@@ -2066,24 +2189,40 @@ fn serviceTcpConnects(device: *e1000e.Device, tick: u64) usize {
                 .window_size = segment.window_size,
                 .payload_length = @intCast(segment.payload.len),
             });
-            if (!transition.accepted) break;
-            if (transition.outbound) |outbound| {
-                if (!sendTcpControl(device, connection, outbound)) connection.status = .io_failed;
+            if (transition.accepted) {
+                if (transition.outbound) |outbound| {
+                    if (!sendTcpControl(device, connection, outbound)) connection.status = .io_failed;
+                }
+                if (connection.status != .io_failed) {
+                    connection.status = switch (transition.state) {
+                        .established => .established,
+                        .reset => .refused,
+                        .timed_out => .timed_out,
+                        else => .connecting,
+                    };
+                }
+                if (connection.status != .connecting) {
+                    wakeups += activeProcesses().wakeMatching(.socket_write, socketWaitKey(@intCast(index), slot.generation), true);
+                }
             }
-            if (connection.status != .io_failed) {
-                connection.status = switch (transition.state) {
-                    .established => .established,
-                    .reset => .refused,
-                    .timed_out => .timed_out,
-                    else => .connecting,
-                };
-            }
-            if (connection.status != .connecting) {
-                wakeups += activeProcesses().wakeMatching(.socket_write, socketWaitKey(@intCast(index), slot.generation), true);
-            }
+            handled = true;
             break;
         }
+        if (handled) continue;
+
+        for (&socket_slots, 0..) |*slot, index| {
+            if (!slot.used or slot.protocol != .tcp) continue;
+            const listener = if (slot.listener) |*value| value else continue;
+            if (segment.destination_port != listener.local_port) continue;
+            if (serviceTcpListenerSegment(device, listener, @intCast(index), slot.generation, segment, tick)) {
+                if (tcpListenerReady(listener)) {
+                    wakeups += activeProcesses().wakeMatching(.socket_read, socketWaitKey(@intCast(index), slot.generation), true);
+                }
+                break;
+            }
+        }
     }
+
     for (&socket_slots, 0..) |*slot, index| {
         if (!slot.used or slot.protocol != .tcp) continue;
         const connection = if (slot.tcp) |*value| value else continue;
@@ -2094,13 +2233,113 @@ fn serviceTcpConnects(device: *e1000e.Device, tick: u64) usize {
             .retransmit_syn => if (timer.outbound) |outbound| {
                 if (!sendTcpControl(device, connection, outbound)) connection.status = .io_failed;
             },
+            .retransmit_syn_ack => {},
             .timed_out => connection.status = .timed_out,
         }
         if (connection.status != .connecting) {
             wakeups += activeProcesses().wakeMatching(.socket_write, socketWaitKey(@intCast(index), slot.generation), true);
         }
     }
+
+    for (&socket_slots) |*slot| {
+        if (!slot.used or slot.protocol != .tcp) continue;
+        const listener = if (slot.listener) |*value| value else continue;
+        const limit: usize = listener.backlog;
+        for (listener.pending[0..limit]) |*pending| {
+            if (!pending.used) continue;
+            const control = if (pending.control) |*value| value else {
+                pending.* = .{};
+                continue;
+            };
+            if (control.state != .syn_received) continue;
+            const timer = tcp_connection.onTimer(control, tick);
+            switch (timer.action) {
+                .none => {},
+                .retransmit_syn => {},
+                .retransmit_syn_ack => if (timer.outbound) |outbound| {
+                    if (!sendTcpPendingControl(device, listener, pending, outbound)) pending.* = .{};
+                },
+                .timed_out => {
+                    pending.* = .{};
+                },
+            }
+        }
+    }
     return wakeups;
+}
+
+fn serviceTcpListenerSegment(
+    device: *e1000e.Device,
+    listener: *TcpListenerState,
+    socket_index: u16,
+    generation: u32,
+    segment: tcp.Segment,
+    tick: u64,
+) bool {
+    const limit: usize = listener.backlog;
+    for (listener.pending[0..limit]) |*pending| {
+        if (!pending.used or pending.peer_port != segment.source_port or
+            !std.mem.eql(u8, &pending.peer_ipv4, &segment.source_ipv4) or
+            !std.mem.eql(u8, &pending.peer_mac, &segment.source_mac)) continue;
+        const control = if (pending.control) |*value| value else {
+            pending.* = .{};
+            return true;
+        };
+        const transition = tcp_connection.handleSegment(control, .{
+            .sequence_number = segment.sequence_number,
+            .acknowledgement_number = segment.acknowledgement_number,
+            .flags = segment.flags,
+            .window_size = segment.window_size,
+            .payload_length = @intCast(segment.payload.len),
+        });
+        if (!transition.accepted) return true;
+        if (transition.outbound) |outbound| {
+            if (!sendTcpPendingControl(device, listener, pending, outbound)) {
+                pending.* = .{};
+                return true;
+            }
+        }
+        switch (transition.state) {
+            .closed, .reset, .timed_out => pending.* = .{},
+            else => {},
+        }
+        return true;
+    }
+
+    if (segment.flags != tcp.flag_syn or segment.payload.len != 0) return true;
+    var pending_index: usize = 0;
+    while (pending_index < limit and listener.pending[pending_index].used) : (pending_index += 1) {}
+    if (pending_index == limit) return true;
+
+    var control = tcp_connection.init(tcp_receive_window) orelse return true;
+    const initial_sequence = tcpPassiveInitialSequence(socket_index, @intCast(pending_index), generation, segment.sequence_number, tick);
+    const transition = tcp_connection.beginPassiveOpenAt(&control, initial_sequence, .{
+        .sequence_number = segment.sequence_number,
+        .acknowledgement_number = segment.acknowledgement_number,
+        .flags = segment.flags,
+        .window_size = segment.window_size,
+        .payload_length = @intCast(segment.payload.len),
+    }, tick, tcp_retransmission_policy);
+    if (!transition.accepted) return true;
+    const pending = &listener.pending[pending_index];
+    pending.* = .{
+        .used = true,
+        .peer_ipv4 = segment.source_ipv4,
+        .peer_mac = segment.source_mac,
+        .peer_port = segment.source_port,
+        .control = control,
+    };
+    if (transition.outbound) |outbound| {
+        if (!sendTcpPendingControl(device, listener, pending, outbound)) pending.* = .{};
+    }
+    return true;
+}
+
+fn tcpPassiveInitialSequence(socket_index: u16, pending_index: u8, generation: u32, peer_sequence: u32, tick: u64) u32 {
+    var value = @as(u32, @truncate(tick)) ^ peer_sequence ^ (generation *% 0x9E37_79B9) ^
+        (@as(u32, socket_index + 1) << 16) ^ (@as(u32, pending_index + 1) *% 0x45D9_F3B) ^ 0x4C49_5301;
+    if (value == 0) value = 1;
+    return value;
 }
 
 fn socketWaitKey(index: u16, generation: u32) u64 {

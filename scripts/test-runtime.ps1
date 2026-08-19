@@ -24,6 +24,9 @@ $client = $null
 $tcpFixtureListener = $null
 $tcpFixtureAccept = $null
 $tcpFixtureClient = $null
+$tcpPassiveClient = $null
+$tcpPassiveConnect = $null
+$serialBytes = $null
 try {
     try { $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(30)) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
     if (-not $acquired) { throw 'The shared ZigOs QEMU harness remained busy for 30 seconds.' }
@@ -109,7 +112,7 @@ try {
         '-no-reboot'
     )
     if ($Network) {
-        $arguments += @('-netdev', "user,id=net0,tftp=$tftpPath", '-device', 'e1000e,netdev=net0,mac=52:54:00:12:34:56')
+        $arguments += @('-netdev', "user,id=net0,tftp=$tftpPath,hostfwd=tcp:127.0.0.1:39002-10.0.2.15:39002", '-device', 'e1000e,netdev=net0,mac=52:54:00:12:34:56')
     } else {
         $arguments += @('-net', 'none')
     }
@@ -241,6 +244,27 @@ try {
     }
     foreach ($command in $commands) {
         Send-SerialLine $command
+        if ($Network -and $command -eq 'exec /bin/socket.elf') {
+            Start-Sleep -Milliseconds 200
+            $tcpPassiveClient = [System.Net.Sockets.TcpClient]::new()
+            $tcpPassiveConnect = $tcpPassiveClient.ConnectAsync('127.0.0.1', 39002)
+            if (-not $tcpPassiveConnect.Wait([TimeSpan]::FromSeconds(5))) {
+                throw 'Timed out connecting through QEMU hostfwd to the G301 guest listener.'
+            }
+            $socketDeadline = (Get-Date).AddSeconds(8)
+            $socketPassed = $false
+            while ((Get-Date) -lt $socketDeadline) {
+                Start-Sleep -Milliseconds 50
+                $socketText = Current-SerialText
+                if ($socketText.Contains('socket-api: UDP/TCP connect/listen passed')) {
+                    $socketPassed = $true
+                    break
+                }
+                $process.Refresh()
+                if ($process.HasExited) { throw 'QEMU exited before the G301 socket fixture completed.' }
+            }
+            if (-not $socketPassed) { throw 'The G301 socket fixture did not complete after the host-forward connection.' }
+        }
         if ($command -eq 'exec /bin/tty.elf') {
             Start-Sleep -Milliseconds 300
             $ttyInput = [System.Collections.Generic.List[byte]]::new()
@@ -336,7 +360,7 @@ try {
         'exec: PID 16 state zombie status 0x56',
         'c-sdk: start',
         'c-sdk: argc/argv passed',
-        'c-sdk: ABI 1.27 discovery passed',
+        'c-sdk: ABI 1.28 discovery passed',
         'c-sdk: process umask creation passed',
         'c-sdk: setuid/setgid metadata passed',
         'c-sdk: advisory whole-file flock passed',
@@ -380,7 +404,7 @@ try {
         'faults 1',
         $(if ($Network) { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/62/1 blocked 3/1 wakeups 3/1' } else { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/56/1 blocked 3/1 wakeups 3/1' }),
         'ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/suspend/overflow 1/0/0/0 clean yes',
-        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5850692 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11431/4680/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
+        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5853252 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11436/4675/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
         'ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes',
         'ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 global/mount/immediate/durable/reject 1/2/1/1/0 writeback active no request/complete/pass 1/1/1 immediate/durable/clean/unsupported/failure/stale 1/0/0/0/0/0 pages queued/completed 6/6 payload/header/flush 1/1/2 NVMe read/write/flush ',
         ' errors 0/0 clean yes',
@@ -405,7 +429,7 @@ try {
             'exec: PID 19 state zombie status 0x5A',
             'serial COM1 online; framebuffer no; USB keyboard no; NVMe yes; AHCI no; e1000e yes',
             'e1000e0: up mac 52:54:00:12:34:56 ipv4 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 dns 10.0.2.3',
-            'socket-api: UDP and TCP connect/getpeername passed',
+            'socket-api: UDP/TCP connect/listen passed',
             'reply from 10.0.2.2: bytes=16',
             'localhost A 127.0.0.1',
             'UDP endpoints active/readable/connected',
@@ -452,6 +476,13 @@ try {
     Write-Host 'Persistent x86-64 runtime session passed.'
 }
 finally {
+    if ($serialBytes) {
+        try {
+            $serialText = [System.Text.Encoding]::ASCII.GetString($serialBytes.ToArray())
+            [System.IO.File]::WriteAllText($serialLog, $serialText, [System.Text.Encoding]::ASCII)
+        } catch {}
+    }
+    if ($tcpPassiveClient) { $tcpPassiveClient.Dispose() }
     if ($tcpFixtureClient) { $tcpFixtureClient.Dispose() }
     if ($tcpFixtureListener) { $tcpFixtureListener.Stop() }
     if ($client) { $client.Dispose() }

@@ -40,6 +40,10 @@ int64_t zigos_connect(uint16_t fd, const zigos_ipv4_socket_address *address) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_CONNECT, fd, pointer_value(address), sizeof(*address), 0, 0, 0);
 }
 
+int64_t zigos_listen(uint16_t fd, uint16_t backlog) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_LISTEN, fd, backlog, 0, 0, 0, 0);
+}
+
 int64_t zigos_getsockname(uint16_t fd, zigos_ipv4_socket_address *address) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_GETSOCKNAME, fd, pointer_value(address), sizeof(*address), 0, 0, 0);
 }

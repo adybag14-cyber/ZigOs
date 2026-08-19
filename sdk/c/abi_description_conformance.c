@@ -2,10 +2,10 @@
 
 _Static_assert(ZIGOS_ABI_MAGIC == UINT32_C(0x4942415A), "ABI magic");
 _Static_assert(ZIGOS_ABI_MAJOR == UINT16_C(1), "ABI major");
-_Static_assert(ZIGOS_ABI_MINOR == UINT16_C(27), "ABI minor");
+_Static_assert(ZIGOS_ABI_MINOR == UINT16_C(28), "ABI minor");
 _Static_assert(ZIGOS_PAGE_SIZE == UINT32_C(4096), "ABI page size");
 _Static_assert(ZIGOS_SYSCALL_BASE == UINT16_C(64), "ABI syscall base");
-_Static_assert(ZIGOS_SYSCALL_COUNT == UINT16_C(66), "ABI syscall count");
+_Static_assert(ZIGOS_SYSCALL_COUNT == UINT16_C(67), "ABI syscall count");
 _Static_assert(ZIGOS_SYS_FSCHECK == UINT64_C(129), "ABI last syscall");
 _Static_assert(sizeof(zigos_auxv_entry) == 16, "startup auxv layout");
 _Static_assert(sizeof(zigos_abi_info) == 64, "ABI discovery layout");
