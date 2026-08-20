@@ -60,6 +60,19 @@ def generate(spec: dict) -> tuple[str, str, str]:
     for name, value in spec.get("socket_shutdown", {}).items():
         zig.append(f"pub const socket_shutdown_{name}: u64 = {value};\n")
         nasm.append(f"%define ZIGOS_SOCKET_SHUTDOWN_{name.upper()} {value}\n")
+    for name, value in spec.get("socket_option_levels", {}).items():
+        zig.append(f"pub const socket_option_level_{name}: u64 = {value};\n")
+        nasm.append(f"%define ZIGOS_SOL_{name.upper()} {value}\n")
+    for name, value in spec.get("socket_options", {}).items():
+        zig.append(f"pub const socket_option_{name}: u64 = {value};\n")
+        nasm.append(f"%define ZIGOS_SO_{name.upper()} {value}\n")
+    nasm.extend([
+        "%define ZIGOS_AF_INET 2\n",
+        "%define ZIGOS_SOCKET_STREAM 1\n",
+        "%define ZIGOS_SOCKET_DATAGRAM 2\n",
+        "%define ZIGOS_PROTOCOL_TCP 6\n",
+        "%define ZIGOS_PROTOCOL_UDP 17\n",
+    ])
     for name, value in spec.get("spawn_flags", {}).items():
         zig.append(f"pub const spawn_{name}: u16 = @as(u16, 1) << {value};\n")
         nasm.append(f"%define ZIGOS_SPAWN_{name.upper()} (1 << {value})\n")
@@ -280,6 +293,10 @@ def generate_c(spec: dict) -> str:
         lines.append(f"#define ZIGOS_MSG_{name.upper()} UINT64_C({value})\n")
     for name, value in spec.get("socket_shutdown", {}).items():
         lines.append(f"#define ZIGOS_SOCKET_SHUTDOWN_{name.upper()} UINT64_C({value})\n")
+    for name, value in spec.get("socket_option_levels", {}).items():
+        lines.append(f"#define ZIGOS_SOL_{name.upper()} UINT64_C({value})\n")
+    for name, value in spec.get("socket_options", {}).items():
+        lines.append(f"#define ZIGOS_SO_{name.upper()} UINT64_C({value})\n")
     for name, value in spec.get("spawn_flags", {}).items():
         lines.append(f"#define ZIGOS_SPAWN_{name.upper()} (UINT16_C(1) << {value})\n")
     for name, value in spec.get("spawn_io", {}).items():
@@ -393,6 +410,8 @@ def generate_c(spec: dict) -> str:
         "int64_t zigos_listen(uint16_t fd, uint16_t backlog);\n",
         "int64_t zigos_accept(uint16_t fd, zigos_ipv4_socket_address *address);\n",
         "int64_t zigos_socket_shutdown(uint16_t fd, uint64_t how);\n",
+        "int64_t zigos_getsockopt(uint16_t fd, uint64_t level, uint64_t option);\n",
+        "int64_t zigos_setsockopt(uint16_t fd, uint64_t level, uint64_t option, uint64_t value);\n",
         "int64_t zigos_getsockname(uint16_t fd, zigos_ipv4_socket_address *address);\n",
         "int64_t zigos_getpeername(uint16_t fd, zigos_ipv4_socket_address *address);\n",
         "int64_t zigos_open(const char *path, uint64_t flags, uint16_t mode);\n",

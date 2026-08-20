@@ -335,7 +335,7 @@ def main() -> int:
                 "cat: input/output error",
                 "ZigOs block-backed FAT16 runtime",
                 "ZigOs NVMe read fault injection: failures 1 armed no clean yes",
-                "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5804100 metadata/file/block reads 114/3/115 failures 1 clusters claimed/free/loop/cross/range 11340/4771/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes",
+                "ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5804612 metadata/file/block reads 114/3/115 failures 1 clusters claimed/free/loop/cross/range 11341/4770/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes",
                 "ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes",
                 "ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 144/144 cache-released 13 storage persistent clean yes",
                 "ZigOs normal boot verified: diagnostic-suite skipped yes userspace-init yes userspace-shell yes tty yes vfs yes spawn-wait yes storage persistent cleanup yes",

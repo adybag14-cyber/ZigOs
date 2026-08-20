@@ -19,7 +19,7 @@ ORG 0
 %define PARTIAL_SEND_PAYLOAD   (DATA_BASE + 3072)
 
 %define START_LENGTH    19
-%define PASS_LENGTH     81
+%define PASS_LENGTH     91
 %define PAYLOAD_LENGTH  8
 %define DNS_QUERY_LENGTH 27
 %define RECEIVE_CAPACITY 512
@@ -46,10 +46,10 @@ _start:
     jz .fail_abi
     test qword [rbx + 24], ZIGOS_CAP_TCP_SOCKETS
     jz .fail_abi
-    cmp word [rbx + 8], 5
+    cmp word [rbx + 8], 32
     jb .fail_abi
 
-    ; G301: bind a passive TCP listener. G302 remains responsible for accept.
+    ; G301 binds a passive TCP listener; G302 accepts its established peer below.
     mov eax, SYS_SOCKET
     mov edi, 2                  ; AF_INET
     mov esi, 1                  ; SOCK_STREAM
@@ -77,6 +77,29 @@ _start:
     int 0x80
     test eax, eax
     jnz .fail_listen_call
+
+    ; G307 socket-level introspection exposes listener state without changing it.
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_ACCEPTCONN
+    int 0x80
+    cmp eax, 1
+    jne .fail_sockopt_listener
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_TYPE
+    int 0x80
+    cmp eax, ZIGOS_SOCKET_STREAM
+    jne .fail_sockopt_listener
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_PROTOCOL
+    int 0x80
+    cmp eax, ZIGOS_PROTOCOL_TCP
+    jne .fail_sockopt_listener
 
     mov eax, SYS_GETSOCKNAME
     mov edi, r12d
@@ -190,6 +213,14 @@ _start:
     mov rbx, POLL_BUFFER
     test word [rbx + 4], 2
     jz .fail_accept_poll
+
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r13d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_ACCEPTCONN
+    int 0x80
+    test eax, eax
+    jnz .fail_sockopt_accept
 
     ; G305 read-half shutdown is local and idempotent; the write half remains ready.
     mov eax, SYS_SOCKET_SHUTDOWN
@@ -353,13 +384,78 @@ _start:
     cmp dword [rbx + 4], 0x0F02000A   ; 10.0.2.15 bytes
     jne .fail_name
 
-    ; Socket-level nonblocking mode must reject an empty queue immediately.
-    mov eax, SYS_SETNONBLOCK
+    ; G307 generic socket options expose immutable type/protocol/listener state and
+    ; share the one mutable NONBLOCK bit with legacy syscall 107.
+    mov eax, SYS_GETSOCKOPT
     mov edi, r12d
-    mov esi, 1
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_TYPE
+    int 0x80
+    cmp eax, ZIGOS_SOCKET_DATAGRAM
+    jne .fail_sockopt_udp
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_PROTOCOL
+    int 0x80
+    cmp eax, ZIGOS_PROTOCOL_UDP
+    jne .fail_sockopt_udp
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_ACCEPTCONN
     int 0x80
     test eax, eax
-    jnz .fail_nonblock
+    jnz .fail_sockopt_udp
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_NONBLOCKING
+    int 0x80
+    test eax, eax
+    jnz .fail_sockopt_udp
+
+    ; Unsupported levels/options and writes to read-only options fail closed.
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, 0xFFFF
+    mov edx, ZIGOS_SO_NONBLOCKING
+    int 0x80
+    cmp rax, ERRNO_PROTOCOL_OPTION
+    jne .fail_sockopt_udp
+    mov eax, SYS_SETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_TYPE
+    mov r10d, ZIGOS_SOCKET_STREAM
+    int 0x80
+    cmp rax, ERRNO_PROTOCOL_OPTION
+    jne .fail_sockopt_udp
+    mov eax, SYS_SETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_NONBLOCKING
+    mov r10d, 2
+    int 0x80
+    cmp rax, ERRNO_INVALID
+    jne .fail_sockopt_udp
+
+    ; Generic NONBLOCK enables the existing empty-queue EWOULDBLOCK path.
+    mov eax, SYS_SETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_NONBLOCKING
+    mov r10d, 1
+    int 0x80
+    test eax, eax
+    jnz .fail_sockopt_udp
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_NONBLOCKING
+    int 0x80
+    cmp eax, 1
+    jne .fail_sockopt_udp
 
     mov eax, SYS_RECVFROM
     mov edi, r12d
@@ -378,6 +474,13 @@ _start:
     int 0x80
     test eax, eax
     jnz .fail_nonblock
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_NONBLOCKING
+    int 0x80
+    test eax, eax
+    jnz .fail_sockopt_udp
 
     ; Per-call MSG_DONTWAIT must have the same empty-queue result.
     mov eax, SYS_RECVFROM
@@ -550,6 +653,29 @@ _start:
     jne .fail_tcp_peer
     cmp dword [rbx + 4], 0x0202000A
     jne .fail_tcp_peer
+
+    ; G307 active TCP introspection reports stream/TCP and not-listening.
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_TYPE
+    int 0x80
+    cmp eax, ZIGOS_SOCKET_STREAM
+    jne .fail_sockopt_tcp
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_PROTOCOL
+    int 0x80
+    cmp eax, ZIGOS_PROTOCOL_TCP
+    jne .fail_sockopt_tcp
+    mov eax, SYS_GETSOCKOPT
+    mov edi, r12d
+    mov esi, ZIGOS_SOL_SOCKET
+    mov edx, ZIGOS_SO_ACCEPTCONN
+    int 0x80
+    test eax, eax
+    jnz .fail_sockopt_tcp
 
     mov rbx, POLL_BUFFER
     mov word [rbx + 0], r12w
@@ -775,6 +901,18 @@ _start:
     jmp .exit_failure
 .fail_tcp_shutdown_poll:
     mov edi, 0xE7
+    jmp .exit_failure
+.fail_sockopt_udp:
+    mov edi, 0xF0
+    jmp .exit_failure
+.fail_sockopt_listener:
+    mov edi, 0xF1
+    jmp .exit_failure
+.fail_sockopt_accept:
+    mov edi, 0xF2
+    jmp .exit_failure
+.fail_sockopt_tcp:
+    mov edi, 0xF3
     jmp .exit_failure
 .fail_pass:
     mov edi, 0xBE

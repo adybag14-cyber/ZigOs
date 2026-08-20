@@ -316,10 +316,10 @@ def main() -> int:
     require(diskless_normal_boot_test, '"sync: unsupported",', "diskless gate forbids regression to persistence-gated global sync")
     require(diskless_normal_boot_test, "storage diskless-ram-root cleanup yes", "diskless QEMU gate requires clean resource reclamation")
     require(runtime, "ZigOs shutdown drain:", "diagnostic shutdown drains and reaps delayed terminal userspace")
-    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 31:
-        raise SystemExit("permanent-userspace contract missing: ABI version 1.31")
+    if abi_spec["abi"]["major"] != 1 or abi_spec["abi"]["minor"] != 32:
+        raise SystemExit("permanent-userspace contract missing: ABI version 1.32")
     expected_fs_syscalls = {"lseek": 98, "mkdir": 99, "unlink": 100, "rmdir": 101, "rename": 102, "chmod": 103}
-    expected_network_syscalls = {"sendto": 104, "recvfrom": 105, "getpeername": 106, "setnonblock": 107, "listen": 130, "accept": 131, "socket_shutdown": 132}
+    expected_network_syscalls = {"sendto": 104, "recvfrom": 105, "getpeername": 106, "setnonblock": 107, "listen": 130, "accept": 131, "socket_shutdown": 132, "getsockopt": 133, "setsockopt": 134}
     expected_platform_syscalls = {"ioctl": 108, "stat": 109, "openat": 110, "fsync": 111, "symlink": 112, "readlink": 113, "link": 114, "fallocate": 115, "readv": 116, "writev": 117, "fdatasync": 118, "mount": 119, "umount": 120, "statfs": 121, "stattimes": 122, "statowner": 123, "umask": 124, "flock": 125, "lockrange": 126, "watchdir": 127, "kill": 128, "fscheck": 129}
     syscall_spec = abi_spec["syscalls"]
     core_numbering_valid = syscall_spec.get("spawnv") == 96 and syscall_spec.get("sync") == 97
@@ -327,13 +327,19 @@ def main() -> int:
     network_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_network_syscalls.items())
     platform_numbering_valid = all(syscall_spec.get(name) == number for name, number in expected_platform_syscalls.items())
     if not core_numbering_valid or not fs_numbering_valid or not network_numbering_valid or not platform_numbering_valid:
-        raise SystemExit("permanent-userspace contract missing: ABI 1.31 syscall numbering")
+        raise SystemExit("permanent-userspace contract missing: ABI 1.32 syscall numbering")
     if abi_spec.get("message_flags") != {"dontwait": 1}:
         raise SystemExit("permanent-userspace contract missing: bounded MSG_DONTWAIT value")
     if abi_spec.get("socket_shutdown") != {"read": 0, "write": 1, "both": 2}:
         raise SystemExit("permanent-userspace contract missing: ABI 1.31 socket shutdown mode values")
     if syscall_spec.get("shutdown") != 93 or syscall_spec.get("socket_shutdown") != 132:
         raise SystemExit("permanent-userspace contract missing: OS shutdown 93 must remain distinct from socket shutdown 132")
+    if abi_spec.get("socket_option_levels") != {"socket": 1}:
+        raise SystemExit("permanent-userspace contract missing: G307 socket option level namespace")
+    if abi_spec.get("socket_options") != {"nonblocking": 1, "type": 2, "protocol": 3, "acceptconn": 4}:
+        raise SystemExit("permanent-userspace contract missing: G307 socket option values")
+    if abi_spec.get("errno", {}).get("protocol_option") != -92:
+        raise SystemExit("permanent-userspace contract missing: G307 unsupported-option errno")
     if abi_spec.get("spawn_flags") != {"new_process_group": 0, "join_process_group": 1, "pipeline_io": 2, "foreground_process_group": 3}:
         raise SystemExit("permanent-userspace contract missing: ABI 1.24 foreground spawn flag values")
     if abi_spec.get("spawn_io") != {"inherit_descriptor": 65535}:
@@ -740,7 +746,7 @@ def main() -> int:
     require(io_error_boot_test, "metadata/file/block reads 114/3/115 failures 1", "QEMU requires exact failed-read and retry accounting")
     require(io_error_boot_test, 'str(work / "zig-cache")', "FAT EIO private-prefix build isolates its local Zig cache")
     require(readonly_remount_boot_test, 'str(work / "zig-cache")', "persistent fail-stop private-prefix build isolates its local Zig cache")
-    require(io_error_boot_test, "11340/4771/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes", "G305 EIO recovery retains measured private-build FAT ownership")
+    require(io_error_boot_test, "11341/4770/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes", "G307 EIO recovery retains measured private-build FAT ownership")
     require(build_graph, '"nvme-write-fault-lba"', "build graph exposes the disabled-by-default persistent write-error target")
     require(kernel, "NVMe one-shot write error armed:", "test build arms persistent write failure only after boot-time inspection")
     require(runtime, "fn persistenceDamageClean", "normal shutdown accepts one classified contained persistent write failure at any prior generation")
@@ -761,16 +767,16 @@ def main() -> int:
     require(readonly_remount_boot_test, "append: read-only filesystem", "retained mutation paths are rejected after fail-stop remount")
     require(readonly_remount_boot_test, "damaged yes reason payload_write remounts/failures 1/0 discarded/rejected 2/1", "QEMU requires exact damage and remount conservation")
     require(readonly_remount_boot_test, "vfs-remount/discard 1/2 mount-readonly yes clean yes", "VFS and persistence remount accounting must agree exactly")
-    require(readonly_remount_boot_test, "11340/4771/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G305 contained persistent-write profile retains measured private-build FAT ownership")
+    require(readonly_remount_boot_test, "11341/4770/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G307 contained persistent-write profile retains measured private-build FAT ownership")
     require(readonly_remount_boot_test, "alloc/free 64/64 cache-released 12 storage persistent-read-only clean yes", "contained normal boot balances every measured resource")
     require(runtime_test, "cat /boot/README.TXT", "diagnostic QEMU reads a root file after NVMe handoff")
     require(runtime_test, "cat /boot/EFI/BOOT/BOOT.CFG", "diagnostic QEMU reads a nested file after NVMe handoff")
     require(runtime_test, "stat /boot/EFI/BOOT/BOOTX64.EFI", "diagnostic QEMU stats the multi-mebibyte boot image without RAM-copying it")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 54 failed 0", "offline diagnostic profile requires the expanded block-backed FAT command matrix")
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 56 failed 0", "live diagnostic profile requires the expanded block-backed FAT command matrix")
-    require(runtime_test, "11440/4671/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both G305 diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
+    require(runtime_test, "11441/4670/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both G307 diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
     require(normal_boot_test, "ZigOs boot FAT: block-backed yes files/directories 3/2", "persistent normal boot requires a clean real block-backed /boot")
-    require(normal_boot_test, "11340/4771/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G305 normal QEMU requires exact FAT ownership with zero classified corruption")
+    require(normal_boot_test, "11340/4771/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G307 normal QEMU requires exact FAT ownership with zero classified corruption")
     require(diskless_normal_boot_test, "ZigOs boot FAT: block-backed no files/directories 0/0", "diskless normal boot requires an explicitly absent backend and fallback namespace")
     require(diskless_normal_boot_test, "0/0/0/0/0 lock tickets/outstanding 0/0 quarantine state/reason/events no/none/0 clean yes", "diskless fallback has no FAT ownership or classified corruption state")
     for script_text, profile in (
@@ -886,7 +892,7 @@ def main() -> int:
     require(c_abi_header, "#ifndef ZIGOS_ABI_H", "G292 C ABI description is a self-contained generated header")
     require(c_header, "#ifndef ZIGOS_ABI_H", "G292 full C wrapper header shares the minimal-description guard")
     require(c_header, "#endif /* ZIGOS_ABI_H */", "G292 full C wrapper header closes the shared ABI-description block before wrappers")
-    require(c_abi_header, "ZIGOS_ABI_MINOR UINT16_C(31)", "G305 advances the generated description to current ABI 1.31")
+    require(c_abi_header, "ZIGOS_ABI_MINOR UINT16_C(32)", "G305 advances the generated description to current ABI 1.31")
     require(c_abi_header, "#define ZIGOS_SYS_FSCHECK UINT64_C(129)", "G292 description publishes the complete current syscall numbering")
     require(c_abi_header, 'sizeof(zigos_abi_info) == 64', "G292 description freezes ABI discovery layout")
     require(c_abi_header, 'sizeof(zigos_directory_event) == 64', "G292 description freezes directory-event layout")
@@ -896,7 +902,7 @@ def main() -> int:
     forbid(c_abi_header, "zigos_abi_query(", "G292 description must not declare optional ABI-query wrappers")
     require(c_abi_description_conformance, '#include "zigos_abi.h"', "G292 conformance includes only the minimal ABI description")
     forbid(c_abi_description_conformance, '#include "zigos.h"', "G292 conformance must not depend on the wrapper header")
-    require(c_abi_description_conformance, "_Static_assert(ZIGOS_SYSCALL_COUNT == UINT16_C(69)", "current C probe compile-time checks the complete syscall range through G305")
+    require(c_abi_description_conformance, "_Static_assert(ZIGOS_SYSCALL_COUNT == UINT16_C(71)", "current C probe compile-time checks the complete syscall range through G305")
     require(c_abi_description_conformance, "auxiliary_value(auxv, ZIGOS_AUX_PAGESZ)", "G292 C probe compiles bounded access to the described startup auxv")
     require(c_abi_description_conformance, "ZIGOS_AUX_ZIGOS_CAPABILITIES", "G292 C probe compiles bounded described capability discovery checks")
     forbid(c_abi_description_conformance, "zigos_write(", "G292 C probe remains wrapper-free")
@@ -911,7 +917,7 @@ def main() -> int:
     require(build_graph, "sdk/c/conformance.c", "build graph compiles an independent freestanding C conformance program")
     require(build_graph, '"artifacts/c-sdk.elf"', "C SDK conformance is installed as a standalone artifact")
     require(runtime, '"/bin/c-sdk.elf"', "C SDK conformance is installed in the runtime VFS")
-    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(31)", "generated C header publishes ABI 1.31")
+    require(c_header, "ZIGOS_ABI_MINOR UINT16_C(32)", "generated C header publishes ABI 1.31")
     require(sdk_abi, "pub const syscall_kill: u64 = 128;", "ABI 1.25 generated Zig constants publish kill syscall 128")
     require(c_header, "#define ZIGOS_SYS_KILL UINT64_C(128)", "ABI 1.25 generated C constants publish kill syscall 128")
     require(c_header, "int64_t zigos_kill(uint32_t pid, uint8_t signal);", "ABI 1.25 generated C header declares kill")
@@ -1219,7 +1225,7 @@ def main() -> int:
     require(socket_conformance, "SYS_GETPEERNAME", "CPL3 socket fixture checks its connected peer")
     require(socket_conformance, "SYS_SETNONBLOCK", "CPL3 socket fixture checks socket-level nonblocking mode")
     require(socket_conformance, "ZIGOS_MSG_DONTWAIT", "CPL3 socket fixture checks per-call nonblocking mode")
-    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown passed", "required live QEMU session retains G300/G301 TCP connect/listen while proving G302 accept")
+    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown + sockopt passed", "required live QEMU session retains G300/G301 TCP connect/listen while proving G302 accept")
     require(sdk_conformance, "shared file mmap coherence passed", "Zig conformance binary proves ordinary writes immediately refresh mapped reads after close and unlink")
     require(sdk_conformance, "try zigos.chmod(mapping_path, 0);", "CPL3 fixture maps through a descriptor opened before pathname permissions are removed")
     require(sdk_conformance, "null,\n        13,", "CPL3 fixture exercises a partial final file page rather than a preallocated full page")
@@ -1431,8 +1437,8 @@ def main() -> int:
     require(workflow, "test-boot-fat-io-error.py --boot-timeout 240", "hosted integration runs the block-read EIO and retry gate")
     require(workflow, "test-persistent-readonly-remount.py --boot-timeout 240", "hosted integration runs the persistent fail-stop read-only remount gate")
     require(readme, "252/252 canonical host-test executions across all 106 unique isolated-test declarations", "README carries the clean canonical execution and declaration counts")
-    require(readme, "Size:    5,855,232 bytes", "README carries the reproducible G305 ABI 1.31 EFI size")
-    require(readme, "SHA-256: BFCDEF20D44A5BF74479AEEF92F6E11914CEF78E3D7AEEF7E4A0CD27D3F618EA", "README carries the reproducible G305 ABI 1.31 EFI hash")
+    require(readme, "Size:    5,855,744 bytes", "README carries the reproducible G305 ABI 1.31 EFI size")
+    require(readme, "SHA-256: AD8CE2CE847240C16BA9AE0E213649317D5B63D7D2C5BFC6990EDA068CEEEC2A", "README carries the reproducible G305 ABI 1.31 EFI hash")
     require(readme, "Persistent NVMe write-error read-only-remount profile", "README documents the required fail-stop profile")
     require(readme, "discarded/rejected 2/1 vfs-remount/discard 1/2 mount-readonly yes clean yes", "README freezes exact G229 containment telemetry")
     require(priority, "252/252 canonical host-test executions across 106 unique isolated Zig test declarations", "priority remediation carries the canonical execution and declaration counts")
@@ -1501,10 +1507,10 @@ def main() -> int:
     require(c_conformance, "sizeof(exact_path_boundary) != 256", "C CPL3 fixture proves the exact 255-byte C-string payload")
     require(c_conformance, "sizeof(overlong_path_boundary) != 257", "C CPL3 fixture proves the 256-byte C-string payload")
     require(c_conformance, "pathname length/component bounds", "C CPL3 fixture fails closed on G247 boundary regressions")
-    require(runtime_test, "bytes 5855300 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11440/4671/0/0/0", "G305 diagnostic harness freezes the measured FAT geometry")
-    require(normal_boot_test, "11340/4771/0/0/0 lock tickets/outstanding 1/0", "G305 normal harness freezes the measured FAT geometry")
-    require(io_error_boot_test, "bytes 5804100 metadata/file/block reads 114/3/115 failures 1 clusters claimed/free/loop/cross/range 11340/4771/0/0/0", "G305 read-EIO harness freezes its private fault-injection geometry")
-    require(readonly_remount_boot_test, "bytes 5804100 metadata/file/block reads 113/0/113 failures 0 clusters claimed/free/loop/cross/range 11340/4771/0/0/0", "G305 write-EIO harness freezes its private fault-injection geometry")
+    require(runtime_test, "bytes 5855812 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11441/4670/0/0/0", "G307 diagnostic harness freezes the measured FAT geometry")
+    require(normal_boot_test, "11340/4771/0/0/0 lock tickets/outstanding 1/0", "G307 normal harness freezes the measured FAT geometry")
+    require(io_error_boot_test, "bytes 5804612 metadata/file/block reads 114/3/115 failures 1 clusters claimed/free/loop/cross/range 11341/4770/0/0/0", "G307 read-EIO harness freezes its private fault-injection geometry")
+    require(readonly_remount_boot_test, "bytes 5804612 metadata/file/block reads 113/0/113 failures 0 clusters claimed/free/loop/cross/range 11341/4770/0/0/0", "G307 write-EIO harness freezes its private fault-injection geometry")
     require(readme, "user path payloads may be at most 255 bytes", "README documents the G247 pathname bound")
     require(priority, "G247 closes the user-path length/classification gap", "priority remediation records G247 bounds and errno classification")
     require(threat_model, "User pathname payloads are capped at 255 bytes", "threat model records the fixed G247 pathname security boundary")
@@ -1847,7 +1853,7 @@ def main() -> int:
     require(readme, "G266 keeps ABI 1.23", "README documents G266 without an ABI bump")
     require(priority, "G266 keeps ABI 1.23", "priority remediation records G266 TTY control-key generation")
     require(threat_model, "G266 recognizes Ctrl-Z only inside the trusted TTY line discipline", "threat model bounds G266 signal authority")
-    require(roadmap, "251 complete, 249 open", "roadmap arithmetic includes G305")
+    require(roadmap, "252 complete, 248 open", "roadmap arithmetic includes G305")
     require(roadmap, "- [x] **G229** " + chr(0x2014) + " Remount a damaged writable filesystem read-only.", "roadmap marks G229 complete with the canonical separator")
     require(roadmap, "- [x] **G230** " + chr(0x2014) + " Expose mount and unmount syscalls.", "roadmap marks G230 complete with the canonical separator")
     require(roadmap, "- [x] **G231** " + chr(0x2014) + " Reject unmount while paths or descriptors remain busy.", "roadmap marks G231 complete with the canonical separator")
@@ -2140,7 +2146,7 @@ def main() -> int:
     require(priority, "G280 keeps ABI 1.24", "priority remediation records G280 standalone stat")
     require(threat_model, "G280 gives standalone `stat` observation authority", "threat model bounds G280 metadata observation")
     require(roadmap, "- [x] **G280** " + chr(0x2014) + " Provide a standalone stat userspace program.", "roadmap marks G280 complete with the canonical separator")
-    require(roadmap, "251 complete, 249 open", "roadmap arithmetic includes G305")
+    require(roadmap, "252 complete, 248 open", "roadmap arithmetic includes G305")
     require(head_source, "if (argc != 2)", "G281 standalone head requires exactly one file")
     require(head_source, "const default_lines: usize = 10;", "G281 head fixes the default output at ten lines")
     require(head_source, "var bytes: [512]u8 = undefined;", "G281 head uses one fixed streaming buffer")
@@ -2171,7 +2177,7 @@ def main() -> int:
     require(priority, "G281 keeps ABI 1.24", "priority remediation records G281 standalone text tools")
     require(threat_model, "G281 gives standalone `head`, `tail`, `wc` and `grep`", "threat model bounds G281 text-observation authority")
     require(roadmap, "- [x] **G281** " + chr(0x2014) + " Provide standalone head, tail, wc and grep programs.", "roadmap marks G281 complete with the canonical separator")
-    require(roadmap, "251 complete, 249 open", "roadmap arithmetic includes G305")
+    require(roadmap, "252 complete, 248 open", "roadmap arithmetic includes G305")
     require(hexdump_source, "if (argc != 2)", "G282 standalone hexdump requires exactly one file")
     require(hexdump_source, "const maximum_output_bytes: usize = 256;", "G282 hexdump hard-caps observation at 256 bytes")
     require(hexdump_source, "const row_bytes: usize = 16;", "G282 hexdump uses sixteen-byte rows")
@@ -2404,7 +2410,7 @@ def main() -> int:
     require(runtime_test, "BeginAcceptTcpClient", "G300 host fixture starts a real TCP accept before QEMU")
     require(runtime_test, "EndAcceptTcpClient", "G300 host fixture requires a real accepted guest connection")
     require(runtime_test, "The G305 active TCP fixture did not reach the loopback host listener.", "G305 live test fails closed if active-open does not reach the loopback host")
-    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown passed", "current live QEMU retains G301 passive listen while extending the combined proof with G302 accept")
+    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown + sockopt passed", "current live QEMU retains G301 passive listen while extending the combined proof with G302 accept")
     require(sdk_source, "pub fn listen(fd: u16, backlog: u16)", "G301 Zig SDK exposes the bounded listen syscall")
     require(c_header, "int64_t zigos_listen(uint16_t fd, uint16_t backlog);", "G301 C SDK exposes the bounded listen syscall")
     require(executor, "fn syscallListen(context: *Context, frame: *interrupt_context.Frame) u64", "G301 kernel dispatcher implements bounded passive listen")
@@ -2424,7 +2430,7 @@ def main() -> int:
     require(runtime_test, "hostfwd=tcp:127.0.0.1:39002-10.0.2.15:39002", "G301 inbound QEMU forwarding is loopback-only on the host")
     require(runtime_test, "Start-Sleep -Milliseconds 200", "G301 harness gives the launched listener a bounded setup interval before host connect")
     require(runtime_test, "ConnectAsync('127.0.0.1', 39002)", "G301 harness performs a real host-to-guest TCP connect")
-    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown passed", "current harness requires the completed G301/G302 passive-listen/accept proof")
+    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown + sockopt passed", "current harness requires the completed G301/G302 passive-listen/accept proof")
     require(runtime_test, "if ($serialBytes)", "G301 live harness retains serial evidence on early failure")
     require(readme, "G301 advances the public ABI to 1.28", "README documents G301 bounded passive listen")
     require(readme, "backlog 1 through 4", "README documents the fixed G301 backlog bound")
@@ -2458,7 +2464,7 @@ def main() -> int:
     require(socket_conformance, "accepted control block is established/writable", "G302 fixture requires accepted descriptor poll writability")
     require(socket_conformance, "G313/G314 remain open", "G302 fixture keeps TCP payload I/O outside accept scope")
     require(socket_conformance, "Consuming the single backlog entry removes listener readability", "G302 fixture proves exact backlog consumption")
-    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown passed", "G302 live harness requires the complete accept proof")
+    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown + sockopt passed", "G302 live harness requires the complete accept proof")
     require(readme, "G302 advances the public ABI to 1.29", "README documents G302 accept")
     require(readme, "Descriptor-allocation failure leaves the pending entry untouched", "README documents G302 allocation failure atomicity")
     require(readme, "peer-copy failure closes the provisional descriptor", "README documents G302 peer-copy rollback")
@@ -2482,7 +2488,7 @@ def main() -> int:
     require(runtime_test, "$sendToBytes.Length -ne 1024", "G303 host requires the sendto datagram to be exactly the returned short count")
     require(runtime_test, "$sendBytes.Length -ne 1024", "G303 host requires the connected-send datagram to be exactly the returned short count")
     require(runtime_test, "G303 UDP partial send/sendto host proof passed:", "G303 hosted logs expose direct byte-proof completion")
-    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown passed", "G303 live harness combines UDP short sends with the retained TCP connect/listen/accept proof")
+    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown + sockopt passed", "G303 live harness combines UDP short sends with the retained TCP connect/listen/accept proof")
     require(readme, "G303 advances the public ABI to 1.30", "README documents G303 bounded partial-send semantics")
     require(readme, "ZigOs-specific bounded UDP short-return contract", "README explicitly avoids claiming POSIX UDP datagram atomicity")
     require(readme, "13253800737F65ED354FED06A38590377FBF317057DABAE4CBB9D12E4A20C8B2", "README freezes the current G303 ABI header identity")
@@ -2520,7 +2526,7 @@ def main() -> int:
     require(socket_conformance, "SYS_GETPEERNAME", "G305 fixture retains peer identity after half-close")
     require(socket_conformance, ".fail_udp_shutdown", "G305 fixture requires UDP shutdown rejection")
     require(runtime_test, "G305 TCP shutdown host proof passed: guest SHUT_WR delivered FIN/EOF to the loopback host peer.", "G305 host proves the FIN crossed QEMU slirp as EOF")
-    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown passed", "G305 live harness combines half-close with all prior socket proofs")
+    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown + sockopt passed", "G305 live harness combines half-close with all prior socket proofs")
     require(readme, "G305 advances the public ABI to 1.31", "README documents G305 socket half-close")
     require(readme, "rather than reusing syscall 93", "README preserves the privileged OS-shutdown syscall namespace")
     require(readme, "G313/G314 and G321/G322 retain those later boundaries", "README does not overclaim TCP payload or graceful-close completion")
@@ -2532,6 +2538,39 @@ def main() -> int:
     require(priority, "G305 advances ABI to 1.31", "priority remediation records G305 half-close scope")
     require(threat_model, "G305 adds bounded TCP half-close authority", "threat model records G305 FIN authority")
     require(roadmap, "- [x] **G305** " + chr(0x2014) + " Expose shutdown for half-closing TCP connections.", "roadmap marks G305 complete")
+    require(c_header, "ZIGOS_SYS_GETSOCKOPT UINT64_C(133)", "G307 C ABI publishes getsockopt syscall 133")
+    require(c_header, "ZIGOS_SYS_SETSOCKOPT UINT64_C(134)", "G307 C ABI publishes setsockopt syscall 134")
+    require(c_header, "ZIGOS_SOL_SOCKET UINT64_C(1)", "G307 C ABI publishes the bounded socket option level")
+    require(c_header, "ZIGOS_SO_NONBLOCKING UINT64_C(1)", "G307 C ABI publishes mutable NONBLOCKING option")
+    require(c_header, "ZIGOS_SO_ACCEPTCONN UINT64_C(4)", "G307 C ABI publishes listener introspection")
+    require(c_header, "ZIGOS_ERRNO_PROTOCOL_OPTION INT64_C(-92)", "G307 C ABI publishes explicit unsupported-option errno")
+    require(c_library, "int64_t zigos_getsockopt(uint16_t fd, uint64_t level, uint64_t option)", "G307 C SDK invokes scalar getsockopt")
+    require(c_library, "int64_t zigos_setsockopt(uint16_t fd, uint64_t level, uint64_t option, uint64_t value)", "G307 C SDK invokes scalar setsockopt")
+    require(sdk_source, "pub const SocketOption = enum(u64)", "G307 Zig SDK exposes typed socket options")
+    require(sdk_source, "pub fn getSocketOption(fd: u16, level: SocketOptionLevel, option: SocketOption) Error!u64", "G307 Zig SDK exposes scalar option get")
+    require(sdk_source, "pub fn setSocketOption(fd: u16, level: SocketOptionLevel, option: SocketOption, value: u64) Error!void", "G307 Zig SDK exposes scalar option set")
+    require(executor, "syscall.syscall_getsockopt => return syscallGetSocketOption(context, frame)", "G307 dispatcher routes option reads")
+    require(executor, "syscall.syscall_setsockopt => return syscallSetSocketOption(context, frame)", "G307 dispatcher routes option writes")
+    require(executor, "fn syscallGetSocketOption(", "G307 kernel implements option reads")
+    require(executor, "fn syscallSetSocketOption(", "G307 kernel implements option writes")
+    require(executor, "slot.nonblocking = frame.r10 != 0;", "G307 generic NONBLOCKING setter shares the existing slot state")
+    require(executor, "syscall.socket_option_acceptconn => @intFromBool(slot.protocol == .tcp and slot.listener != null)", "G307 derives listener state instead of storing duplicate option state")
+    require(socket_conformance, "G307 generic socket options expose immutable type/protocol/listener state", "G307 CPL3 fixture exercises the new option namespace")
+    require(socket_conformance, "SYS_GETSOCKOPT", "G307 CPL3 fixture performs option reads")
+    require(socket_conformance, "SYS_SETSOCKOPT", "G307 CPL3 fixture performs option writes")
+    require(socket_conformance, "ERRNO_PROTOCOL_OPTION", "G307 CPL3 fixture proves unsupported/read-only failures")
+    require(runtime_test, "G307 socket option guest proof passed: type/protocol/acceptconn introspection and NONBLOCK set/get coherence completed.", "G307 live log exposes direct option proof completion")
+    require(runtime_test, "socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown + sockopt passed", "G307 live harness combines socket options with prior network proofs")
+    require(readme, "G307 advances the public ABI to 1.32", "README documents G307 socket options")
+    require(readme, "G320 retains keepalive and G313-G319 retain TCP data/reliability policy", "README does not overclaim later socket policies")
+    require(readme, "88599160CF9E3FA83641347FCFD793A6EA65678A34DAF34329B4F0B49459836B", "README freezes the G307 ABI header identity")
+    require(readme, "1E8B384041A8D3EB8C00F370B6E4A1AF186DCB326C0B51821B35C504E31002C0", "README freezes the G307 C ABI probe identity")
+    require(readme, "42C30ABF2133F62BCA1FDCBC19C67F0690EB61238EE1CE9EBC114EC0C4EB9296", "README freezes the G307 C SDK identity")
+    require(readme, "039CE363C008653D05B8082B8BAA344216C047EE857D8C11267E57CB40F2B766", "README freezes the G307 Zig SDK identity")
+    require(readme, "C697155A102F0ADFCCC0D0E4913E53104E7B8002F42E7EEA90FD9A257C204388", "README freezes the G307 socket fixture identity")
+    require(priority, "G307 advances ABI to 1.32", "priority remediation records G307 option scope")
+    require(threat_model, "G307 adds only bounded socket-policy observation", "threat model records G307 authority boundary")
+    require(roadmap, "- [x] **G307** " + chr(0x2014) + " Expose socket option get/set operations.", "roadmap marks G307 complete")
     require(readme, "G300 advances the public ABI to 1.27", "README documents the bounded G300 active-open slice")
     require(readme, "G300 deliberately rejects TCP application `send`/`recv` with `ENOSYS`", "README keeps G313/G314 payload I/O outside G300")
     require(readme, "current initial sequence is derived deterministically", "README records the non-cryptographic G300 ISN limitation")
@@ -2546,10 +2585,10 @@ def main() -> int:
     require(threat_model, "host listener is loopback-only", "threat model requires G300 CI not publish a LAN listener")
     require(threat_model, "ISN is deterministically derived", "threat model records the G300 sequence-number limitation")
     require(roadmap, "- [x] **G300** " + chr(0x2014) + " Expose connect for UDP and TCP sockets.", "roadmap marks G300 complete")
-    require(roadmap, "251 complete, 249 open", "roadmap arithmetic includes G305")
+    require(roadmap, "252 complete, 248 open", "roadmap arithmetic includes G305")
     roadmap_items = re.findall(r"^- \[([ x])\] \*\*G\d{3}\*\*", roadmap, flags=re.MULTILINE)
-    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 251:
-        raise SystemExit("roadmap must contain 500 goals with exactly 251 complete after G305")
+    if len(roadmap_items) != 500 or sum(item == "x" for item in roadmap_items) != 252:
+        raise SystemExit("roadmap must contain 500 goals with exactly 252 complete after G307")
     require(workflow, "Cross-platform artifact identity gate", "hosted cross-platform reproducibility gate")
     require(workflow, "cmp --", "artifact bytes are compared instead of only printed")
     require(asset_builder, '"schema": 2', "host-independent generated-asset manifest schema")
@@ -2613,7 +2652,7 @@ def main() -> int:
         "c-sdk: advisory whole-file flock passed",
         "zig-sdk: directory watch notifications passed",
         "zig-sdk: startup/argv/abi/files/vm/file-mmap/errno/fsync/fdatasync/readv/writev/mount/umount/tmpfs/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/watchdir/kill passed",
-        "c-sdk: ABI 1.31 discovery passed",
+        "c-sdk: ABI 1.32 discovery passed",
         "c-sdk: directory watch notifications passed",
         "c-sdk: generated header/library/device/ioctl/stat/statfs/stattimes/statowner/umask/setid-metadata/flock/lockrange/watchdir/kill/directory-openat/fsync/fdatasync/symlink/readlink/link/nlink/fallocate/sparse/readv/writev passed",
         "ZigOs block-backed FAT16 runtime mount",
@@ -2658,7 +2697,7 @@ def main() -> int:
         if len(goals) != 32:
             raise SystemExit(f"Capstone 19 must document exactly 32 goals, found {len(goals)}")
 
-    print("Verified permanent runtime contract: ABI 1.31 Zig/C SDKs with bounded UDP partial-send plus TCP active/passive-open/accept/half-close, process umask, inert setuid/setgid metadata, sticky-directory removal rules, advisory whole-file flock, bounded advisory byte-range locking and bounded directory-change notifications, statfs, four-field inode timestamps, persistent UID/GID ownership metadata and owner/group/other VFS enforcement, with root-only tmpfs mount/umount and busy-path protection, fixed live devfs/procfs/netfs registries, retained read-only block-backed FAT16 boot files with staged validation, classified quarantine fallback, recoverable block-read EIO propagation and fail-stop persistent write-error read-only remount, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/degraded/diskless normal profiles, retained networking and storage, and complete cleanup")
+    print("Verified permanent runtime contract: ABI 1.32 Zig/C SDKs with bounded UDP partial-send plus TCP active/passive-open/accept/half-close and scalar socket options, process umask, inert setuid/setgid metadata, sticky-directory removal rules, advisory whole-file flock, bounded advisory byte-range locking and bounded directory-change notifications, statfs, four-field inode timestamps, persistent UID/GID ownership metadata and owner/group/other VFS enforcement, with root-only tmpfs mount/umount and busy-path protection, fixed live devfs/procfs/netfs registries, retained read-only block-backed FAT16 boot files with staged validation, classified quarantine fallback, recoverable block-read EIO propagation and fail-stop persistent write-error read-only remount, read-only shared file mappings with coherent VFS cache reads, PMM-backed pressure-reclaiming file cache with page-scoped writer serialization, bounded asynchronous dirty-page writeback, all-writable-mount sync, fsync/fdatasync, vectored I/O, sparse files, atomic append, per-node devices, diagnostic/persistent/degraded/diskless normal profiles, retained networking and storage, and complete cleanup")
     return 0
 
 

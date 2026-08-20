@@ -700,6 +700,8 @@ pub fn handleSyscall(
         syscall.syscall_listen => return syscallListen(context, frame),
         syscall.syscall_accept => return syscallAccept(context, frame, fx_state),
         syscall.syscall_socket_shutdown => return syscallSocketShutdown(context, frame),
+        syscall.syscall_getsockopt => return syscallGetSocketOption(context, frame),
+        syscall.syscall_setsockopt => return syscallSetSocketOption(context, frame),
         syscall.syscall_send => return syscallSend(context, frame),
         syscall.syscall_recv => return syscallRecv(context, frame, fx_state),
         syscall.syscall_getsockname => return syscallGetSockName(context, frame),
@@ -2060,6 +2062,54 @@ fn syscallGetPeerName(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     }
     frame.rax = @sizeOf(runtime_abi.Ipv4SocketAddress);
+    return 0;
+}
+
+fn syscallGetSocketOption(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (frame.rsi != syscall.socket_option_level_socket) {
+        frame.rax = reject(syscall.errno_protocol_option);
+        return 0;
+    }
+    frame.rax = switch (frame.rdx) {
+        syscall.socket_option_nonblocking => @intFromBool(slot.nonblocking),
+        syscall.socket_option_type => if (slot.protocol == .tcp) runtime_abi.socket_stream else runtime_abi.socket_datagram,
+        syscall.socket_option_protocol => if (slot.protocol == .tcp) runtime_abi.protocol_tcp else runtime_abi.protocol_udp,
+        syscall.socket_option_acceptconn => @intFromBool(slot.protocol == .tcp and slot.listener != null),
+        else => {
+            frame.rax = reject(syscall.errno_protocol_option);
+            return 0;
+        },
+    };
+    return 0;
+}
+
+fn syscallSetSocketOption(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (frame.rsi != syscall.socket_option_level_socket or frame.rdx != syscall.socket_option_nonblocking) {
+        frame.rax = reject(syscall.errno_protocol_option);
+        return 0;
+    }
+    if (frame.r10 > 1) {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    }
+    slot.nonblocking = frame.r10 != 0;
+    frame.rax = 0;
     return 0;
 }
 

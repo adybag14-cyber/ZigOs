@@ -109,6 +109,17 @@ pub const SocketShutdown = enum(u64) {
     both = abi.socket_shutdown_both,
 };
 
+pub const SocketOptionLevel = enum(u64) {
+    socket = abi.socket_option_level_socket,
+};
+
+pub const SocketOption = enum(u64) {
+    nonblocking = abi.socket_option_nonblocking,
+    type = abi.socket_option_type,
+    protocol = abi.socket_option_protocol,
+    acceptconn = abi.socket_option_acceptconn,
+};
+
 pub const FallocateFlags = packed struct(u8) {
     keep_size: bool = false,
     punch_hole: bool = false,
@@ -519,6 +530,14 @@ pub fn accept(fd: u16, address: ?*Ipv4SocketAddress) Error!u16 {
 
 pub fn shutdownSocket(fd: u16, how: SocketShutdown) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_socket_shutdown, fd, @intFromEnum(how), 0, 0, 0, 0));
+}
+
+pub fn getSocketOption(fd: u16, level: SocketOptionLevel, option: SocketOption) Error!u64 {
+    return try result(zigos_syscall6(abi.syscall_getsockopt, fd, @intFromEnum(level), @intFromEnum(option), 0, 0, 0));
+}
+
+pub fn setSocketOption(fd: u16, level: SocketOptionLevel, option: SocketOption, value: u64) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_setsockopt, fd, @intFromEnum(level), @intFromEnum(option), value, 0, 0));
 }
 
 pub fn send(fd: u16, bytes: []const u8) Error!usize {

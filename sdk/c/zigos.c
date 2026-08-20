@@ -52,6 +52,14 @@ int64_t zigos_socket_shutdown(uint16_t fd, uint64_t how) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_SOCKET_SHUTDOWN, fd, how, 0, 0, 0, 0);
 }
 
+int64_t zigos_getsockopt(uint16_t fd, uint64_t level, uint64_t option) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_GETSOCKOPT, fd, level, option, 0, 0, 0);
+}
+
+int64_t zigos_setsockopt(uint16_t fd, uint64_t level, uint64_t option, uint64_t value) {
+    return (int64_t)zigos_syscall6(ZIGOS_SYS_SETSOCKOPT, fd, level, option, value, 0, 0);
+}
+
 int64_t zigos_getsockname(uint16_t fd, zigos_ipv4_socket_address *address) {
     return (int64_t)zigos_syscall6(ZIGOS_SYS_GETSOCKNAME, fd, pointer_value(address), sizeof(*address), 0, 0, 0);
 }

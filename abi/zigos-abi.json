@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 31,
+    "minor": 32,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -89,7 +89,9 @@
     "fscheck": 129,
     "listen": 130,
     "accept": 131,
-    "socket_shutdown": 132
+    "socket_shutdown": 132,
+    "getsockopt": 133,
+    "setsockopt": 134
   },
   "errno": {
     "permission": -1,
@@ -122,6 +124,7 @@
     "not_empty": -39,
     "loop": -40,
     "not_socket": -88,
+    "protocol_option": -92,
     "address_in_use": -98,
     "not_connected": -107,
     "connection_refused": -111
@@ -218,5 +221,14 @@
     "read": 0,
     "write": 1,
     "both": 2
+  },
+  "socket_option_levels": {
+    "socket": 1
+  },
+  "socket_options": {
+    "nonblocking": 1,
+    "type": 2,
+    "protocol": 3,
+    "acceptconn": 4
   }
 }
