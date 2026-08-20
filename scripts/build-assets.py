@@ -64,15 +64,19 @@ def runtime_tty_data() -> bytes:
 
 
 def runtime_socket_data() -> bytes:
-    data = bytearray(1024)
+    data = bytearray(4096)
     fields = {
         0: b"socket-api: start\r\n",
-        64: b"socket-api: UDP/TCP connect/listen/accept passed\r\n",
+        64: b"socket-api: UDP partial send/sendto + TCP connect/listen/accept passed\r\n",
         160: b"UDP-CPL3",
         192: bytes.fromhex("5A5A01000001000000000000096C6F63616C686F73740000010001"),
     }
     for offset, value in fields.items():
         data[offset : offset + len(value)] = value
+    for index in range(1476):
+        data[1024 + index] = (index * 3 + 7) & 0xFF
+    for index in range(1024):
+        data[3072 + index] = (index * 5 + 11) & 0xFF
     return bytes(data)
 
 

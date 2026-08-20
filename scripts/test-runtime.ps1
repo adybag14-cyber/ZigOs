@@ -26,6 +26,7 @@ $tcpFixtureAccept = $null
 $tcpFixtureClient = $null
 $tcpPassiveClient = $null
 $tcpPassiveConnect = $null
+$udpSendFixture = $null
 $serialBytes = $null
 try {
     try { $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(30)) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
@@ -72,6 +73,13 @@ try {
             $tcpFixtureAccept = $tcpFixtureListener.BeginAcceptTcpClient($null, $null)
         } catch {
             throw "The G300 TCP listener could not bind host port 39001: $($_.Exception.Message)"
+        }
+        try {
+            $udpSendEndpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, 39003)
+            $udpSendFixture = [System.Net.Sockets.UdpClient]::new($udpSendEndpoint)
+            $udpSendFixture.Client.ReceiveTimeout = 5000
+        } catch {
+            throw "The G303 UDP listener could not bind host port 39003: $($_.Exception.Message)"
         }
     }
     $codeImage = Join-Path $buildDir 'runtime-ovmf-code.fd'
@@ -256,14 +264,38 @@ try {
             while ((Get-Date) -lt $socketDeadline) {
                 Start-Sleep -Milliseconds 50
                 $socketText = Current-SerialText
-                if ($socketText.Contains('socket-api: UDP/TCP connect/listen/accept passed')) {
+                if ($socketText.Contains('socket-api: UDP partial send/sendto + TCP connect/listen/accept passed')) {
                     $socketPassed = $true
                     break
                 }
                 $process.Refresh()
-                if ($process.HasExited) { throw 'QEMU exited before the G302 socket fixture completed.' }
+                if ($process.HasExited) { throw 'QEMU exited before the G303 socket fixture completed.' }
             }
-            if (-not $socketPassed) { throw 'The G302 socket fixture did not complete after the host-forward connection.' }
+            if (-not $socketPassed) { throw 'The G303 socket fixture did not complete after the host-forward connection.' }
+            if (-not $udpSendFixture) { throw 'The G303 host UDP fixture was not available.' }
+            $udpRemote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
+            try {
+                $sendToBytes = $udpSendFixture.Receive([ref]$udpRemote)
+            } catch {
+                throw "The G303 sendto partial datagram did not reach host UDP port 39003: $($_.Exception.Message)"
+            }
+            if ($sendToBytes.Length -ne 1024) { throw "The G303 sendto partial datagram had $($sendToBytes.Length) bytes instead of 1024." }
+            for ($index = 0; $index -lt $sendToBytes.Length; $index++) {
+                $expected = [byte](($index * 3 + 7) -band 0xFF)
+                if ($sendToBytes[$index] -ne $expected) { throw "The G303 sendto partial payload differed at byte $index." }
+            }
+            $udpRemote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
+            try {
+                $sendBytes = $udpSendFixture.Receive([ref]$udpRemote)
+            } catch {
+                throw "The G303 connected-send partial datagram did not reach host UDP port 39003: $($_.Exception.Message)"
+            }
+            if ($sendBytes.Length -ne 1024) { throw "The G303 connected-send partial datagram had $($sendBytes.Length) bytes instead of 1024." }
+            for ($index = 0; $index -lt $sendBytes.Length; $index++) {
+                $expected = [byte](($index * 5 + 11) -band 0xFF)
+                if ($sendBytes[$index] -ne $expected) { throw "The G303 connected-send partial payload differed at byte $index." }
+            }
+            Write-Host 'G303 UDP partial send/sendto host proof passed: two 1476-byte requests delivered exact 1024-byte prefixes.'
         }
         if ($command -eq 'exec /bin/tty.elf') {
             Start-Sleep -Milliseconds 300
@@ -360,7 +392,7 @@ try {
         'exec: PID 16 state zombie status 0x56',
         'c-sdk: start',
         'c-sdk: argc/argv passed',
-        'c-sdk: ABI 1.29 discovery passed',
+        'c-sdk: ABI 1.30 discovery passed',
         'c-sdk: process umask creation passed',
         'c-sdk: setuid/setgid metadata passed',
         'c-sdk: advisory whole-file flock passed',
@@ -429,7 +461,7 @@ try {
             'exec: PID 19 state zombie status 0x5A',
             'serial COM1 online; framebuffer no; USB keyboard no; NVMe yes; AHCI no; e1000e yes',
             'e1000e0: up mac 52:54:00:12:34:56 ipv4 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 dns 10.0.2.3',
-            'socket-api: UDP/TCP connect/listen/accept passed',
+            'socket-api: UDP partial send/sendto + TCP connect/listen/accept passed',
             'reply from 10.0.2.2: bytes=16',
             'localhost A 127.0.0.1',
             'UDP endpoints active/readable/connected',
@@ -482,6 +514,7 @@ finally {
             [System.IO.File]::WriteAllText($serialLog, $serialText, [System.Text.Encoding]::ASCII)
         } catch {}
     }
+    if ($udpSendFixture) { $udpSendFixture.Dispose() }
     if ($tcpPassiveClient) { $tcpPassiveClient.Dispose() }
     if ($tcpFixtureClient) { $tcpFixtureClient.Dispose() }
     if ($tcpFixtureListener) { $tcpFixtureListener.Stop() }

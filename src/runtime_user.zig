@@ -1743,12 +1743,13 @@ fn syscallSend(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     }
-    if (length > maximum_io_bytes or !validateRange(context, frame.rsi, length, false)) {
-        frame.rax = reject(if (length > maximum_io_bytes) errno_invalid else errno_fault);
+    const send_length = @min(length, maximum_io_bytes);
+    if (!validateRange(context, frame.rsi, send_length, false)) {
+        frame.rax = reject(errno_fault);
         return 0;
     }
     var bytes: [maximum_io_bytes]u8 = undefined;
-    if (length != 0 and !copyFromUser(context, frame.rsi, bytes[0..length])) {
+    if (send_length != 0 and !copyFromUser(context, frame.rsi, bytes[0..send_length])) {
         frame.rax = reject(errno_fault);
         return 0;
     }
@@ -1772,11 +1773,11 @@ fn syscallSend(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.errno_io);
         return 0;
     }
-    if (e1000e.sendConnectedUdpDatagram(device, socket, 64, bytes[0..length]) == null) {
+    if (e1000e.sendConnectedUdpDatagram(device, socket, 64, bytes[0..send_length]) == null) {
         frame.rax = reject(runtime_abi.errno_io);
         return 0;
     }
-    frame.rax = length;
+    frame.rax = send_length;
     return 0;
 }
 
@@ -1793,8 +1794,9 @@ fn syscallSendTo(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     }
-    if (length > maximum_io_bytes or !validateRange(context, frame.rsi, length, false)) {
-        frame.rax = reject(if (length > maximum_io_bytes) errno_invalid else errno_fault);
+    const send_length = @min(length, maximum_io_bytes);
+    if (!validateRange(context, frame.rsi, send_length, false)) {
+        frame.rax = reject(errno_fault);
         return 0;
     }
     const address = readSocketAddress(context, frame.r8, frame.r9) orelse {
@@ -1802,7 +1804,7 @@ fn syscallSendTo(context: *Context, frame: *interrupt_context.Frame) u64 {
         return 0;
     };
     var bytes: [maximum_io_bytes]u8 = undefined;
-    if (length != 0 and !copyFromUser(context, frame.rsi, bytes[0..length])) {
+    if (send_length != 0 and !copyFromUser(context, frame.rsi, bytes[0..send_length])) {
         frame.rax = reject(errno_fault);
         return 0;
     }
@@ -1831,11 +1833,11 @@ fn syscallSendTo(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.errno_io);
         return 0;
     }
-    if (e1000e.sendUdpDatagramTo(device, socket, peer, 64, bytes[0..length]) == null) {
+    if (e1000e.sendUdpDatagramTo(device, socket, peer, 64, bytes[0..send_length]) == null) {
         frame.rax = reject(runtime_abi.errno_io);
         return 0;
     }
-    frame.rax = length;
+    frame.rax = send_length;
     return 0;
 }
 
