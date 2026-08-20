@@ -2,7 +2,7 @@
   "abi": {
     "magic": 1229078874,
     "major": 1,
-    "minor": 30,
+    "minor": 31,
     "page_size": 4096,
     "syscall_base": 64
   },
@@ -88,7 +88,8 @@
     "kill": 128,
     "fscheck": 129,
     "listen": 130,
-    "accept": 131
+    "accept": 131,
+    "socket_shutdown": 132
   },
   "errno": {
     "permission": -1,
@@ -212,5 +213,10 @@
     "rename_from": 2,
     "rename_to": 3,
     "overflow": 4
+  },
+  "socket_shutdown": {
+    "read": 0,
+    "write": 1,
+    "both": 2
   }
 }

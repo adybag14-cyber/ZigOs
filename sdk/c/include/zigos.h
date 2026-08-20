@@ -10,10 +10,10 @@
 
 #define ZIGOS_ABI_MAGIC UINT32_C(0x4942415A)
 #define ZIGOS_ABI_MAJOR UINT16_C(1)
-#define ZIGOS_ABI_MINOR UINT16_C(30)
+#define ZIGOS_ABI_MINOR UINT16_C(31)
 #define ZIGOS_PAGE_SIZE UINT32_C(4096)
 #define ZIGOS_SYSCALL_BASE UINT16_C(64)
-#define ZIGOS_SYSCALL_COUNT UINT16_C(68)
+#define ZIGOS_SYSCALL_COUNT UINT16_C(69)
 #define ZIGOS_MAX_IOVECS UINT64_C(8)
 
 #define ZIGOS_AUX_NULL UINT64_C(0)
@@ -29,6 +29,9 @@
 #define ZIGOS_SEEK_CURRENT UINT64_C(1)
 #define ZIGOS_SEEK_END UINT64_C(2)
 #define ZIGOS_MSG_DONTWAIT UINT64_C(1)
+#define ZIGOS_SOCKET_SHUTDOWN_READ UINT64_C(0)
+#define ZIGOS_SOCKET_SHUTDOWN_WRITE UINT64_C(1)
+#define ZIGOS_SOCKET_SHUTDOWN_BOTH UINT64_C(2)
 #define ZIGOS_SPAWN_NEW_PROCESS_GROUP (UINT16_C(1) << 0)
 #define ZIGOS_SPAWN_JOIN_PROCESS_GROUP (UINT16_C(1) << 1)
 #define ZIGOS_SPAWN_PIPELINE_IO (UINT16_C(1) << 2)
@@ -155,6 +158,7 @@
 #define ZIGOS_SYS_FSCHECK UINT64_C(129)
 #define ZIGOS_SYS_LISTEN UINT64_C(130)
 #define ZIGOS_SYS_ACCEPT UINT64_C(131)
+#define ZIGOS_SYS_SOCKET_SHUTDOWN UINT64_C(132)
 
 #define ZIGOS_ERRNO_PERMISSION INT64_C(-1)
 #define ZIGOS_ERRNO_NOT_FOUND INT64_C(-2)
@@ -274,6 +278,7 @@ int64_t zigos_bind(uint16_t fd, const zigos_ipv4_socket_address *address);
 int64_t zigos_connect(uint16_t fd, const zigos_ipv4_socket_address *address);
 int64_t zigos_listen(uint16_t fd, uint16_t backlog);
 int64_t zigos_accept(uint16_t fd, zigos_ipv4_socket_address *address);
+int64_t zigos_socket_shutdown(uint16_t fd, uint64_t how);
 int64_t zigos_getsockname(uint16_t fd, zigos_ipv4_socket_address *address);
 int64_t zigos_getpeername(uint16_t fd, zigos_ipv4_socket_address *address);
 int64_t zigos_open(const char *path, uint64_t flags, uint16_t mode);

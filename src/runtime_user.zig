@@ -153,6 +153,8 @@ const TcpSocketState = struct {
     peer_port: u16,
     control: tcp_connection.ControlBlock,
     status: TcpConnectStatus = .connecting,
+    read_shutdown: bool = false,
+    write_shutdown: bool = false,
 };
 
 const TcpPendingConnection = struct {
@@ -697,6 +699,7 @@ pub fn handleSyscall(
         syscall.syscall_connect => return syscallConnect(context, frame, fx_state),
         syscall.syscall_listen => return syscallListen(context, frame),
         syscall.syscall_accept => return syscallAccept(context, frame, fx_state),
+        syscall.syscall_socket_shutdown => return syscallSocketShutdown(context, frame),
         syscall.syscall_send => return syscallSend(context, frame),
         syscall.syscall_recv => return syscallRecv(context, frame, fx_state),
         syscall.syscall_getsockname => return syscallGetSockName(context, frame),
@@ -1607,6 +1610,65 @@ fn syscallAccept(
     return 0;
 }
 
+fn syscallSocketShutdown(context: *Context, frame: *interrupt_context.Frame) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const shutdown_read, const shutdown_write = switch (frame.rsi) {
+        syscall.socket_shutdown_read => .{ true, false },
+        syscall.socket_shutdown_write => .{ false, true },
+        syscall.socket_shutdown_both => .{ true, true },
+        else => {
+            frame.rax = reject(errno_invalid);
+            return 0;
+        },
+    };
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (slot.protocol != .tcp) {
+        frame.rax = reject(errno_no_syscall);
+        return 0;
+    }
+    if (slot.listener != null) {
+        frame.rax = reject(runtime_abi.errno_not_connected);
+        return 0;
+    }
+    const connection = if (slot.tcp) |*value| value else {
+        frame.rax = reject(runtime_abi.errno_not_connected);
+        return 0;
+    };
+    if (connection.status != .established) {
+        frame.rax = reject(runtime_abi.errno_not_connected);
+        return 0;
+    }
+
+    if (shutdown_write and !connection.write_shutdown) {
+        const device = e1000e.activeDevice() orelse {
+            frame.rax = reject(runtime_abi.errno_connection_refused);
+            return 0;
+        };
+        if (!runtimeNetworkReady(device)) {
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        }
+        const previous_control = connection.control;
+        const transition = tcp_connection.beginClose(&connection.control);
+        const outbound = if (transition.accepted) transition.outbound else null;
+        if (outbound == null or !sendTcpControl(device, connection, outbound.?)) {
+            connection.control = previous_control;
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        }
+        connection.write_shutdown = true;
+    }
+    if (shutdown_read) connection.read_shutdown = true;
+    frame.rax = 0;
+    return 0;
+}
+
 fn syscallConnect(
     context: *Context,
     frame: *interrupt_context.Frame,
@@ -2144,7 +2206,7 @@ fn pollExternalSocket(_: ?*anyopaque, index: u16, generation: u32, requested: u1
     } else if (slot.tcp) |connection| {
         ready |= switch (connection.status) {
             .connecting => 0,
-            .established => runtime_abi.poll_writable,
+            .established => if (connection.write_shutdown) 0 else runtime_abi.poll_writable,
             .refused, .timed_out, .io_failed => runtime_abi.poll_error | runtime_abi.poll_hangup,
         };
     } else {

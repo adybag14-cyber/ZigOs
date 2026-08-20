@@ -264,14 +264,14 @@ try {
             while ((Get-Date) -lt $socketDeadline) {
                 Start-Sleep -Milliseconds 50
                 $socketText = Current-SerialText
-                if ($socketText.Contains('socket-api: UDP partial send/sendto + TCP connect/listen/accept passed')) {
+                if ($socketText.Contains('socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown passed')) {
                     $socketPassed = $true
                     break
                 }
                 $process.Refresh()
-                if ($process.HasExited) { throw 'QEMU exited before the G303 socket fixture completed.' }
+                if ($process.HasExited) { throw 'QEMU exited before the G305 socket fixture completed.' }
             }
-            if (-not $socketPassed) { throw 'The G303 socket fixture did not complete after the host-forward connection.' }
+            if (-not $socketPassed) { throw 'The G305 socket fixture did not complete after the host-forward connection.' }
             if (-not $udpSendFixture) { throw 'The G303 host UDP fixture was not available.' }
             $udpRemote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
             try {
@@ -296,6 +296,21 @@ try {
                 if ($sendBytes[$index] -ne $expected) { throw "The G303 connected-send partial payload differed at byte $index." }
             }
             Write-Host 'G303 UDP partial send/sendto host proof passed: two 1476-byte requests delivered exact 1024-byte prefixes.'
+            if (-not $tcpFixtureAccept -or -not $tcpFixtureAccept.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds(5))) {
+                throw 'The G305 active TCP fixture did not reach the loopback host listener.'
+            }
+            $tcpFixtureClient = $tcpFixtureListener.EndAcceptTcpClient($tcpFixtureAccept)
+            $tcpFixtureAccept = $null
+            $tcpShutdownStream = $tcpFixtureClient.GetStream()
+            $tcpShutdownStream.ReadTimeout = 5000
+            $tcpShutdownByte = [byte[]]::new(1)
+            try {
+                $tcpShutdownRead = $tcpShutdownStream.Read($tcpShutdownByte, 0, 1)
+            } catch {
+                throw "The G305 host did not observe TCP write-half EOF: $($_.Exception.Message)"
+            }
+            if ($tcpShutdownRead -ne 0) { throw "The G305 host read $tcpShutdownRead bytes instead of EOF after guest SHUT_WR." }
+            Write-Host 'G305 TCP shutdown host proof passed: guest SHUT_WR delivered FIN/EOF to the loopback host peer.'
         }
         if ($command -eq 'exec /bin/tty.elf') {
             Start-Sleep -Milliseconds 300
@@ -320,11 +335,8 @@ try {
         if ($process.HasExited) { break }
     }
     Read-SerialAvailable
-    if ($Network) {
-        if (-not $tcpFixtureAccept -or -not $tcpFixtureAccept.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds(5))) {
-            throw 'The G300 TCP fixture did not reach the host listener through QEMU slirp.'
-        }
-        $tcpFixtureClient = $tcpFixtureListener.EndAcceptTcpClient($tcpFixtureAccept)
+    if ($Network -and -not $tcpFixtureClient) {
+        throw 'The G305 TCP fixture never completed its host-side half-close proof.'
     }
     $serialText = [System.Text.Encoding]::ASCII.GetString($serialBytes.ToArray())
     [System.IO.File]::WriteAllText($serialLog, $serialText, [System.Text.Encoding]::ASCII)
@@ -392,7 +404,7 @@ try {
         'exec: PID 16 state zombie status 0x56',
         'c-sdk: start',
         'c-sdk: argc/argv passed',
-        'c-sdk: ABI 1.30 discovery passed',
+        'c-sdk: ABI 1.31 discovery passed',
         'c-sdk: process umask creation passed',
         'c-sdk: setuid/setgid metadata passed',
         'c-sdk: advisory whole-file flock passed',
@@ -436,7 +448,7 @@ try {
         'faults 1',
         $(if ($Network) { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/62/1 blocked 3/1 wakeups 3/1' } else { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/56/1 blocked 3/1 wakeups 3/1' }),
         'ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/suspend/overflow 1/0/0/0 clean yes',
-        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5854788 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11439/4672/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
+        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5855300 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11440/4671/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
         'ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes',
         'ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 global/mount/immediate/durable/reject 1/2/1/1/0 writeback active no request/complete/pass 1/1/1 immediate/durable/clean/unsupported/failure/stale 1/0/0/0/0/0 pages queued/completed 6/6 payload/header/flush 1/1/2 NVMe read/write/flush ',
         ' errors 0/0 clean yes',
@@ -461,7 +473,7 @@ try {
             'exec: PID 19 state zombie status 0x5A',
             'serial COM1 online; framebuffer no; USB keyboard no; NVMe yes; AHCI no; e1000e yes',
             'e1000e0: up mac 52:54:00:12:34:56 ipv4 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 dns 10.0.2.3',
-            'socket-api: UDP partial send/sendto + TCP connect/listen/accept passed',
+            'socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown passed',
             'reply from 10.0.2.2: bytes=16',
             'localhost A 127.0.0.1',
             'UDP endpoints active/readable/connected',

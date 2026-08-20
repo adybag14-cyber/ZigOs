@@ -67,7 +67,7 @@ def runtime_socket_data() -> bytes:
     data = bytearray(4096)
     fields = {
         0: b"socket-api: start\r\n",
-        64: b"socket-api: UDP partial send/sendto + TCP connect/listen/accept passed\r\n",
+        64: b"socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown passed\r\n",
         160: b"UDP-CPL3",
         192: bytes.fromhex("5A5A01000001000000000000096C6F63616C686F73740000010001"),
     }

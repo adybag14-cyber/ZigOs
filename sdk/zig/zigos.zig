@@ -103,6 +103,12 @@ pub const MessageFlags = packed struct(u8) {
     }
 };
 
+pub const SocketShutdown = enum(u64) {
+    read = abi.socket_shutdown_read,
+    write = abi.socket_shutdown_write,
+    both = abi.socket_shutdown_both,
+};
+
 pub const FallocateFlags = packed struct(u8) {
     keep_size: bool = false,
     punch_hole: bool = false,
@@ -509,6 +515,10 @@ pub fn accept(fd: u16, address: ?*Ipv4SocketAddress) Error!u16 {
     const pointer: u64 = if (address) |value| ptrValue(value) else 0;
     const size: u64 = if (address == null) 0 else @sizeOf(Ipv4SocketAddress);
     return @intCast(try result(zigos_syscall6(abi.syscall_accept, fd, pointer, size, 0, 0, 0)));
+}
+
+pub fn shutdownSocket(fd: u16, how: SocketShutdown) Error!void {
+    _ = try result(zigos_syscall6(abi.syscall_socket_shutdown, fd, @intFromEnum(how), 0, 0, 0, 0));
 }
 
 pub fn send(fd: u16, bytes: []const u8) Error!usize {

@@ -19,7 +19,7 @@ ORG 0
 %define PARTIAL_SEND_PAYLOAD   (DATA_BASE + 3072)
 
 %define START_LENGTH    19
-%define PASS_LENGTH     72
+%define PASS_LENGTH     81
 %define PAYLOAD_LENGTH  8
 %define DNS_QUERY_LENGTH 27
 %define RECEIVE_CAPACITY 512
@@ -190,6 +190,35 @@ _start:
     mov rbx, POLL_BUFFER
     test word [rbx + 4], 2
     jz .fail_accept_poll
+
+    ; G305 read-half shutdown is local and idempotent; the write half remains ready.
+    mov eax, SYS_SOCKET_SHUTDOWN
+    mov edi, r13d
+    mov esi, ZIGOS_SOCKET_SHUTDOWN_READ
+    int 0x80
+    test eax, eax
+    jnz .fail_accept_shutdown
+    mov eax, SYS_SOCKET_SHUTDOWN
+    mov edi, r13d
+    mov esi, ZIGOS_SOCKET_SHUTDOWN_READ
+    int 0x80
+    test eax, eax
+    jnz .fail_accept_shutdown
+    mov rbx, POLL_BUFFER
+    mov word [rbx + 0], r13w
+    mov word [rbx + 2], 2
+    mov word [rbx + 4], 0
+    mov word [rbx + 6], 0
+    mov eax, SYS_POLL
+    mov rdi, POLL_BUFFER
+    mov esi, 1
+    xor edx, edx
+    int 0x80
+    cmp eax, 1
+    jne .fail_accept_shutdown
+    mov rbx, POLL_BUFFER
+    test word [rbx + 4], 2
+    jz .fail_accept_shutdown
 
     ; G313/G314 remain open: accepting a control block does not expose TCP payload I/O.
     mov eax, SYS_SEND
@@ -457,6 +486,13 @@ _start:
     cmp eax, PAYLOAD_LENGTH
     jne .fail_send
 
+    mov eax, SYS_SOCKET_SHUTDOWN
+    mov edi, r12d
+    mov esi, ZIGOS_SOCKET_SHUTDOWN_WRITE
+    int 0x80
+    cmp rax, ERRNO_NO_SYSCALL
+    jne .fail_udp_shutdown
+
     mov eax, SYS_CLOSE
     mov edi, r12d
     int 0x80
@@ -530,6 +566,57 @@ _start:
     mov rbx, POLL_BUFFER
     test word [rbx + 4], 2
     jz .fail_tcp_poll
+
+    ; Invalid shutdown mode is failure-atomic and leaves writability unchanged.
+    mov eax, SYS_SOCKET_SHUTDOWN
+    mov edi, r12d
+    mov esi, 3
+    int 0x80
+    cmp rax, ERRNO_INVALID
+    jne .fail_tcp_shutdown
+
+    ; G305 write-half shutdown emits one FIN and is idempotent. The descriptor
+    ; remains open/peer-addressable but is no longer writable.
+    mov eax, SYS_SOCKET_SHUTDOWN
+    mov edi, r12d
+    mov esi, ZIGOS_SOCKET_SHUTDOWN_WRITE
+    int 0x80
+    test eax, eax
+    jnz .fail_tcp_shutdown
+    mov eax, SYS_SOCKET_SHUTDOWN
+    mov edi, r12d
+    mov esi, ZIGOS_SOCKET_SHUTDOWN_WRITE
+    int 0x80
+    test eax, eax
+    jnz .fail_tcp_shutdown
+
+    mov eax, SYS_GETPEERNAME
+    mov edi, r12d
+    mov rsi, SOURCE_ADDRESS
+    mov edx, 8
+    int 0x80
+    cmp eax, 8
+    jne .fail_tcp_shutdown
+    mov rbx, SOURCE_ADDRESS
+    cmp word [rbx + 0], 2
+    jne .fail_tcp_shutdown
+    cmp word [rbx + 2], 0x5998
+    jne .fail_tcp_shutdown
+    cmp dword [rbx + 4], 0x0202000A
+    jne .fail_tcp_shutdown
+
+    mov rbx, POLL_BUFFER
+    mov word [rbx + 0], r12w
+    mov word [rbx + 2], 2
+    mov word [rbx + 4], 0
+    mov word [rbx + 6], 0
+    mov eax, SYS_POLL
+    mov rdi, POLL_BUFFER
+    mov esi, 1
+    xor edx, edx
+    int 0x80
+    test eax, eax
+    jnz .fail_tcp_shutdown_poll
 
     ; G313 remains open: connect must not silently expose TCP payload send.
     mov eax, SYS_SEND
@@ -662,6 +749,9 @@ _start:
 .fail_accept_close:
     mov edi, 0xDD
     jmp .exit_failure
+.fail_accept_shutdown:
+    mov edi, 0xDE
+    jmp .exit_failure
 .fail_partial_socket:
     mov edi, 0xE0
     jmp .exit_failure
@@ -676,6 +766,15 @@ _start:
     jmp .exit_failure
 .fail_partial_close:
     mov edi, 0xE4
+    jmp .exit_failure
+.fail_udp_shutdown:
+    mov edi, 0xE5
+    jmp .exit_failure
+.fail_tcp_shutdown:
+    mov edi, 0xE6
+    jmp .exit_failure
+.fail_tcp_shutdown_poll:
+    mov edi, 0xE7
     jmp .exit_failure
 .fail_pass:
     mov edi, 0xBE
