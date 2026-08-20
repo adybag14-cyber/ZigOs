@@ -17,7 +17,7 @@ ORG 0
 %define RECEIVE_BUFFER  (DATA_BASE + 400)
 
 %define START_LENGTH    19
-%define PASS_LENGTH     43
+%define PASS_LENGTH     50
 %define PAYLOAD_LENGTH  8
 %define DNS_QUERY_LENGTH 27
 %define RECEIVE_CAPACITY 512
@@ -117,7 +117,106 @@ _start:
     test word [rbx + 4], 1
     jz .fail_listen_poll
 
-    ; G302 boundary: the listener itself has no connected peer before accept.
+    ; The listener itself remains unconnected; G302 accepts one queued peer into a new descriptor.
+    mov eax, SYS_GETPEERNAME
+    mov edi, r12d
+    mov rsi, SOURCE_ADDRESS
+    mov edx, 8
+    int 0x80
+    cmp rax, ERRNO_NOT_CONNECTED
+    jne .fail_listen_boundary
+
+    mov eax, SYS_ACCEPT
+    mov edi, r12d
+    mov rsi, SOURCE_ADDRESS
+    mov edx, 8
+    int 0x80
+    test eax, eax
+    js .fail_accept
+    mov r13d, eax
+
+    mov rbx, SOURCE_ADDRESS
+    cmp word [rbx + 0], 2
+    jne .fail_accept_peer
+    cmp word [rbx + 2], 0
+    je .fail_accept_peer
+    cmp dword [rbx + 4], 0x0202000A    ; slirp host appears as 10.0.2.2
+    jne .fail_accept_peer
+
+    mov eax, SYS_GETPEERNAME
+    mov edi, r13d
+    mov rsi, PEER_ADDRESS
+    mov edx, 8
+    int 0x80
+    cmp eax, 8
+    jne .fail_accept_peer
+    mov rbx, SOURCE_ADDRESS
+    mov rcx, PEER_ADDRESS
+    mov rax, [rbx]
+    cmp rax, [rcx]
+    jne .fail_accept_peer
+
+    mov eax, SYS_GETSOCKNAME
+    mov edi, r13d
+    mov rsi, LOCAL_ADDRESS
+    mov edx, 8
+    int 0x80
+    cmp eax, 8
+    jne .fail_accept_name
+    mov rbx, LOCAL_ADDRESS
+    cmp word [rbx + 0], 2
+    jne .fail_accept_name
+    cmp word [rbx + 2], 0x5A98         ; accepted socket retains listener port 39002
+    jne .fail_accept_name
+    cmp dword [rbx + 4], 0x0F02000A
+    jne .fail_accept_name
+
+    mov rbx, POLL_BUFFER
+    mov word [rbx + 0], r13w
+    mov word [rbx + 2], 2               ; accepted control block is established/writable
+    mov word [rbx + 4], 0
+    mov word [rbx + 6], 0
+    mov eax, SYS_POLL
+    mov rdi, POLL_BUFFER
+    mov esi, 1
+    xor edx, edx
+    int 0x80
+    cmp eax, 1
+    jne .fail_accept_poll
+    mov rbx, POLL_BUFFER
+    test word [rbx + 4], 2
+    jz .fail_accept_poll
+
+    ; G313/G314 remain open: accepting a control block does not expose TCP payload I/O.
+    mov eax, SYS_SEND
+    mov edi, r13d
+    mov rsi, PAYLOAD
+    mov edx, PAYLOAD_LENGTH
+    xor r10d, r10d
+    int 0x80
+    cmp rax, ERRNO_NO_SYSCALL
+    jne .fail_accept_boundary
+
+    mov eax, SYS_CLOSE
+    mov edi, r13d
+    int 0x80
+    test eax, eax
+    jnz .fail_accept_close
+
+    ; Consuming the single backlog entry removes listener readability.
+    mov rbx, POLL_BUFFER
+    mov word [rbx + 0], r12w
+    mov word [rbx + 2], 1
+    mov word [rbx + 4], 0
+    mov word [rbx + 6], 0
+    mov eax, SYS_POLL
+    mov rdi, POLL_BUFFER
+    mov esi, 1
+    xor edx, edx
+    int 0x80
+    test eax, eax
+    jnz .fail_accept_boundary
+
     mov eax, SYS_GETPEERNAME
     mov edi, r12d
     mov rsi, SOURCE_ADDRESS
@@ -488,6 +587,24 @@ _start:
     jmp .exit_failure
 .fail_listen_close:
     mov edi, 0xD7
+    jmp .exit_failure
+.fail_accept:
+    mov edi, 0xD8
+    jmp .exit_failure
+.fail_accept_peer:
+    mov edi, 0xD9
+    jmp .exit_failure
+.fail_accept_name:
+    mov edi, 0xDA
+    jmp .exit_failure
+.fail_accept_poll:
+    mov edi, 0xDB
+    jmp .exit_failure
+.fail_accept_boundary:
+    mov edi, 0xDC
+    jmp .exit_failure
+.fail_accept_close:
+    mov edi, 0xDD
     jmp .exit_failure
 .fail_pass:
     mov edi, 0xBE

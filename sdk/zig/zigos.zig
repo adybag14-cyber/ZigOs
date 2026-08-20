@@ -505,6 +505,12 @@ pub fn listen(fd: u16, backlog: u16) Error!void {
     _ = try result(zigos_syscall6(abi.syscall_listen, fd, backlog, 0, 0, 0, 0));
 }
 
+pub fn accept(fd: u16, address: ?*Ipv4SocketAddress) Error!u16 {
+    const pointer: u64 = if (address) |value| ptrValue(value) else 0;
+    const size: u64 = if (address == null) 0 else @sizeOf(Ipv4SocketAddress);
+    return @intCast(try result(zigos_syscall6(abi.syscall_accept, fd, pointer, size, 0, 0, 0)));
+}
+
 pub fn send(fd: u16, bytes: []const u8) Error!usize {
     return @intCast(try result(zigos_syscall6(abi.syscall_send, fd, ptrValue(bytes.ptr), bytes.len, 0, 0, 0)));
 }

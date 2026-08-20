@@ -696,6 +696,7 @@ pub fn handleSyscall(
         syscall.syscall_bind => return syscallBind(context, frame),
         syscall.syscall_connect => return syscallConnect(context, frame, fx_state),
         syscall.syscall_listen => return syscallListen(context, frame),
+        syscall.syscall_accept => return syscallAccept(context, frame, fx_state),
         syscall.syscall_send => return syscallSend(context, frame),
         syscall.syscall_recv => return syscallRecv(context, frame, fx_state),
         syscall.syscall_getsockname => return syscallGetSockName(context, frame),
@@ -1511,6 +1512,101 @@ fn syscallListen(context: *Context, frame: *interrupt_context.Frame) u64 {
     return 0;
 }
 
+fn syscallAccept(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
+    const fd = runtime_abi.descriptor(frame.rdi) orelse {
+        frame.rax = reject(errno_bad_fd);
+        return 0;
+    };
+    const copy_peer = frame.rsi != 0 or frame.rdx != 0;
+    if (copy_peer and (frame.rsi == 0 or frame.rdx < @sizeOf(runtime_abi.Ipv4SocketAddress) or
+        !validateRange(context, frame.rsi, @sizeOf(runtime_abi.Ipv4SocketAddress), true)))
+    {
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (slot.protocol != .tcp) {
+        frame.rax = reject(errno_no_syscall);
+        return 0;
+    }
+    const resource = socketResourceForSlot(slot) orelse {
+        frame.rax = reject(runtime_abi.errno_not_socket);
+        return 0;
+    };
+    const listener = if (slot.listener) |*value| value else {
+        frame.rax = reject(errno_invalid);
+        return 0;
+    };
+    const pending_index = tcpListenerEstablishedIndex(listener) orelse {
+        if (slot.nonblocking) {
+            frame.rax = reject(errno_would_block);
+            return 0;
+        }
+        activeProcesses().block(context.handle, .socket_read, socketWaitKey(resource.index, resource.generation)) catch |err| {
+            frame.rax = reject(runtime_abi.fromError(err));
+            return 0;
+        };
+        return blockAndRetry(context, frame, fx_state);
+    };
+    const pending = listener.pending[pending_index];
+    const control = pending.control orelse {
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    };
+    if (!pending.used or control.state != .established) {
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    }
+
+    const accepted_index = findFreeSocketSlot() orelse {
+        frame.rax = reject(runtime_abi.errno_system_file_limit);
+        return 0;
+    };
+    const accepted_generation = nextSocketGeneration(socket_slots[accepted_index].generation);
+    socket_slots[accepted_index] = .{
+        .used = true,
+        .generation = accepted_generation,
+        .protocol = .tcp,
+        .tcp_bound_port = listener.local_port,
+        .tcp = .{
+            .local_port = listener.local_port,
+            .peer_ipv4 = pending.peer_ipv4,
+            .peer_mac = pending.peer_mac,
+            .peer_port = pending.peer_port,
+            .control = control,
+            .status = .established,
+        },
+    };
+    const accepted_fd = activeDescriptors().createExternalDescriptor(
+        activeProcesses(),
+        context.handle,
+        .tcp_socket,
+        .{ .index = @intCast(accepted_index), .generation = accepted_generation },
+        true,
+        true,
+        true,
+    ) catch |err| {
+        socket_slots[accepted_index] = .{ .generation = accepted_generation };
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    if (copy_peer and !writeSocketAddress(context, frame.rsi, frame.rdx, pending.peer_ipv4, pending.peer_port)) {
+        activeDescriptors().close(activeVfs(), activeProcesses(), context.handle, accepted_fd) catch {};
+        frame.rax = reject(errno_fault);
+        return 0;
+    }
+    listener.pending[pending_index] = .{};
+    frame.rax = accepted_fd;
+    return 0;
+}
+
 fn syscallConnect(
     context: *Context,
     frame: *interrupt_context.Frame,
@@ -2085,12 +2181,16 @@ fn tcpPortInUse(port: u16) bool {
     return false;
 }
 
-fn tcpListenerReady(listener: *const TcpListenerState) bool {
-    for (listener.pending[0..listener.backlog]) |pending| {
+fn tcpListenerEstablishedIndex(listener: *const TcpListenerState) ?usize {
+    for (listener.pending[0..listener.backlog], 0..) |pending, index| {
         const control = pending.control orelse continue;
-        if (pending.used and control.state == .established) return true;
+        if (pending.used and control.state == .established) return index;
     }
-    return false;
+    return null;
+}
+
+fn tcpListenerReady(listener: *const TcpListenerState) bool {
+    return tcpListenerEstablishedIndex(listener) != null;
 }
 
 fn nextTcpEphemeralPort(port: u16) u16 {
