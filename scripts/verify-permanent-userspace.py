@@ -776,7 +776,7 @@ def main() -> int:
     require(runtime_test, "ZigOs persistent runtime shutdown: commands 56 failed 0", "live diagnostic profile requires the expanded block-backed FAT command matrix")
     require(runtime_test, "11446/4665/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes", "both G310 diagnostic QEMU profiles require exact global FAT ownership with zero classified corruption")
     require(normal_boot_test, "ZigOs boot FAT: block-backed yes files/directories 3/2", "persistent normal boot requires a clean real block-backed /boot")
-    require(normal_boot_test, "11345/4766/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G310 normal QEMU requires exact FAT ownership with zero classified corruption")
+    require(normal_boot_test, "11346/4765/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes", "G310 normal QEMU requires exact FAT ownership with zero classified corruption")
     require(diskless_normal_boot_test, "ZigOs boot FAT: block-backed no files/directories 0/0", "diskless normal boot requires an explicitly absent backend and fallback namespace")
     require(diskless_normal_boot_test, "0/0/0/0/0 lock tickets/outstanding 0/0 quarantine state/reason/events no/none/0 clean yes", "diskless fallback has no FAT ownership or classified corruption state")
     for script_text, profile in (
@@ -1508,7 +1508,7 @@ def main() -> int:
     require(c_conformance, "sizeof(overlong_path_boundary) != 257", "C CPL3 fixture proves the 256-byte C-string payload")
     require(c_conformance, "pathname length/component bounds", "C CPL3 fixture fails closed on G247 boundary regressions")
     require(runtime_test, "bytes 5858372 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11446/4665/0/0/0", "G310 diagnostic harness freezes the measured FAT geometry")
-    require(normal_boot_test, "11345/4766/0/0/0 lock tickets/outstanding 1/0", "G310 normal harness freezes the measured FAT geometry")
+    require(normal_boot_test, "11346/4765/0/0/0 lock tickets/outstanding 1/0", "G310 normal harness freezes the measured FAT geometry")
     require(io_error_boot_test, "bytes 5807172 metadata/file/block reads 114/3/115 failures 1 clusters claimed/free/loop/cross/range 11346/4765/0/0/0", "G310 read-EIO harness freezes its private fault-injection geometry")
     require(readonly_remount_boot_test, "bytes 5807172 metadata/file/block reads 113/0/113 failures 0 clusters claimed/free/loop/cross/range 11346/4765/0/0/0", "G310 write-EIO harness freezes its private fault-injection geometry")
     require(readme, "user path payloads may be at most 255 bytes", "README documents the G247 pathname bound")
