@@ -6531,6 +6531,7 @@ var last_rx_cause: u32 = 0;
 var tx_pending_mask: u32 = 0;
 var rx_pending_mask: u32 = 0;
 var tx_ready_mask: u32 = 0;
+var runtime_tx_completion_count: u64 = 0;
 var rx_ready_mask: u32 = 0;
 var tx_completion_queue: CompletionQueue = undefined;
 var rx_completion_queue: CompletionQueue = undefined;
@@ -6704,6 +6705,7 @@ pub fn initializeAndTestNetwork(
     @atomicStore(u32, &rx_pending_mask, all_rx_descriptors_pending, .release);
     tx_ready_mask = 0;
     rx_ready_mask = 0;
+    @atomicStore(u64, &runtime_tx_completion_count, 0, .release);
     @atomicStore(u64, &total_interrupt_count, 0, .release);
     @atomicStore(u64, &tx_interrupt_count, 0, .release);
     @atomicStore(u64, &rx_interrupt_count, 0, .release);
@@ -8036,7 +8038,98 @@ pub fn pingIpv4(device: *Device, destination_ipv4: [4]u8, receive_budget: u16) ?
     return null;
 }
 
+pub fn runtimeTransmitWritable(device: *const Device) bool {
+    if (device.tx_ring_address == 0 or device.tx_buffer_address == 0 or
+        device.tx_producer >= ring_descriptor_count)
+    {
+        return false;
+    }
+    if (!device.fixture_transport and (!runtimePollingMode() or !runtimeMmioAccessible(device))) return false;
+    return @atomicLoad(u32, &tx_pending_mask, .acquire) == 0;
+}
+
+pub fn serviceRuntimeTransmitCompletions(device: *Device) u8 {
+    if (device.tx_ring_address == 0) return 0;
+    const pending_before = @atomicLoad(u32, &tx_pending_mask, .acquire);
+    if (pending_before == 0) return 0;
+
+    const descriptors: [*]volatile TxDescriptor = @ptrFromInt(device.tx_ring_address);
+    for (0..ring_descriptor_count) |descriptor_index| {
+        const bit = descriptorBit(descriptor_index);
+        if ((pending_before & bit) == 0 or (descriptors[descriptor_index].status & 1) == 0) continue;
+        completePendingDescriptor(&tx_pending_mask, &tx_completion_queue, descriptor_index);
+    }
+
+    const pending_after = @atomicLoad(u32, &tx_pending_mask, .acquire);
+    const completed_mask = pending_before & ~pending_after;
+    var completed: u8 = 0;
+    for (0..ring_descriptor_count) |descriptor_index| {
+        const bit = descriptorBit(descriptor_index);
+        if ((completed_mask & bit) == 0) continue;
+        _ = consumeCompletion(&tx_completion_queue, &tx_ready_mask, descriptor_index);
+        completed +|= 1;
+    }
+    if (completed != 0) _ = @atomicRmw(u64, &runtime_tx_completion_count, .Add, completed, .acq_rel);
+    return completed;
+}
+
+pub fn runtimeTransmitCompletionCount() u64 {
+    return @atomicLoad(u64, &runtime_tx_completion_count, .acquire);
+}
+
+pub fn runtimeTransmitPendingMask() u32 {
+    return @atomicLoad(u32, &tx_pending_mask, .acquire);
+}
+
+fn waitForRuntimeTransmitCapacity(device: *Device) bool {
+    if (@atomicLoad(u32, &tx_pending_mask, .acquire) == 0) return true;
+    var iteration: usize = 0;
+    while (iteration < maximum_poll_iterations) : (iteration += 1) {
+        _ = serviceRuntimeTransmitCompletions(device);
+        if (@atomicLoad(u32, &tx_pending_mask, .acquire) == 0) return true;
+        zigos_cpu_relax();
+    }
+    return false;
+}
+
+/// Hands one frame to the retained runtime TX ring without waiting for DMA
+/// completion. ZigOs deliberately has one shared TX DMA buffer today, so this
+/// path admits exactly one in-flight frame. Later writers observe bounded
+/// backpressure until serviceRuntimeTransmitCompletions() retires that frame.
+pub fn submitRuntimeFrame(device: *Device, frame: []const u8) ?TxCompletion {
+    if (!runtimeTransmitWritable(device) or frame.len == 0 or frame.len > memory.page_size) return null;
+
+    const descriptor_index: usize = device.tx_producer;
+    const tx_buffer = @as([*]u8, @ptrFromInt(device.tx_buffer_address))[0..memory.page_size];
+    @memset(tx_buffer, 0);
+    @memcpy(tx_buffer[0..frame.len], frame);
+    const descriptors: [*]volatile TxDescriptor = @ptrFromInt(device.tx_ring_address);
+    descriptors[descriptor_index] = makeTxDescriptor(device.tx_buffer_address, @intCast(frame.len));
+    if (!armTxDescriptor(descriptor_index)) return null;
+    zigos_memory_fence();
+
+    const next_cursor: u16 = @intCast((descriptor_index + 1) % ring_descriptor_count);
+    if (next_cursor == 0) device.tx_cursor_wraps +|= 1;
+    if (device.fixture_transport) {
+        descriptors[descriptor_index].status = 1;
+    } else {
+        write32(device.bar0, tdt_offset, next_cursor);
+        _ = read32(device.bar0, status_offset);
+    }
+
+    device.tx_producer = next_cursor;
+    device.tx_submissions +|= 1;
+    return .{
+        .descriptor_index = @intCast(descriptor_index),
+        .next_cursor = next_cursor,
+        .frame_length = @intCast(frame.len),
+        .interrupt_count = 0,
+        .interrupt_cause = 0,
+    };
+}
+
 pub fn submitFrame(device: *Device, frame: []const u8) ?TxCompletion {
+    if (!waitForRuntimeTransmitCapacity(device)) return null;
     if (device.fixture_transport) return submitFixtureFrame(device, frame);
     if (device.bar0 == 0 or frame.len == 0 or frame.len > memory.page_size or
         device.tx_producer >= ring_descriptor_count)
@@ -8797,6 +8890,69 @@ pub fn sendConnectedUdpDatagram(
     const endpoint = udpSocketEndpoint(device, socket) orelse return null;
     if (!endpoint.peer_bound) return null;
     return sendUdpDatagramTo(device, socket, endpoint.peer, ttl, payload);
+}
+
+pub fn sendUdpSocketRuntime(
+    device: *Device,
+    socket: UdpSocket,
+    options: UdpSendOptions,
+) ?TxCompletion {
+    const endpoint = udpSocketEndpoint(device, socket) orelse return null;
+    if (options.destination_port == 0 or options.ttl == 0 or
+        options.payload.len > maximum_udp_payload_bytes)
+    {
+        return null;
+    }
+    var frame = std.mem.zeroes([maximum_software_packet_bytes]u8);
+    const frame_length = udp.buildFrame(&frame, .{
+        .source_mac = device.local_mac,
+        .destination_mac = options.destination_mac,
+        .source_ipv4 = device.local_ipv4,
+        .destination_ipv4 = options.destination_ipv4,
+        .source_port = endpoint.port,
+        .destination_port = options.destination_port,
+        .identification = options.identification,
+        .ttl = options.ttl,
+        .payload = options.payload,
+    }) orelse return null;
+    return submitRuntimeFrame(device, frame[0..frame_length]);
+}
+
+pub fn sendUdpDatagramToRuntime(
+    device: *Device,
+    socket: UdpSocket,
+    peer: UdpPeer,
+    ttl: u8,
+    payload: []const u8,
+) ?UdpTransmitResult {
+    _ = udpSocketEndpoint(device, socket) orelse return null;
+    if (!validUdpPeer(peer)) return null;
+    var identification = device.next_udp_identification;
+    if (identification == 0) identification = 1;
+    const completion = sendUdpSocketRuntime(device, socket, .{
+        .destination_mac = peer.mac,
+        .destination_ipv4 = peer.ipv4,
+        .destination_port = peer.port,
+        .identification = identification,
+        .ttl = ttl,
+        .payload = payload,
+    }) orelse return null;
+    device.next_udp_identification = nextUdpIdentification(identification);
+    return .{
+        .completion = completion,
+        .identification = identification,
+    };
+}
+
+pub fn sendConnectedUdpDatagramRuntime(
+    device: *Device,
+    socket: UdpSocket,
+    ttl: u8,
+    payload: []const u8,
+) ?UdpTransmitResult {
+    const endpoint = udpSocketEndpoint(device, socket) orelse return null;
+    if (!endpoint.peer_bound) return null;
+    return sendUdpDatagramToRuntime(device, socket, endpoint.peer, ttl, payload);
 }
 
 pub fn sendDnsAQuery(

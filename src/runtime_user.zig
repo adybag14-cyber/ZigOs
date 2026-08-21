@@ -95,6 +95,12 @@ pub const Report = struct {
     preemptions: u64,
     blocking_returns: u64,
     syscalls: u64,
+    socket_tx_handoffs: u64,
+    socket_tx_waits: u64,
+    socket_tx_would_block: u64,
+    socket_tx_completions: u64,
+    socket_tx_wakeups: u64,
+    socket_tx_pending_mask: u32,
     reclaimed_pages: u64,
     shared_pages: usize,
     file_mapping_pages: usize,
@@ -241,6 +247,11 @@ var faults: u64 = 0;
 var preemptions: u64 = 0;
 var blocking_returns: u64 = 0;
 var syscall_count: u64 = 0;
+var socket_tx_handoffs: u64 = 0;
+var socket_tx_waits: u64 = 0;
+var socket_tx_would_block: u64 = 0;
+var socket_tx_wakeups: u64 = 0;
+var socket_tx_observed_completions: u64 = 0;
 
 pub const ShutdownFn = *const fn (context: ?*anyopaque, process_handle: u64) bool;
 pub const SyncFn = *const fn (context: ?*anyopaque) i64;
@@ -304,6 +315,11 @@ pub fn initialize(
     preemptions = 0;
     blocking_returns = 0;
     syscall_count = 0;
+    socket_tx_handoffs = 0;
+    socket_tx_waits = 0;
+    socket_tx_would_block = 0;
+    socket_tx_wakeups = 0;
+    socket_tx_observed_completions = 0;
     system_context = null;
     shutdown_fn = null;
     sync_fn = null;
@@ -702,10 +718,10 @@ pub fn handleSyscall(
         syscall.syscall_socket_shutdown => return syscallSocketShutdown(context, frame),
         syscall.syscall_getsockopt => return syscallGetSocketOption(context, frame),
         syscall.syscall_setsockopt => return syscallSetSocketOption(context, frame),
-        syscall.syscall_send => return syscallSend(context, frame),
+        syscall.syscall_send => return syscallSend(context, frame, fx_state),
         syscall.syscall_recv => return syscallRecv(context, frame, fx_state),
         syscall.syscall_getsockname => return syscallGetSockName(context, frame),
-        syscall.syscall_sendto => return syscallSendTo(context, frame),
+        syscall.syscall_sendto => return syscallSendTo(context, frame, fx_state),
         syscall.syscall_recvfrom => return syscallRecvFrom(context, frame, fx_state),
         syscall.syscall_getpeername => return syscallGetPeerName(context, frame),
         syscall.syscall_setnonblock => return syscallSetNonblocking(context, frame),
@@ -927,6 +943,12 @@ pub fn report() Report {
         .preemptions = preemptions,
         .blocking_returns = blocking_returns,
         .syscalls = syscall_count,
+        .socket_tx_handoffs = socket_tx_handoffs,
+        .socket_tx_waits = socket_tx_waits,
+        .socket_tx_would_block = socket_tx_would_block,
+        .socket_tx_completions = if (e1000e.activeDevice() != null) e1000e.runtimeTransmitCompletionCount() else 0,
+        .socket_tx_wakeups = socket_tx_wakeups,
+        .socket_tx_pending_mask = if (e1000e.activeDevice() != null) e1000e.runtimeTransmitPendingMask() else 0,
         .reclaimed_pages = allocator_report.frees,
         .shared_pages = allocator_report.shared,
         .file_mapping_pages = file_mapping_pages,
@@ -1794,7 +1816,11 @@ fn syscallConnect(
     return blockAndRetry(context, frame, fx_state);
 }
 
-fn syscallSend(context: *Context, frame: *interrupt_context.Frame) u64 {
+fn syscallSend(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
     const fd = runtime_abi.descriptor(frame.rdi) orelse {
         frame.rax = reject(errno_bad_fd);
         return 0;
@@ -1803,10 +1829,10 @@ fn syscallSend(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     };
-    if (runtime_abi.messageFlagBits(frame.r10) == null) {
+    const flags = runtime_abi.messageFlagBits(frame.r10) orelse {
         frame.rax = reject(errno_invalid);
         return 0;
-    }
+    };
     const send_length = @min(length, maximum_io_bytes);
     if (!validateRange(context, frame.rsi, send_length, false)) {
         frame.rax = reject(errno_fault);
@@ -1837,15 +1863,23 @@ fn syscallSend(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(runtime_abi.errno_io);
         return 0;
     }
-    if (e1000e.sendConnectedUdpDatagram(device, socket, 64, bytes[0..send_length]) == null) {
+    if (!e1000e.runtimeTransmitWritable(device)) {
+        return blockSocketWriter(context, frame, fx_state, slot, flags);
+    }
+    if (e1000e.sendConnectedUdpDatagramRuntime(device, socket, 64, bytes[0..send_length]) == null) {
         frame.rax = reject(runtime_abi.errno_io);
         return 0;
     }
+    socket_tx_handoffs +%= 1;
     frame.rax = send_length;
     return 0;
 }
 
-fn syscallSendTo(context: *Context, frame: *interrupt_context.Frame) u64 {
+fn syscallSendTo(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+) u64 {
     const fd = runtime_abi.descriptor(frame.rdi) orelse {
         frame.rax = reject(errno_bad_fd);
         return 0;
@@ -1854,10 +1888,10 @@ fn syscallSendTo(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     };
-    if (runtime_abi.messageFlagBits(frame.r10) == null) {
+    const flags = runtime_abi.messageFlagBits(frame.r10) orelse {
         frame.rax = reject(errno_invalid);
         return 0;
-    }
+    };
     const send_length = @min(length, maximum_io_bytes);
     if (!validateRange(context, frame.rsi, send_length, false)) {
         frame.rax = reject(errno_fault);
@@ -1888,21 +1922,49 @@ fn syscallSendTo(context: *Context, frame: *interrupt_context.Frame) u64 {
         frame.rax = reject(errno_invalid);
         return 0;
     };
+    if (!runtimeNetworkReady(device)) {
+        frame.rax = reject(runtime_abi.errno_io);
+        return 0;
+    }
+    if (!e1000e.runtimeTransmitWritable(device)) {
+        return blockSocketWriter(context, frame, fx_state, slot, flags);
+    }
     if (slot.udp == null) slot.udp = e1000e.openEphemeralUdpSocket(device);
     const socket = slot.udp orelse {
         frame.rax = reject(runtime_abi.errno_no_space);
         return 0;
     };
-    if (!runtimeNetworkReady(device)) {
+    if (e1000e.sendUdpDatagramToRuntime(device, socket, peer, 64, bytes[0..send_length]) == null) {
         frame.rax = reject(runtime_abi.errno_io);
         return 0;
     }
-    if (e1000e.sendUdpDatagramTo(device, socket, peer, 64, bytes[0..send_length]) == null) {
-        frame.rax = reject(runtime_abi.errno_io);
-        return 0;
-    }
+    socket_tx_handoffs +%= 1;
     frame.rax = send_length;
     return 0;
+}
+
+fn blockSocketWriter(
+    context: *Context,
+    frame: *interrupt_context.Frame,
+    fx_state: *align(16) interrupt_context.FxState,
+    slot: *const SocketSlot,
+    flags: u8,
+) u64 {
+    if (slot.nonblocking or (flags & runtime_abi.message_dontwait) != 0) {
+        socket_tx_would_block +%= 1;
+        frame.rax = reject(errno_would_block);
+        return 0;
+    }
+    const resource = socketResourceForSlot(slot) orelse {
+        frame.rax = reject(runtime_abi.errno_not_socket);
+        return 0;
+    };
+    activeProcesses().block(context.handle, .socket_write, socketWaitKey(resource.index, resource.generation)) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+    socket_tx_waits +%= 1;
+    return blockAndRetry(context, frame, fx_state);
 }
 
 fn syscallRecv(
@@ -2137,8 +2199,26 @@ fn runtimeNetworkReady(device: *e1000e.Device) bool {
 
 pub fn serviceNetwork() usize {
     const device = e1000e.activeDevice() orelse return 0;
+    _ = e1000e.serviceRuntimeTransmitCompletions(device);
     _ = e1000e.serviceUdpSockets(device, 8);
     var wakeups = serviceTcpConnects(device, current_tick);
+    // Observe the cumulative runtime-TX completion counter across service passes,
+    // not merely within this call. A synchronous control-frame sender may retire
+    // an asynchronous UDP descriptor while draining the shared DMA buffer; the
+    // next scheduler pass must still notice that capacity transition and wake
+    // any UDP writers that slept on it.
+    const tx_completions = e1000e.runtimeTransmitCompletionCount();
+    const tx_completion_delta = tx_completions -% socket_tx_observed_completions;
+    socket_tx_observed_completions = tx_completions;
+    if (tx_completion_delta != 0 and e1000e.runtimeTransmitWritable(device)) {
+        var writer_wakeups: usize = 0;
+        for (socket_slots, 0..) |slot, index| {
+            if (!slot.used or slot.protocol != .udp) continue;
+            writer_wakeups += activeProcesses().wakeMatching(.socket_write, socketWaitKey(@intCast(index), slot.generation), true);
+        }
+        socket_tx_wakeups +%= writer_wakeups;
+        wakeups += writer_wakeups;
+    }
     for (socket_slots, 0..) |slot, index| {
         if (!slot.used or slot.protocol != .udp) continue;
         const socket = slot.udp orelse continue;
@@ -2247,7 +2327,7 @@ fn pollExternalSocket(_: ?*anyopaque, index: u16, generation: u32, requested: u1
     const device = e1000e.activeDevice() orelse return runtime_abi.poll_error | runtime_abi.poll_hangup;
     var ready: u16 = 0;
     if (slot.protocol == .udp) {
-        ready |= runtime_abi.poll_writable;
+        if (e1000e.runtimeTransmitWritable(device)) ready |= runtime_abi.poll_writable;
         if (slot.udp) |socket| {
             if (e1000e.udpSocketReadable(device, socket)) ready |= runtime_abi.poll_readable;
         }

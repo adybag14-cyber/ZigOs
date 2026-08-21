@@ -27,6 +27,7 @@ $tcpFixtureClient = $null
 $tcpPassiveClient = $null
 $tcpPassiveConnect = $null
 $udpSendFixture = $null
+$udpTxWakeFixture = $null
 $serialBytes = $null
 try {
     try { $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(30)) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
@@ -80,6 +81,13 @@ try {
             $udpSendFixture.Client.ReceiveTimeout = 5000
         } catch {
             throw "The G303 UDP listener could not bind host port 39003: $($_.Exception.Message)"
+        }
+        try {
+            $udpTxWakeEndpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, 39004)
+            $udpTxWakeFixture = [System.Net.Sockets.UdpClient]::new($udpTxWakeEndpoint)
+            $udpTxWakeFixture.Client.ReceiveTimeout = 5000
+        } catch {
+            throw "The G310 UDP listener could not bind host port 39004: $($_.Exception.Message)"
         }
     }
     $codeImage = Join-Path $buildDir 'runtime-ovmf-code.fd'
@@ -264,7 +272,7 @@ try {
             while ((Get-Date) -lt $socketDeadline) {
                 Start-Sleep -Milliseconds 50
                 $socketText = Current-SerialText
-                if ($socketText.Contains('socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown + sockopt passed')) {
+                if ($socketText.Contains('socket-api: UDP partial-send + TCP connect/listen/accept/shutdown + sockopt + txwake passed')) {
                     $socketPassed = $true
                     break
                 }
@@ -273,6 +281,23 @@ try {
             }
             if (-not $socketPassed) { throw 'The G307 socket fixture did not complete after the host-forward connection.' }
             Write-Host 'G307 socket option guest proof passed: type/protocol/acceptconn introspection and NONBLOCK set/get coherence completed.'
+            if (-not $udpTxWakeFixture) { throw 'The G310 host UDP fixture was not available.' }
+            for ($attempt = 0; $attempt -lt 2; $attempt++) {
+                $txWakeRemote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
+                try {
+                    $txWakeBytes = $udpTxWakeFixture.Receive([ref]$txWakeRemote)
+                } catch {
+                    throw "The G310 accepted TX datagram $attempt did not reach host UDP port 39004: $($_.Exception.Message)"
+                }
+                if ($txWakeBytes.Length -ne 8 -or [System.Text.Encoding]::ASCII.GetString($txWakeBytes) -ne 'UDP-CPL3') {
+                    throw "The G310 accepted TX datagram $attempt did not match the exact 8-byte fixture payload."
+                }
+            }
+            Start-Sleep -Milliseconds 100
+            if ($udpTxWakeFixture.Available -ne 0) {
+                throw 'The G310 MSG_DONTWAIT backpressured send incorrectly transmitted a third UDP datagram.'
+            }
+            Write-Host 'G310 TX capacity guest/host proof passed: DONTWAIT transmitted nothing and the blocked writer resumed after real descriptor completion.'
             if (-not $udpSendFixture) { throw 'The G303 host UDP fixture was not available.' }
             $udpRemote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
             try {
@@ -449,7 +474,7 @@ try {
         'faults 1',
         $(if ($Network) { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/62/1 blocked 3/1 wakeups 3/1' } else { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/56/1 blocked 3/1 wakeups 3/1' }),
         'ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/suspend/overflow 1/0/0/0 clean yes',
-        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5855812 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11441/4670/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
+        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5858372 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11446/4665/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
         'ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes',
         'ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 global/mount/immediate/durable/reject 1/2/1/1/0 writeback active no request/complete/pass 1/1/1 immediate/durable/clean/unsupported/failure/stale 1/0/0/0/0/0 pages queued/completed 6/6 payload/header/flush 1/1/2 NVMe read/write/flush ',
         ' errors 0/0 clean yes',
@@ -462,6 +487,7 @@ try {
         ' file-mappings 0 launches/exits/faults ',
         $(if ($Network) { 'launches/exits/faults 17/15/1' } else { 'launches/exits/faults 15/13/1' }),
         $(if ($Network) { 'reclaimed 284 stale-contexts-swept 0 allocator alloc/release/retains 284/284/0' } else { 'reclaimed 253 stale-contexts-swept 0 allocator alloc/release/retains 253/253/0' }),
+        $(if ($Network) { 'socket-tx handoffs/waits/would-block/completions/wakeups/pending 7/1/1/7/1/0' } else { 'socket-tx handoffs/waits/would-block/completions/wakeups/pending 0/0/0/0/0/0' }),
         'ZigOs x86-64 Capstone 18 verified: goals 0x000001D1',
         'ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes'
     )
@@ -474,7 +500,7 @@ try {
             'exec: PID 19 state zombie status 0x5A',
             'serial COM1 online; framebuffer no; USB keyboard no; NVMe yes; AHCI no; e1000e yes',
             'e1000e0: up mac 52:54:00:12:34:56 ipv4 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 dns 10.0.2.3',
-            'socket-api: UDP partial send/sendto + TCP connect/listen/accept/shutdown + sockopt passed',
+            'socket-api: UDP partial-send + TCP connect/listen/accept/shutdown + sockopt + txwake passed',
             'reply from 10.0.2.2: bytes=16',
             'localhost A 127.0.0.1',
             'UDP endpoints active/readable/connected',
@@ -527,6 +553,7 @@ finally {
             [System.IO.File]::WriteAllText($serialLog, $serialText, [System.Text.Encoding]::ASCII)
         } catch {}
     }
+    if ($udpTxWakeFixture) { $udpTxWakeFixture.Dispose() }
     if ($udpSendFixture) { $udpSendFixture.Dispose() }
     if ($tcpPassiveClient) { $tcpPassiveClient.Dispose() }
     if ($tcpFixtureClient) { $tcpFixtureClient.Dispose() }

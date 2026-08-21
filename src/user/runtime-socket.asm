@@ -19,7 +19,7 @@ ORG 0
 %define PARTIAL_SEND_PAYLOAD   (DATA_BASE + 3072)
 
 %define START_LENGTH    19
-%define PASS_LENGTH     91
+%define PASS_LENGTH     93
 %define PAYLOAD_LENGTH  8
 %define DNS_QUERY_LENGTH 27
 %define RECEIVE_CAPACITY 512
@@ -322,6 +322,13 @@ _start:
     cmp eax, PARTIAL_EXPECTED_LENGTH
     jne .fail_partial_sendto
 
+    ; Retire the first G303 asynchronous TX before testing the connected send.
+    mov eax, SYS_SLEEP
+    mov edi, 2
+    int 0x80
+    test eax, eax
+    jnz .fail_partial_sendto
+
     mov eax, SYS_CONNECT
     mov edi, r15d
     mov rsi, PEER_ADDRESS
@@ -340,6 +347,79 @@ _start:
     int 0x80
     cmp eax, PARTIAL_EXPECTED_LENGTH
     jne .fail_partial_send
+
+    ; G310 reuses the G303 UDP socket. Two ticks first guarantee the prior
+    ; asynchronous frame has been retired. One sendto then occupies the single
+    ; shared-DMA TX slot; MSG_DONTWAIT must see EWOULDBLOCK, poll must lose
+    ; writability, and a blocking retry may return only after a later service tick.
+    mov rbx, PEER_ADDRESS
+    mov word [rbx + 0], 2
+    mov word [rbx + 2], 0x5C98         ; network-order port 39004
+    mov dword [rbx + 4], 0x0202000A    ; 10.0.2.2 host gateway
+
+    mov eax, SYS_SLEEP
+    mov edi, 2
+    int 0x80
+    test eax, eax
+    jnz .fail_tx_wakeup_block
+    mov eax, SYS_TICKS
+    int 0x80
+    mov r14, rax
+
+    mov eax, SYS_SENDTO
+    mov edi, r15d
+    mov rsi, PAYLOAD
+    mov edx, PAYLOAD_LENGTH
+    xor r10d, r10d
+    mov r8, PEER_ADDRESS
+    mov r9d, 8
+    int 0x80
+    cmp eax, PAYLOAD_LENGTH
+    jne .fail_tx_wakeup_backpressure
+
+    mov eax, SYS_SENDTO
+    mov edi, r15d
+    mov rsi, PAYLOAD
+    mov edx, PAYLOAD_LENGTH
+    mov r10d, ZIGOS_MSG_DONTWAIT
+    mov r8, PEER_ADDRESS
+    mov r9d, 8
+    int 0x80
+    cmp rax, ERRNO_WOULD_BLOCK
+    jne .fail_tx_wakeup_backpressure
+
+    mov rbx, POLL_BUFFER
+    mov word [rbx + 0], r15w
+    mov word [rbx + 2], 2
+    mov word [rbx + 4], 0
+    mov word [rbx + 6], 0
+    mov eax, SYS_POLL
+    mov rdi, POLL_BUFFER
+    mov esi, 1
+    xor edx, edx
+    int 0x80
+    test eax, eax
+    jnz .fail_tx_wakeup_poll
+
+    mov eax, SYS_SENDTO
+    mov edi, r15d
+    mov rsi, PAYLOAD
+    mov edx, PAYLOAD_LENGTH
+    xor r10d, r10d
+    mov r8, PEER_ADDRESS
+    mov r9d, 8
+    int 0x80
+    cmp eax, PAYLOAD_LENGTH
+    jne .fail_tx_wakeup_block
+    mov eax, SYS_TICKS
+    int 0x80
+    cmp rax, r14
+    jbe .fail_tx_wakeup_block
+    mov eax, SYS_SLEEP
+    mov edi, 2
+    int 0x80
+    test eax, eax
+    jnz .fail_tx_wakeup_block
 
     mov eax, SYS_CLOSE
     mov edi, r15d
@@ -913,6 +993,15 @@ _start:
     jmp .exit_failure
 .fail_sockopt_tcp:
     mov edi, 0xF3
+    jmp .exit_failure
+.fail_tx_wakeup_backpressure:
+    mov edi, 0xF7
+    jmp .exit_failure
+.fail_tx_wakeup_poll:
+    mov edi, 0xF8
+    jmp .exit_failure
+.fail_tx_wakeup_block:
+    mov edi, 0xF9
     jmp .exit_failure
 .fail_pass:
     mov edi, 0xBE
