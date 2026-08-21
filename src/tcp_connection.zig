@@ -692,6 +692,37 @@ test "passive open completes SYN SYN-ACK ACK and replays duplicate SYN" {
     try std.testing.expect(ack.accepted);
     try std.testing.expectEqual(State.established, control.state);
     try std.testing.expect(!control.retransmission_active);
+
+    const retained_ack = handleSegment(&control, .{
+        .sequence_number = control.receive_next,
+        .acknowledgement_number = control.send_next,
+        .flags = tcp.flag_ack,
+        .window_size = 31_000,
+    });
+    try std.testing.expect(retained_ack.accepted);
+    try std.testing.expectEqual(State.established, control.state);
+    try std.testing.expectEqual(@as(u16, 31_000), control.send_window);
+
+    const wrong_reset = handleSegment(&control, .{
+        .sequence_number = control.receive_next +% 1,
+        .acknowledgement_number = control.send_next,
+        .flags = tcp.flag_rst,
+        .window_size = 0,
+    });
+    try std.testing.expect(!wrong_reset.accepted);
+    try std.testing.expectEqual(RejectReason.unexpected_sequence, wrong_reset.rejection);
+    try std.testing.expectEqual(State.established, control.state);
+
+    const reset = handleSegment(&control, .{
+        .sequence_number = control.receive_next,
+        .acknowledgement_number = control.send_next,
+        .flags = tcp.flag_rst,
+        .window_size = 0,
+    });
+    try std.testing.expect(reset.accepted);
+    try std.testing.expectEqual(ActionKind.connection_reset, reset.action);
+    try std.testing.expectEqual(State.reset, control.state);
+    try std.testing.expectEqual(@as(u32, 1), control.resets);
 }
 
 test "passive SYN-ACK retransmission is bounded" {

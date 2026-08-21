@@ -2473,33 +2473,63 @@ fn serviceTcpConnects(device: *e1000e.Device, tick: u64) usize {
         for (&socket_slots, 0..) |*slot, index| {
             if (!slot.used or slot.protocol != .tcp) continue;
             const connection = if (slot.tcp) |*value| value else continue;
-            if (connection.status != .connecting or connection.local_port != segment.destination_port or
-                connection.peer_port != segment.source_port or !std.mem.eql(u8, &connection.peer_ipv4, &segment.source_ipv4) or
+            if (connection.local_port != segment.destination_port or connection.peer_port != segment.source_port or
+                !std.mem.eql(u8, &connection.peer_ipv4, &segment.source_ipv4) or
                 !std.mem.eql(u8, &connection.peer_mac, &segment.source_mac)) continue;
+
+            if (connection.status == .connecting) {
+                const transition = tcp_connection.handleSegment(&connection.control, .{
+                    .sequence_number = segment.sequence_number,
+                    .acknowledgement_number = segment.acknowledgement_number,
+                    .flags = segment.flags,
+                    .window_size = segment.window_size,
+                    .payload_length = @intCast(segment.payload.len),
+                });
+                if (transition.accepted) {
+                    if (transition.outbound) |outbound| {
+                        if (!sendTcpControl(device, connection, outbound)) connection.status = .io_failed;
+                    }
+                    if (connection.status != .io_failed) {
+                        connection.status = switch (transition.state) {
+                            .established => .established,
+                            .reset => .refused,
+                            .timed_out => .timed_out,
+                            else => .connecting,
+                        };
+                    }
+                    if (connection.status != .connecting) {
+                        wakeups += activeProcesses().wakeMatching(.socket_write, socketWaitKey(@intCast(index), slot.generation), true);
+                    }
+                }
+                handled = true;
+                break;
+            }
+
+            if (connection.status != .established) continue;
+            // G312 keeps established control blocks live after connect/accept, but
+            // deliberately does not consume application payload or FIN. G313/G314
+            // own payload I/O and G321/G322 own graceful close progression.
+            handled = true;
+            if (connection.control.state != .established or segment.payload.len != 0 or
+                (segment.flags & (tcp.flag_syn | tcp.flag_fin)) != 0)
+            {
+                break;
+            }
             const transition = tcp_connection.handleSegment(&connection.control, .{
                 .sequence_number = segment.sequence_number,
                 .acknowledgement_number = segment.acknowledgement_number,
                 .flags = segment.flags,
                 .window_size = segment.window_size,
-                .payload_length = @intCast(segment.payload.len),
+                .payload_length = 0,
             });
             if (transition.accepted) {
                 if (transition.outbound) |outbound| {
                     if (!sendTcpControl(device, connection, outbound)) connection.status = .io_failed;
                 }
-                if (connection.status != .io_failed) {
-                    connection.status = switch (transition.state) {
-                        .established => .established,
-                        .reset => .refused,
-                        .timed_out => .timed_out,
-                        else => .connecting,
-                    };
-                }
-                if (connection.status != .connecting) {
-                    wakeups += activeProcesses().wakeMatching(.socket_write, socketWaitKey(@intCast(index), slot.generation), true);
+                if (connection.status != .io_failed and transition.state == .reset) {
+                    connection.status = .refused;
                 }
             }
-            handled = true;
             break;
         }
         if (handled) continue;

@@ -17,6 +17,7 @@ ORG 0
 %define RECEIVE_BUFFER  (DATA_BASE + 400)
 %define PARTIAL_SENDTO_PAYLOAD (DATA_BASE + 1024)
 %define PARTIAL_SEND_PAYLOAD   (DATA_BASE + 3072)
+%define G312_PASS_MESSAGE       (DATA_BASE + 928)
 
 %define START_LENGTH    19
 %define PASS_LENGTH     93
@@ -25,6 +26,7 @@ ORG 0
 %define RECEIVE_CAPACITY 512
 %define PARTIAL_REQUEST_LENGTH 1476
 %define PARTIAL_EXPECTED_LENGTH 1024
+%define G312_PASS_LENGTH 26
 
 _start:
     mov eax, SYS_WRITE
@@ -198,16 +200,9 @@ _start:
     cmp dword [rbx + 4], 0x0F02000A
     jne .fail_accept_name
 
-    mov rbx, POLL_BUFFER
-    mov word [rbx + 0], r13w
-    mov word [rbx + 2], 2               ; accepted control block is established/writable
-    mov word [rbx + 4], 0
-    mov word [rbx + 6], 0
-    mov eax, SYS_POLL
-    mov rdi, POLL_BUFFER
-    mov esi, 1
-    xor edx, edx
-    int 0x80
+    mov edi, r13d
+    mov esi, 2               ; accepted control block is established/writable
+    call .poll_one
     cmp eax, 1
     jne .fail_accept_poll
     mov rbx, POLL_BUFFER
@@ -235,16 +230,9 @@ _start:
     int 0x80
     test eax, eax
     jnz .fail_accept_shutdown
-    mov rbx, POLL_BUFFER
-    mov word [rbx + 0], r13w
-    mov word [rbx + 2], 2
-    mov word [rbx + 4], 0
-    mov word [rbx + 6], 0
-    mov eax, SYS_POLL
-    mov rdi, POLL_BUFFER
-    mov esi, 1
-    xor edx, edx
-    int 0x80
+    mov edi, r13d
+    mov esi, 2
+    call .poll_one
     cmp eax, 1
     jne .fail_accept_shutdown
     mov rbx, POLL_BUFFER
@@ -261,6 +249,62 @@ _start:
     cmp rax, ERRNO_NO_SYSCALL
     jne .fail_accept_boundary
 
+    ; G312: the accepted ESTABLISHED control block must remain addressable after
+    ; the handshake validation window. Keep the host peer open across a real
+    ; half-second dwell, then prove the exact peer/local tuple and POLLOUT state
+    ; are still coherent. TCP payload I/O remains ENOSYS above; FIN progression
+    ; remains reserved for G321/G322.
+    mov eax, SYS_SLEEP
+    mov edi, 50
+    int 0x80
+    test eax, eax
+    jnz .fail_tcp_retained
+
+    mov eax, SYS_GETPEERNAME
+    mov edi, r13d
+    mov rsi, PEER_ADDRESS
+    mov edx, 8
+    int 0x80
+    cmp eax, 8
+    jne .fail_tcp_retained
+    mov rbx, SOURCE_ADDRESS
+    mov rcx, PEER_ADDRESS
+    mov rax, [rbx]
+    cmp rax, [rcx]
+    jne .fail_tcp_retained
+
+    mov eax, SYS_GETSOCKNAME
+    mov edi, r13d
+    mov rsi, LOCAL_ADDRESS
+    mov edx, 8
+    int 0x80
+    cmp eax, 8
+    jne .fail_tcp_retained
+    mov rbx, LOCAL_ADDRESS
+    cmp word [rbx + 0], 2
+    jne .fail_tcp_retained
+    cmp word [rbx + 2], 0x5A98
+    jne .fail_tcp_retained
+    cmp dword [rbx + 4], 0x0F02000A
+    jne .fail_tcp_retained
+
+    mov edi, r13d
+    mov esi, 2
+    call .poll_one
+    cmp eax, 1
+    jne .fail_tcp_retained
+    mov rbx, POLL_BUFFER
+    test word [rbx + 4], 2
+    jz .fail_tcp_retained
+
+    mov eax, SYS_WRITE
+    mov edi, 1
+    mov rsi, G312_PASS_MESSAGE
+    mov edx, G312_PASS_LENGTH
+    int 0x80
+    cmp eax, G312_PASS_LENGTH
+    jne .fail_tcp_retained
+
     mov eax, SYS_CLOSE
     mov edi, r13d
     int 0x80
@@ -268,16 +312,9 @@ _start:
     jnz .fail_accept_close
 
     ; Consuming the single backlog entry removes listener readability.
-    mov rbx, POLL_BUFFER
-    mov word [rbx + 0], r12w
-    mov word [rbx + 2], 1
-    mov word [rbx + 4], 0
-    mov word [rbx + 6], 0
-    mov eax, SYS_POLL
-    mov rdi, POLL_BUFFER
+    mov edi, r12d
     mov esi, 1
-    xor edx, edx
-    int 0x80
+    call .poll_one
     test eax, eax
     jnz .fail_accept_boundary
 
@@ -388,16 +425,9 @@ _start:
     cmp rax, ERRNO_WOULD_BLOCK
     jne .fail_tx_wakeup_backpressure
 
-    mov rbx, POLL_BUFFER
-    mov word [rbx + 0], r15w
-    mov word [rbx + 2], 2
-    mov word [rbx + 4], 0
-    mov word [rbx + 6], 0
-    mov eax, SYS_POLL
-    mov rdi, POLL_BUFFER
-    mov esi, 1
-    xor edx, edx
-    int 0x80
+    mov edi, r15d
+    mov esi, 2
+    call .poll_one
     test eax, eax
     jnz .fail_tx_wakeup_poll
 
@@ -644,16 +674,9 @@ _start:
     cmp dword [rbx + 4], 0x0202000A
     jne .fail_peer
 
-    mov rbx, POLL_BUFFER
-    mov word [rbx + 0], r12w
-    mov word [rbx + 2], 2              ; writable
-    mov word [rbx + 4], 0
-    mov word [rbx + 6], 0
-    mov eax, SYS_POLL
-    mov rdi, POLL_BUFFER
-    mov esi, 1
-    xor edx, edx
-    int 0x80
+    mov edi, r12d
+    mov esi, 2              ; writable
+    call .poll_one
     cmp eax, 1
     jne .fail_poll
     mov rbx, POLL_BUFFER
@@ -757,16 +780,9 @@ _start:
     test eax, eax
     jnz .fail_sockopt_tcp
 
-    mov rbx, POLL_BUFFER
-    mov word [rbx + 0], r12w
-    mov word [rbx + 2], 2              ; writable once established
-    mov word [rbx + 4], 0
-    mov word [rbx + 6], 0
-    mov eax, SYS_POLL
-    mov rdi, POLL_BUFFER
-    mov esi, 1
-    xor edx, edx
-    int 0x80
+    mov edi, r12d
+    mov esi, 2              ; writable once established
+    call .poll_one
     cmp eax, 1
     jne .fail_tcp_poll
     mov rbx, POLL_BUFFER
@@ -811,16 +827,9 @@ _start:
     cmp dword [rbx + 4], 0x0202000A
     jne .fail_tcp_shutdown
 
-    mov rbx, POLL_BUFFER
-    mov word [rbx + 0], r12w
-    mov word [rbx + 2], 2
-    mov word [rbx + 4], 0
-    mov word [rbx + 6], 0
-    mov eax, SYS_POLL
-    mov rdi, POLL_BUFFER
-    mov esi, 1
-    xor edx, edx
-    int 0x80
+    mov edi, r12d
+    mov esi, 2
+    call .poll_one
     test eax, eax
     jnz .fail_tcp_shutdown_poll
 
@@ -852,6 +861,19 @@ _start:
     mov edi, 0x54
     int 0x80
     ud2
+
+; Compact single-descriptor nonblocking poll helper. Inputs: EDI=fd, ESI=events.
+.poll_one:
+    mov rbx, POLL_BUFFER
+    mov word [rbx + 0], di
+    mov word [rbx + 2], si
+    mov dword [rbx + 4], 0
+    mov eax, SYS_POLL
+    mov rdi, POLL_BUFFER
+    mov esi, 1
+    xor edx, edx
+    int 0x80
+    ret
 
 .fail_start:
     mov edi, 0xB0
@@ -957,6 +979,9 @@ _start:
     jmp .exit_failure
 .fail_accept_shutdown:
     mov edi, 0xDE
+    jmp .exit_failure
+.fail_tcp_retained:
+    mov edi, 0xDF
     jmp .exit_failure
 .fail_partial_socket:
     mov edi, 0xE0

@@ -267,6 +267,23 @@ try {
             if (-not $tcpPassiveConnect.Wait([TimeSpan]::FromSeconds(5))) {
                 throw 'Timed out connecting through QEMU hostfwd to the G301 guest listener.'
             }
+            $g312Deadline = (Get-Date).AddSeconds(8)
+            $g312Passed = $false
+            while ((Get-Date) -lt $g312Deadline) {
+                Start-Sleep -Milliseconds 25
+                $socketText = Current-SerialText
+                if ($socketText.Contains('G312 TCP retained passed')) {
+                    $g312Passed = $true
+                    break
+                }
+                $process.Refresh()
+                if ($process.HasExited) { throw 'QEMU exited before the G312 retained TCP fixture completed.' }
+            }
+            if (-not $g312Passed) { throw 'The G312 accepted TCP control block did not survive its post-handshake dwell.' }
+            $tcpPassiveClient.Close()
+            $tcpPassiveClient.Dispose()
+            $tcpPassiveClient = $null
+
             $socketDeadline = (Get-Date).AddSeconds(8)
             $socketPassed = $false
             while ((Get-Date) -lt $socketDeadline) {
@@ -277,10 +294,11 @@ try {
                     break
                 }
                 $process.Refresh()
-                if ($process.HasExited) { throw 'QEMU exited before the G307 socket fixture completed.' }
+                if ($process.HasExited) { throw 'QEMU exited before the G312 socket fixture completed.' }
             }
-            if (-not $socketPassed) { throw 'The G307 socket fixture did not complete after the host-forward connection.' }
+            if (-not $socketPassed) { throw 'The G312 socket fixture did not complete after the retained-control-block proof.' }
             Write-Host 'G307 socket option guest proof passed: type/protocol/acceptconn introspection and NONBLOCK set/get coherence completed.'
+            Write-Host 'G312 retained TCP control-block proof passed: an accepted ESTABLISHED socket preserved its exact peer/local tuple and POLLOUT state across a post-handshake dwell without enabling payload or FIN handling.'
             if (-not $udpTxWakeFixture) { throw 'The G310 host UDP fixture was not available.' }
             for ($attempt = 0; $attempt -lt 2; $attempt++) {
                 $txWakeRemote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
@@ -474,7 +492,7 @@ try {
         'faults 1',
         $(if ($Network) { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/62/1 blocked 3/1 wakeups 3/1' } else { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/56/1 blocked 3/1 wakeups 3/1' }),
         'ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/suspend/overflow 1/0/0/0 clean yes',
-        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5858372 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11446/4665/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
+        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5858884 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11447/4664/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
         'ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes',
         'ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 global/mount/immediate/durable/reject 1/2/1/1/0 writeback active no request/complete/pass 1/1/1 immediate/durable/clean/unsupported/failure/stale 1/0/0/0/0/0 pages queued/completed 6/6 payload/header/flush 1/1/2 NVMe read/write/flush ',
         ' errors 0/0 clean yes',
