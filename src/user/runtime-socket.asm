@@ -17,7 +17,7 @@ ORG 0
 %define RECEIVE_BUFFER  (DATA_BASE + 400)
 %define PARTIAL_SENDTO_PAYLOAD (DATA_BASE + 1024)
 %define PARTIAL_SEND_PAYLOAD   (DATA_BASE + 3072)
-%define G312_PASS_MESSAGE       (DATA_BASE + 928)
+%define G312_READY_MESSAGE      (DATA_BASE + 928)
 
 %define START_LENGTH    19
 %define PASS_LENGTH     93
@@ -26,7 +26,7 @@ ORG 0
 %define RECEIVE_CAPACITY 512
 %define PARTIAL_REQUEST_LENGTH 1476
 %define PARTIAL_EXPECTED_LENGTH 1024
-%define G312_PASS_LENGTH 26
+%define G312_READY_LENGTH 12
 
 _start:
     mov eax, SYS_WRITE
@@ -118,7 +118,7 @@ _start:
     cmp dword [rbx + 4], 0x0F02000A   ; 10.0.2.15 bytes
     jne .fail_listen_name
 
-    mov r14d, 500                       ; at most five seconds at 100 Hz
+    mov r14d, 50000                     ; bounded hostfwd-ready budget on fast virtual clocks
 .listen_poll:
     mov rbx, POLL_BUFFER
     mov word [rbx + 0], r12w
@@ -249,16 +249,26 @@ _start:
     cmp rax, ERRNO_NO_SYSCALL
     jne .fail_accept_boundary
 
-    ; G312: the accepted ESTABLISHED control block must remain addressable after
-    ; the handshake validation window. Keep the host peer open across a real
-    ; half-second dwell, then prove the exact peer/local tuple and POLLOUT state
-    ; are still coherent. TCP payload I/O remains ENOSYS above; FIN progression
-    ; remains reserved for G321/G322.
-    mov eax, SYS_SLEEP
-    mov edi, 50
+    ; G312: announce the accepted ESTABLISHED control block only after the
+    ; payload boundary above is proven. The host then writes one real byte; runtime
+    ; service must recognize/defer that payload without consuming or ACKing it.
+    ; A second blocking accept is the host->guest barrier; after it wakes, the
+    ; original tuple and POLLOUT must remain coherent for G314 later.
+    mov eax, SYS_WRITE
+    mov edi, 1
+    mov rsi, G312_READY_MESSAGE
+    mov edx, G312_READY_LENGTH
+    int 0x80
+    cmp eax, G312_READY_LENGTH
+    jne .fail_tcp_retained
+
+    mov eax, SYS_ACCEPT
+    mov edi, r12d
+    xor esi, esi
+    xor edx, edx
     int 0x80
     test eax, eax
-    jnz .fail_tcp_retained
+    js .fail_tcp_retained
 
     mov eax, SYS_GETPEERNAME
     mov edi, r13d
@@ -296,14 +306,6 @@ _start:
     mov rbx, POLL_BUFFER
     test word [rbx + 4], 2
     jz .fail_tcp_retained
-
-    mov eax, SYS_WRITE
-    mov edi, 1
-    mov rsi, G312_PASS_MESSAGE
-    mov edx, G312_PASS_LENGTH
-    int 0x80
-    cmp eax, G312_PASS_LENGTH
-    jne .fail_tcp_retained
 
     mov eax, SYS_CLOSE
     mov edi, r13d

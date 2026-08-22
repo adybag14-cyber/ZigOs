@@ -101,6 +101,7 @@ pub const Report = struct {
     socket_tx_completions: u64,
     socket_tx_wakeups: u64,
     socket_tx_pending_mask: u32,
+    tcp_deferred_ingress_events: u64,
     reclaimed_pages: u64,
     shared_pages: usize,
     file_mapping_pages: usize,
@@ -161,6 +162,7 @@ const TcpSocketState = struct {
     status: TcpConnectStatus = .connecting,
     read_shutdown: bool = false,
     write_shutdown: bool = false,
+    deferred_ingress_seen: bool = false,
 };
 
 const TcpPendingConnection = struct {
@@ -252,6 +254,7 @@ var socket_tx_waits: u64 = 0;
 var socket_tx_would_block: u64 = 0;
 var socket_tx_wakeups: u64 = 0;
 var socket_tx_observed_completions: u64 = 0;
+var tcp_deferred_ingress_events: u64 = 0;
 
 pub const ShutdownFn = *const fn (context: ?*anyopaque, process_handle: u64) bool;
 pub const SyncFn = *const fn (context: ?*anyopaque) i64;
@@ -320,6 +323,7 @@ pub fn initialize(
     socket_tx_would_block = 0;
     socket_tx_wakeups = 0;
     socket_tx_observed_completions = 0;
+    tcp_deferred_ingress_events = 0;
     system_context = null;
     shutdown_fn = null;
     sync_fn = null;
@@ -949,6 +953,7 @@ pub fn report() Report {
         .socket_tx_completions = if (e1000e.activeDevice() != null) e1000e.runtimeTransmitCompletionCount() else 0,
         .socket_tx_wakeups = socket_tx_wakeups,
         .socket_tx_pending_mask = if (e1000e.activeDevice() != null) e1000e.runtimeTransmitPendingMask() else 0,
+        .tcp_deferred_ingress_events = tcp_deferred_ingress_events,
         .reclaimed_pages = allocator_report.frees,
         .shared_pages = allocator_report.shared,
         .file_mapping_pages = file_mapping_pages,
@@ -2506,13 +2511,18 @@ fn serviceTcpConnects(device: *e1000e.Device, tick: u64) usize {
             }
 
             if (connection.status != .established) continue;
-            // G312 keeps established control blocks live after connect/accept, but
-            // deliberately does not consume application payload or FIN. G313/G314
-            // own payload I/O and G321/G322 own graceful close progression.
+            // G312 keeps established control blocks live after connect/accept.
+            // Exact peer payload or FIN is recognized once as deferred ingress so the
+            // live runtime proves the retained tuple is still serviced, but neither
+            // is fed to the state machine or ACKed here: G314 owns payload receive
+            // and G321/G322 own graceful close progression. SYN remains later too.
             handled = true;
-            if (connection.control.state != .established or segment.payload.len != 0 or
-                (segment.flags & (tcp.flag_syn | tcp.flag_fin)) != 0)
-            {
+            if (connection.control.state != .established or (segment.flags & tcp.flag_syn) != 0) break;
+            if (segment.payload.len != 0 or (segment.flags & tcp.flag_fin) != 0) {
+                if (!connection.deferred_ingress_seen) {
+                    connection.deferred_ingress_seen = true;
+                    tcp_deferred_ingress_events +|= 1;
+                }
                 break;
             }
             const transition = tcp_connection.handleSegment(&connection.control, .{

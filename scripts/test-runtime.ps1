@@ -26,6 +26,8 @@ $tcpFixtureAccept = $null
 $tcpFixtureClient = $null
 $tcpPassiveClient = $null
 $tcpPassiveConnect = $null
+$tcpPassiveSyncClient = $null
+$tcpPassiveSyncConnect = $null
 $udpSendFixture = $null
 $udpTxWakeFixture = $null
 $serialBytes = $null
@@ -261,30 +263,48 @@ try {
     foreach ($command in $commands) {
         Send-SerialLine $command
         if ($Network -and $command -eq 'exec /bin/socket.elf') {
-            Start-Sleep -Milliseconds 200
+            $socketStartDeadline = (Get-Date).AddSeconds(120)
+            $socketStarted = $false
+            while ((Get-Date) -lt $socketStartDeadline) {
+                Start-Sleep -Milliseconds 25
+                if ((Current-SerialText).Contains('socket-api: start')) {
+                    $socketStarted = $true
+                    break
+                }
+                $process.Refresh()
+                if ($process.HasExited) { throw 'QEMU exited before the socket fixture entered CPL3.' }
+            }
+            if (-not $socketStarted) { throw 'The socket fixture did not reach its CPL3 start marker.' }
             $tcpPassiveClient = [System.Net.Sockets.TcpClient]::new()
             $tcpPassiveConnect = $tcpPassiveClient.ConnectAsync('127.0.0.1', 39002)
             if (-not $tcpPassiveConnect.Wait([TimeSpan]::FromSeconds(5))) {
                 throw 'Timed out connecting through QEMU hostfwd to the G301 guest listener.'
             }
-            $g312Deadline = (Get-Date).AddSeconds(8)
-            $g312Passed = $false
-            while ((Get-Date) -lt $g312Deadline) {
+            $g312ReadyDeadline = (Get-Date).AddSeconds(60)
+            $g312Ready = $false
+            while ((Get-Date) -lt $g312ReadyDeadline) {
                 Start-Sleep -Milliseconds 25
                 $socketText = Current-SerialText
-                if ($socketText.Contains('G312 TCP retained passed')) {
-                    $g312Passed = $true
+                if ($socketText.Contains('G312 ready')) {
+                    $g312Ready = $true
                     break
                 }
                 $process.Refresh()
-                if ($process.HasExited) { throw 'QEMU exited before the G312 retained TCP fixture completed.' }
+                if ($process.HasExited) { throw 'QEMU exited before the G312 retained TCP fixture became ready.' }
             }
-            if (-not $g312Passed) { throw 'The G312 accepted TCP control block did not survive its post-handshake dwell.' }
-            $tcpPassiveClient.Close()
-            $tcpPassiveClient.Dispose()
-            $tcpPassiveClient = $null
+            if (-not $g312Ready) { throw 'The G312 accepted TCP control block never reached its post-handshake ready point.' }
+            $tcpPassiveClient.NoDelay = $true
+            $g312Bytes = [System.Text.Encoding]::ASCII.GetBytes('G312DATA')
+            $g312Sent = $tcpPassiveClient.Client.Send($g312Bytes)
+            if ($g312Sent -ne 8) { throw "The G312 host payload sent $g312Sent bytes instead of 8." }
+            Start-Sleep -Milliseconds 100
+            $tcpPassiveSyncClient = [System.Net.Sockets.TcpClient]::new()
+            $tcpPassiveSyncConnect = $tcpPassiveSyncClient.ConnectAsync('127.0.0.1', 39002)
+            if (-not $tcpPassiveSyncConnect.Wait([TimeSpan]::FromSeconds(5))) {
+                throw 'The G312 synchronization connection did not complete through QEMU hostfwd.'
+            }
 
-            $socketDeadline = (Get-Date).AddSeconds(8)
+            $socketDeadline = (Get-Date).AddSeconds(90)
             $socketPassed = $false
             while ((Get-Date) -lt $socketDeadline) {
                 Start-Sleep -Milliseconds 50
@@ -298,7 +318,11 @@ try {
             }
             if (-not $socketPassed) { throw 'The G312 socket fixture did not complete after the retained-control-block proof.' }
             Write-Host 'G307 socket option guest proof passed: type/protocol/acceptconn introspection and NONBLOCK set/get coherence completed.'
-            Write-Host 'G312 retained TCP control-block proof passed: an accepted ESTABLISHED socket preserved its exact peer/local tuple and POLLOUT state across a post-handshake dwell without enabling payload or FIN handling.'
+            Write-Host 'G312 retained TCP control-block proof passed: the host sent the exact 8-byte G312DATA payload after the guest established marker, then a second TCP handshake released the guest blocking accept; runtime recognized the original established payload as deferred ingress while preserving its peer/local tuple and POLLOUT without consuming or ACKing application data.'
+            $tcpPassiveSyncClient.Dispose()
+            $tcpPassiveSyncClient = $null
+            $tcpPassiveClient.Dispose()
+            $tcpPassiveClient = $null
             if (-not $udpTxWakeFixture) { throw 'The G310 host UDP fixture was not available.' }
             for ($attempt = 0; $attempt -lt 2; $attempt++) {
                 $txWakeRemote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
@@ -505,7 +529,7 @@ try {
         ' file-mappings 0 launches/exits/faults ',
         $(if ($Network) { 'launches/exits/faults 17/15/1' } else { 'launches/exits/faults 15/13/1' }),
         $(if ($Network) { 'reclaimed 284 stale-contexts-swept 0 allocator alloc/release/retains 284/284/0' } else { 'reclaimed 253 stale-contexts-swept 0 allocator alloc/release/retains 253/253/0' }),
-        $(if ($Network) { 'socket-tx handoffs/waits/would-block/completions/wakeups/pending 7/1/1/7/1/0' } else { 'socket-tx handoffs/waits/would-block/completions/wakeups/pending 0/0/0/0/0/0' }),
+        $(if ($Network) { 'socket-tx handoffs/waits/would-block/completions/wakeups/pending 7/1/1/7/1/0 tcp-deferred-ingress 1' } else { 'socket-tx handoffs/waits/would-block/completions/wakeups/pending 0/0/0/0/0/0 tcp-deferred-ingress 0' }),
         'ZigOs x86-64 Capstone 18 verified: goals 0x000001D1',
         'ZigOs x86-64 Capstone 19 verified: goals 0x000001F1 new-goals 0x00000020 vfs-elf yes private-cr3 yes retained-contexts yes timer-preemption yes real-fault yes executable-pipes yes frame-reclamation yes network-facades-removed yes cleanup yes'
     )
@@ -573,6 +597,7 @@ finally {
     }
     if ($udpTxWakeFixture) { $udpTxWakeFixture.Dispose() }
     if ($udpSendFixture) { $udpSendFixture.Dispose() }
+    if ($tcpPassiveSyncClient) { $tcpPassiveSyncClient.Dispose() }
     if ($tcpPassiveClient) { $tcpPassiveClient.Dispose() }
     if ($tcpFixtureClient) { $tcpFixtureClient.Dispose() }
     if ($tcpFixtureListener) { $tcpFixtureListener.Stop() }

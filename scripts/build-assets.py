@@ -70,7 +70,7 @@ def runtime_socket_data() -> bytes:
         64: b"socket-api: UDP partial-send + TCP connect/listen/accept/shutdown + sockopt + txwake passed\r\n",
         160: b"UDP-CPL3",
         192: bytes.fromhex("5A5A01000001000000000000096C6F63616C686F73740000010001"),
-        928: b"G312 TCP retained passed\r\n",
+        928: b"G312 ready\r\n",
     }
     for offset, value in fields.items():
         data[offset : offset + len(value)] = value

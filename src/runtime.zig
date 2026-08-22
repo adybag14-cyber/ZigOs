@@ -2909,7 +2909,8 @@ fn finishDiagnosticRuntime() noreturn {
         (!state.config.network_ready or (userspace_report.socket_tx_handoffs == 7 and
             userspace_report.socket_tx_waits == 1 and userspace_report.socket_tx_would_block == 1 and
             userspace_report.socket_tx_completions == 7 and userspace_report.socket_tx_wakeups == 1 and
-            userspace_report.socket_tx_pending_mask == 0)) and
+            userspace_report.socket_tx_pending_mask == 0 and userspace_report.tcp_deferred_ingress_events == 1)) and
+        (state.config.network_ready or userspace_report.tcp_deferred_ingress_events == 0) and
         userspace_report.shared_pages == 0 and userspace_report.allocator_clean and
         userspace_report.allocator_allocations == userspace_report.reclaimed_pages and
         userspace_report.allocator_out_of_memory == 0 and userspace_report.allocator_rejections == 0 and physical_clean;
@@ -3314,6 +3315,8 @@ fn finishDiagnosticRuntime() noreturn {
     emitDecimal(userspace_report.socket_tx_wakeups);
     emit("/");
     emitDecimal(userspace_report.socket_tx_pending_mask);
+    emit(" tcp-deferred-ingress ");
+    emitDecimal(userspace_report.tcp_deferred_ingress_events);
     emit(" reclaimed ");
     emitDecimal(userspace_report.reclaimed_pages);
     emit(" stale-contexts-swept ");
