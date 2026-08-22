@@ -80,7 +80,7 @@ try {
         try {
             $udpSendEndpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, 39003)
             $udpSendFixture = [System.Net.Sockets.UdpClient]::new($udpSendEndpoint)
-            $udpSendFixture.Client.ReceiveTimeout = 5000
+            $udpSendFixture.Client.ReceiveTimeout = [Math]::Max(5000, $TimeoutSeconds * 1000)
         } catch {
             throw "The G303 UDP listener could not bind host port 39003: $($_.Exception.Message)"
         }
@@ -263,36 +263,30 @@ try {
     foreach ($command in $commands) {
         Send-SerialLine $command
         if ($Network -and $command -eq 'exec /bin/socket.elf') {
-            $socketStartDeadline = (Get-Date).AddSeconds(120)
-            $socketStarted = $false
-            while ((Get-Date) -lt $socketStartDeadline) {
-                Start-Sleep -Milliseconds 25
-                if ((Current-SerialText).Contains('socket-api: start')) {
-                    $socketStarted = $true
-                    break
-                }
-                $process.Refresh()
-                if ($process.HasExited) { throw 'QEMU exited before the socket fixture entered CPL3.' }
-            }
-            if (-not $socketStarted) { throw 'The socket fixture did not reach its CPL3 start marker.' }
+            # CPL3 stdout is buffered in the diagnostic profile until foreground exit,
+            # so never use socket-api/G312 text as an in-flight synchronization signal.
             $tcpPassiveClient = [System.Net.Sockets.TcpClient]::new()
             $tcpPassiveConnect = $tcpPassiveClient.ConnectAsync('127.0.0.1', 39002)
             if (-not $tcpPassiveConnect.Wait([TimeSpan]::FromSeconds(5))) {
                 throw 'Timed out connecting through QEMU hostfwd to the G301 guest listener.'
             }
-            $g312ReadyDeadline = (Get-Date).AddSeconds(60)
-            $g312Ready = $false
-            while ((Get-Date) -lt $g312ReadyDeadline) {
-                Start-Sleep -Milliseconds 25
-                $socketText = Current-SerialText
-                if ($socketText.Contains('G312 ready')) {
-                    $g312Ready = $true
-                    break
-                }
-                $process.Refresh()
-                if ($process.HasExited) { throw 'QEMU exited before the G312 retained TCP fixture became ready.' }
+
+            # The first required G303 sendto is emitted only after the guest has accepted
+            # the original TCP connection and proved TCP payload send remains ENOSYS.
+            # Receiving it therefore gives the host a real, non-buffered post-accept signal.
+            if (-not $udpSendFixture) { throw 'The G303/G312 host UDP synchronization fixture was not available.' }
+            $udpRemote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
+            try {
+                $sendToBytes = $udpSendFixture.Receive([ref]$udpRemote)
+            } catch {
+                throw "The G303/G312 post-accept sendto datagram did not reach host UDP port 39003: $($_.Exception.Message)"
             }
-            if (-not $g312Ready) { throw 'The G312 accepted TCP control block never reached its post-handshake ready point.' }
+            if ($sendToBytes.Length -ne 1024) { throw "The G303 sendto partial datagram had $($sendToBytes.Length) bytes instead of 1024." }
+            for ($index = 0; $index -lt $sendToBytes.Length; $index++) {
+                $expected = [byte](($index * 3 + 7) -band 0xFF)
+                if ($sendToBytes[$index] -ne $expected) { throw "The G303 sendto partial payload differed at byte $index." }
+            }
+
             $tcpPassiveClient.NoDelay = $true
             $g312Bytes = [System.Text.Encoding]::ASCII.GetBytes('G312DATA')
             $g312Sent = $tcpPassiveClient.Client.Send($g312Bytes)
@@ -318,7 +312,7 @@ try {
             }
             if (-not $socketPassed) { throw 'The G312 socket fixture did not complete after the retained-control-block proof.' }
             Write-Host 'G307 socket option guest proof passed: type/protocol/acceptconn introspection and NONBLOCK set/get coherence completed.'
-            Write-Host 'G312 retained TCP control-block proof passed: the host sent the exact 8-byte G312DATA payload after the guest established marker, then a second TCP handshake released the guest blocking accept; runtime recognized the original established payload as deferred ingress while preserving its peer/local tuple and POLLOUT without consuming or ACKing application data.'
+            Write-Host 'G312 retained TCP control-block proof passed: the already-required first G303 sendto acted as a non-buffered post-accept signal; the host then sent exact G312DATA before a second TCP handshake released blocking accept, and runtime recorded one deferred established ingress while preserving peer/local tuple and POLLOUT without consuming or ACKing application data.'
             $tcpPassiveSyncClient.Dispose()
             $tcpPassiveSyncClient = $null
             $tcpPassiveClient.Dispose()
@@ -341,17 +335,6 @@ try {
             }
             Write-Host 'G310 TX capacity guest/host proof passed: DONTWAIT transmitted nothing and the blocked writer resumed after real descriptor completion.'
             if (-not $udpSendFixture) { throw 'The G303 host UDP fixture was not available.' }
-            $udpRemote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
-            try {
-                $sendToBytes = $udpSendFixture.Receive([ref]$udpRemote)
-            } catch {
-                throw "The G303 sendto partial datagram did not reach host UDP port 39003: $($_.Exception.Message)"
-            }
-            if ($sendToBytes.Length -ne 1024) { throw "The G303 sendto partial datagram had $($sendToBytes.Length) bytes instead of 1024." }
-            for ($index = 0; $index -lt $sendToBytes.Length; $index++) {
-                $expected = [byte](($index * 3 + 7) -band 0xFF)
-                if ($sendToBytes[$index] -ne $expected) { throw "The G303 sendto partial payload differed at byte $index." }
-            }
             $udpRemote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
             try {
                 $sendBytes = $udpSendFixture.Receive([ref]$udpRemote)

@@ -17,7 +17,6 @@ ORG 0
 %define RECEIVE_BUFFER  (DATA_BASE + 400)
 %define PARTIAL_SENDTO_PAYLOAD (DATA_BASE + 1024)
 %define PARTIAL_SEND_PAYLOAD   (DATA_BASE + 3072)
-%define G312_READY_MESSAGE      (DATA_BASE + 928)
 
 %define START_LENGTH    19
 %define PASS_LENGTH     93
@@ -26,7 +25,6 @@ ORG 0
 %define RECEIVE_CAPACITY 512
 %define PARTIAL_REQUEST_LENGTH 1476
 %define PARTIAL_EXPECTED_LENGTH 1024
-%define G312_READY_LENGTH 12
 
 _start:
     mov eax, SYS_WRITE
@@ -249,19 +247,42 @@ _start:
     cmp rax, ERRNO_NO_SYSCALL
     jne .fail_accept_boundary
 
-    ; G312: announce the accepted ESTABLISHED control block only after the
-    ; payload boundary above is proven. The host then writes one real byte; runtime
-    ; service must recognize/defer that payload without consuming or ACKing it.
-    ; A second blocking accept is the host->guest barrier; after it wakes, the
-    ; original tuple and POLLOUT must remain coherent for G314 later.
-    mov eax, SYS_WRITE
-    mov edi, 1
-    mov rsi, G312_READY_MESSAGE
-    mov edx, G312_READY_LENGTH
-    int 0x80
-    cmp eax, G312_READY_LENGTH
-    jne .fail_tcp_retained
+    ; G312 keeps the accepted TCP socket and listener alive through the first G303 sendto below.
+    ; That already-required datagram becomes the host-visible
+    ; post-accept synchronization signal without adding another network handoff.
 
+    ; G303: both UDP sendto and connected send expose a bounded positive
+    ; short count instead of rejecting a request larger than the ABI copy window.
+    mov eax, SYS_SOCKET
+    mov edi, 2                  ; AF_INET
+    mov esi, 2                  ; SOCK_DGRAM
+    mov edx, 17                 ; UDP
+    int 0x80
+    test eax, eax
+    js .fail_partial_socket
+    mov r15d, eax
+
+    mov rbx, PEER_ADDRESS
+    mov word [rbx + 0], 2
+    mov word [rbx + 2], 0x5B98         ; network-order port 39003
+    mov dword [rbx + 4], 0x0202000A    ; 10.0.2.2 host gateway
+
+    mov eax, SYS_SENDTO
+    mov edi, r15d
+    mov rsi, PARTIAL_SENDTO_PAYLOAD
+    mov edx, PARTIAL_REQUEST_LENGTH
+    xor r10d, r10d
+    mov r8, PEER_ADDRESS
+    mov r9d, 8
+    int 0x80
+    cmp eax, PARTIAL_EXPECTED_LENGTH
+    jne .fail_partial_sendto
+
+    ; G312: receipt of the exact G303 sendto proves the host reached a point
+    ; after the first TCP accept and the ENOSYS payload boundary. The host now
+    ; injects G312DATA into the original accepted tuple, waits briefly, then
+    ; opens a second hostfwd connection. Blocking accept below keeps runtime
+    ; network service active until that externally ordered barrier completes.
     mov eax, SYS_ACCEPT
     mov edi, r12d
     xor esi, esi
@@ -270,15 +291,17 @@ _start:
     test eax, eax
     js .fail_tcp_retained
 
+    ; The original accepted control block remains exact and writable after the
+    ; deferred payload has been observed but deliberately not consumed.
     mov eax, SYS_GETPEERNAME
     mov edi, r13d
-    mov rsi, PEER_ADDRESS
+    mov rsi, RECEIVE_BUFFER
     mov edx, 8
     int 0x80
     cmp eax, 8
     jne .fail_tcp_retained
     mov rbx, SOURCE_ADDRESS
-    mov rcx, PEER_ADDRESS
+    mov rcx, RECEIVE_BUFFER
     mov rax, [rbx]
     cmp rax, [rcx]
     jne .fail_tcp_retained
@@ -314,6 +337,7 @@ _start:
     jnz .fail_accept_close
 
     ; Consuming the single backlog entry removes listener readability.
+    ; G312 repeats this inherited G302 proof after the synchronization accept.
     mov edi, r12d
     mov esi, 1
     call .poll_one
@@ -333,33 +357,6 @@ _start:
     int 0x80
     test eax, eax
     jnz .fail_listen_close
-
-    ; G303: both UDP sendto and connected send expose a bounded positive
-    ; short count instead of rejecting a request larger than the ABI copy window.
-    mov eax, SYS_SOCKET
-    mov edi, 2                  ; AF_INET
-    mov esi, 2                  ; SOCK_DGRAM
-    mov edx, 17                 ; UDP
-    int 0x80
-    test eax, eax
-    js .fail_partial_socket
-    mov r15d, eax
-
-    mov rbx, PEER_ADDRESS
-    mov word [rbx + 0], 2
-    mov word [rbx + 2], 0x5B98         ; network-order port 39003
-    mov dword [rbx + 4], 0x0202000A    ; 10.0.2.2 host gateway
-
-    mov eax, SYS_SENDTO
-    mov edi, r15d
-    mov rsi, PARTIAL_SENDTO_PAYLOAD
-    mov edx, PARTIAL_REQUEST_LENGTH
-    xor r10d, r10d
-    mov r8, PEER_ADDRESS
-    mov r9d, 8
-    int 0x80
-    cmp eax, PARTIAL_EXPECTED_LENGTH
-    jne .fail_partial_sendto
 
     ; Retire the first G303 asynchronous TX before testing the connected send.
     mov eax, SYS_SLEEP
