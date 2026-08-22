@@ -151,7 +151,7 @@ ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 a
 NVMe one-shot read error armed: requested LBA 17319, command LBA 32768
 cat: input/output error
 ZigOs NVMe read fault injection: failures 1 armed no clean yes
-ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5807684 metadata/file/block reads 114/3/115 failures 1 clusters claimed/free/loop/cross/range 11347/4764/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes
+ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5808196 metadata/file/block reads 114/3/115 failures 1 clusters claimed/free/loop/cross/range 11348/4763/0/0/0 lock tickets/outstanding 4/0 quarantine state/reason/events no/none/0 clean yes
 ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes
 ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 144/144 cache-released 13 storage persistent clean yes
 
@@ -163,7 +163,7 @@ write: read-only filesystem
 sync: read-only filesystem
 ZigOs NVMe write fault injection: failures 1 armed no clean yes
 ZigOs persistent damage containment: damaged yes reason payload_write remounts/failures 1/0 discarded/rejected 2/1 vfs-remount/discard 1/2 mount-readonly yes clean yes
-ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5807684 metadata/file/block reads 113/0/113 failures 0 clusters claimed/free/loop/cross/range 11347/4764/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes
+ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5808196 metadata/file/block reads 113/0/113 failures 0 clusters claimed/free/loop/cross/range 11348/4763/0/0/0 lock tickets/outstanding 1/0 quarantine state/reason/events no/none/0 clean yes
 ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes
 ZigOs normal userspace resources: processes 1 descriptors 0 contexts 0 pages 0 alloc/free 64/64 cache-released 12 storage persistent-read-only clean yes
 
