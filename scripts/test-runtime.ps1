@@ -271,8 +271,25 @@ try {
                 throw 'Timed out connecting through QEMU hostfwd to the G301 guest listener.'
             }
 
-            # The first required G303 sendto is emitted only after the guest has accepted
-            # the original TCP connection and proved TCP payload send remains ENOSYS.
+            # G313: the accepted descriptor requests 1476 deterministic bytes, but the
+            # bounded send contract may transmit only the 1024-byte ABI prefix. Read the
+            # real TCP stream fully and verify every byte of that returned prefix.
+            $tcpPassiveStream = $tcpPassiveClient.GetStream()
+            $tcpPassiveStream.ReadTimeout = 5000
+            $g313Bytes = [byte[]]::new(1024)
+            $g313Read = 0
+            while ($g313Read -lt $g313Bytes.Length) {
+                $count = $tcpPassiveStream.Read($g313Bytes, $g313Read, $g313Bytes.Length - $g313Read)
+                if ($count -le 0) { throw 'The G313 accepted TCP peer reached EOF before the 1024-byte application prefix.' }
+                $g313Read += $count
+            }
+            for ($index = 0; $index -lt $g313Bytes.Length; $index++) {
+                $expected = [byte](($index * 3 + 7) -band 0xFF)
+                if ($g313Bytes[$index] -ne $expected) { throw "The G313 TCP short-send prefix differed at byte $index." }
+            }
+            Write-Host 'G313 TCP application send host proof passed: a 1476-byte request returned/delivered the exact deterministic 1024-byte prefix.'
+
+            # The first required G303 sendto is emitted after the G313 transmit proof.
             # Receiving it therefore gives the host a real, non-buffered post-accept signal.
             if (-not $udpSendFixture) { throw 'The G303/G312 host UDP synchronization fixture was not available.' }
             $udpRemote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
@@ -499,7 +516,7 @@ try {
         'faults 1',
         $(if ($Network) { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/62/1 blocked 3/1 wakeups 3/1' } else { 'ZigOs persistent descriptors: namespaces 1 fds 3 open 3 terminals 3 vfs 0 pipes 0 dup/inherited/cloexec 5/56/1 blocked 3/1 wakeups 3/1' }),
         'ZigOs permanent TTY: foreground group/session 1/1 buffered/edit/eof 0/0/0 lines 1 bytes submitted/read 7/7 blocked/wakeups 1/1 erase/interrupt/suspend/overflow 1/0/0/0 clean yes',
-        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5858884 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11447/4664/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
+        'ZigOs boot FAT: block-backed yes files/directories 3/2 bytes 5859908 metadata/file/block reads 113/4/115 failures 0 clusters claimed/free/loop/cross/range 11449/4662/0/0/0 lock tickets/outstanding 5/0 quarantine state/reason/events no/none/0 clean yes',
         'ZigOs live pseudo filesystems: dev/proc/net registrations 3/5/4 publications 3/5/4 withdrawals 0/0/0 failures 0/0/0 clean yes',
         'ZigOs persistent storage: mounted yes generation/slot 1/0 records/payload 0/4 mounts/syncs/checks/recoveries 1/1/1/0 global/mount/immediate/durable/reject 1/2/1/1/0 writeback active no request/complete/pass 1/1/1 immediate/durable/clean/unsupported/failure/stale 1/0/0/0/0/0 pages queued/completed 6/6 payload/header/flush 1/1/2 NVMe read/write/flush ',
         ' errors 0/0 clean yes',

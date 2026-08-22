@@ -1838,6 +1838,75 @@ fn syscallSend(
         frame.rax = reject(errno_invalid);
         return 0;
     };
+    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
+        frame.rax = reject(runtime_abi.fromError(err));
+        return 0;
+    };
+
+    if (slot.protocol == .tcp) {
+        if (slot.listener != null) {
+            frame.rax = reject(runtime_abi.errno_not_connected);
+            return 0;
+        }
+        const connection = if (slot.tcp) |*value| value else {
+            frame.rax = reject(runtime_abi.errno_not_connected);
+            return 0;
+        };
+        switch (connection.status) {
+            .established => {},
+            .connecting => return blockSocketWriter(context, frame, fx_state, slot, flags),
+            .refused => {
+                frame.rax = reject(runtime_abi.errno_connection_refused);
+                return 0;
+            },
+            .timed_out, .io_failed => {
+                frame.rax = reject(runtime_abi.errno_io);
+                return 0;
+            },
+        }
+        if (connection.write_shutdown) {
+            frame.rax = reject(runtime_abi.errno_broken_pipe);
+            return 0;
+        }
+        if (length == 0) {
+            frame.rax = 0;
+            return 0;
+        }
+        if (!tcp_connection.applicationSendReady(&connection.control)) {
+            return blockSocketWriter(context, frame, fx_state, slot, flags);
+        }
+        const send_length = @min(length, maximum_io_bytes, @as(usize, connection.control.send_window));
+        if (send_length == 0) return blockSocketWriter(context, frame, fx_state, slot, flags);
+        if (!validateRange(context, frame.rsi, send_length, false)) {
+            frame.rax = reject(errno_fault);
+            return 0;
+        }
+        var bytes: [maximum_io_bytes]u8 = undefined;
+        if (!copyFromUser(context, frame.rsi, bytes[0..send_length])) {
+            frame.rax = reject(errno_fault);
+            return 0;
+        }
+        const device = e1000e.activeDevice() orelse {
+            frame.rax = reject(runtime_abi.errno_connection_refused);
+            return 0;
+        };
+        if (!runtimeNetworkReady(device)) {
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        }
+        const previous_control = connection.control;
+        const outbound = tcp_connection.beginApplicationSend(&connection.control, @intCast(send_length)) orelse {
+            return blockSocketWriter(context, frame, fx_state, slot, flags);
+        };
+        if (!sendTcpApplicationData(device, connection, outbound, bytes[0..send_length])) {
+            connection.control = previous_control;
+            frame.rax = reject(runtime_abi.errno_io);
+            return 0;
+        }
+        frame.rax = send_length;
+        return 0;
+    }
+
     const send_length = @min(length, maximum_io_bytes);
     if (!validateRange(context, frame.rsi, send_length, false)) {
         frame.rax = reject(errno_fault);
@@ -1846,14 +1915,6 @@ fn syscallSend(
     var bytes: [maximum_io_bytes]u8 = undefined;
     if (send_length != 0 and !copyFromUser(context, frame.rsi, bytes[0..send_length])) {
         frame.rax = reject(errno_fault);
-        return 0;
-    }
-    const slot = socketSlotForDescriptor(context.handle, fd) catch |err| {
-        frame.rax = reject(runtime_abi.fromError(err));
-        return 0;
-    };
-    if (slot.protocol != .udp) {
-        frame.rax = reject(errno_no_syscall);
         return 0;
     }
     const socket = slot.udp orelse {
@@ -2341,7 +2402,7 @@ fn pollExternalSocket(_: ?*anyopaque, index: u16, generation: u32, requested: u1
     } else if (slot.tcp) |connection| {
         ready |= switch (connection.status) {
             .connecting => 0,
-            .established => if (connection.write_shutdown) 0 else runtime_abi.poll_writable,
+            .established => if (connection.write_shutdown or !tcp_connection.applicationSendReady(&connection.control)) 0 else runtime_abi.poll_writable,
             .refused, .timed_out, .io_failed => runtime_abi.poll_error | runtime_abi.poll_hangup,
         };
     } else {
@@ -2416,13 +2477,14 @@ fn tcpInitialSequence(index: u16, generation: u32) u32 {
     return value;
 }
 
-fn sendTcpControlToPeer(
+fn sendTcpSegmentToPeer(
     device: *e1000e.Device,
     local_port: u16,
     peer_mac: [6]u8,
     peer_ipv4: [4]u8,
     peer_port: u16,
     outbound: tcp_connection.OutboundSegment,
+    payload: []const u8,
 ) bool {
     return e1000e.sendTcpSegment(device, .{
         .destination_mac = peer_mac,
@@ -2433,7 +2495,19 @@ fn sendTcpControlToPeer(
         .acknowledgement_number = outbound.acknowledgement_number,
         .flags = outbound.flags,
         .window_size = outbound.window_size,
+        .payload = payload,
     }) != null;
+}
+
+fn sendTcpControlToPeer(
+    device: *e1000e.Device,
+    local_port: u16,
+    peer_mac: [6]u8,
+    peer_ipv4: [4]u8,
+    peer_port: u16,
+    outbound: tcp_connection.OutboundSegment,
+) bool {
+    return sendTcpSegmentToPeer(device, local_port, peer_mac, peer_ipv4, peer_port, outbound, &.{});
 }
 
 fn sendTcpControl(device: *e1000e.Device, connection: *const TcpSocketState, outbound: tcp_connection.OutboundSegment) bool {
@@ -2444,6 +2518,23 @@ fn sendTcpControl(device: *e1000e.Device, connection: *const TcpSocketState, out
         connection.peer_ipv4,
         connection.peer_port,
         outbound,
+    );
+}
+
+fn sendTcpApplicationData(
+    device: *e1000e.Device,
+    connection: *const TcpSocketState,
+    outbound: tcp_connection.OutboundSegment,
+    payload: []const u8,
+) bool {
+    return sendTcpSegmentToPeer(
+        device,
+        connection.local_port,
+        connection.peer_mac,
+        connection.peer_ipv4,
+        connection.peer_port,
+        outbound,
+        payload,
     );
 }
 
@@ -2511,17 +2602,30 @@ fn serviceTcpConnects(device: *e1000e.Device, tick: u64) usize {
             }
 
             if (connection.status != .established) continue;
-            // G312 keeps established control blocks live after connect/accept.
-            // Exact peer payload or FIN is recognized once as deferred ingress so the
-            // live runtime proves the retained tuple is still serviced, but neither
-            // is fed to the state machine or ACKed here: G314 owns payload receive
-            // and G321/G322 own graceful close progression. SYN remains later too.
+            // G313 retires acknowledged application sends while preserving the G312
+            // deferred-ingress boundary: payload bytes and FIN are still not consumed,
+            // acknowledged, or allowed to advance receive_next until G314/G321-G322.
             handled = true;
             if (connection.control.state != .established or (segment.flags & tcp.flag_syn) != 0) break;
+            const previous_unacknowledged = connection.control.send_unacknowledged;
             if (segment.payload.len != 0 or (segment.flags & tcp.flag_fin) != 0) {
+                if ((segment.flags & tcp.flag_ack) != 0 and (segment.flags & tcp.flag_rst) == 0) {
+                    _ = tcp_connection.handleSegment(&connection.control, .{
+                        .sequence_number = segment.sequence_number,
+                        .acknowledgement_number = segment.acknowledgement_number,
+                        .flags = tcp.flag_ack,
+                        .window_size = segment.window_size,
+                        .payload_length = 0,
+                    });
+                }
                 if (!connection.deferred_ingress_seen) {
                     connection.deferred_ingress_seen = true;
                     tcp_deferred_ingress_events +|= 1;
+                }
+                if (connection.control.send_unacknowledged != previous_unacknowledged and
+                    tcp_connection.applicationSendReady(&connection.control))
+                {
+                    wakeups += activeProcesses().wakeMatching(.socket_write, socketWaitKey(@intCast(index), slot.generation), true);
                 }
                 break;
             }
@@ -2538,6 +2642,11 @@ fn serviceTcpConnects(device: *e1000e.Device, tick: u64) usize {
                 }
                 if (connection.status != .io_failed and transition.state == .reset) {
                     connection.status = .refused;
+                }
+                if (connection.control.send_unacknowledged != previous_unacknowledged and
+                    tcp_connection.applicationSendReady(&connection.control))
+                {
+                    wakeups += activeProcesses().wakeMatching(.socket_write, socketWaitKey(@intCast(index), slot.generation), true);
                 }
             }
             break;

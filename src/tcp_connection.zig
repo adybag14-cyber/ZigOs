@@ -111,6 +111,7 @@ pub const ControlBlock = struct {
     receive_window: u16,
     resets: u32,
     bytes_received: u64,
+    bytes_sent: u64,
     fins_received: u32,
     fins_sent: u32,
     retransmission_policy: RetransmissionPolicy,
@@ -133,6 +134,7 @@ pub fn init(receive_window: u16) ?ControlBlock {
         .receive_window = receive_window,
         .resets = 0,
         .bytes_received = 0,
+        .bytes_sent = 0,
         .fins_received = 0,
         .fins_sent = 0,
         .retransmission_policy = .{
@@ -160,6 +162,7 @@ pub fn beginActiveOpen(control: *ControlBlock, initial_sequence: u32) Transition
     control.send_window = 0;
     control.resets = 0;
     control.bytes_received = 0;
+    control.bytes_sent = 0;
     control.fins_received = 0;
     control.fins_sent = 0;
     control.retransmission_active = false;
@@ -218,6 +221,7 @@ pub fn beginPassiveOpenAt(
     control.send_window = segment.window_size;
     control.resets = 0;
     control.bytes_received = 0;
+    control.bytes_sent = 0;
     control.fins_received = 0;
     control.fins_sent = 0;
     control.retransmission_policy = policy;
@@ -228,6 +232,23 @@ pub fn beginPassiveOpenAt(
     control.last_timer_tick = tick;
 
     return accepted(control, previous, .send_syn_ack, makeSynAck(control));
+}
+
+pub fn applicationSendReady(control: *const ControlBlock) bool {
+    return control.state == .established and control.send_unacknowledged == control.send_next and control.send_window != 0;
+}
+
+pub fn beginApplicationSend(control: *ControlBlock, payload_length: u16) ?OutboundSegment {
+    if (payload_length == 0 or !applicationSendReady(control) or payload_length > control.send_window) return null;
+    const outbound = OutboundSegment{
+        .sequence_number = control.send_next,
+        .acknowledgement_number = control.receive_next,
+        .flags = tcp.flag_psh | tcp.flag_ack,
+        .window_size = control.receive_window,
+    };
+    control.send_next +%= payload_length;
+    control.bytes_sent +|= payload_length;
+    return outbound;
 }
 
 pub fn beginClose(control: *ControlBlock) Transition {
@@ -702,6 +723,48 @@ test "passive open completes SYN SYN-ACK ACK and replays duplicate SYN" {
     try std.testing.expect(retained_ack.accepted);
     try std.testing.expectEqual(State.established, control.state);
     try std.testing.expectEqual(@as(u16, 31_000), control.send_window);
+    try std.testing.expect(applicationSendReady(&control));
+
+    const data_sequence = control.send_next;
+    const data = beginApplicationSend(&control, 8) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(data_sequence, data.sequence_number);
+    try std.testing.expectEqual(control.receive_next, data.acknowledgement_number);
+    try std.testing.expectEqual(tcp.flag_psh | tcp.flag_ack, data.flags);
+    try std.testing.expectEqual(data_sequence +% 8, control.send_next);
+    try std.testing.expectEqual(@as(u64, 8), control.bytes_sent);
+    try std.testing.expect(!applicationSendReady(&control));
+    try std.testing.expect(beginApplicationSend(&control, 1) == null);
+
+    const data_ack = handleSegment(&control, .{
+        .sequence_number = control.receive_next,
+        .acknowledgement_number = control.send_next,
+        .flags = tcp.flag_ack,
+        .window_size = 30_500,
+    });
+    try std.testing.expect(data_ack.accepted);
+    try std.testing.expectEqual(control.send_next, control.send_unacknowledged);
+    try std.testing.expectEqual(@as(u16, 30_500), control.send_window);
+    try std.testing.expect(applicationSendReady(&control));
+    try std.testing.expect(beginApplicationSend(&control, 30_501) == null);
+
+    const zero_window_ack = handleSegment(&control, .{
+        .sequence_number = control.receive_next,
+        .acknowledgement_number = control.send_next,
+        .flags = tcp.flag_ack,
+        .window_size = 0,
+    });
+    try std.testing.expect(zero_window_ack.accepted);
+    try std.testing.expect(!applicationSendReady(&control));
+    try std.testing.expect(beginApplicationSend(&control, 1) == null);
+
+    const reopened_window_ack = handleSegment(&control, .{
+        .sequence_number = control.receive_next,
+        .acknowledgement_number = control.send_next,
+        .flags = tcp.flag_ack,
+        .window_size = 30_500,
+    });
+    try std.testing.expect(reopened_window_ack.accepted);
+    try std.testing.expect(applicationSendReady(&control));
 
     const wrong_reset = handleSegment(&control, .{
         .sequence_number = control.receive_next +% 1,

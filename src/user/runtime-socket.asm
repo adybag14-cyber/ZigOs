@@ -237,14 +237,16 @@ _start:
     test word [rbx + 4], 2
     jz .fail_accept_shutdown
 
-    ; G313/G314 remain open: accepting a control block does not expose TCP payload I/O.
+    ; G313: accepted TCP descriptors expose the same bounded short-return contract:
+    ; request 1476 deterministic bytes, transmit/return only the 1024-byte ABI prefix.
+    ; G314 receive/reassembly and G316 retransmission remain outside this fixture.
     mov eax, SYS_SEND
     mov edi, r13d
-    mov rsi, PAYLOAD
-    mov edx, PAYLOAD_LENGTH
+    mov rsi, PARTIAL_SENDTO_PAYLOAD
+    mov edx, PARTIAL_REQUEST_LENGTH
     xor r10d, r10d
     int 0x80
-    cmp rax, ERRNO_NO_SYSCALL
+    cmp eax, PARTIAL_EXPECTED_LENGTH
     jne .fail_accept_boundary
 
     ; G312 keeps the accepted TCP socket and listener alive through the first G303 sendto below.
@@ -279,7 +281,7 @@ _start:
     jne .fail_partial_sendto
 
     ; G312: receipt of the exact G303 sendto proves the host reached a point
-    ; after the first TCP accept and the ENOSYS payload boundary. The host now
+    ; after the first TCP accept and the G313 transmit proof. The host now
     ; injects G312DATA into the original accepted tuple, waits briefly, then
     ; opens a second hostfwd connection. Blocking accept below keeps runtime
     ; network service active until that externally ordered barrier completes.
@@ -832,14 +834,14 @@ _start:
     test eax, eax
     jnz .fail_tcp_shutdown_poll
 
-    ; G313 remains open: connect must not silently expose TCP payload send.
+    ; G313: write-half shutdown rejects later TCP application sends with EPIPE.
     mov eax, SYS_SEND
     mov edi, r12d
     mov rsi, PAYLOAD
     mov edx, PAYLOAD_LENGTH
     xor r10d, r10d
     int 0x80
-    cmp rax, ERRNO_NO_SYSCALL
+    cmp rax, ERRNO_BROKEN_PIPE
     jne .fail_tcp_boundary
 
     mov eax, SYS_CLOSE
